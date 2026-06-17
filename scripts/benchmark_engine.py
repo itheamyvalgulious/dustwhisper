@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+import random
+import statistics
+import sys
+import time
+from typing import Callable
+
+import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import moderngl
+
+from oracle_game.types import ForceSource, Phase
+from oracle_game.world import WorldEngine
+
+
+ScenarioSetup = Callable[[WorldEngine], None]
+
+
+def create_context() -> tuple[object, str]:
+    errors: list[str] = []
+    for label, kwargs in (
+        ("egl", {"require": 430, "backend": "egl"}),
+        ("default", {"require": 430}),
+    ):
+        try:
+            return moderngl.create_standalone_context(**kwargs), label
+        except Exception as exc:  # pragma: no cover - environment dependent
+            errors.append(f"{label}: {exc}")
+    raise RuntimeError("unable to create ModernGL context: " + " | ".join(errors))
+
+
+def fill_rect(engine: WorldEngine, x0: int, y0: int, x1: int, y1: int, material: str, phase: Phase | None = None) -> None:
+    for y in range(max(0, y0), min(engine.height, y1)):
+        for x in range(max(0, x0), min(engine.width, x1)):
+            engine.set_cell(x, y, material, phase=phase, mark_dirty=False)
+    engine.active.mark_rect(x0, y0, x1, y1)
+
+
+def activate_all(engine: WorldEngine) -> None:
+    engine.active.mark_rect(0, 0, engine.width, engine.height)
+
+
+def setup_random_materials(engine: WorldEngine) -> None:
+    rng = np.random.default_rng(1729)
+    material_ids = np.asarray(sorted(material_id for material_id in engine.rulebook.materials_by_id if material_id > 0), dtype=np.int32)
+    if material_ids.size == 0:
+        activate_all(engine)
+        return
+    phase_lookup = np.zeros((int(material_ids.max()) + 1,), dtype=np.uint8)
+    for material_id, material in engine.rulebook.materials_by_id.items():
+        if 0 <= int(material_id) < phase_lookup.size:
+            phase_lookup[int(material_id)] = int(material.default_phase)
+    engine.material_id[:, :] = rng.choice(material_ids, size=engine.material_id.shape, replace=True)
+    engine.phase[:, :] = phase_lookup[engine.material_id]
+    engine.cell_flags[:, :] = 0
+    engine.velocity[:, :, :] = rng.normal(0.0, 0.15, size=engine.velocity.shape).astype(np.float32)
+    engine.cell_temperature[:, :] = rng.normal(20.0, 12.0, size=engine.cell_temperature.shape).astype(np.float32)
+    engine.timer_pack[:, :, :] = 0
+    engine.integrity[:, :] = rng.uniform(10.0, 100.0, size=engine.integrity.shape).astype(np.float32)
+    engine.island_id[:, :] = 0
+    engine.entity_id[:, :] = 0
+    engine.placeholder_displaced_material[:, :] = 0
+    engine.flow_velocity[:, :, :] = rng.normal(0.0, 0.2, size=engine.flow_velocity.shape).astype(np.float32)
+    engine.ambient_temperature[:, :] = rng.normal(20.0, 4.0, size=engine.ambient_temperature.shape).astype(np.float32)
+    engine.gas_concentration[:, :, :] = rng.uniform(0.0, 0.05, size=engine.gas_concentration.shape).astype(np.float32)
+    activate_all(engine)
+
+
+def setup_empty_active(engine: WorldEngine) -> None:
+    activate_all(engine)
+    engine.force_sources.append(
+        ForceSource(x=engine.width * 0.5, y=engine.height * 0.5, direction=(1.0, -0.25), radius=18.0, strength=1.2, lifetime=5.0)
+    )
+
+
+def setup_dense_liquid(engine: WorldEngine) -> None:
+    fill_rect(engine, 8, engine.height // 2, engine.width - 8, engine.height - 8, "water_liquid", Phase.LIQUID)
+    fill_rect(engine, 0, engine.height - 8, engine.width, engine.height, "raw_stone_solid", Phase.STATIC_SOLID)
+    activate_all(engine)
+
+
+def setup_dense_gas(engine: WorldEngine) -> None:
+    water_gas = engine.rulebook.gas_id("water_gas")
+    engine.gas_concentration[water_gas, engine.gas_height // 4 : engine.gas_height * 3 // 4, :] = 0.9
+    engine.ambient_temperature[:, :] = 55.0
+    engine.force_sources.append(
+        ForceSource(x=engine.width * 0.35, y=engine.height * 0.45, direction=(1.0, 0.0), radius=24.0, strength=2.0, lifetime=5.0)
+    )
+    activate_all(engine)
+
+
+def setup_optics_branches(engine: WorldEngine) -> None:
+    fill_rect(engine, engine.width // 2, 8, engine.width // 2 + 3, engine.height - 8, "gold_solid", Phase.STATIC_SOLID)
+    engine.emitters.append(
+        {
+            "light_type": "visible_light",
+            "origin": (8, engine.height // 2),
+            "direction": (1.0, 0.0),
+            "spread": 0.25,
+            "strength": 1.0,
+            "range_cells": min(engine.width, 96),
+        }
+    )
+    activate_all(engine)
+
+
+def setup_mixed_reaction_motion(engine: WorldEngine) -> None:
+    fill_rect(engine, 4, engine.height - 20, engine.width - 4, engine.height - 8, "raw_stone_solid", Phase.STATIC_SOLID)
+    fill_rect(engine, 12, 12, engine.width // 2, 44, "sand_powder", Phase.POWDER)
+    fill_rect(engine, engine.width // 2, 18, engine.width - 16, 42, "acid_liquid", Phase.LIQUID)
+    fill_rect(engine, engine.width // 2 - 6, 18, engine.width // 2 - 3, 42, "raw_stone_solid", Phase.STATIC_SOLID)
+    engine.emitters.append(
+        {
+            "light_type": "chaos_light",
+            "origin": (engine.width // 2, 8),
+            "direction": (0.0, 1.0),
+            "spread": 0.2,
+            "strength": 1.0,
+            "range_cells": 80,
+        }
+    )
+    engine.force_sources.append(
+        ForceSource(x=engine.width * 0.25, y=engine.height * 0.25, direction=(0.6, 0.1), radius=20.0, strength=1.5, lifetime=5.0)
+    )
+    activate_all(engine)
+
+
+SCENARIOS: dict[str, ScenarioSetup] = {
+    "empty_active": setup_empty_active,
+    "dense_liquid": setup_dense_liquid,
+    "dense_gas": setup_dense_gas,
+    "optics_branches": setup_optics_branches,
+    "mixed_reaction_motion": setup_mixed_reaction_motion,
+    "random_materials": setup_random_materials,
+}
+
+
+def percentile(values: list[float], pct: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, round((len(ordered) - 1) * pct)))
+    return ordered[index]
+
+
+def run_scenario(
+    name: str,
+    setup: ScenarioSetup,
+    *,
+    ctx: object,
+    width: int,
+    height: int,
+    warmup: int,
+    frames: int,
+    dt: float,
+    readback: bool,
+) -> dict[str, object]:
+    engine = WorldEngine(width=width, height=height, gpu_context=ctx)
+    try:
+        setup(engine)
+        if engine.simulation_backend == "gpu":
+            engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+            engine._gpu_cpu_dirty_resources.clear()
+        for _ in range(warmup):
+            if readback:
+                engine.request_readback(width // 2, height // 2, 8, 8, ("cell", "gas", "optics"), label=f"{name}_warmup")
+            engine.step(dt)
+            ctx.finish()
+            engine.poll_all_readbacks()
+
+        frame_ms: list[float] = []
+        readbacks_completed = 0
+        for frame_index in range(frames):
+            if readback:
+                engine.request_readback(width // 2, height // 2, 8, 8, ("cell", "gas", "optics"), label=f"{name}_{frame_index}")
+            start = time.perf_counter()
+            engine.step(dt)
+            ctx.finish()
+            frame_ms.append((time.perf_counter() - start) * 1000.0)
+            readbacks_completed += len(engine.poll_all_readbacks())
+
+        report = engine.simulation_backend_report()
+        return {
+            "scenario": name,
+            "frames": frames,
+            "avg_ms": statistics.fmean(frame_ms) if frame_ms else 0.0,
+            "min_ms": min(frame_ms, default=0.0),
+            "p95_ms": percentile(frame_ms, 0.95),
+            "max_ms": max(frame_ms, default=0.0),
+            "readbacks_completed": readbacks_completed,
+            "backend_report": report,
+        }
+    finally:
+        engine.close()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Benchmark DustWhisper core world engine GPU scenarios.")
+    parser.add_argument("--width", type=int, default=192)
+    parser.add_argument("--height", type=int, default=128)
+    parser.add_argument("--warmup", type=int, default=5)
+    parser.add_argument("--frames", type=int, default=30)
+    parser.add_argument("--dt", type=float, default=1.0 / 60.0)
+    parser.add_argument("--readback", action="store_true", help="Queue one small async readback per frame.")
+    parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    parser.add_argument("--scenario", action="append", choices=sorted(SCENARIOS), help="Run only the selected scenario; repeatable.")
+    args = parser.parse_args()
+
+    ctx, backend_label = create_context()
+    info = getattr(ctx, "info", {})
+    selected = args.scenario or list(SCENARIOS)
+    results = [
+        run_scenario(
+            name,
+            SCENARIOS[name],
+            ctx=ctx,
+            width=args.width,
+            height=args.height,
+            warmup=args.warmup,
+            frames=args.frames,
+            dt=args.dt,
+            readback=args.readback,
+        )
+        for name in selected
+    ]
+    payload = {
+        "context_backend": backend_label,
+        "gpu": {
+            "renderer": info.get("GL_RENDERER", ""),
+            "vendor": info.get("GL_VENDOR", ""),
+            "opengl_version": info.get("GL_VERSION", ""),
+        },
+        "results": results,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    print(f"Context backend: {backend_label}")
+    print(f"Renderer: {payload['gpu']['renderer']}")
+    print(f"Vendor: {payload['gpu']['vendor']}")
+    print(f"OpenGL: {payload['gpu']['opengl_version']}")
+    for result in results:
+        report = result["backend_report"]
+        assert isinstance(report, dict)
+        non_gpu = report.get("non_gpu_backends", {})
+        print(
+            f"{result['scenario']}: avg={result['avg_ms']:.3f}ms "
+            f"p95={result['p95_ms']:.3f}ms max={result['max_ms']:.3f}ms "
+            f"strict_gpu_ready={report.get('strict_gpu_ready')} non_gpu={non_gpu}"
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

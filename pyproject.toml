@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oracle-game"
+version = "0.1.0"
+description = "Core world engine prototype for Dustwhisper"
+requires-python = ">=3.12"
+dependencies = [
+  "moderngl>=5.10",
+  "moderngl-window>=3.1",
+  "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2",
+]
+
+[project.scripts]
+enginedemo = "oracle_game.enginedemo:main"
+
+[tool.setuptools.packages.find]
+include = ["oracle_game*"]
+
