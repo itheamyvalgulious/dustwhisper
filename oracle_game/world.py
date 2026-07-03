@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from collections import deque
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import asdict, replace
 from enum import Enum
 import json
 import threading
+import time
 from typing import Any, Iterable, Sequence
 import zlib
 
@@ -39,6 +41,10 @@ from oracle_game.paging import RingPagingWindow
 from oracle_game.rules import RuleBook, build_default_optics_entries, build_default_payloads
 from oracle_game.sim.collapse import CollapseSolver
 from oracle_game.sim.gas import GasSolver
+from oracle_game.sim.gpu_collapse_dirty import (
+    clear_collapse_structure_dirty_tile_mask,
+    drain_collapse_structure_dirty_tile_regions,
+)
 from oracle_game.sim.heat import HeatSolver
 from oracle_game.sim.liquid import LiquidSolver
 from oracle_game.sim.motion import MotionSolver
@@ -248,6 +254,7 @@ class WorldEngine:
         self.bridge_frame_readback_requests: list[ReadbackRequest] = []
         self.bridge_frame_placeholders: list[EntityPlaceholder] = []
         self.bridge_frame_placeholder_dirty_rects: list[tuple[int, int, int, int]] = []
+        self._pending_placeholder_dirty_rects: list[tuple[int, int, int, int]] = []
         self.bridge_frame_paging_updates: list[PageStripeUpdate] = []
         self.bridge_frame_page_stripes: list[tuple[PageStripeUpdate, dict[str, Any]]] = []
         self._bridge_inputs_prepared = False
@@ -261,8 +268,14 @@ class WorldEngine:
         self._gpu_optics_outputs_clear = False
         self.gpu_realtime_budget_enabled = True
         self.gpu_realtime_budget_cell_threshold = GPU_REALTIME_BUDGET_CELL_THRESHOLD
+        self.profile_passes_enabled = False
+        self.profile_passes_sync = False
+        self.last_pass_profile: dict[str, Any] = {"passes": [], "summary": {}, "skipped_stages": []}
+        self.last_skipped_gpu_stages: list[str] = []
         self.collapse_dirty_regions: list[tuple[int, int, int, int]] = []
         self.collapse_deferred_regions: list[tuple[int, int, int, int]] = []
+        self._gpu_collapse_structure_dirty_tiles_pending = False
+        self._gpu_collapse_structure_dirty_tiles_deferred = False
         self.islands: dict[int, object] = {}
         self.entity_states: dict[int, EntityState] = {}
         self.entity_placeholders: dict[int, set[tuple[int, int]]] = {}
@@ -377,6 +390,15 @@ class WorldEngine:
     def require_gpu_world_backend(self) -> None:
         self.simulation_backend = "gpu"
 
+    def prewarm_formal_connected_collapse(self) -> bool:
+        if self.simulation_backend != "gpu":
+            return False
+        pipeline = self.collapse_solver.gpu_pipeline
+        if not pipeline.available(self):
+            return False
+        pipeline.prewarm_formal_connected_resources(self)
+        return True
+
     def _gpu_context_available(self) -> bool:
         ctx = self.bridge.ctx
         return bool(self.bridge.enabled and ctx is not None and getattr(ctx, "version_code", 0) >= 430)
@@ -385,16 +407,54 @@ class WorldEngine:
         return self.simulation_backend == "gpu"
 
     def _gpu_realtime_budget_active(self) -> bool:
-        return bool(
-            self.gpu_realtime_budget_enabled
-            and self.simulation_backend == "gpu"
-            and int(self.width) * int(self.height) >= int(self.gpu_realtime_budget_cell_threshold)
-        )
+        if not (self.gpu_realtime_budget_enabled and self.simulation_backend == "gpu"):
+            return False
+        active_tile_count = self._gpu_active_tile_count()
+        if active_tile_count <= 0:
+            return False
+        estimated_active_cells = active_tile_count * int(self.active.tile_size) * int(self.active.tile_size)
+        return estimated_active_cells >= int(self.gpu_realtime_budget_cell_threshold)
+
+    def _gpu_active_tile_count(self) -> int:
+        if "active_tile_ttl" in self.bridge.gpu_authoritative_resources:
+            active_meta = self.bridge.shadow_buffers.get("active_meta")
+            if isinstance(active_meta, np.ndarray) and active_meta.size > 0:
+                return int(active_meta[0]["active_tile_count"])
+            return 0
+        active_tile_ttl = np.asarray(self.active.active_tile_ttl, dtype=np.int32)
+        if active_tile_ttl.size <= 0:
+            return 0
+        return int(np.count_nonzero(active_tile_ttl > 0))
 
     def _skip_budgeted_gpu_stage(self, stage: str) -> bool:
-        if not self._gpu_realtime_budget_active():
-            return False
-        return stage in {"gas", "heat", "liquid", "optics", "reaction_rules"}
+        return False
+
+    @contextmanager
+    def _profile_pass(self, name: str):
+        profile = self.last_pass_profile if self.profile_passes_enabled else None
+        ctx = self.bridge.ctx if bool(getattr(self, "profile_passes_sync", False)) else None
+        if profile is not None and ctx is not None:
+            ctx.finish()
+        start = time.perf_counter() if profile is not None else 0.0
+        try:
+            yield
+        finally:
+            if profile is None:
+                return
+            if ctx is not None:
+                ctx.finish()
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            entry = {
+                "name": str(name),
+                "cpu_ms": elapsed_ms,
+                "gpu_ms": elapsed_ms if ctx is not None else None,
+            }
+            profile["passes"].append(entry)
+            summary = profile["summary"].setdefault(str(name), {"count": 0, "cpu_ms": 0.0, "gpu_ms": None})
+            summary["count"] += 1
+            summary["cpu_ms"] += elapsed_ms
+            if ctx is not None:
+                summary["gpu_ms"] = float(summary["gpu_ms"] or 0.0) + elapsed_ms
 
     def _gpu_pipeline_available(self, pipeline: Any, name: str, *, require: bool | None = None) -> bool:
         if self.simulation_backend == "cpu":
@@ -441,6 +501,7 @@ class WorldEngine:
             "entity_id",
             "placeholder_displaced_material",
             "collapse_delay_pending",
+            "liquid_flow_intent",
         )
 
     def bootstrap_defaults(self) -> None:
@@ -1067,9 +1128,9 @@ class WorldEngine:
             world_x = int(placeholder.world_x)
             world_y = int(placeholder.world_y)
         else:
-            buffer_x = int(placeholder.x)
-            buffer_y = int(placeholder.y)
-            world_x, world_y = self._buffer_to_world_position((buffer_x, buffer_y))
+            world_x = int(placeholder.x)
+            world_y = int(placeholder.y)
+            buffer_x, buffer_y = self._world_to_buffer_clamped(world_x, world_y)
         return replace(
             placeholder,
             x=int(buffer_x),
@@ -1794,6 +1855,7 @@ class WorldEngine:
         self.emitters.clear()
         self.collapse_dirty_regions.clear()
         self.collapse_deferred_regions.clear()
+        clear_collapse_structure_dirty_tile_mask(self)
         self.islands.clear()
         self.entity_states.clear()
         self.entity_placeholders.clear()
@@ -1826,7 +1888,6 @@ class WorldEngine:
         self.page_store.clear()
         self.next_island_id = 1
         self._build_demo_scene()
-        self.active.mark_rect(0, 0, self.width, self.height)
 
     def queue_command(self, kind: str, **payload: Any) -> None:
         self.command_queue.append(WorldCommand(kind=kind, payload=deepcopy(payload)))
@@ -2741,6 +2802,12 @@ class WorldEngine:
             for command in self.command_queue
             if command.kind == "request_readback"
         ]
+        bridge_runtime = self.bridge.serialize_runtime_state()
+        readback_slots = [
+            slot
+            for slot in bridge_runtime.get("readback_slots", [])
+            if bool(slot.get("occupied", False))
+        ]
         return {
             "queued": len(queued_commands),
             "queued_commands": queued_commands,
@@ -2748,6 +2815,8 @@ class WorldEngine:
             "pending_requests": [self.serialize_readback_request(request) for request in self.pending_readbacks],
             "inflight": len(self.inflight_readbacks),
             "inflight_requests": [self.serialize_readback_request(request) for request in self.inflight_readbacks],
+            "inflight_slots": readback_slots,
+            "readback_latency_frames": bridge_runtime.get("readback_latency_frames", {}),
             "ready": len(self.completed_readbacks),
         }
 
@@ -3724,6 +3793,7 @@ class WorldEngine:
                 "enabled": bool(self.gpu_realtime_budget_enabled),
                 "active": bool(self._gpu_realtime_budget_active()),
                 "cell_threshold": int(self.gpu_realtime_budget_cell_threshold),
+                "skipped_stages": list(self.last_skipped_gpu_stages),
             },
             "backends": backends,
             "non_gpu_backends": non_gpu,
@@ -4491,6 +4561,8 @@ class WorldEngine:
         frame_input: WorldFrameInput | None,
         capture_output: bool,
     ) -> WorldFrameOutput | None:
+        self.last_skipped_gpu_stages = []
+        self.last_pass_profile = {"passes": [], "summary": {}, "skipped_stages": self.last_skipped_gpu_stages}
         if not self._bridge_inputs_prepared:
             self._prepare_bridge_frame_inputs()
         consumed_readbacks: list[ReadbackResult] = []
@@ -4504,31 +4576,34 @@ class WorldEngine:
         readback_plans: list[dict[str, Any]] = []
         bridge_upload_snapshot: dict[str, Any] = {}
         bridge_frame_snapshot: dict[str, Any] = {}
+        output_controller_state = deepcopy(self.controller_state_snapshot)
         queued_observations = 0
         queued_readbacks = 0
         queued_commands = 0
         placeholder_count = 0
-        self._collect_ready_readbacks(self.frame_id + 1)
-        if capture_output:
-            consumed_readbacks = self.poll_all_readbacks()
-            observations = self._collect_observations(consumed_readbacks)
-            entity_feedback = self._collect_entity_feedback(consumed_readbacks)
-        if frame_input is not None:
-            (
-                output_controller_state,
-                paging_updates,
-                resolved_targets,
-                resolved_change_intents,
-                resolved_carrier_intents,
-                observation_plans,
-                readback_plans,
-                queued_observations,
-                queued_readbacks,
-                queued_commands,
-                placeholder_count,
-            ) = self._apply_frame_input(frame_input)
-        else:
-            output_controller_state = deepcopy(self.controller_state_snapshot)
+        with self._profile_pass("readback"):
+            self._collect_ready_readbacks(self.frame_id + 1)
+            if capture_output:
+                consumed_readbacks = self.poll_all_readbacks()
+                observations = self._collect_observations(consumed_readbacks)
+                entity_feedback = self._collect_entity_feedback(consumed_readbacks)
+        with self._profile_pass("commands"):
+            if frame_input is not None:
+                (
+                    output_controller_state,
+                    paging_updates,
+                    resolved_targets,
+                    resolved_change_intents,
+                    resolved_carrier_intents,
+                    observation_plans,
+                    readback_plans,
+                    queued_observations,
+                    queued_readbacks,
+                    queued_commands,
+                    placeholder_count,
+                ) = self._apply_frame_input(frame_input)
+            else:
+                output_controller_state = deepcopy(self.controller_state_snapshot)
 
         self.frame_id += 1
         if capture_output:
@@ -4538,66 +4613,111 @@ class WorldEngine:
                 observations=observations,
                 entity_feedback=entity_feedback,
             )
-        self._apply_commands()
-        if self._needs_pre_simulation_bridge_sync(frame_input=frame_input):
-            self.bridge.sync_world(self)
-            self._gpu_cpu_dirty_resources.clear()
-        persistent_observation_plans = self._queue_persistent_entity_observations()
-        observation_plans.extend(persistent_observation_plans)
-        queued_observations += len(persistent_observation_plans)
-        self.collapse_solver.reset_runtime_state(self)
-        self.collapse_solver.step(self)
-        if self._skip_budgeted_gpu_stage("gas"):
-            self.gas_solver.reset_runtime_state(self)
-            self.gas_solver.last_backend = "idle"
-        else:
+        with self._profile_pass("commands"):
+            self._apply_commands()
+        with self._profile_pass("pre_sync"):
+            if self._needs_pre_simulation_bridge_sync(frame_input=frame_input):
+                self._sync_pre_simulation_bridge_without_debug_upload()
+                self._gpu_cpu_dirty_resources.clear()
+        with self._profile_pass("commands"):
+            persistent_observation_plans = self._queue_persistent_entity_observations()
+            observation_plans.extend(persistent_observation_plans)
+            queued_observations += len(persistent_observation_plans)
+        if self.profile_passes_enabled:
+            self.collapse_solver.gpu_pipeline.reset_pass_profile()
+        collapse_pipeline = self.collapse_solver.gpu_pipeline
+        with self._profile_pass("collapse"):
+            with collapse_pipeline._profile_pass(self, "dirty_tile_drain"):
+                self._drain_gpu_collapse_structure_dirty_tiles()
+            with collapse_pipeline._profile_pass(self, "solver_runtime_reset"):
+                self.collapse_solver.reset_runtime_state(self)
+            self.collapse_solver.step(self)
+        collapse_profile = getattr(getattr(self.collapse_solver, "gpu_pipeline", None), "last_pass_profile", None)
+        if self.profile_passes_enabled and isinstance(collapse_profile, dict):
+            self.last_pass_profile["collapse"] = collapse_profile
+        if self.profile_passes_enabled:
+            self.gas_solver.gpu_pipeline.reset_pass_profile()
+        with self._profile_pass("gas"):
             self.gas_solver.step(self, dt)
-        if self._skip_budgeted_gpu_stage("heat"):
-            self.heat_solver.reset_runtime_state(self)
-            self.heat_solver.last_backend = "idle"
-        else:
+        gas_profile = getattr(getattr(self.gas_solver, "gpu_pipeline", None), "last_pass_profile", None)
+        if self.profile_passes_enabled and isinstance(gas_profile, dict):
+            self.last_pass_profile["gas"] = gas_profile
+        if self.profile_passes_enabled:
+            self.heat_solver.gpu_pipeline.reset_pass_profile()
+        with self._profile_pass("heat"):
             self.heat_solver.step(self, dt)
+        heat_profile = getattr(getattr(self.heat_solver, "gpu_pipeline", None), "last_pass_profile", None)
+        if self.profile_passes_enabled and isinstance(heat_profile, dict):
+            self.last_pass_profile["heat"] = heat_profile
         self.reaction_solver.reset_runtime_state(self)
-        run_reaction_rules = not self._skip_budgeted_gpu_stage("reaction_rules")
-        if run_reaction_rules:
-            self.reaction_solver._advance_timed_slots(self)
-            self.reaction_solver._run_self_rules(self)
-            self.reaction_solver._run_material_material(self)
-            self.reaction_solver._run_material_gas(self)
-        self.motion_solver.step(self, dt)
-        if self._skip_budgeted_gpu_stage("liquid"):
-            self.liquid_solver.reset_runtime_state(self)
-            self.liquid_solver.last_backend = "idle"
-        else:
+        if self.profile_passes_enabled:
+            self.reaction_solver.gpu_pipeline.reset_pass_profile()
+        with self._profile_pass("reactions before motion"):
+            self.reaction_solver.gpu_pipeline.begin_formal_reaction_segment(self, "before_motion")
+            try:
+                with self._profile_pass("reaction_timed"):
+                    self.reaction_solver._advance_timed_slots(self)
+                with self._profile_pass("reaction_self"):
+                    self.reaction_solver._run_self_rules(self)
+                self.reaction_solver.gpu_pipeline.flush_formal_reaction_segment(self, "before_motion")
+            finally:
+                self.reaction_solver.gpu_pipeline.end_formal_reaction_segment(self, "before_motion")
+        with self._profile_pass("liquid_pre_motion_intent"):
+            self.liquid_solver.prepare_motion_flow_intent(self)
+        with self._profile_pass("motion"):
+            self.motion_solver.step(self, dt)
+        motion_profile = getattr(getattr(self.motion_solver, "gpu_pipeline", None), "last_pass_profile", None)
+        if self.profile_passes_enabled and isinstance(motion_profile, dict):
+            self.last_pass_profile["motion"] = motion_profile
+        with self._profile_pass("liquid"):
             self.liquid_solver.step(self)
-        if self._skip_budgeted_gpu_stage("optics"):
-            self.optics_solver.reset_runtime_state(self)
-            self.optics_solver.last_backend = "idle"
-            self._formal_gpu_frame_has_light_dose = False
-        else:
+        liquid_profile = getattr(getattr(self.liquid_solver, "gpu_pipeline", None), "last_pass_profile", None)
+        if self.profile_passes_enabled and isinstance(liquid_profile, dict):
+            self.last_pass_profile["liquid"] = liquid_profile
+        with self._profile_pass("optics"):
             self.optics_solver.step(self)
-        if run_reaction_rules:
-            self.reaction_solver._run_material_light(self)
-            self.reaction_solver._run_gas_gas(self)
-            self.reaction_solver._run_gas_light(self)
-        if self.reaction_solver.gpu_pipeline.clear_reaction_latches(self):
-            self.reaction_solver._note_runtime_backend("gpu")
-        else:
-            self._require_gpu_stage("reaction latch clearing")
-            self.cell_flags &= np.uint8(~int(CellFlag.REACTION_LATCHED) & 0xFF)
-            self.reaction_solver._note_runtime_backend("cpu")
-        active_scheduler_gpu_authoritative = (
-            self.simulation_backend == "gpu"
-            and "active_tile_ttl" in self.bridge.gpu_authoritative_resources
-        )
-        if active_scheduler_gpu_authoritative:
-            if not self.bridge.decay_active_scheduler(self):
+        optics_profile = getattr(self.optics_solver, "last_pass_profile", None)
+        if self.profile_passes_enabled and isinstance(optics_profile, dict):
+            self.last_pass_profile["optics"] = optics_profile
+        with self._profile_pass("reactions after optics"):
+            self.reaction_solver.gpu_pipeline.begin_formal_reaction_segment(self, "after_optics")
+            try:
+                with self._profile_pass("reaction_material_material"):
+                    self.reaction_solver._run_material_material(self)
+                with self._profile_pass("reaction_material_gas"):
+                    self.reaction_solver._run_material_gas(self)
+                with self._profile_pass("reaction_material_light"):
+                    self.reaction_solver._run_material_light(self)
+                with self._profile_pass("reaction_gas_gas"):
+                    self.reaction_solver._run_gas_gas(self)
+                with self._profile_pass("reaction_gas_light"):
+                    self.reaction_solver._run_gas_light(self)
+                self.reaction_solver.gpu_pipeline.flush_formal_reaction_segment(self, "after_optics")
+            finally:
+                self.reaction_solver.gpu_pipeline.end_formal_reaction_segment(self, "after_optics")
+        with self._profile_pass("latch_clear"):
+            if self.reaction_solver.gpu_pipeline.clear_reaction_latches(self):
+                self.reaction_solver._note_runtime_backend("gpu")
+            else:
+                self._require_gpu_stage("reaction latch clearing")
+                self.cell_flags &= np.uint8(~int(CellFlag.REACTION_LATCHED) & 0xFF)
+                self.reaction_solver._note_runtime_backend("cpu")
+        reaction_profile = getattr(getattr(self.reaction_solver, "gpu_pipeline", None), "last_pass_profile", None)
+        if self.profile_passes_enabled and isinstance(reaction_profile, dict):
+            self.last_pass_profile["reactions"] = reaction_profile
+        with self._profile_pass("active_decay"):
+            active_scheduler_gpu_authoritative = (
+                self.simulation_backend == "gpu"
+                and "active_tile_ttl" in self.bridge.gpu_authoritative_resources
+            )
+            if active_scheduler_gpu_authoritative:
+                if not self.bridge.decay_active_scheduler(self):
+                    self._require_gpu_stage("active scheduler decay")
+                    raise RuntimeError("GPU active scheduler decay failed; CPU fallback is disabled")
+            elif self.simulation_backend == "gpu":
                 self._require_gpu_stage("active scheduler decay")
-                raise RuntimeError("GPU active scheduler decay failed; CPU fallback is disabled")
-        elif self.simulation_backend == "gpu":
-            self._require_gpu_stage("active scheduler decay")
-        else:
-            self.active.decay()
+            else:
+                self.active.decay()
         bridge_world_synced = False
         if capture_output:
             if self.simulation_backend != "gpu":
@@ -4607,8 +4727,9 @@ class WorldEngine:
                 self.bridge.sync_force_sources(self)
             bridge_upload_snapshot = self.serialize_bridge_upload_snapshot()
             bridge_frame_snapshot = self.serialize_bridge_frame_snapshot()
-        self._finish_readbacks(world_synced=bridge_world_synced)
-        self._collect_ready_readbacks(self.frame_id)
+        with self._profile_pass("readback"):
+            self._finish_readbacks(world_synced=bridge_world_synced)
+            self._collect_ready_readbacks(self.frame_id)
         self._bridge_inputs_prepared = False
 
         if not capture_output:
@@ -4949,7 +5070,15 @@ class WorldEngine:
             if next_placeholder is None or next_placeholder.entity_id != entity_id:
                 changed_cells.add(cell)
         for cell, placeholder in next_cells.items():
-            if current_cells.get(cell) != placeholder.entity_id:
+            x, y = cell
+            material_id = int(self.material_id[y, x])
+            entity_id = int(self.entity_id[y, x])
+            has_matching_placeholder_cell = (
+                material_id > 0
+                and self._shadow_material_is_placeholder(material_id)
+                and entity_id == int(placeholder.entity_id)
+            )
+            if current_cells.get(cell) != placeholder.entity_id or not has_matching_placeholder_cell:
                 changed_cells.add(cell)
 
         payload: list[dict[str, Any]] = []
@@ -5321,6 +5450,9 @@ class WorldEngine:
         else:
             self.entity_id[y, x] = 0
             self.placeholder_displaced_material[y, x] = 0
+        current_displaced = int(self.placeholder_displaced_material[y, x])
+        if current_is_placeholder or previous_is_placeholder or previous_displaced != current_displaced:
+            self._pending_placeholder_dirty_rects.append((int(x), int(y), int(x) + 1, int(y) + 1))
         self.island_id[y, x] = 0 if self.phase[y, x] != int(Phase.FALLING_ISLAND) else self.island_id[y, x]
         self._refresh_island_records_for_ids((previous_island_id, int(self.island_id[y, x])))
         self._mark_active_rect_runtime(max(0, x - 1), max(0, y - 1), min(self.width, x + 2), min(self.height, y + 2))
@@ -5398,6 +5530,8 @@ class WorldEngine:
         previous_material = int(self.material_id[y, x])
         previous_phase = int(self.phase[y, x])
         previous_island_id = int(self.island_id[y, x])
+        previous_displaced = int(self.placeholder_displaced_material[y, x])
+        previous_is_placeholder = self._shadow_material_is_placeholder(previous_material)
         self.material_id[y, x] = 0
         self.phase[y, x] = 0
         self.cell_flags[y, x] = 0
@@ -5408,6 +5542,8 @@ class WorldEngine:
         self.island_id[y, x] = 0
         self.entity_id[y, x] = 0
         self.placeholder_displaced_material[y, x] = 0
+        if previous_is_placeholder or previous_displaced != 0:
+            self._pending_placeholder_dirty_rects.append((int(x), int(y), int(x) + 1, int(y) + 1))
         self._refresh_island_records_for_ids((previous_island_id,))
         self._mark_active_rect_runtime(max(0, x - 1), max(0, y - 1), min(self.width, x + 2), min(self.height, y + 2))
         if mark_dirty and self._cell_participates_in_collapse(previous_material, previous_phase):
@@ -5920,8 +6056,11 @@ class WorldEngine:
             "emitted_material_mask": emitted_material_mask.tolist(),
         }
 
-    def serialize_collapse_runtime(self) -> dict[str, Any]:
-        snapshot = self.collapse_solver.runtime_snapshot(self)
+    def serialize_collapse_runtime(self, *, allow_gpu_sync_readback: bool = False) -> dict[str, Any]:
+        snapshot = self.collapse_solver.runtime_snapshot(
+            self,
+            allow_gpu_sync_readback=allow_gpu_sync_readback,
+        )
         solve_region_mask = np.asarray(snapshot["solve_region_mask"], dtype=np.uint8)
         structural_mask = np.asarray(snapshot["structural_mask"], dtype=np.uint8)
         support_seed_mask = np.asarray(snapshot["support_seed_mask"], dtype=np.uint8)
@@ -5932,6 +6071,14 @@ class WorldEngine:
         collapsed_cell_mask = np.asarray(snapshot["collapsed_cell_mask"], dtype=np.uint8)
         return {
             "backend": str(snapshot["backend"]),
+            "gpu_authoritative": bool(snapshot.get("gpu_authoritative", False)),
+            "gpu_authoritative_resources": list(snapshot.get("gpu_authoritative_resources", [])),
+            "snapshot_source": str(snapshot.get("snapshot_source", "cpu")),
+            "snapshot_stale": bool(snapshot.get("snapshot_stale", False)),
+            "gpu_authoritative_snapshot_stale": bool(snapshot.get("gpu_authoritative_snapshot_stale", False)),
+            "stale_resources": list(snapshot.get("stale_resources", [])),
+            "sync_readback_required": bool(snapshot.get("sync_readback_required", False)),
+            "sync_readback_performed": bool(snapshot.get("sync_readback_performed", False)),
             "cell_grid_size": [int(self.width), int(self.height)],
             "dirty_region_count_before": int(snapshot["dirty_region_count_before"]),
             "solve_region_count": int(snapshot["solve_region_count"]),
@@ -11725,7 +11872,7 @@ class WorldEngine:
             "requests": [self.serialize_readback_request(request) for request in requests],
         }
 
-    def _current_cell_state_snapshot(self) -> dict[str, np.ndarray]:
+    def _current_cell_state_snapshot(self, *, allow_gpu_sync_readback: bool = False) -> dict[str, np.ndarray]:
         if (
             self.simulation_backend == "gpu"
             and "cell_core" in self.bridge.gpu_authoritative_resources
@@ -11733,6 +11880,12 @@ class WorldEngine:
             and self.bridge.ctx is not None
             and "cell_core" in self.bridge.buffers
         ):
+            if not allow_gpu_sync_readback:
+                return {
+                    "material_id": self.material_id,
+                    "phase": self.phase,
+                    "integrity": self.integrity,
+                }
             try:
                 core = np.frombuffer(
                     self.bridge.buffers["cell_core"].read(size=self.width * self.height * 5 * np.dtype(np.uint32).itemsize),
@@ -11755,7 +11908,7 @@ class WorldEngine:
             "integrity": self.integrity,
         }
 
-    def _current_entity_runtime_snapshot(self) -> dict[str, np.ndarray]:
+    def _current_entity_runtime_snapshot(self, *, allow_gpu_sync_readback: bool = False) -> dict[str, np.ndarray]:
         if (
             self.simulation_backend == "gpu"
             and self.bridge.enabled
@@ -11765,6 +11918,11 @@ class WorldEngine:
             and "entity_id" in self.bridge.buffers
             and "placeholder_displaced_material" in self.bridge.buffers
         ):
+            if not allow_gpu_sync_readback:
+                return {
+                    "entity_id": self.entity_id,
+                    "placeholder_displaced_material": self.placeholder_displaced_material,
+                }
             try:
                 return {
                     "entity_id": np.frombuffer(
@@ -11786,10 +11944,22 @@ class WorldEngine:
             "placeholder_displaced_material": self.placeholder_displaced_material,
         }
 
-    def serialize_entity_placeholders(self) -> dict[str, Any]:
+    def _entity_placeholder_state_gpu_authoritative(self) -> bool:
+        if self.simulation_backend != "gpu":
+            return False
+        authoritative = self.bridge.gpu_authoritative_resources
+        return bool(
+            "cell_core" in authoritative
+            or "entity_id" in authoritative
+            or "placeholder_displaced_material" in authoritative
+        )
+
+    def serialize_entity_placeholders(self, *, allow_gpu_sync_readback: bool = False) -> dict[str, Any]:
+        if not allow_gpu_sync_readback and self._entity_placeholder_state_gpu_authoritative():
+            return self.serialize_entity_placeholder_index_snapshot()
         payload: list[dict[str, Any]] = []
-        cell_state = self._current_cell_state_snapshot()
-        entity_runtime = self._current_entity_runtime_snapshot()
+        cell_state = self._current_cell_state_snapshot(allow_gpu_sync_readback=allow_gpu_sync_readback)
+        entity_runtime = self._current_entity_runtime_snapshot(allow_gpu_sync_readback=allow_gpu_sync_readback)
         material_id_grid = cell_state["material_id"]
         phase_grid = cell_state["phase"]
         displaced_grid = entity_runtime["placeholder_displaced_material"]
@@ -11866,10 +12036,15 @@ class WorldEngine:
             )
         return {"placeholders": payload}
 
-    def serialize_entity_feedback_snapshot(self) -> dict[str, Any]:
+    def serialize_entity_feedback_snapshot(self, *, allow_gpu_sync_readback: bool = False) -> dict[str, Any]:
+        if not allow_gpu_sync_readback and self._entity_placeholder_state_gpu_authoritative():
+            return self.serialize_consumed_entity_feedback_snapshot()
         feedback = {}
         for entity_id, entity in sorted(self.entity_states.items()):
-            snapshot = self._build_entity_feedback_from_current_state(entity)
+            snapshot = self._build_entity_feedback_from_current_state(
+                entity,
+                allow_gpu_sync_readback=allow_gpu_sync_readback,
+            )
             if snapshot is None:
                 continue
             feedback[str(entity_id)] = self.serialize_entity_feedback(snapshot)
@@ -12621,7 +12796,7 @@ class WorldEngine:
         def flush_pending_grid_commands() -> None:
             if not pending_grid_commands:
                 return
-            if self.simulation_backend == "gpu":
+            if self.simulation_backend == "gpu" and not self._world_simulation_frame_active:
                 self.bridge.sync_world(self)
             self._apply_grid_world_commands(pending_grid_commands)
             pending_grid_commands.clear()
@@ -13521,23 +13696,31 @@ class WorldEngine:
         return updates
 
     def _prepare_bridge_frame_inputs(self) -> None:
+        pending_placeholder_dirty_rects = list(self._pending_placeholder_dirty_rects)
         self._clear_bridge_frame_inputs(keep_commands=False, prepared=True)
-        if self.simulation_backend == "gpu" and self._gpu_cpu_dirty_resources:
-            self.bridge.sync_world(self)
-            self._gpu_cpu_dirty_resources.clear()
+        if pending_placeholder_dirty_rects:
+            self.bridge_frame_placeholder_dirty_rects.extend(pending_placeholder_dirty_rects)
+            self._pending_placeholder_dirty_rects.clear()
 
     def _needs_pre_simulation_bridge_sync(self, *, frame_input: WorldFrameInput | None) -> bool:
         if self.simulation_backend != "gpu":
             return False
         return bool(
             frame_input is not None
-            or self.bridge_frame_commands
             or self.bridge_frame_placeholders
             or self.bridge_frame_placeholder_dirty_rects
             or self.bridge_frame_paging_updates
             or self.bridge_frame_page_stripes
             or self._gpu_cpu_dirty_resources
         )
+
+    def _sync_pre_simulation_bridge_without_debug_upload(self) -> None:
+        try:
+            self.bridge.sync_world(self, upload_debug_texture=False)
+        except TypeError as exc:
+            if "upload_debug_texture" not in str(exc):
+                raise
+            self.bridge.sync_world(self)
 
     def _clear_bridge_frame_inputs(self, *, keep_commands: bool, prepared: bool) -> None:
         if not keep_commands:
@@ -13577,6 +13760,8 @@ class WorldEngine:
             else:
                 x0, y0, x1, y1, tile_padding = rect
             self.active.mark_rect(int(x0), int(y0), int(x1), int(y1), tile_padding=int(tile_padding))
+        if self.simulation_backend == "gpu":
+            self._invalidate_gpu_authoritative_resources("active_meta", "active_tile_ttl", "active_chunk_mask")
 
     def _sync_entity_placeholders(self, placeholders: list[EntityPlaceholder]) -> None:
         self.bridge_frame_placeholders.extend(replace(placeholder) for placeholder in placeholders)
@@ -13611,7 +13796,7 @@ class WorldEngine:
                 if self.simulation_backend == "gpu" and self._world_simulation_frame_active and (
                     not self._bridge_inputs_prepared or self._gpu_cpu_dirty_resources
                 ):
-                    self.bridge.sync_world(self)
+                    self._sync_pre_simulation_bridge_without_debug_upload()
                     self._gpu_cpu_dirty_resources.clear()
                     self._bridge_inputs_prepared = True
                 self.placeholder_pipeline.apply(self, placeholders)
@@ -14072,6 +14257,14 @@ class WorldEngine:
         if 0 <= int(material_id) < self.material_is_placeholder.shape[0]:
             return bool(self.material_is_placeholder[int(material_id)])
         return False
+
+    def _material_placeholder_mask(self, material_id: np.ndarray) -> np.ndarray:
+        ids = np.asarray(material_id, dtype=np.int64)
+        mask = np.zeros(ids.shape, dtype=np.bool_)
+        valid = (ids >= 0) & (ids < int(self.material_is_placeholder.shape[0]))
+        if np.any(valid):
+            mask[valid] = self.material_is_placeholder[ids[valid]]
+        return mask
 
     def _shadow_material_is_plant(self, material_id: int) -> bool:
         shadow_material = self._shadow_material_def(int(material_id))
@@ -16344,11 +16537,16 @@ class WorldEngine:
         }
         return self._build_entity_feedback_from_state(entity, cell_state=cell_state, entity_runtime=entity_runtime)
 
-    def _build_entity_feedback_from_current_state(self, entity: EntityState) -> EntityFeedback | None:
+    def _build_entity_feedback_from_current_state(
+        self,
+        entity: EntityState,
+        *,
+        allow_gpu_sync_readback: bool = False,
+    ) -> EntityFeedback | None:
         return self._build_entity_feedback_from_state(
             entity,
-            cell_state=self._current_cell_state_snapshot(),
-            entity_runtime=self._current_entity_runtime_snapshot(),
+            cell_state=self._current_cell_state_snapshot(allow_gpu_sync_readback=allow_gpu_sync_readback),
+            entity_runtime=self._current_entity_runtime_snapshot(allow_gpu_sync_readback=allow_gpu_sync_readback),
         )
 
     def _build_entity_feedback_from_state(
@@ -16525,7 +16723,7 @@ class WorldEngine:
 
     def _rebuild_entity_placeholder_index(self) -> None:
         self.entity_placeholders.clear()
-        placeholder_mask = (self.entity_id > 0) & np.vectorize(self._shadow_material_is_placeholder, otypes=[np.bool_])(self.material_id)
+        placeholder_mask = (self.entity_id > 0) & self._material_placeholder_mask(self.material_id)
         ys, xs = np.nonzero(placeholder_mask)
         for y, x in zip(ys.tolist(), xs.tolist()):
             entity_id = int(self.entity_id[y, x])
@@ -16545,7 +16743,7 @@ class WorldEngine:
         placeholder_displaced_material = np.asarray(placeholder_displaced_material, dtype=np.int32).copy()
         empty_mask = material_id <= 0
         phase[empty_mask] = 0
-        placeholder_mask = np.vectorize(self._shadow_material_is_placeholder, otypes=[np.bool_])(material_id)
+        placeholder_mask = self._material_placeholder_mask(material_id)
         non_placeholder_mask = empty_mask | ~placeholder_mask
         entity_id[non_placeholder_mask] = 0
         placeholder_displaced_material[non_placeholder_mask] = 0
@@ -16597,7 +16795,7 @@ class WorldEngine:
         *,
         stripe_axis: int,
     ) -> np.ndarray:
-        live_placeholder_mask = (self.entity_id > 0) & np.vectorize(self._shadow_material_is_placeholder, otypes=[np.bool_])(self.material_id)
+        live_placeholder_mask = (self.entity_id > 0) & self._material_placeholder_mask(self.material_id)
         grid = np.where(live_placeholder_mask, self.entity_id, 0).astype(np.int32)
         for entity_id, cells in self.entity_placeholders.items():
             for x, y in cells:
@@ -16616,7 +16814,7 @@ class WorldEngine:
                 raise RuntimeError(
                     "GPU page stripe placeholder runtime requires payload runtime data; CPU fallback is disabled"
                 )
-            placeholder_mask = (self.entity_id > 0) & np.vectorize(self._shadow_material_is_placeholder, otypes=[np.bool_])(self.material_id)
+            placeholder_mask = (self.entity_id > 0) & self._material_placeholder_mask(self.material_id)
             dense_placeholder_ids = np.where(placeholder_mask, self.entity_id, 0).astype(np.int32)
             entity_placeholder_entity_id = self._capture_stripe_array(
                 dense_placeholder_ids,
@@ -16951,6 +17149,11 @@ class WorldEngine:
             )
         )
 
+    def _drain_gpu_collapse_structure_dirty_tiles(self) -> None:
+        regions = drain_collapse_structure_dirty_tile_regions(self)
+        if regions:
+            self.collapse_dirty_regions.extend(regions)
+
     def _paint_material(self, x: int, y: int, material: str, radius: int) -> None:
         yy, xx = np.mgrid[0:self.height, 0:self.width]
         mask = (xx - x) ** 2 + (yy - y) ** 2 <= radius ** 2
@@ -16975,29 +17178,49 @@ class WorldEngine:
                 self.set_cell(write_x, write_y, material)
 
     def _build_demo_scene(self) -> None:
-        self._fill_rect(0, self.height - 20, self.width, 20, "raw_stone_solid")
-        self._fill_rect(10, self.height - 60, 36, 8, "sandstone_solid")
-        self._fill_rect(60, self.height - 95, 30, 6, "log_solid")
-        self._fill_rect(90, self.height - 130, 10, 20, "vortex_heart_solid")
-        self._fill_rect(120, self.height - 50, 28, 12, "water_liquid")
-        self._fill_rect(155, self.height - 48, 20, 10, "poison_liquid")
-        self._fill_rect(180, self.height - 48, 20, 10, "acid_liquid")
-        self._fill_rect(205, self.height - 48, 20, 10, "oil_liquid")
-        self._fill_rect(45, self.height - 100, 8, 8, "explosive_solid")
-        self._fill_rect(25, self.height - 78, 4, 4, "fire_powder")
-        self._fill_rect(65, self.height - 120, 3, 3, "phosphor_visible_powder")
-        self._fill_rect(70, self.height - 120, 3, 3, "phosphor_holy_powder")
-        self._fill_rect(75, self.height - 120, 3, 3, "phosphor_chaos_powder")
-        self._fill_rect(80, self.height - 120, 3, 3, "phosphor_magic_powder")
-        self._fill_rect(38, self.height - 88, 8, 6, "pollution_powder")
-        self._fill_rect(65, self.height - 101, 3, 12, "root_solid")
-        self._fill_rect(68, self.height - 116, 10, 3, "log_solid")
+        active_w = int(self.paging.active_width)
+        active_h = int(self.paging.active_height)
+        floor_y = max(0, active_h - 28)
+        self._fill_rect(0, floor_y, active_w, 28, "raw_stone_solid")
+        self._fill_rect(32, floor_y - 58, 160, 14, "sandstone_solid")
+        self._fill_rect(60, floor_y - 112, 118, 54, "sand_powder")
+        self._fill_rect(230, floor_y - 24, 112, 24, "water_liquid")
+        self._fill_rect(374, floor_y - 18, 78, 18, "oil_liquid")
+        self._fill_rect(500, floor_y - 86, 12, 86, "raw_stone_solid")
+        self._fill_rect(520, floor_y - 46, 130, 18, "sandstone_solid")
+        self._fill_rect(550, floor_y - 86, 76, 40, "gravel_powder")
+        self._fill_rect(690, floor_y - 140, 72, 16, "log_solid")
+        self._fill_rect(700, floor_y - 188, 12, 48, "root_solid")
 
     def _fill_rect(self, x: int, y: int, width: int, height: int, material: str) -> None:
         x0 = max(0, x)
         y0 = max(0, y)
         x1 = min(self.width, x + width)
         y1 = min(self.height, y + height)
-        mask = np.zeros((self.height, self.width), dtype=bool)
-        mask[y0:y1, x0:x1] = True
-        self.set_material_by_mask(mask, material, mark_dirty=False)
+        if x0 >= x1 or y0 >= y1:
+            return
+        material_id = self._resolve_sanctioned_material_id(material)
+        if material_id <= 0:
+            raise KeyError(material)
+        phase = int(self.material_default_phase[material_id]) if material_id < self.material_default_phase.shape[0] else 0
+        integrity = (
+            float(self.material_base_integrity[material_id])
+            if material_id < self.material_base_integrity.shape[0]
+            else 0.0
+        )
+        self.material_id[y0:y1, x0:x1] = int(material_id)
+        self.phase[y0:y1, x0:x1] = phase
+        self.cell_flags[y0:y1, x0:x1] = 0
+        self.velocity[y0:y1, x0:x1] = 0.0
+        self.timer_pack[y0:y1, x0:x1] = 0
+        self.integrity[y0:y1, x0:x1] = integrity
+        self.island_id[y0:y1, x0:x1] = 0
+        self.entity_id[y0:y1, x0:x1] = 0
+        self.placeholder_displaced_material[y0:y1, x0:x1] = 0
+        if material_id < self.material_spawn_temperature.shape[0]:
+            spawn_temperature = float(self.material_spawn_temperature[material_id])
+            if np.isfinite(spawn_temperature):
+                self.cell_temperature[y0:y1, x0:x1] = np.maximum(
+                    self.cell_temperature[y0:y1, x0:x1],
+                    spawn_temperature,
+                )

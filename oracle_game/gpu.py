@@ -10,8 +10,12 @@ from typing import Any
 
 import numpy as np
 
+from oracle_game.readback import READBACK_CPU_LATENCY_FRAMES, READBACK_GPU_LATENCY_FRAMES
 from oracle_game.readback_contract import READBACK_CHANNEL_BITS
 from oracle_game.types import COLLAPSE_BEHAVIOR_IDS, PageStripeUpdate, ReadbackRequest, ReadbackResult, WorldCommand
+
+CPU_READBACK_LATENCY_FRAMES = READBACK_CPU_LATENCY_FRAMES
+GPU_READBACK_LATENCY_FRAMES = READBACK_GPU_LATENCY_FRAMES
 
 try:  # pragma: no cover
     import moderngl
@@ -1260,6 +1264,9 @@ class GLReadbackSlot:
     buffer: Any | None = None
     frame_id: int = -1
     ready_frame_id: int = -1
+    min_poll_frame_id: int = -1
+    latency_frames: int = CPU_READBACK_LATENCY_FRAMES
+    gpu_backed: bool = False
     request: ReadbackRequest | None = None
     nbytes: int = 0
     layout: "ReadbackPayloadLayout | None" = None
@@ -1840,6 +1847,7 @@ class GPUBridge:
     table_buffers: dict[str, Any] = field(default_factory=dict)
     typed_table_buffers: dict[str, Any] = field(default_factory=dict)
     readback_programs: dict[str, Any] = field(default_factory=dict)
+    display_programs: dict[str, Any] = field(default_factory=dict)
     active_scheduler_programs: dict[str, Any] = field(default_factory=dict)
     readback_slots: list[GLReadbackSlot] = field(default_factory=lambda: [GLReadbackSlot(0), GLReadbackSlot(1)])
     gpu_authoritative_resources: set[str] = field(default_factory=set)
@@ -1873,6 +1881,7 @@ class GPUBridge:
             self.release()
         else:
             self._release_readback_programs()
+            self._release_display_programs()
         self.ctx = ctx
         self.own_context = False
         self.enabled = True
@@ -1907,11 +1916,12 @@ class GPUBridge:
         self.world_signature = signature
         self.textures["material"] = self.ctx.texture((world.width, world.height), 1, dtype="f4")
         self.textures["light"] = self.ctx.texture((world.width, world.height), 4, dtype="f4")
-        self.textures["debug"] = self.ctx.texture((world.width, world.height), 3, dtype="f4")
+        self.textures["debug"] = self.ctx.texture((world.width, world.height), 4, dtype="f4")
         self.textures["ambient_temperature"] = self.ctx.texture((world.gas_width, world.gas_height), 1, dtype="f4")
         self.textures["pressure_ping"] = self.ctx.texture((world.gas_width, world.gas_height), 1, dtype="f4")
         self.textures["flow_velocity"] = self.ctx.texture((world.gas_width, world.gas_height), 2, dtype="f4")
         self.textures["visible_illumination"] = self.ctx.texture((world.width, world.height), 4, dtype="f4")
+        self.textures["liquid_flow_intent"] = self.ctx.texture((world.width, world.height), 2, dtype="f4")
         for texture in self.textures.values():
             texture.filter = (self.ctx.NEAREST, self.ctx.NEAREST)
         self.buffers["cell_core"] = self.ctx.buffer(reserve=world.width * world.height * 5 * 4, dynamic=True)
@@ -1962,6 +1972,10 @@ class GPUBridge:
             reserve=max(4, world.active.chunk_width * world.active.chunk_height * 4),
             dynamic=True,
         )
+        active_chunk_count = max(1, int(world.active.chunk_width * world.active.chunk_height))
+        self.buffers["active_chunk_list"] = self.ctx.buffer(reserve=max(8, active_chunk_count * 2 * 4), dynamic=True)
+        self.buffers["active_chunk_count"] = self.ctx.buffer(reserve=4, dynamic=True)
+        self.buffers["active_chunk_dispatch_args"] = self.ctx.buffer(reserve=3 * 4, dynamic=True)
         self.buffers["gas_runtime_meta"] = self.ctx.buffer(reserve=max(4, GAS_RUNTIME_META_DTYPE.itemsize), dynamic=True)
         self.buffers["gas_solve_tile_mask"] = self.ctx.buffer(
             reserve=max(4, world.active.tile_width * world.active.tile_height),
@@ -2292,16 +2306,23 @@ class GPUBridge:
         world: "WorldEngine",
         *,
         debug_frame: np.ndarray | None = None,
+        upload_debug_texture: bool = True,
         force_cpu_resource_upload: bool = False,
     ) -> None:
         previous_force_cpu_resource_upload = self._force_cpu_resource_upload
         self._force_cpu_resource_upload = bool(force_cpu_resource_upload)
         try:
-            self._sync_world_impl(world, debug_frame=debug_frame)
+            self._sync_world_impl(world, debug_frame=debug_frame, upload_debug_texture=upload_debug_texture)
         finally:
             self._force_cpu_resource_upload = previous_force_cpu_resource_upload
 
-    def _sync_world_impl(self, world: "WorldEngine", *, debug_frame: np.ndarray | None = None) -> None:
+    def _sync_world_impl(
+        self,
+        world: "WorldEngine",
+        *,
+        debug_frame: np.ndarray | None = None,
+        upload_debug_texture: bool = True,
+    ) -> None:
         self.ensure_world_resources(world)
         self.sync_rule_tables(world)
         upload_solver_runtime_from_cpu = self._should_upload_cpu_solver_runtime(world)
@@ -2796,6 +2817,16 @@ class GPUBridge:
             self._write_dynamic_buffer("active_tile_ttl", active_tile_ttl_upload)
         if self._should_upload_cpu_resource(world, "active_chunk_mask"):
             self._write_dynamic_buffer("active_chunk_mask", active_chunk_mask_upload.astype(np.int32, copy=False))
+        if (
+            getattr(world, "simulation_backend", "") == "gpu"
+            and (
+                upload_active_meta_from_cpu
+                or upload_active_tile_ttl_from_cpu
+                or upload_active_chunk_mask_from_cpu
+            )
+        ):
+            self._ensure_active_scheduler_programs()
+            self._refresh_active_chunks_and_meta(world, read_meta=False)
         self._write_dynamic_buffer("gas_runtime_meta", gas_runtime_meta_upload)
         self._write_dynamic_buffer("gas_solve_tile_mask", gas_solve_tile_mask_upload)
         self._write_dynamic_buffer("gas_solve_gas_mask", gas_solve_gas_mask_upload)
@@ -2872,9 +2903,13 @@ class GPUBridge:
             visible_rgba[..., :3] = np.clip(world.visible_illumination, 0.0, 4.0)
             visible_rgba[..., 3] = 1.0
             self.textures["visible_illumination"].write(visible_rgba.tobytes())
-        if debug_frame is None:
-            debug_frame = world.debug_frame(world.default_debug_view)
-        self.textures["debug"].write(np.clip(debug_frame, 0.0, 1.0).astype("f4").tobytes())
+        if upload_debug_texture:
+            if debug_frame is None:
+                debug_frame = world.debug_frame(world.default_debug_view)
+            debug_rgba = np.empty((world.height, world.width, 4), dtype=np.float32)
+            debug_rgba[..., :3] = np.clip(debug_frame, 0.0, 1.0)
+            debug_rgba[..., 3] = 1.0
+            self.textures["debug"].write(debug_rgba.tobytes())
         if self._should_upload_cpu_resource(world, "ambient_temperature"):
             self.textures["ambient_temperature"].write(world.ambient_temperature.astype("f4").tobytes())
         if self._should_upload_cpu_resource(world, "pressure_ping"):
@@ -2900,6 +2935,246 @@ class GPUBridge:
                 "active_tile_ttl",
                 "active_chunk_mask",
             )
+
+    def sync_display_textures(self, world: "WorldEngine") -> None:
+        """Refresh textures sampled by the desktop demo from GPU-authoritative buffers."""
+        if not self.enabled or self.ctx is None:
+            return
+        self.ensure_world_resources(world)
+        if getattr(world, "simulation_backend", "") != "gpu":
+            return
+        if "cell_core" in self.gpu_authoritative_resources and "cell_core" in self.buffers:
+            self._ensure_display_programs()
+            program = self.display_programs["material_from_cell_core"]
+            program["width"] = int(world.width)
+            program["height"] = int(world.height)
+            self.buffers["cell_core"].bind_to_storage_buffer(0)
+            self.textures["material"].bind_to_image(0, read=False, write=True)
+            program.run(group_x=(int(world.width) + 15) // 16, group_y=(int(world.height) + 15) // 16)
+            self.ctx.memory_barrier(self.ctx.TEXTURE_FETCH_BARRIER_BIT | self.ctx.SHADER_IMAGE_ACCESS_BARRIER_BIT)
+        if "visible_illumination" in self.gpu_authoritative_resources and "visible_illumination" in self.textures:
+            self._ensure_display_programs()
+            program = self.display_programs["light_from_visible_texture"]
+            program["width"] = int(world.width)
+            program["height"] = int(world.height)
+            self.textures["visible_illumination"].use(0)
+            self.textures["light"].bind_to_image(0, read=False, write=True)
+            program.run(group_x=(int(world.width) + 15) // 16, group_y=(int(world.height) + 15) // 16)
+            self.ctx.memory_barrier(self.ctx.TEXTURE_FETCH_BARRIER_BIT | self.ctx.SHADER_IMAGE_ACCESS_BARRIER_BIT)
+
+    def sync_debug_display_texture(
+        self,
+        world: "WorldEngine",
+        *,
+        view: str,
+        gas_species_id: int = -1,
+        light_dose_channel: int = -1,
+    ) -> bool:
+        """Refresh the desktop demo debug texture using only GPU-resident state."""
+        if not self.enabled or self.ctx is None:
+            return False
+        if getattr(world, "simulation_backend", "") != "gpu":
+            return False
+        self.ensure_world_resources(world)
+        self._ensure_display_programs()
+        view_ids = {
+            "active": 7,
+            "temperature": 1,
+            "heat": 1,
+            "velocity": 2,
+            "motion": 2,
+            "light": 3,
+            "optics": 4,
+            "gas": 5,
+            "pressure": 6,
+        }
+        view_id = view_ids.get(str(view).lower(), 0)
+        if view_id == 0:
+            return False
+        program = self.display_programs["debug_from_gpu_state"]
+        program["width"] = int(world.width)
+        program["height"] = int(world.height)
+        program["gas_width"] = int(world.gas_width)
+        program["gas_height"] = int(world.gas_height)
+        program["gas_cell_size"] = int(world.gas_cell_size)
+        program["tile_width"] = int(world.active.tile_width)
+        program["tile_height"] = int(world.active.tile_height)
+        program["tile_size"] = int(world.active.tile_size)
+        program["active_ttl_reset"] = int(world.active.active_ttl_reset)
+        program["view_mode"] = int(view_id)
+        program["gas_species_id"] = int(gas_species_id)
+        program["light_dose_channel"] = int(light_dose_channel)
+        program["light_channel_count"] = int(world.cell_optical_dose.shape[0])
+        program["gas_species_count"] = int(world.gas_concentration.shape[0])
+        self.buffers["cell_core"].bind_to_storage_buffer(0)
+        self.buffers["gas_concentration"].bind_to_storage_buffer(1)
+        self.buffers["cell_optical_dose"].bind_to_storage_buffer(2)
+        self.buffers["gas_optical_dose"].bind_to_storage_buffer(3)
+        self.buffers["active_tile_ttl"].bind_to_storage_buffer(4)
+        self.textures["visible_illumination"].use(0)
+        self.textures["flow_velocity"].use(1)
+        self.textures["pressure_ping"].use(2)
+        self.textures["debug"].bind_to_image(0, read=False, write=True)
+        program.run(group_x=(int(world.width) + 15) // 16, group_y=(int(world.height) + 15) // 16)
+        self.ctx.memory_barrier(self.ctx.TEXTURE_FETCH_BARRIER_BIT | self.ctx.SHADER_IMAGE_ACCESS_BARRIER_BIT)
+        return True
+
+    def _ensure_display_programs(self) -> None:
+        if not self.enabled or self.ctx is None:
+            return
+        if "material_from_cell_core" not in self.display_programs:
+            self.display_programs["material_from_cell_core"] = self.ctx.compute_shader(
+                """
+                #version 430
+                layout(local_size_x = 16, local_size_y = 16) in;
+                layout(std430, binding = 0) readonly buffer CellCoreBuffer {
+                    uint cell_core[];
+                };
+                layout(r32f, binding = 0) writeonly uniform image2D material_tex;
+                uniform int width;
+                uniform int height;
+                void main() {
+                    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+                    if (pos.x >= width || pos.y >= height) {
+                        return;
+                    }
+                    int index = pos.y * width + pos.x;
+                    uint word0 = cell_core[index * 5];
+                    float material_id = float(word0 & 0xFFFFu);
+                    imageStore(material_tex, pos, vec4(material_id, 0.0, 0.0, 1.0));
+                }
+                """
+            )
+        if "light_from_visible_texture" not in self.display_programs:
+            self.display_programs["light_from_visible_texture"] = self.ctx.compute_shader(
+                """
+                #version 430
+                layout(local_size_x = 16, local_size_y = 16) in;
+                layout(rgba32f, binding = 0) writeonly uniform image2D light_tex;
+                uniform sampler2D visible_tex;
+                uniform int width;
+                uniform int height;
+                void main() {
+                    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+                    if (pos.x >= width || pos.y >= height) {
+                        return;
+                    }
+                    vec4 light = texelFetch(visible_tex, pos, 0);
+                    imageStore(light_tex, pos, vec4(light.rgb, 1.0));
+                }
+                """
+            )
+            self.display_programs["light_from_visible_texture"]["visible_tex"] = 0
+        if "debug_from_gpu_state" not in self.display_programs:
+            self.display_programs["debug_from_gpu_state"] = self.ctx.compute_shader(
+                """
+                #version 430
+                layout(local_size_x = 16, local_size_y = 16) in;
+                layout(std430, binding = 0) readonly buffer CellCoreBuffer {
+                    uint cell_core[];
+                };
+                layout(std430, binding = 1) readonly buffer GasBuffer {
+                    float gas_concentration[];
+                };
+                layout(std430, binding = 2) readonly buffer CellDoseBuffer {
+                    float cell_optical_dose[];
+                };
+                layout(std430, binding = 3) readonly buffer GasDoseBuffer {
+                    float gas_optical_dose[];
+                };
+                layout(std430, binding = 4) readonly buffer ActiveTileBuffer {
+                    int active_tile_ttl[];
+                };
+                layout(rgba32f, binding = 0) writeonly uniform image2D debug_tex;
+                uniform sampler2D visible_tex;
+                uniform sampler2D flow_velocity_tex;
+                uniform sampler2D pressure_tex;
+                uniform int width;
+                uniform int height;
+                uniform int gas_width;
+                uniform int gas_height;
+                uniform int gas_cell_size;
+                uniform int tile_width;
+                uniform int tile_height;
+                uniform int tile_size;
+                uniform int active_ttl_reset;
+                uniform int view_mode;
+                uniform int gas_species_id;
+                uniform int light_dose_channel;
+                uniform int light_channel_count;
+                uniform int gas_species_count;
+
+                vec3 heat_color(float t) {
+                    float cold = clamp((20.0 - t) / 80.0, 0.0, 1.0);
+                    float hot = clamp((t - 20.0) / 180.0, 0.0, 1.0);
+                    float warm = clamp(1.0 - abs(t - 20.0) / 80.0, 0.0, 1.0);
+                    return clamp(vec3(hot, warm * 0.22 + hot * 0.45, cold), 0.0, 1.0);
+                }
+
+                vec3 vector_color(vec2 v) {
+                    float mag = clamp(length(v) / 4.0, 0.0, 1.0);
+                    if (mag <= 0.00001) {
+                        return vec3(0.0);
+                    }
+                    vec2 dir = normalize(v);
+                    return clamp(vec3(max(dir.x, 0.0), max(dir.y, 0.0), max(-dir.x, 0.0)) * mag + vec3(0.0, 0.0, max(-dir.y, 0.0)) * mag, 0.0, 1.0);
+                }
+
+                void main() {
+                    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+                    if (pos.x >= width || pos.y >= height) {
+                        return;
+                    }
+                    int cell_index = pos.y * width + pos.x;
+                    uint word0 = cell_core[cell_index * 5];
+                    uint word1 = cell_core[cell_index * 5 + 1];
+                    uint word2 = cell_core[cell_index * 5 + 2];
+                    int material_id = int(word0 & 0xFFFFu);
+                    vec2 cell_velocity = unpackHalf2x16(word1);
+                    float cell_temperature = uintBitsToFloat(word2);
+                    ivec2 gas_cell = clamp(pos / max(1, gas_cell_size), ivec2(0), ivec2(max(0, gas_width - 1), max(0, gas_height - 1)));
+                    int gas_index = gas_cell.y * gas_width + gas_cell.x;
+                    vec3 color = vec3(0.0);
+                    if (view_mode == 1) {
+                        color = heat_color(cell_temperature);
+                    } else if (view_mode == 2) {
+                        vec2 flow = texelFetch(flow_velocity_tex, gas_cell, 0).xy;
+                        color = vector_color(material_id > 0 ? cell_velocity : flow);
+                    } else if (view_mode == 3) {
+                        color = clamp(texelFetch(visible_tex, pos, 0).rgb, 0.0, 1.0);
+                    } else if (view_mode == 4) {
+                        if (light_dose_channel >= 0 && light_dose_channel < light_channel_count) {
+                            float cell_dose = cell_optical_dose[light_dose_channel * width * height + cell_index];
+                            float gas_dose = gas_optical_dose[light_dose_channel * gas_width * gas_height + gas_index];
+                            float strength = 1.0 - exp(-max(0.0, cell_dose + gas_dose * 0.65));
+                            color = vec3(strength * 0.2, strength * 0.95, strength);
+                        } else {
+                            color = clamp(texelFetch(visible_tex, pos, 0).rgb, 0.0, 1.0);
+                        }
+                    } else if (view_mode == 5) {
+                        if (gas_species_id >= 0 && gas_species_id < gas_species_count) {
+                            float amount = gas_concentration[gas_species_id * gas_width * gas_height + gas_index];
+                            float strength = 1.0 - exp(-max(0.0, amount));
+                            color = vec3(strength * 0.3, strength, strength * 0.6);
+                        }
+                    } else if (view_mode == 6) {
+                        float pressure = texelFetch(pressure_tex, gas_cell, 0).x;
+                        float pos_pressure = clamp(pressure, 0.0, 1.0);
+                        float neg_pressure = clamp(-pressure, 0.0, 1.0);
+                        color = vec3(pos_pressure, 0.18 * (1.0 - clamp(abs(pressure), 0.0, 1.0)), neg_pressure);
+                    } else if (view_mode == 7) {
+                        ivec2 tile = clamp(pos / max(1, tile_size), ivec2(0), ivec2(max(0, tile_width - 1), max(0, tile_height - 1)));
+                        int ttl = active_tile_ttl[tile.y * tile_width + tile.x];
+                        float active_value = clamp(float(ttl) / max(1.0, float(active_ttl_reset)), 0.0, 1.0);
+                        color = vec3(active_value * 0.10, active_value * 0.95, 0.0);
+                    }
+                    imageStore(debug_tex, pos, vec4(clamp(color, 0.0, 1.0), 1.0));
+                }
+                """
+            )
+            self.display_programs["debug_from_gpu_state"]["visible_tex"] = 0
+            self.display_programs["debug_from_gpu_state"]["flow_velocity_tex"] = 1
+            self.display_programs["debug_from_gpu_state"]["pressure_tex"] = 2
 
     def mark_gpu_authoritative(self, *resource_names: str) -> None:
         self.gpu_authoritative_resources.update(str(name) for name in resource_names)
@@ -3011,7 +3286,7 @@ class GPUBridge:
             getattr(self.ctx, "SHADER_STORAGE_BARRIER_BIT", 0)
             | getattr(self.ctx, "BUFFER_UPDATE_BARRIER_BIT", 0)
         )
-        self._refresh_active_chunks_and_meta(world)
+        self._refresh_active_chunks_and_meta(world, read_meta=False)
         self.mark_gpu_authoritative("active_meta", "active_tile_ttl", "active_chunk_mask")
         return True
 
@@ -3040,49 +3315,65 @@ class GPUBridge:
             | getattr(self.ctx, "BUFFER_UPDATE_BARRIER_BIT", 0)
         )
 
-        self._refresh_active_chunks_and_meta(world)
+        self._refresh_active_chunks_and_meta(world, read_meta=False)
         self.mark_gpu_authoritative("active_meta", "active_tile_ttl", "active_chunk_mask")
         return True
 
-    def _refresh_active_chunks_and_meta(self, world: "WorldEngine") -> None:
+    def _refresh_active_chunks_and_meta(self, world: "WorldEngine", *, read_meta: bool = False) -> None:
         assert self.ctx is not None
-        tile_count = int(world.active.tile_width * world.active.tile_height)
-        chunk_count = int(world.active.chunk_width * world.active.chunk_height)
+        clear_program = self.active_scheduler_programs["clear_active_counts"]
+        self.buffers["active_meta"].bind_to_storage_buffer(binding=0)
+        self.buffers["active_chunk_count"].bind_to_storage_buffer(binding=1)
+        self.buffers["active_chunk_dispatch_args"].bind_to_storage_buffer(binding=2)
+        clear_program.run(1, 1, 1)
+        self.ctx.memory_barrier(
+            getattr(self.ctx, "SHADER_STORAGE_BARRIER_BIT", 0)
+            | getattr(self.ctx, "COMMAND_BARRIER_BIT", 0)
+            | getattr(self.ctx, "BUFFER_UPDATE_BARRIER_BIT", 0)
+        )
+
         refresh_program = self.active_scheduler_programs["refresh_active_chunks"]
         refresh_program["tile_grid_size"].value = (world.active.tile_width, world.active.tile_height)
         refresh_program["chunk_grid_size"].value = (world.active.chunk_width, world.active.chunk_height)
         refresh_program["chunk_tiles"].value = int(world.active.chunk_tiles)
         self.buffers["active_tile_ttl"].bind_to_storage_buffer(binding=0)
         self.buffers["active_chunk_mask"].bind_to_storage_buffer(binding=1)
+        self.buffers["active_meta"].bind_to_storage_buffer(binding=2)
+        self.buffers["active_chunk_count"].bind_to_storage_buffer(binding=3)
+        self.buffers["active_chunk_list"].bind_to_storage_buffer(binding=4)
+        self.buffers["active_chunk_dispatch_args"].bind_to_storage_buffer(binding=5)
         refresh_program.run(world.active.chunk_width, world.active.chunk_height, 1)
         self.ctx.memory_barrier(
             getattr(self.ctx, "SHADER_STORAGE_BARRIER_BIT", 0)
+            | getattr(self.ctx, "COMMAND_BARRIER_BIT", 0)
             | getattr(self.ctx, "BUFFER_UPDATE_BARRIER_BIT", 0)
         )
-
-        clear_program = self.active_scheduler_programs["clear_active_counts"]
-        self.buffers["active_meta"].bind_to_storage_buffer(binding=0)
-        clear_program.run(1, 1, 1)
-        self.ctx.memory_barrier(
-            getattr(self.ctx, "SHADER_STORAGE_BARRIER_BIT", 0)
-            | getattr(self.ctx, "BUFFER_UPDATE_BARRIER_BIT", 0)
-        )
-
-        count_program = self.active_scheduler_programs["count_active_scheduler"]
-        count_program["tile_count"].value = tile_count
-        count_program["chunk_count"].value = chunk_count
-        self.buffers["active_tile_ttl"].bind_to_storage_buffer(binding=0)
-        self.buffers["active_chunk_mask"].bind_to_storage_buffer(binding=1)
-        self.buffers["active_meta"].bind_to_storage_buffer(binding=2)
-        count_program.run((max(tile_count, chunk_count) + 255) // 256, 1, 1)
-        self.ctx.memory_barrier(
-            getattr(self.ctx, "SHADER_STORAGE_BARRIER_BIT", 0)
-            | getattr(self.ctx, "BUFFER_UPDATE_BARRIER_BIT", 0)
-        )
+        if read_meta:
+            self.shadow_buffers["active_meta"] = np.frombuffer(
+                self.buffers["active_meta"].read(size=ACTIVE_META_DTYPE.itemsize),
+                dtype=ACTIVE_META_DTYPE,
+                count=1,
+            ).copy()
 
     def _ensure_active_scheduler_programs(self) -> None:
-        if self.ctx is None or self.active_scheduler_programs:
+        if self.ctx is None:
             return
+        required_programs = {
+            "mark_active_rects",
+            "decay_active_tiles",
+            "clear_active_counts",
+            "count_active_scheduler",
+            "refresh_active_chunks",
+        }
+        if required_programs.issubset(self.active_scheduler_programs):
+            return
+        for name in required_programs:
+            program = self.active_scheduler_programs.pop(name, None)
+            if program is not None:
+                try:
+                    program.release()
+                except Exception:
+                    pass
         self.active_scheduler_programs["mark_active_rects"] = self.ctx.compute_shader(
             """
             #version 430
@@ -3164,9 +3455,19 @@ class GPUBridge:
             layout(std430, binding=0) buffer ActiveMetaBuffer {
                 int active_meta[];
             };
+            layout(std430, binding=1) buffer ActiveChunkCountBuffer {
+                uint active_chunk_count[];
+            };
+            layout(std430, binding=2) buffer ActiveChunkDispatchArgsBuffer {
+                uint active_chunk_dispatch_args[];
+            };
             void main() {
                 active_meta[7] = 0;
                 active_meta[8] = 0;
+                active_chunk_count[0] = 0u;
+                active_chunk_dispatch_args[0] = 0u;
+                active_chunk_dispatch_args[1] = 1u;
+                active_chunk_dispatch_args[2] = 1u;
             }
             """
         )
@@ -3209,6 +3510,18 @@ class GPUBridge:
             layout(std430, binding=1) buffer ActiveChunkMaskBuffer {
                 int active_chunk_mask[];
             };
+            layout(std430, binding=2) buffer ActiveMetaBuffer {
+                int active_meta[];
+            };
+            layout(std430, binding=3) buffer ActiveChunkCountBuffer {
+                uint active_chunk_count[];
+            };
+            layout(std430, binding=4) buffer ActiveChunkListBuffer {
+                ivec2 active_chunk_list[];
+            };
+            layout(std430, binding=5) buffer ActiveChunkDispatchArgsBuffer {
+                uint active_chunk_dispatch_args[];
+            };
             void main() {
                 ivec2 chunk = ivec2(gl_GlobalInvocationID.xy);
                 if (chunk.x >= chunk_grid_size.x || chunk.y >= chunk_grid_size.y) {
@@ -3218,17 +3531,26 @@ class GPUBridge:
                 int y0 = chunk.y * chunk_tiles;
                 int x1 = min(tile_grid_size.x, x0 + chunk_tiles);
                 int y1 = min(tile_grid_size.y, y0 + chunk_tiles);
-                int active_flag = 0;
+                int active_tile_count = 0;
                 for (int tile_y = y0; tile_y < y1; ++tile_y) {
                     for (int tile_x = x0; tile_x < x1; ++tile_x) {
                         int tile_index = tile_y * tile_grid_size.x + tile_x;
                         if (active_tile_ttl[tile_index] > 0) {
-                            active_flag = 1;
+                            active_tile_count += 1;
                         }
                     }
                 }
                 int chunk_index = chunk.y * chunk_grid_size.x + chunk.x;
+                int active_flag = active_tile_count > 0 ? 1 : 0;
                 active_chunk_mask[chunk_index] = active_flag;
+                if (active_flag == 0) {
+                    return;
+                }
+                atomicAdd(active_meta[7], active_tile_count);
+                atomicAdd(active_meta[8], 1);
+                uint slot = atomicAdd(active_chunk_count[0], 1u);
+                active_chunk_list[slot] = chunk;
+                atomicMax(active_chunk_dispatch_args[0], slot + 1u);
             }
             """
         )
@@ -3266,6 +3588,8 @@ class GPUBridge:
         if slot is None:
             return False
         plan = self._plan_readback_payload(payload)
+        gpu_backed = bool(plan.gpu_sources)
+        latency_frames = GPU_READBACK_LATENCY_FRAMES if gpu_backed else CPU_READBACK_LATENCY_FRAMES
         if require_gpu_sources and plan.cpu_chunks:
             paths = ", ".join(".".join(path) if path else "<root>" for path in plan.cpu_chunk_paths)
             raise RuntimeError(
@@ -3303,7 +3627,10 @@ class GPUBridge:
                 raw[offset : offset + len(data)] = data
             slot.buffer = bytes(raw)
         slot.frame_id = frame_id
-        slot.ready_frame_id = frame_id + 1
+        slot.ready_frame_id = frame_id + CPU_READBACK_LATENCY_FRAMES
+        slot.min_poll_frame_id = frame_id + latency_frames
+        slot.latency_frames = latency_frames
+        slot.gpu_backed = gpu_backed
         slot.request = request
         slot.nbytes = plan.nbytes
         slot.layout = plan.layout
@@ -3314,7 +3641,10 @@ class GPUBridge:
         ready_slots = [
             slot
             for slot in self.readback_slots
-            if slot.frame_id >= 0 and slot.request is not None and slot.ready_frame_id >= 0 and slot.ready_frame_id <= current_frame_id
+            if slot.frame_id >= 0
+            and slot.request is not None
+            and slot.min_poll_frame_id >= 0
+            and slot.min_poll_frame_id <= current_frame_id
         ]
         if not ready_slots:
             return None
@@ -3329,6 +3659,9 @@ class GPUBridge:
         result = ReadbackResult(frame_id=slot.frame_id, request=slot.request, payload=payload)
         slot.frame_id = -1
         slot.ready_frame_id = -1
+        slot.min_poll_frame_id = -1
+        slot.latency_frames = CPU_READBACK_LATENCY_FRAMES
+        slot.gpu_backed = False
         slot.request = None
         slot.nbytes = 0
         slot.layout = None
@@ -3416,6 +3749,10 @@ class GPUBridge:
             "occupied": request is not None and slot.frame_id >= 0,
             "frame_id": None if slot.frame_id < 0 else int(slot.frame_id),
             "ready_frame_id": None if slot.ready_frame_id < 0 else int(slot.ready_frame_id),
+            "min_poll_frame_id": None if slot.min_poll_frame_id < 0 else int(slot.min_poll_frame_id),
+            "latency_frames": int(slot.latency_frames),
+            "gpu_backed": bool(slot.gpu_backed),
+            "pending_gpu_latency": bool(slot.gpu_backed and slot.min_poll_frame_id > slot.ready_frame_id >= 0),
             "request_id": None if request is None or request.request_id is None else int(request.request_id),
             "observer_id": None if request is None or request.observer_id is None else int(request.observer_id),
             "label": None if request is None or request.label is None else str(request.label),
@@ -3483,6 +3820,10 @@ class GPUBridge:
                 for name, buffer in sorted(self.typed_table_buffers.items())
             },
             "readback_programs": sorted(str(name) for name in self.readback_programs.keys()),
+            "readback_latency_frames": {
+                "cpu_payload": int(CPU_READBACK_LATENCY_FRAMES),
+                "gpu_payload": int(GPU_READBACK_LATENCY_FRAMES),
+            },
             "readback_slots": [self._serialize_readback_slot(slot) for slot in self.readback_slots],
         }
 
@@ -3521,6 +3862,10 @@ class GPUBridge:
                     pass
             slot.buffer = None
             slot.frame_id = -1
+            slot.ready_frame_id = -1
+            slot.min_poll_frame_id = -1
+            slot.latency_frames = CPU_READBACK_LATENCY_FRAMES
+            slot.gpu_backed = False
             slot.request = None
             slot.nbytes = 0
             slot.layout = None
@@ -3529,6 +3874,7 @@ class GPUBridge:
         self.table_buffers.clear()
         self.typed_table_buffers.clear()
         self._release_active_scheduler_programs()
+        self._release_display_programs()
         self.gpu_authoritative_resources.clear()
         self.rule_table_signature = None
 
@@ -4101,6 +4447,14 @@ class GPUBridge:
             except Exception:
                 pass
         self.readback_programs.clear()
+
+    def _release_display_programs(self) -> None:
+        for program in self.display_programs.values():
+            try:
+                program.release()
+            except Exception:
+                pass
+        self.display_programs.clear()
 
     def _release_active_scheduler_programs(self) -> None:
         for program in self.active_scheduler_programs.values():

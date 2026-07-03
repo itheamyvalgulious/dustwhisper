@@ -45,6 +45,7 @@ class MotionSolver:
 
     def step(self, world: "WorldEngine", dt: float) -> None:
         self.reset_runtime_state()
+        self.gpu_pipeline.reset_pass_profile()
         gpu_available = world._gpu_pipeline_available(self.gpu_pipeline, "motion")
         formal_gpu_frame = (
             gpu_available
@@ -57,7 +58,7 @@ class MotionSolver:
         if formal_gpu_frame and not active_scheduler_gpu_authoritative:
             world._require_gpu_stage("active scheduler motion solve masks")
         if active_scheduler_gpu_authoritative:
-            solve_tile_mask = np.ones((world.active.tile_height, world.active.tile_width), dtype=np.bool_)
+            solve_tile_mask = np.zeros((world.active.tile_height, world.active.tile_width), dtype=np.bool_)
         else:
             solve_tile_mask = self._solve_tile_mask(world)
         if not np.any(solve_tile_mask) and not active_scheduler_gpu_authoritative:
@@ -79,7 +80,7 @@ class MotionSolver:
             self._integrate_velocity(world, dt, solve_cell_mask)
             used_cpu = True
         island_cpu_work = bool(world.islands and not gpu_available)
-        island_used_gpu = self._move_falling_islands(world, use_gpu=gpu_available)
+        island_used_gpu = self._move_falling_islands(world, dt=dt, use_gpu=gpu_available)
         used_gpu = used_gpu or island_used_gpu
         used_cpu = used_cpu or island_cpu_work
         powder_active = bool(gpu_available) or bool(
@@ -89,12 +90,13 @@ class MotionSolver:
             if gpu_available:
                 powder_reservations = self.gpu_pipeline.resolve_and_apply_powders(
                     world,
+                    dt,
                     solve_tile_mask=solve_tile_mask,
                 )
                 used_gpu = True
             else:
                 world._require_cpu_oracle_backend("motion powder")
-                powder_reservations = self._plan_cpu_powder_reservations(world, solve_cell_mask)
+                powder_reservations = self._plan_cpu_powder_reservations(world, solve_cell_mask, dt)
                 powder_reservations = self._resolve_powder_reservations(world, powder_reservations)
                 self.gpu_pipeline.upload_powder_reservations(world, powder_reservations)
                 self._apply_powder_reservations(world, powder_reservations)
@@ -193,7 +195,23 @@ class MotionSolver:
         return payload
 
     def _solve_tile_mask(self, world: "WorldEngine") -> np.ndarray:
-        active_tiles = np.asarray(world.active.active_tile_ttl, dtype=np.int32) > 0
+        formal_gpu_frame = (
+            getattr(world, "simulation_backend", "") == "gpu"
+            and bool(getattr(world, "_world_simulation_frame_active", False))
+            and "active_tile_ttl" in world.bridge.gpu_authoritative_resources
+        )
+        if formal_gpu_frame and world.bridge.enabled and world.bridge.ctx is not None and "active_tile_ttl" in world.bridge.buffers:
+            active_tiles = (
+                np.frombuffer(
+                    world.bridge.buffers["active_tile_ttl"].read(
+                        size=world.active.tile_width * world.active.tile_height * 4,
+                    ),
+                    dtype=np.int32,
+                ).reshape((world.active.tile_height, world.active.tile_width))
+                > 0
+            )
+        else:
+            active_tiles = np.asarray(world.active.active_tile_ttl, dtype=np.int32) > 0
         seeded_tiles = active_tiles.copy()
         tile_size = world.active.tile_size
         for record in world.islands.values():
@@ -273,7 +291,7 @@ class MotionSolver:
             elasticity=elasticity,
         )
 
-    def _move_falling_islands(self, world: "WorldEngine", *, use_gpu: bool) -> bool:
+    def _move_falling_islands(self, world: "WorldEngine", *, dt: float, use_gpu: bool) -> bool:
         if use_gpu and self.gpu_pipeline._formal_gpu_frame(world):
             bridge_authoritative = {"cell_core", "island_id", "island_runtime"}.issubset(
                 world.bridge.gpu_authoritative_resources
@@ -289,20 +307,26 @@ class MotionSolver:
                 )
             runtime_capacity = int(getattr(self.gpu_pipeline, "last_published_island_runtime_capacity", 0))
             if bridge_authoritative and runtime_capacity > 0:
-                reservation_count = self.gpu_pipeline.plan_uploaded_falling_island_reservations_from_bridge_runtime(
+                reservation_capacity = self.gpu_pipeline.plan_uploaded_falling_island_reservations_from_bridge_runtime(
                     world,
+                    dt,
                     runtime_capacity,
                 )
-                if reservation_count <= 0:
+                if reservation_capacity <= 0:
                     self.last_island_reservations = np.zeros((0,), dtype=falling_island_reservation_dtype())
                     world.islands.clear()
                     return False
-                self.gpu_pipeline.resolve_uploaded_falling_island_reservations(world, reservation_count)
-                self.gpu_pipeline.apply_uploaded_falling_island_settlements(world, reservation_count)
-                self.gpu_pipeline.apply_uploaded_falling_island_reservations(world, reservation_count)
+                self.gpu_pipeline.resolve_uploaded_falling_island_reservations(
+                    world,
+                    reservation_capacity,
+                )
+                self.gpu_pipeline.apply_uploaded_falling_island_settlements(world, reservation_capacity)
+                self.gpu_pipeline.apply_uploaded_falling_island_reservations(world, reservation_capacity)
                 self.last_island_reservations = np.zeros((0,), dtype=falling_island_reservation_dtype())
                 world.islands.clear()
                 return True
+            self.last_island_reservations = np.zeros((0,), dtype=falling_island_reservation_dtype())
+            return False
         used_gpu = False
         processed_ids: set[int] = set()
         pending_components: list[tuple[int, np.ndarray, object, tuple[int, int], tuple[float, float], tuple[int, int]]] = []
@@ -340,7 +364,16 @@ class MotionSolver:
                     target_dy = 0
                     residual = tuple(float(value) for value in component_record.subcell_offset)
                 else:
-                    target_dx, target_dy, residual = self._resolve_island_dda_shift(component_record.subcell_offset, (vx, vy))
+                    target_dx, target_dy, residual = self._resolve_island_dda_shift(
+                        component_record.subcell_offset,
+                        (vx, vy),
+                        dt,
+                    )
+                    if target_dx == 0 and target_dy == 0:
+                        gravity_dy = self._falling_island_gravity_fallback_dy(world, coords, vy)
+                        if gravity_dy != 0:
+                            target_dy = gravity_dy
+                            residual = (float(residual[0]), 0.0)
                 pending_components.append(
                     (
                         component_id,
@@ -354,6 +387,7 @@ class MotionSolver:
         island_reservations, used_gpu = self._plan_falling_island_reservations(
             world,
             pending_components,
+            dt=dt,
             use_gpu=use_gpu,
         )
         self.last_island_reservations = island_reservations.copy()
@@ -470,13 +504,20 @@ class MotionSolver:
     def _can_seed_bridge_runtime_fast_path(self, world: "WorldEngine") -> bool:
         if not world.islands:
             return False
-        for record in world.islands.values():
-            x0, y0, x1, y1 = (int(value) for value in record.bbox)
-            if x1 <= x0 or y1 <= y0:
+        bridge_authoritative_island_grid = {"cell_core", "island_id"}.issubset(
+            world.bridge.gpu_authoritative_resources
+        )
+        for island_id, record in world.islands.items():
+            if int(island_id) <= 0:
                 return False
-            # Larger or sparse bboxes may need split/shedding; keep them on the existing GPU component path
-            # until that path is fully bridge-runtime-authoritative.
-            if (x1 - x0) * (y1 - y0) > 4:
+            x0, y0, x1, y1 = (int(value) for value in record.bbox)
+            if x0 < 0 or y0 < 0 or x1 > world.width or y1 > world.height or x1 <= x0 or y1 <= y0:
+                return False
+            if bridge_authoritative_island_grid:
+                continue
+            island_mask = world.island_id[y0:y1, x0:x1] == int(island_id)
+            material_mask = world.material_id[y0:y1, x0:x1] > 0
+            if not bool(np.any(island_mask & material_mask)):
                 return False
         return True
 
@@ -485,6 +526,7 @@ class MotionSolver:
         world: "WorldEngine",
         pending_components: list[tuple[int, np.ndarray, object, tuple[int, int], tuple[float, float], tuple[int, int]]],
         *,
+        dt: float,
         use_gpu: bool,
     ) -> tuple[np.ndarray, bool]:
         reservations = np.zeros((len(pending_components),), dtype=falling_island_reservation_dtype())
@@ -520,6 +562,7 @@ class MotionSolver:
         if gpu_available and gpu_island_ids:
             gpu_reservations = self.gpu_pipeline.plan_falling_island_reservations(
                 world,
+                dt,
                 island_ids=gpu_island_ids,
                 motion_overrides=motion_overrides,
             )
@@ -567,6 +610,7 @@ class MotionSolver:
         self,
         world: "WorldEngine",
         solve_cell_mask: np.ndarray,
+        dt: float,
     ) -> np.ndarray:
         reservations: list[
             tuple[
@@ -589,9 +633,11 @@ class MotionSolver:
                     continue
                 velocity = world.velocity[y, x]
                 max_dda_step = self._material_max_dda_step(world, material_id)
-                desired_dx = int(np.clip(np.rint(float(velocity[0])), -max_dda_step, max_dda_step))
-                desired_dy = int(np.clip(np.rint(float(velocity[1])), -max_dda_step, max_dda_step))
-                reserved_target = self._resolve_powder_dda_target(world, x, y, max_dda_step)
+                frame_delta_x = float(velocity[0]) * float(dt)
+                frame_delta_y = float(velocity[1]) * float(dt)
+                desired_dx = int(np.clip(np.rint(frame_delta_x), -max_dda_step, max_dda_step))
+                desired_dy = int(np.clip(np.rint(frame_delta_y), -max_dda_step, max_dda_step))
+                reserved_target = self._resolve_powder_dda_target(world, x, y, max_dda_step, dt)
                 if reserved_target is None:
                     reserved_target = (x, y)
                 reservations.append(
@@ -800,15 +846,17 @@ class MotionSolver:
     def _component_entry_from_gpu_metadata(self, metadata: np.ndarray) -> _IslandComponentEntry:
         label, min_x, min_y, max_x, max_y, cell_count = (int(value) for value in metadata)
         bbox = (min_x, min_y, max_x, max_y)
-        coords = np.asarray(
-            (
-                (min_y, min_x),
-                (max_y - 1, max_x - 1),
-            ),
-            dtype=np.int32,
-        )
-        if cell_count == 1:
-            coords = coords[:1]
+        width = max_x - min_x
+        height = max_y - min_y
+        bbox_area = width * height
+        if width <= 0 or height <= 0 or cell_count <= 0 or cell_count > bbox_area:
+            raise RuntimeError("GPU falling-island component metadata is invalid")
+        if cell_count != bbox_area:
+            raise RuntimeError(
+                "GPU falling-island component metadata does not include exact non-rectangular coords"
+            )
+        yy, xx = np.mgrid[min_y:max_y, min_x:max_x]
+        coords = np.stack((yy.ravel(), xx.ravel()), axis=1).astype(np.int32)
         return _IslandComponentEntry(
             label=label,
             coords=coords,
@@ -856,13 +904,31 @@ class MotionSolver:
         self,
         subcell_offset: tuple[float, float],
         velocity_xy: tuple[float, float],
+        dt: float,
     ) -> tuple[int, int, tuple[float, float]]:
-        total_x = float(subcell_offset[0]) + float(velocity_xy[0])
-        total_y = float(subcell_offset[1]) + float(velocity_xy[1])
+        total_x = float(subcell_offset[0]) + float(velocity_xy[0]) * float(dt)
+        total_y = float(subcell_offset[1]) + float(velocity_xy[1]) * float(dt)
         target_dx = int(np.clip(np.rint(total_x), -MAX_ISLAND_DDA_STEP, MAX_ISLAND_DDA_STEP))
         target_dy = int(np.clip(np.rint(total_y), -MAX_ISLAND_DDA_STEP, MAX_ISLAND_DDA_STEP))
         residual = (float(total_x - target_dx), float(total_y - target_dy))
         return target_dx, target_dy, residual
+
+    def _falling_island_gravity_fallback_dy(
+        self,
+        world: "WorldEngine",
+        coords: np.ndarray,
+        velocity_y: float,
+    ) -> int:
+        if len(coords) == 0:
+            return 0
+        material_ids = world.material_id[coords[:, 0], coords[:, 1]]
+        gravity = self._material_scalar_field(world, material_ids, "gravity_scale", world.material_gravity)
+        mean_gravity = float(np.mean(gravity)) if gravity.size else 0.0
+        if abs(mean_gravity) > 1.0e-6:
+            return 1 if mean_gravity > 0.0 else -1
+        if abs(float(velocity_y)) <= 1.0e-6:
+            return 0
+        return 1 if float(velocity_y) > 0.0 else -1
 
     def _resolve_island_dda_target(
         self,
@@ -1037,7 +1103,7 @@ class MotionSolver:
             min(world.height, max(old_bbox[3], new_bbox[3]) + 1),
         )
 
-    def _move_powders(self, world: "WorldEngine", solve_cell_mask: np.ndarray) -> None:
+    def _move_powders(self, world: "WorldEngine", solve_cell_mask: np.ndarray, dt: float) -> None:
         processed = np.zeros((world.height, world.width), dtype=bool)
         for y in range(world.height - 2, -1, -1):
             active_xs = np.flatnonzero(solve_cell_mask[y])
@@ -1051,7 +1117,13 @@ class MotionSolver:
                     continue
                 if int(world.phase[y, x]) != int(Phase.POWDER):
                     continue
-                dda_target = self._resolve_powder_dda_target(world, x, y, self._material_max_dda_step(world, material_id))
+                dda_target = self._resolve_powder_dda_target(
+                    world,
+                    x,
+                    y,
+                    self._material_max_dda_step(world, material_id),
+                    dt,
+                )
                 moved = False
                 if dda_target is not None and dda_target != (x, y):
                     world.swap_cells(x, y, dda_target[0], dda_target[1])
@@ -1280,13 +1352,16 @@ class MotionSolver:
         x: int,
         y: int,
         max_dda_step: int,
+        dt: float,
     ) -> tuple[int, int] | None:
         velocity = world.velocity[y, x]
         max_step = max(0, int(max_dda_step))
         if max_step <= 0:
             return None
-        desired_dx = int(np.clip(np.rint(float(velocity[0])), -max_step, max_step))
-        desired_dy = int(np.clip(np.rint(float(velocity[1])), -max_step, max_step))
+        frame_delta_x = float(velocity[0]) * float(dt)
+        frame_delta_y = float(velocity[1]) * float(dt)
+        desired_dx = int(np.clip(np.rint(frame_delta_x), -max_step, max_step))
+        desired_dy = int(np.clip(np.rint(frame_delta_y), -max_step, max_step))
         if desired_dx == 0 and desired_dy == 0:
             return None
         target_x = x + desired_dx

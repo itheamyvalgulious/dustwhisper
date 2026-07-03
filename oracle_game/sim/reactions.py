@@ -33,12 +33,40 @@ REACTION_STAGE_NAMES = (
 )
 
 
+class GPUAuthoritativeFullSolveMask:
+    full_gpu_authoritative = True
+
+    __slots__ = ("domain", "shape")
+
+    def __init__(self, domain: str, shape: tuple[int, int]) -> None:
+        self.domain = domain
+        self.shape = shape
+
+    def __array__(self, dtype: object | None = None, copy: object | None = None) -> np.ndarray:
+        raise TypeError("GPU-authoritative full solve mask is not materialized on CPU")
+
+    def copy(self) -> "GPUAuthoritativeFullSolveMask":
+        return self
+
+    def __repr__(self) -> str:
+        return f"GPUAuthoritativeFullSolveMask(domain={self.domain!r}, shape={self.shape!r})"
+
+
+SolveMask = np.ndarray | GPUAuthoritativeFullSolveMask
+
+
 class ReactionSolver:
     def __init__(self) -> None:
         self.gpu_pipeline = GPUReactionPipeline()
         self.last_backend = "idle"
         self.last_runtime_backend = "idle"
         self._current_stage: str | None = None
+        self._full_solve_mask_cache_signature: tuple[tuple[int, int], tuple[int, int], tuple[int, int]] | None = None
+        self._full_solve_mask_cache: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+        self._full_gpu_authoritative_mask_cache_signature: tuple[tuple[int, int], tuple[int, int], tuple[int, int]] | None = None
+        self._full_gpu_authoritative_mask_cache: (
+            tuple[GPUAuthoritativeFullSolveMask, GPUAuthoritativeFullSolveMask, GPUAuthoritativeFullSolveMask] | None
+        ) = None
         self.reset_runtime_state()
 
     def step(self, world: "WorldEngine", dt: float) -> None:
@@ -59,9 +87,13 @@ class ReactionSolver:
 
     def _advance_timed_slots(self, world: "WorldEngine") -> None:
         self._ensure_runtime_state(world)
-        solve_tile_mask, solve_cell_mask, solve_gas_mask = self._solve_masks(world, seed_timer_cells=True)
+        solve_tile_mask, solve_cell_mask, solve_gas_mask = self._solve_masks(
+            world,
+            seed_timer_cells=True,
+            stage="timed",
+        )
         self._record_stage_solve_masks("timed", solve_tile_mask, solve_cell_mask, solve_gas_mask)
-        if not np.any(solve_tile_mask):
+        if not self._solve_mask_any(solve_tile_mask):
             return
         previous_state = self._capture_activity_state(world, solve_cell_mask, solve_gas_mask)
         self._current_stage = "timed"
@@ -75,6 +107,13 @@ class ReactionSolver:
             self._apply_deferred_batch(world, deferred)
             self._finalize_stage_runtime(world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state)
             return
+        self._require_materialized_cpu_solve_masks(
+            world,
+            "timed reaction actions",
+            solve_tile_mask,
+            solve_cell_mask,
+            solve_gas_mask,
+        )
         world._require_gpu_stage("timed reaction actions")
         self.last_backend = "cpu"
         self._note_runtime_backend("cpu")
@@ -98,9 +137,13 @@ class ReactionSolver:
 
     def _run_self_rules(self, world: "WorldEngine") -> None:
         self._ensure_runtime_state(world)
-        solve_tile_mask, solve_cell_mask, solve_gas_mask = self._solve_masks(world, seed_timer_cells=True)
+        solve_tile_mask, solve_cell_mask, solve_gas_mask = self._solve_masks(
+            world,
+            seed_timer_cells=True,
+            stage="self",
+        )
         self._record_stage_solve_masks("self", solve_tile_mask, solve_cell_mask, solve_gas_mask)
-        if not np.any(solve_tile_mask):
+        if not self._solve_mask_any(solve_tile_mask):
             return
         previous_state = self._capture_activity_state(world, solve_cell_mask, solve_gas_mask)
         self._current_stage = "self"
@@ -114,6 +157,13 @@ class ReactionSolver:
             self._apply_deferred_batch(world, deferred)
             self._finalize_stage_runtime(world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state)
             return
+        self._require_materialized_cpu_solve_masks(
+            world,
+            "self reaction rules",
+            solve_tile_mask,
+            solve_cell_mask,
+            solve_gas_mask,
+        )
         world._require_gpu_stage("self reaction rules")
         self.last_backend = "cpu"
         self._note_runtime_backend("cpu")
@@ -171,9 +221,13 @@ class ReactionSolver:
         self._ensure_runtime_state(world)
         if int(world.bridge.shadow_typed_tables["material_material_rule_table"].shape[0]) <= 0:
             return
-        solve_tile_mask, solve_cell_mask, solve_gas_mask = self._solve_masks(world, seed_timer_cells=True)
+        solve_tile_mask, solve_cell_mask, solve_gas_mask = self._solve_masks(
+            world,
+            seed_timer_cells=True,
+            stage="material_material",
+        )
         self._record_stage_solve_masks("material_material", solve_tile_mask, solve_cell_mask, solve_gas_mask)
-        if not np.any(solve_tile_mask):
+        if not self._solve_mask_any(solve_tile_mask):
             return
         previous_state = self._capture_activity_state(world, solve_cell_mask, solve_gas_mask)
         self._current_stage = "material_material"
@@ -187,6 +241,13 @@ class ReactionSolver:
             self._apply_deferred_batch(world, deferred)
             self._finalize_stage_runtime(world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state)
             return
+        self._require_materialized_cpu_solve_masks(
+            world,
+            "material-material reaction rules",
+            solve_tile_mask,
+            solve_cell_mask,
+            solve_gas_mask,
+        )
         world._require_gpu_stage("material-material reaction rules")
         self.last_backend = "cpu"
         self._note_runtime_backend("cpu")
@@ -242,9 +303,13 @@ class ReactionSolver:
         self._ensure_runtime_state(world)
         if int(world.bridge.shadow_typed_tables["material_gas_rule_table"].shape[0]) <= 0:
             return
-        solve_tile_mask, solve_cell_mask, solve_gas_mask = self._solve_masks(world, seed_timer_cells=True)
+        solve_tile_mask, solve_cell_mask, solve_gas_mask = self._solve_masks(
+            world,
+            seed_timer_cells=True,
+            stage="material_gas",
+        )
         self._record_stage_solve_masks("material_gas", solve_tile_mask, solve_cell_mask, solve_gas_mask)
-        if not np.any(solve_tile_mask):
+        if not self._solve_mask_any(solve_tile_mask):
             return
         previous_state = self._capture_activity_state(world, solve_cell_mask, solve_gas_mask)
         self._current_stage = "material_gas"
@@ -258,6 +323,13 @@ class ReactionSolver:
             self._apply_deferred_batch(world, deferred)
             self._finalize_stage_runtime(world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state)
             return
+        self._require_materialized_cpu_solve_masks(
+            world,
+            "material-gas reaction rules",
+            solve_tile_mask,
+            solve_cell_mask,
+            solve_gas_mask,
+        )
         world._require_gpu_stage("material-gas reaction rules")
         self.last_backend = "cpu"
         self._note_runtime_backend("cpu")
@@ -312,11 +384,13 @@ class ReactionSolver:
         self._ensure_runtime_state(world)
         if int(world.bridge.shadow_typed_tables["material_light_rule_table"].shape[0]) <= 0:
             return
-        if self._formal_gpu_frame(world) and getattr(world, "_formal_gpu_frame_has_light_dose", None) is False:
-            return
-        solve_tile_mask, solve_cell_mask, solve_gas_mask = self._solve_masks(world, seed_timer_cells=True)
+        solve_tile_mask, solve_cell_mask, solve_gas_mask = self._solve_masks(
+            world,
+            seed_timer_cells=True,
+            stage="material_light",
+        )
         self._record_stage_solve_masks("material_light", solve_tile_mask, solve_cell_mask, solve_gas_mask)
-        if not np.any(solve_tile_mask):
+        if not self._solve_mask_any(solve_tile_mask):
             return
         previous_state = self._capture_activity_state(world, solve_cell_mask, solve_gas_mask)
         self._current_stage = "material_light"
@@ -330,6 +404,13 @@ class ReactionSolver:
             self._apply_deferred_batch(world, deferred)
             self._finalize_stage_runtime(world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state)
             return
+        self._require_materialized_cpu_solve_masks(
+            world,
+            "material-light reaction rules",
+            solve_tile_mask,
+            solve_cell_mask,
+            solve_gas_mask,
+        )
         world._require_gpu_stage("material-light reaction rules")
         self.last_backend = "cpu"
         self._note_runtime_backend("cpu")
@@ -456,11 +537,13 @@ class ReactionSolver:
         self._ensure_runtime_state(world)
         if int(world.bridge.shadow_typed_tables["gas_light_rule_table"].shape[0]) <= 0:
             return
-        if self._formal_gpu_frame(world) and getattr(world, "_formal_gpu_frame_has_light_dose", None) is False:
-            return
-        solve_tile_mask, solve_cell_mask, solve_gas_mask = self._solve_masks(world, seed_timer_cells=True)
+        solve_tile_mask, solve_cell_mask, solve_gas_mask = self._solve_masks(
+            world,
+            seed_timer_cells=True,
+            stage="gas_light",
+        )
         self._record_stage_solve_masks("gas_light", solve_tile_mask, solve_cell_mask, solve_gas_mask)
-        if not np.any(solve_tile_mask):
+        if not self._solve_mask_any(solve_tile_mask):
             return
         previous_state = self._capture_activity_state(world, solve_cell_mask, solve_gas_mask)
         self._current_stage = "gas_light"
@@ -475,6 +558,13 @@ class ReactionSolver:
                 self._apply_deferred_batch(world, deferred)
             self._finalize_stage_runtime(world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state)
             return
+        self._require_materialized_cpu_solve_masks(
+            world,
+            "gas-light reaction rules",
+            solve_tile_mask,
+            solve_cell_mask,
+            solve_gas_mask,
+        )
         world._require_gpu_stage("gas-light reaction rules")
         self.last_backend = "cpu"
         self._note_runtime_backend("cpu")
@@ -522,15 +612,24 @@ class ReactionSolver:
         world: "WorldEngine",
         *,
         seed_timer_cells: bool,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        stage: str | None = None,
+    ) -> tuple[SolveMask, SolveMask, SolveMask]:
         formal_gpu_frame = self._formal_gpu_frame(world)
         active_scheduler_gpu_authoritative = self._active_scheduler_gpu_authoritative(world)
         if formal_gpu_frame and not active_scheduler_gpu_authoritative:
             world._require_gpu_stage("active scheduler reaction solve masks")
+        if self._use_full_gpu_authoritative_reaction_solve_masks(world, stage):
+            return self._full_gpu_authoritative_solve_masks(world)
         if active_scheduler_gpu_authoritative:
-            solve_tile_mask = np.ones((world.active.tile_height, world.active.tile_width), dtype=np.bool_)
+            return self._full_solve_masks(world)
         else:
             solve_tile_mask = self._solve_tile_mask(world, seed_timer_cells=seed_timer_cells)
+            if (
+                not formal_gpu_frame
+                and not bool(getattr(world, "_world_simulation_frame_active", False))
+                and not np.any(solve_tile_mask)
+            ):
+                solve_tile_mask = np.ones((world.active.tile_height, world.active.tile_width), dtype=np.bool_)
         solve_cell_mask = tile_mask_to_cell_mask(
             solve_tile_mask,
             tile_size=world.active.tile_size,
@@ -547,6 +646,75 @@ class ReactionSolver:
             gas_height=world.gas_height,
         )
         return solve_tile_mask, solve_cell_mask, solve_gas_mask
+
+    def _use_full_gpu_authoritative_reaction_solve_masks(self, world: "WorldEngine", stage: str | None) -> bool:
+        if not self._active_scheduler_gpu_authoritative(world):
+            return False
+        if stage in {"material_material", "material_gas"}:
+            return True
+        return stage in {"material_light", "gas_light"} and self.gpu_pipeline._formal_light_dose_guard_buffer(world) is not None
+
+    def _full_gpu_authoritative_solve_masks(
+        self,
+        world: "WorldEngine",
+    ) -> tuple[GPUAuthoritativeFullSolveMask, GPUAuthoritativeFullSolveMask, GPUAuthoritativeFullSolveMask]:
+        tile_shape = (world.active.tile_height, world.active.tile_width)
+        cell_shape = (world.height, world.width)
+        gas_shape = (world.gas_height, world.gas_width)
+        signature = (tile_shape, cell_shape, gas_shape)
+        if (
+            self._full_gpu_authoritative_mask_cache_signature != signature
+            or self._full_gpu_authoritative_mask_cache is None
+        ):
+            self._full_gpu_authoritative_mask_cache_signature = signature
+            self._full_gpu_authoritative_mask_cache = (
+                GPUAuthoritativeFullSolveMask("tile", tile_shape),
+                GPUAuthoritativeFullSolveMask("cell", cell_shape),
+                GPUAuthoritativeFullSolveMask("gas", gas_shape),
+            )
+        return self._full_gpu_authoritative_mask_cache
+
+    def _full_solve_masks(self, world: "WorldEngine") -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        tile_shape = (world.active.tile_height, world.active.tile_width)
+        cell_shape = (world.height, world.width)
+        gas_shape = (world.gas_height, world.gas_width)
+        signature = (tile_shape, cell_shape, gas_shape)
+        if self._full_solve_mask_cache_signature != signature or self._full_solve_mask_cache is None:
+            self._full_solve_mask_cache_signature = signature
+            self._full_solve_mask_cache = (
+                np.ones(tile_shape, dtype=np.bool_),
+                np.ones(cell_shape, dtype=np.bool_),
+                np.ones(gas_shape, dtype=np.bool_),
+            )
+        solve_tile_mask, solve_cell_mask, solve_gas_mask = self._full_solve_mask_cache
+        return solve_tile_mask.copy(), solve_cell_mask.copy(), solve_gas_mask.copy()
+
+    @staticmethod
+    def _is_full_gpu_authoritative_mask(mask: object) -> bool:
+        return bool(getattr(mask, "full_gpu_authoritative", False))
+
+    @classmethod
+    def _all_full_gpu_authoritative_masks(cls, *masks: object) -> bool:
+        return all(cls._is_full_gpu_authoritative_mask(mask) for mask in masks)
+
+    @classmethod
+    def _solve_mask_any(cls, mask: object) -> bool:
+        if cls._is_full_gpu_authoritative_mask(mask):
+            return True
+        return bool(np.any(mask))
+
+    def _require_materialized_cpu_solve_masks(
+        self,
+        world: "WorldEngine",
+        stage_name: str,
+        *solve_masks: object,
+    ) -> None:
+        if not any(self._is_full_gpu_authoritative_mask(mask) for mask in solve_masks):
+            return
+        world._require_gpu_stage(stage_name)
+        raise RuntimeError(
+            f"GPU-authoritative reaction solve masks require GPU support for {stage_name}; CPU fallback is disabled"
+        )
 
     def _formal_gpu_frame(self, world: "WorldEngine") -> bool:
         return (
@@ -575,15 +743,20 @@ class ReactionSolver:
     def _capture_activity_state(
         self,
         world: "WorldEngine",
-        solve_cell_mask: np.ndarray,
-        solve_gas_mask: np.ndarray,
+        solve_cell_mask: SolveMask,
+        solve_gas_mask: SolveMask,
     ) -> dict[str, object]:
-        self._stage_extra_changed_cell_mask = np.zeros((world.height, world.width), dtype=np.bool_)
         if self._formal_gpu_frame(world):
+            if self._all_full_gpu_authoritative_masks(solve_cell_mask, solve_gas_mask):
+                self._stage_extra_changed_cell_mask = None
+            else:
+                self._stage_extra_changed_cell_mask = np.zeros((world.height, world.width), dtype=np.bool_)
             return {
                 "formal_gpu_frame": True,
+                "full_gpu_authoritative": self._all_full_gpu_authoritative_masks(solve_cell_mask, solve_gas_mask),
                 "emitters": len(world.emitters),
             }
+        self._stage_extra_changed_cell_mask = np.zeros((world.height, world.width), dtype=np.bool_)
         return {
             "formal_gpu_frame": False,
             "material_id": world.material_id[solve_cell_mask].copy(),
@@ -634,10 +807,15 @@ class ReactionSolver:
     def _record_stage_solve_masks(
         self,
         stage: str,
-        solve_tile_mask: np.ndarray,
-        solve_cell_mask: np.ndarray,
-        solve_gas_mask: np.ndarray,
+        solve_tile_mask: SolveMask,
+        solve_cell_mask: SolveMask,
+        solve_gas_mask: SolveMask,
     ) -> None:
+        if self._all_full_gpu_authoritative_masks(solve_tile_mask, solve_cell_mask, solve_gas_mask):
+            self.last_full_gpu_authoritative_solve_stages.add(stage)
+            self.last_stage_solve_modes[stage] = "full_gpu_authoritative"
+            return
+        self.last_stage_solve_modes[stage] = "materialized"
         self.last_stage_tile_masks[stage] = np.asarray(solve_tile_mask, dtype=np.bool_).copy()
         self.last_solve_cell_mask |= np.asarray(solve_cell_mask, dtype=np.bool_)
         self.last_solve_gas_mask |= np.asarray(solve_gas_mask, dtype=np.bool_)
@@ -659,13 +837,25 @@ class ReactionSolver:
     def _finalize_stage_runtime(
         self,
         world: "WorldEngine",
-        solve_tile_mask: np.ndarray,
-        solve_cell_mask: np.ndarray,
-        solve_gas_mask: np.ndarray,
+        solve_tile_mask: SolveMask,
+        solve_cell_mask: SolveMask,
+        solve_gas_mask: SolveMask,
         previous_state: dict[str, object],
     ) -> None:
         if bool(previous_state.get("formal_gpu_frame", False)):
-            self.last_changed_cell_mask |= solve_cell_mask | self._stage_extra_changed_cell_mask
+            if self._all_full_gpu_authoritative_masks(solve_tile_mask, solve_cell_mask, solve_gas_mask):
+                if self._current_stage is not None:
+                    self.last_full_gpu_authoritative_changed_stages.add(self._current_stage)
+                if self._stage_extra_changed_cell_mask is not None and np.any(self._stage_extra_changed_cell_mask):
+                    self.last_changed_cell_mask |= self._stage_extra_changed_cell_mask
+                self._current_stage = None
+                if not self._active_scheduler_gpu_authoritative(world):
+                    world._require_gpu_stage("active scheduler reaction refresh")
+                return
+            stage_extra_changed_cell_mask = self._stage_extra_changed_cell_mask
+            if stage_extra_changed_cell_mask is None:
+                stage_extra_changed_cell_mask = np.zeros((world.height, world.width), dtype=np.bool_)
+            self.last_changed_cell_mask |= solve_cell_mask | stage_extra_changed_cell_mask
             self.last_changed_gas_mask |= solve_gas_mask
             self.last_ambient_changed_mask |= solve_gas_mask
             self.last_timer_changed_mask |= solve_cell_mask
@@ -701,7 +891,8 @@ class ReactionSolver:
             ambient_changed_mask[solve_gas_mask] = (
                 np.abs(world.ambient_temperature[solve_gas_mask] - previous_state["ambient_temperature"]) > REACTION_ACTIVITY_EPSILON
             )
-        material_changed_mask |= self._stage_extra_changed_cell_mask
+        if self._stage_extra_changed_cell_mask is not None:
+            material_changed_mask |= self._stage_extra_changed_cell_mask
         self.last_changed_cell_mask |= (
             material_changed_mask
             | phase_changed_mask
@@ -1768,6 +1959,9 @@ class ReactionSolver:
         self.last_timer_changed_mask = np.zeros(cell_shape, dtype=np.bool_)
         self.last_emitted_light_mask = np.zeros(cell_shape, dtype=np.bool_)
         self.last_emitted_material_mask = np.zeros(cell_shape, dtype=np.bool_)
+        self.last_stage_solve_modes = {stage: "empty" for stage in REACTION_STAGE_NAMES}
+        self.last_full_gpu_authoritative_solve_stages: set[str] = set()
+        self.last_full_gpu_authoritative_changed_stages: set[str] = set()
         self.last_stage_action_counts = {stage: 0 for stage in REACTION_STAGE_NAMES}
         self.last_executed_action_count = 0
         self.last_emitted_light_count = 0
@@ -1783,11 +1977,19 @@ class ReactionSolver:
         self._runtime_used_cpu = False
         self._runtime_used_gpu = False
         self._current_stage = None
+        if world is None:
+            self._full_solve_mask_cache_signature = None
+            self._full_solve_mask_cache = None
+            self._full_gpu_authoritative_mask_cache_signature = None
+            self._full_gpu_authoritative_mask_cache = None
 
     def runtime_snapshot(self) -> dict[str, object]:
         return {
             "backend": self.last_runtime_backend,
             "stage_tile_masks": {stage: mask.copy() for stage, mask in self.last_stage_tile_masks.items()},
+            "stage_solve_modes": dict(self.last_stage_solve_modes),
+            "full_gpu_authoritative_solve_stages": sorted(self.last_full_gpu_authoritative_solve_stages),
+            "full_gpu_authoritative_changed_stages": sorted(self.last_full_gpu_authoritative_changed_stages),
             "solve_cell_mask": self.last_solve_cell_mask.copy(),
             "solve_gas_mask": self.last_solve_gas_mask.copy(),
             "changed_cell_mask": self.last_changed_cell_mask.copy(),

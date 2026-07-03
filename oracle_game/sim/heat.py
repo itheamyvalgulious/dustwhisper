@@ -36,7 +36,6 @@ class HeatSolver:
         self.last_public_condense_targets: list[dict[str, object]] = []
 
     def step(self, world: "WorldEngine", dt: float) -> None:
-        self.reset_runtime_state(world)
         world.bridge.sync_rule_tables(world)
         gpu_available = world._gpu_pipeline_available(self.gpu_pipeline, "heat")
         formal_gpu_frame = (
@@ -44,51 +43,58 @@ class HeatSolver:
             and getattr(world, "simulation_backend", "") == "gpu"
             and bool(getattr(world, "_world_simulation_frame_active", False))
         )
-        active_scheduler_gpu_authoritative = (
-            formal_gpu_frame and "active_tile_ttl" in world.bridge.gpu_authoritative_resources
-        )
-        if formal_gpu_frame and not active_scheduler_gpu_authoritative:
-            world._require_gpu_stage("active scheduler heat solve masks")
-        if active_scheduler_gpu_authoritative:
-            solve_tile_mask = np.ones((world.active.tile_height, world.active.tile_width), dtype=np.bool_)
-        else:
-            solve_tile_mask = self._solve_tile_mask(world)
-        if not np.any(solve_tile_mask) and not active_scheduler_gpu_authoritative:
-            return
-        solve_cell_mask = tile_mask_to_cell_mask(
-            solve_tile_mask,
-            tile_size=world.active.tile_size,
-            width=world.width,
-            height=world.height,
-        )
-        solve_gas_mask = tile_mask_to_gas_mask(
-            solve_tile_mask,
-            tile_size=world.active.tile_size,
-            gas_cell_size=world.gas_cell_size,
-            width=world.width,
-            height=world.height,
-            gas_width=world.gas_width,
-            gas_height=world.gas_height,
-        )
-        self.last_solve_tile_mask = solve_tile_mask.copy()
-        self.last_solve_cell_mask = solve_cell_mask.copy()
-        self.last_solve_gas_mask = solve_gas_mask.copy()
-        self.last_ambient_iterations = int(self.ambient_iterations)
+        self.reset_runtime_state(world, empty_heat_targets=formal_gpu_frame)
+        with self.gpu_pipeline._profile_pass(world, "mask_prep"):
+            active_scheduler_gpu_authoritative = (
+                formal_gpu_frame and "active_tile_ttl" in world.bridge.gpu_authoritative_resources
+            )
+            if formal_gpu_frame and not active_scheduler_gpu_authoritative:
+                world._require_gpu_stage("active scheduler heat solve masks")
+            if active_scheduler_gpu_authoritative:
+                solve_tile_mask = np.ones((world.active.tile_height, world.active.tile_width), dtype=np.bool_)
+            else:
+                solve_tile_mask = self._solve_tile_mask(world)
+            if not np.any(solve_tile_mask) and not active_scheduler_gpu_authoritative:
+                return
+            if active_scheduler_gpu_authoritative:
+                solve_cell_mask = np.zeros((0, 0), dtype=np.bool_)
+                solve_gas_mask = np.zeros((0, 0), dtype=np.bool_)
+            else:
+                solve_cell_mask = tile_mask_to_cell_mask(
+                    solve_tile_mask,
+                    tile_size=world.active.tile_size,
+                    width=world.width,
+                    height=world.height,
+                )
+                solve_gas_mask = tile_mask_to_gas_mask(
+                    solve_tile_mask,
+                    tile_size=world.active.tile_size,
+                    gas_cell_size=world.gas_cell_size,
+                    width=world.width,
+                    height=world.height,
+                    gas_width=world.gas_width,
+                    gas_height=world.gas_height,
+                )
+            self.last_solve_tile_mask = solve_tile_mask.copy()
+            self.last_solve_cell_mask = solve_cell_mask.copy()
+            self.last_solve_gas_mask = solve_gas_mask.copy()
+            self.last_ambient_iterations = int(self.ambient_iterations)
 
-        if formal_gpu_frame:
-            previous_cell_temperature = None
-            previous_ambient_temperature = None
-            previous_material_id = None
-            previous_phase = None
-            previous_integrity = None
-            previous_gas_concentration = None
-        else:
-            previous_cell_temperature = world.cell_temperature[solve_cell_mask].copy()
-            previous_ambient_temperature = world.ambient_temperature[solve_gas_mask].copy()
-            previous_material_id = world.material_id[solve_cell_mask].copy()
-            previous_phase = world.phase[solve_cell_mask].copy()
-            previous_integrity = world.integrity[solve_cell_mask].copy()
-            previous_gas_concentration = world.gas_concentration[:, solve_gas_mask].copy()
+        with self.gpu_pipeline._profile_pass(world, "previous_state_capture"):
+            if formal_gpu_frame:
+                previous_cell_temperature = None
+                previous_ambient_temperature = None
+                previous_material_id = None
+                previous_phase = None
+                previous_integrity = None
+                previous_gas_concentration = None
+            else:
+                previous_cell_temperature = world.cell_temperature[solve_cell_mask].copy()
+                previous_ambient_temperature = world.ambient_temperature[solve_gas_mask].copy()
+                previous_material_id = world.material_id[solve_cell_mask].copy()
+                previous_phase = world.phase[solve_cell_mask].copy()
+                previous_integrity = world.integrity[solve_cell_mask].copy()
+                previous_gas_concentration = world.gas_concentration[:, solve_gas_mask].copy()
         if gpu_available:
             stage_targets = self.gpu_pipeline.step(
                 world,
@@ -107,29 +113,48 @@ class HeatSolver:
                 condense_targets=self._plan_condense_targets(world, solve_gas_mask=solve_gas_mask),
             )
 
-        self.last_phase_targets = stage_targets.phase_targets.copy()
-        self.last_boil_targets = stage_targets.boil_targets.copy()
-        self.last_condense_targets = stage_targets.condense_targets.copy()
-        (
-            self.last_public_phase_targets,
-            self.last_public_boil_targets,
-            self.last_public_condense_targets,
-        ) = self._capture_public_runtime_targets(
-            world,
-            stage_targets.phase_targets,
-            stage_targets.boil_targets,
-            stage_targets.condense_targets,
-            solve_gas_mask=solve_gas_mask,
-        )
+        stage_targets_empty = stage_targets.empty
+        with self.gpu_pipeline._profile_pass(world, "stage_target_store"):
+            if stage_targets_empty:
+                self.last_phase_targets = stage_targets.phase_targets
+                self.last_boil_targets = stage_targets.boil_targets
+                self.last_condense_targets = stage_targets.condense_targets
+            else:
+                self.last_phase_targets = stage_targets.phase_targets.copy()
+                self.last_boil_targets = stage_targets.boil_targets.copy()
+                self.last_condense_targets = stage_targets.condense_targets.copy()
+        if stage_targets_empty:
+            with self.gpu_pipeline._profile_pass(world, "public_target_capture_skipped"):
+                self.last_public_phase_targets = []
+                self.last_public_boil_targets = []
+                self.last_public_condense_targets = []
+        else:
+            with self.gpu_pipeline._profile_pass(world, "public_target_capture"):
+                (
+                    self.last_public_phase_targets,
+                    self.last_public_boil_targets,
+                    self.last_public_condense_targets,
+                ) = self._capture_public_runtime_targets(
+                    world,
+                    stage_targets.phase_targets,
+                    stage_targets.boil_targets,
+                    stage_targets.condense_targets,
+                    solve_gas_mask=solve_gas_mask,
+                )
 
         if gpu_available:
-            self._mark_heat_target_collapse_dirty_region(
-                world,
-                stage_targets.phase_targets,
-                stage_targets.boil_targets,
-                stage_targets.condense_targets,
-                solve_tile_mask,
-            )
+            if stage_targets_empty:
+                with self.gpu_pipeline._profile_pass(world, "heat_target_dirty_marking_skipped"):
+                    pass
+            else:
+                with self.gpu_pipeline._profile_pass(world, "heat_target_dirty_marking"):
+                    self._mark_heat_target_collapse_dirty_region(
+                        world,
+                        stage_targets.phase_targets,
+                        stage_targets.boil_targets,
+                        stage_targets.condense_targets,
+                        solve_tile_mask,
+                    )
         else:
             self._apply_phase_targets(world, stage_targets.phase_targets, solve_cell_mask=solve_cell_mask)
             self._apply_boil_targets(world, stage_targets.boil_targets, solve_cell_mask=solve_cell_mask, dt=dt)
@@ -171,7 +196,8 @@ class HeatSolver:
             )
         if active_scheduler_gpu_authoritative:
             change_flags = (False, False, False, False, False, False)
-        self._refresh_active_regions(world, solve_tile_mask, *change_flags)
+        with self.gpu_pipeline._profile_pass(world, "active_refresh"):
+            self._refresh_active_regions(world, solve_tile_mask, *change_flags)
 
     def _step_cpu_active(self, world: "WorldEngine", dt: float, solve_tile_mask: np.ndarray) -> None:
         cell_mask = tile_mask_to_cell_mask(
@@ -509,7 +535,7 @@ class HeatSolver:
         self.gpu_pipeline.release()
         self.reset_runtime_state()
 
-    def reset_runtime_state(self, world: "WorldEngine" | None = None) -> None:
+    def reset_runtime_state(self, world: "WorldEngine" | None = None, *, empty_heat_targets: bool = False) -> None:
         if world is None:
             self.last_solve_tile_mask = np.zeros((0, 0), dtype=np.bool_)
             self.last_solve_cell_mask = np.zeros((0, 0), dtype=np.bool_)
@@ -519,11 +545,18 @@ class HeatSolver:
             self.last_condense_targets = np.zeros((0, 0, 0), dtype=np.bool_)
         else:
             self.last_solve_tile_mask = np.zeros((world.active.tile_height, world.active.tile_width), dtype=np.bool_)
-            self.last_solve_cell_mask = np.zeros((world.height, world.width), dtype=np.bool_)
-            self.last_solve_gas_mask = np.zeros((world.gas_height, world.gas_width), dtype=np.bool_)
-            self.last_phase_targets = np.zeros((world.height, world.width), dtype=np.int32)
-            self.last_boil_targets = np.zeros((world.height, world.width), dtype=np.int32)
-            self.last_condense_targets = np.zeros(world.gas_concentration.shape, dtype=np.bool_)
+            if empty_heat_targets:
+                self.last_solve_cell_mask = np.zeros((0, 0), dtype=np.bool_)
+                self.last_solve_gas_mask = np.zeros((0, 0), dtype=np.bool_)
+                self.last_phase_targets = np.zeros((0, 0), dtype=np.int32)
+                self.last_boil_targets = np.zeros((0, 0), dtype=np.int32)
+                self.last_condense_targets = np.zeros((0, 0, 0), dtype=np.bool_)
+            else:
+                self.last_solve_cell_mask = np.zeros((world.height, world.width), dtype=np.bool_)
+                self.last_solve_gas_mask = np.zeros((world.gas_height, world.gas_width), dtype=np.bool_)
+                self.last_phase_targets = np.zeros((world.height, world.width), dtype=np.int32)
+                self.last_boil_targets = np.zeros((world.height, world.width), dtype=np.int32)
+                self.last_condense_targets = np.zeros(world.gas_concentration.shape, dtype=np.bool_)
         self.last_ambient_iterations = 0
         self.last_cell_changed = False
         self.last_ambient_changed = False

@@ -8,7 +8,7 @@ import random
 import statistics
 import sys
 import time
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
 
@@ -152,6 +152,45 @@ def percentile(values: list[float], pct: float) -> float:
     return ordered[index]
 
 
+def summarize_pass_profiles(profiles: list[dict[str, Any]]) -> dict[str, Any]:
+    summary: dict[str, dict[str, Any]] = {}
+    for profile in profiles:
+        for entry in profile.get("passes", []):
+            name = str(entry.get("name", ""))
+            if not name:
+                continue
+            aggregate = summary.setdefault(name, {"count": 0, "cpu_ms": 0.0, "gpu_ms": None})
+            aggregate["count"] += 1
+            aggregate["cpu_ms"] += float(entry.get("cpu_ms") or 0.0)
+            gpu_ms = entry.get("gpu_ms")
+            if gpu_ms is not None:
+                aggregate["gpu_ms"] = float(aggregate["gpu_ms"] or 0.0) + float(gpu_ms)
+        for child_name in ("collapse", "gas", "heat", "motion", "liquid", "optics", "reactions"):
+            child_profile = profile.get(child_name)
+            if not isinstance(child_profile, dict):
+                continue
+            for entry in child_profile.get("passes", []):
+                name = f"{child_name}.{entry.get('name', '')}"
+                if name == f"{child_name}.":
+                    continue
+                aggregate = summary.setdefault(name, {"count": 0, "cpu_ms": 0.0, "gpu_ms": None})
+                aggregate["count"] += 1
+                aggregate["cpu_ms"] += float(entry.get("cpu_ms") or 0.0)
+                gpu_ms = entry.get("gpu_ms")
+                if gpu_ms is not None:
+                    aggregate["gpu_ms"] = float(aggregate["gpu_ms"] or 0.0) + float(gpu_ms)
+    return {
+        name: {
+            "count": values["count"],
+            "total_cpu_ms": values["cpu_ms"],
+            "avg_cpu_ms": values["cpu_ms"] / values["count"] if values["count"] else 0.0,
+            "total_gpu_ms": values["gpu_ms"],
+            "avg_gpu_ms": (values["gpu_ms"] / values["count"]) if values["gpu_ms"] is not None and values["count"] else None,
+        }
+        for name, values in sorted(summary.items())
+    }
+
+
 def run_scenario(
     name: str,
     setup: ScenarioSetup,
@@ -163,13 +202,20 @@ def run_scenario(
     frames: int,
     dt: float,
     readback: bool,
+    profile_passes: bool,
+    profile_passes_sync: bool = False,
 ) -> dict[str, object]:
     engine = WorldEngine(width=width, height=height, gpu_context=ctx)
     try:
+        engine.profile_passes_enabled = bool(profile_passes)
+        engine.profile_passes_sync = bool(profile_passes_sync)
         setup(engine)
         if engine.simulation_backend == "gpu":
             engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
             engine._gpu_cpu_dirty_resources.clear()
+            prewarm_collapse = getattr(engine, "prewarm_formal_connected_collapse", None)
+            if callable(prewarm_collapse):
+                prewarm_collapse()
         for _ in range(warmup):
             if readback:
                 engine.request_readback(width // 2, height // 2, 8, 8, ("cell", "gas", "optics"), label=f"{name}_warmup")
@@ -178,6 +224,7 @@ def run_scenario(
             engine.poll_all_readbacks()
 
         frame_ms: list[float] = []
+        pass_profiles: list[dict[str, Any]] = []
         readbacks_completed = 0
         for frame_index in range(frames):
             if readback:
@@ -186,10 +233,12 @@ def run_scenario(
             engine.step(dt)
             ctx.finish()
             frame_ms.append((time.perf_counter() - start) * 1000.0)
+            if profile_passes:
+                pass_profiles.append(dict(engine.last_pass_profile))
             readbacks_completed += len(engine.poll_all_readbacks())
 
         report = engine.simulation_backend_report()
-        return {
+        result: dict[str, object] = {
             "scenario": name,
             "frames": frames,
             "avg_ms": statistics.fmean(frame_ms) if frame_ms else 0.0,
@@ -199,6 +248,11 @@ def run_scenario(
             "readbacks_completed": readbacks_completed,
             "backend_report": report,
         }
+        if profile_passes:
+            result["pass_profiles"] = pass_profiles
+            result["pass_profile_summary"] = summarize_pass_profiles(pass_profiles)
+            result["skipped_gpu_stages"] = list(report.get("gpu_realtime_budget", {}).get("skipped_stages", []))
+        return result
     finally:
         engine.close()
 
@@ -211,6 +265,12 @@ def main() -> int:
     parser.add_argument("--frames", type=int, default=30)
     parser.add_argument("--dt", type=float, default=1.0 / 60.0)
     parser.add_argument("--readback", action="store_true", help="Queue one small async readback per frame.")
+    parser.add_argument("--profile-passes", action="store_true", help="Record per-frame pass-level CPU timings.")
+    parser.add_argument(
+        "--profile-passes-sync",
+        action="store_true",
+        help="Synchronize around profiled passes to attribute queued GPU work to the pass that launched it.",
+    )
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     parser.add_argument("--scenario", action="append", choices=sorted(SCENARIOS), help="Run only the selected scenario; repeatable.")
     args = parser.parse_args()
@@ -229,6 +289,8 @@ def main() -> int:
             frames=args.frames,
             dt=args.dt,
             readback=args.readback,
+            profile_passes=args.profile_passes,
+            profile_passes_sync=args.profile_passes_sync,
         )
         for name in selected
     ]
@@ -258,6 +320,19 @@ def main() -> int:
             f"p95={result['p95_ms']:.3f}ms max={result['max_ms']:.3f}ms "
             f"strict_gpu_ready={report.get('strict_gpu_ready')} non_gpu={non_gpu}"
         )
+        if args.profile_passes:
+            skipped = result.get("skipped_gpu_stages", [])
+            print(f"  skipped_gpu_stages={skipped}")
+            summary = result.get("pass_profile_summary", {})
+            if isinstance(summary, dict):
+                for name, values in summary.items():
+                    if isinstance(values, dict):
+                        avg_gpu = values.get("avg_gpu_ms")
+                        line = f"  {name}: avg_cpu={float(values.get('avg_cpu_ms', 0.0)):.3f}ms"
+                        if avg_gpu is not None:
+                            line += f" avg_gpu={float(avg_gpu):.3f}ms"
+                        line += f" count={values.get('count')}"
+                        print(line)
     return 0
 
 

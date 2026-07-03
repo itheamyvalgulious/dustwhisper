@@ -36,6 +36,21 @@ class LiquidSolver:
         self.last_liquid_cell_count_before = 0
         self.last_liquid_cell_count_after = 0
 
+    def prepare_motion_flow_intent(self, world: "WorldEngine") -> None:
+        gpu_available = world._gpu_pipeline_available(self.gpu_pipeline, "liquid")
+        formal_gpu_frame = (
+            gpu_available
+            and getattr(world, "simulation_backend", "") == "gpu"
+            and bool(getattr(world, "_world_simulation_frame_active", False))
+        )
+        if not formal_gpu_frame:
+            return
+        if "active_tile_ttl" not in world.bridge.gpu_authoritative_resources:
+            world._require_gpu_stage("active scheduler liquid pre-motion intent mask")
+            return
+        solve_tile_mask = np.zeros((world.active.tile_height, world.active.tile_width), dtype=np.bool_)
+        self.gpu_pipeline.prepare_motion_flow_intent(world, solve_tile_mask=solve_tile_mask)
+
     def step(self, world: "WorldEngine") -> None:
         self.reset_runtime_state(world)
         gpu_available = world._gpu_pipeline_available(self.gpu_pipeline, "liquid")
@@ -51,7 +66,7 @@ class LiquidSolver:
             world._require_gpu_stage("active scheduler liquid solve masks")
         if active_scheduler_gpu_authoritative:
             active_tiles = []
-            solve_tile_mask = np.ones((world.active.tile_height, world.active.tile_width), dtype=np.bool_)
+            solve_tile_mask = np.zeros((world.active.tile_height, world.active.tile_width), dtype=np.bool_)
         else:
             active_tiles = list(world.active.iter_active_tiles())
             solve_tile_mask = self._build_solve_tile_mask(world, active_tiles)
@@ -157,6 +172,27 @@ class LiquidSolver:
             solve_tile_mask[tile_y, tile_x] = True
         return solve_tile_mask
 
+    def _world_cell_reachable_empty(self, world: "WorldEngine", x: int, y: int) -> bool:
+        material_id = int(world.material_id[y, x])
+        phase_id = int(world.phase[y, x])
+        if material_id != 0:
+            return False
+        if phase_id in (int(Phase.LIQUID), int(Phase.FALLING_ISLAND)):
+            return False
+        if int(world.entity_id[y, x]) > 0:
+            return False
+        if int(world.placeholder_displaced_material[y, x]) > 0:
+            return False
+        return True
+
+    def _world_cell_is_tile_level_liquid(self, world: "WorldEngine", x: int, y: int) -> bool:
+        material_id = int(world.material_id[y, x])
+        return (
+            material_id > 0
+            and int(world.phase[y, x]) == int(Phase.LIQUID)
+            and self._material_liquid_solver_kind(world, material_id) == LIQUID_SOLVER_TILE_LEVEL
+        )
+
     def _solve_tile(self, world: "WorldEngine", x0: int, y0: int, x1: int, y1: int) -> None:
         local_material = world.material_id[y0:y1, x0:x1].copy()
         local_phase = world.phase[y0:y1, x0:x1].copy()
@@ -165,7 +201,42 @@ class LiquidSolver:
         local_temp = world.cell_temperature[y0:y1, x0:x1].copy()
         local_integrity = world.integrity[y0:y1, x0:x1].copy()
         local_velocity = world.velocity[y0:y1, x0:x1].copy()
+        local_island = world.island_id[y0:y1, x0:x1].copy()
+        local_entity = world.entity_id[y0:y1, x0:x1].copy()
+        local_displaced = world.placeholder_displaced_material[y0:y1, x0:x1].copy()
         changed = False
+
+        def reachable_empty(local_y: int, local_x: int) -> bool:
+            material_id = int(local_material[local_y, local_x])
+            phase_id = int(local_phase[local_y, local_x])
+            if material_id != 0:
+                return False
+            if phase_id in (int(Phase.LIQUID), int(Phase.FALLING_ISLAND)):
+                return False
+            if int(local_entity[local_y, local_x]) > 0:
+                return False
+            if int(local_displaced[local_y, local_x]) > 0:
+                return False
+            return True
+
+        def is_liquid(local_y: int, local_x: int) -> bool:
+            return int(local_material[local_y, local_x]) > 0 and int(local_phase[local_y, local_x]) == int(Phase.LIQUID)
+
+        def is_tile_level_liquid(local_y: int, local_x: int) -> bool:
+            material_id = int(local_material[local_y, local_x])
+            return (
+                material_id > 0
+                and int(local_phase[local_y, local_x]) == int(Phase.LIQUID)
+                and self._material_liquid_solver_kind(world, material_id) == LIQUID_SOLVER_TILE_LEVEL
+            )
+
+        def snapshot_tile_level_liquid(row_material: np.ndarray, row_phase: np.ndarray, local_x: int) -> bool:
+            material_id = int(row_material[local_x])
+            return (
+                material_id > 0
+                and int(row_phase[local_x]) == int(Phase.LIQUID)
+                and self._material_liquid_solver_kind(world, material_id) == LIQUID_SOLVER_TILE_LEVEL
+            )
 
         def move_cell(src_y: int, src_x: int, dst_y: int, dst_x: int) -> None:
             local_material[dst_y, dst_x] = local_material[src_y, src_x]
@@ -175,6 +246,9 @@ class LiquidSolver:
             local_temp[dst_y, dst_x] = local_temp[src_y, src_x]
             local_integrity[dst_y, dst_x] = local_integrity[src_y, src_x]
             local_velocity[dst_y, dst_x] = local_velocity[src_y, src_x]
+            local_island[dst_y, dst_x] = local_island[src_y, src_x]
+            local_entity[dst_y, dst_x] = local_entity[src_y, src_x]
+            local_displaced[dst_y, dst_x] = local_displaced[src_y, src_x]
             local_material[src_y, src_x] = 0
             local_phase[src_y, src_x] = 0
             local_flags[src_y, src_x] = 0
@@ -182,35 +256,83 @@ class LiquidSolver:
             local_temp[src_y, src_x] = 0.0
             local_integrity[src_y, src_x] = 0.0
             local_velocity[src_y, src_x] = 0.0
+            local_island[src_y, src_x] = 0
+            local_entity[src_y, src_x] = 0
+            local_displaced[src_y, src_x] = 0
 
         for ly in range(local_material.shape[0] - 2, -1, -1):
             row_material = local_material[ly].copy()
             row_phase = local_phase[ly].copy()
-            below_material = local_material[ly + 1].copy()
-            claimed_lateral_dest = np.zeros((local_material.shape[1],), dtype=np.bool_)
-            planned_moves: list[tuple[int, int, int, int]] = []
-            for lx in range(local_material.shape[1]):
-                if int(row_material[lx]) == 0 or int(row_phase[lx]) != int(Phase.LIQUID):
+            width = local_material.shape[1]
+            claimed_down_source = np.zeros((width,), dtype=np.bool_)
+            claimed_down_target = np.zeros((width,), dtype=np.bool_)
+            planned_down_moves: list[tuple[int, int, int, int]] = []
+            lx = 0
+            while lx < width:
+                if not snapshot_tile_level_liquid(row_material, row_phase, lx):
+                    lx += 1
                     continue
-                liquid_solver_kind = self._material_liquid_solver_kind(world, int(row_material[lx]))
-                if int(below_material[lx]) == 0:
-                    planned_moves.append((ly, lx, ly + 1, lx))
+                run_start = lx
+                while lx < width and snapshot_tile_level_liquid(row_material, row_phase, lx):
+                    lx += 1
+                run_end = lx
+                first_empty_x = -1
+                for probe_x in range(run_start, run_end):
+                    if reachable_empty(ly + 1, probe_x) and not bool(claimed_down_target[probe_x]):
+                        first_empty_x = probe_x
+                        break
+                if first_empty_x < 0:
                     continue
-                if liquid_solver_kind == LIQUID_SOLVER_COLUMNAR:
-                    continue
-                if lx > 0 and int(row_material[lx - 1]) == 0 and not bool(claimed_lateral_dest[lx - 1]):
-                    claimed_lateral_dest[lx - 1] = True
-                    planned_moves.append((ly, lx, ly, lx - 1))
-                    continue
-                if lx + 1 < local_material.shape[1] and int(row_material[lx + 1]) == 0 and not bool(
-                    claimed_lateral_dest[lx + 1]
+                empty_start = first_empty_x
+                while (
+                    empty_start > 0
+                    and reachable_empty(ly + 1, empty_start - 1)
+                    and not bool(claimed_down_target[empty_start - 1])
                 ):
+                    empty_start -= 1
+                empty_end = first_empty_x + 1
+                while (
+                    empty_end < width
+                    and reachable_empty(ly + 1, empty_end)
+                    and not bool(claimed_down_target[empty_end])
+                ):
+                    empty_end += 1
+                move_count = min(run_end - run_start, empty_end - empty_start)
+                if move_count <= 0:
+                    continue
+                target_base = min(max(run_start, empty_start), empty_end - move_count)
+                claimed_down_source[run_start:run_end] = True
+                claimed_down_target[target_base : target_base + move_count] = True
+                for offset in range(move_count):
+                    planned_down_moves.append((ly, run_start + offset, ly + 1, target_base + offset))
+            for src_y, src_x, dst_y, dst_x in planned_down_moves:
+                move_cell(src_y, src_x, dst_y, dst_x)
+                changed = True
+
+            for lx in range(width):
+                if bool(claimed_down_source[lx]):
+                    continue
+                if is_liquid(ly, lx) and reachable_empty(ly + 1, lx):
+                    move_cell(ly, lx, ly + 1, lx)
+                    changed = True
+
+            claimed_lateral_dest = np.zeros((width,), dtype=np.bool_)
+            planned_lateral_moves: list[tuple[int, int, int, int]] = []
+            for lx in range(width):
+                if bool(claimed_down_source[lx]) or not is_tile_level_liquid(ly, lx):
+                    continue
+                if lx > 0 and reachable_empty(ly, lx - 1) and not bool(claimed_lateral_dest[lx - 1]):
+                    claimed_lateral_dest[lx - 1] = True
+                    planned_lateral_moves.append((ly, lx, ly, lx - 1))
+                    continue
+                if lx + 1 < width and reachable_empty(ly, lx + 1) and not bool(claimed_lateral_dest[lx + 1]):
                     claimed_lateral_dest[lx + 1] = True
-                    planned_moves.append((ly, lx, ly, lx + 1))
-            for src_y, src_x, dst_y, dst_x in planned_moves:
+                    planned_lateral_moves.append((ly, lx, ly, lx + 1))
+            for src_y, src_x, dst_y, dst_x in planned_lateral_moves:
                 move_cell(src_y, src_x, dst_y, dst_x)
                 changed = True
         if changed:
+            world._invalidate_gpu_authoritative_cell_resources()
             world.material_id[y0:y1, x0:x1] = local_material
             world.phase[y0:y1, x0:x1] = local_phase
             world.cell_flags[y0:y1, x0:x1] = local_flags
@@ -218,6 +340,9 @@ class LiquidSolver:
             world.cell_temperature[y0:y1, x0:x1] = local_temp
             world.integrity[y0:y1, x0:x1] = local_integrity
             world.velocity[y0:y1, x0:x1] = local_velocity
+            world.island_id[y0:y1, x0:x1] = local_island
+            world.entity_id[y0:y1, x0:x1] = local_entity
+            world.placeholder_displaced_material[y0:y1, x0:x1] = local_displaced
             world._mark_active_rect_runtime(x0, y0, x1, y1)
 
     def _seam_correction(self, world: "WorldEngine", solve_tile_mask: np.ndarray) -> None:
@@ -239,21 +364,109 @@ class LiquidSolver:
             y0 = tile_y * tile_size
             y1 = min(world.height, y0 + tile_size)
             for y in range(y0, y1):
-                left_id = int(world.material_id[y, left])
-                if (
-                    int(world.phase[y, left]) == int(Phase.LIQUID)
-                    and self._material_liquid_solver_kind(world, left_id) == LIQUID_SOLVER_TILE_LEVEL
-                    and int(world.material_id[y, right]) == 0
-                ):
-                    world.swap_cells(left, y, right, y)
+                if self._apply_horizontal_seam_run(world, boundary_x, y, tile_size):
+                    continue
         for tile_x, boundary_y in sorted(horizontal_boundaries):
             top = boundary_y - 1
             bottom = boundary_y
             x0 = tile_x * tile_size
             x1 = min(world.width, x0 + tile_size)
-            for x in range(x0, x1):
-                if int(world.phase[top, x]) == int(Phase.LIQUID) and int(world.material_id[bottom, x]) == 0:
-                    world.swap_cells(x, top, x, bottom)
+            self._apply_vertical_seam_run(world, top, bottom, x0, x1)
+
+    def _apply_horizontal_seam_run(
+        self,
+        world: "WorldEngine",
+        boundary_x: int,
+        y: int,
+        tile_size: int,
+    ) -> bool:
+        if boundary_x <= 0 or boundary_x >= world.width:
+            return False
+        left = boundary_x - 1
+        right = boundary_x
+        if self._world_cell_is_tile_level_liquid(world, left, y) and self._world_cell_reachable_empty(world, right, y):
+            source_start = left
+            source_tile_start = (left // tile_size) * tile_size
+            while source_start > source_tile_start and self._world_cell_is_tile_level_liquid(world, source_start - 1, y):
+                source_start -= 1
+            target_end = right
+            target_tile_end = min(world.width, right + tile_size)
+            while target_end < target_tile_end and self._world_cell_reachable_empty(world, target_end, y):
+                target_end += 1
+            move_count = min(left - source_start + 1, target_end - right)
+            if move_count > 0:
+                source_base = left - move_count + 1
+                for offset in range(move_count):
+                    world.swap_cells(source_base + offset, y, right + offset, y)
+                return True
+        if self._world_cell_is_tile_level_liquid(world, right, y) and self._world_cell_reachable_empty(world, left, y):
+            source_end = right + 1
+            source_tile_end = min(world.width, right + tile_size)
+            while source_end < source_tile_end and self._world_cell_is_tile_level_liquid(world, source_end, y):
+                source_end += 1
+            target_start = left
+            target_tile_start = max(0, right - tile_size)
+            while target_start > target_tile_start and self._world_cell_reachable_empty(world, target_start - 1, y):
+                target_start -= 1
+            move_count = min(source_end - right, right - target_start)
+            if move_count > 0:
+                target_base = right - move_count
+                for offset in range(move_count):
+                    world.swap_cells(right + offset, y, target_base + offset, y)
+                return True
+        return False
+
+    def _apply_vertical_seam_run(
+        self,
+        world: "WorldEngine",
+        top: int,
+        bottom: int,
+        x0: int,
+        x1: int,
+    ) -> None:
+        claimed_source: set[int] = set()
+        claimed_target: set[int] = set()
+        planned_moves: list[tuple[int, int]] = []
+        x = x0
+        while x < x1:
+            if not self._world_cell_is_tile_level_liquid(world, x, top):
+                x += 1
+                continue
+            run_start = x
+            while x < x1 and self._world_cell_is_tile_level_liquid(world, x, top):
+                x += 1
+            run_end = x
+            first_empty_x = -1
+            for probe_x in range(run_start, run_end):
+                if self._world_cell_reachable_empty(world, probe_x, bottom) and probe_x not in claimed_target:
+                    first_empty_x = probe_x
+                    break
+            if first_empty_x < 0:
+                continue
+            empty_start = first_empty_x
+            while (
+                empty_start > x0
+                and self._world_cell_reachable_empty(world, empty_start - 1, bottom)
+                and empty_start - 1 not in claimed_target
+            ):
+                empty_start -= 1
+            empty_end = first_empty_x + 1
+            while (
+                empty_end < x1
+                and self._world_cell_reachable_empty(world, empty_end, bottom)
+                and empty_end not in claimed_target
+            ):
+                empty_end += 1
+            move_count = min(run_end - run_start, empty_end - empty_start)
+            if move_count <= 0:
+                continue
+            target_base = min(max(run_start, empty_start), empty_end - move_count)
+            claimed_source.update(range(run_start, run_end))
+            claimed_target.update(range(target_base, target_base + move_count))
+            for offset in range(move_count):
+                planned_moves.append((run_start + offset, target_base + offset))
+        for source_x, target_x in planned_moves:
+            world.swap_cells(source_x, top, target_x, bottom)
 
     def _apply_buoyancy(self, world: "WorldEngine", solve_cell_mask: np.ndarray) -> None:
         pair_mask = solve_cell_mask[1:, :] | solve_cell_mask[:-1, :]
@@ -298,6 +511,7 @@ class LiquidSolver:
     def _apply_placeholder_displacement(self, world: "WorldEngine", solve_cell_mask: np.ndarray) -> None:
         placeholder_id = self._placeholder_material_id(world)
         material_in = world.material_id.copy()
+        phase_in = world.phase.copy()
         temp_in = world.cell_temperature.copy()
         pending_in = world.placeholder_displaced_material.copy()
         pending_mask = (pending_in > 0) & solve_cell_mask
@@ -315,23 +529,57 @@ class LiquidSolver:
                 if not np.any(pending_mask[y, left:right]):
                     continue
                 seg_len = right - left
-                for source_x in range(left, right):
+                pending_sources = [source_x for source_x in range(left, right) if int(pending_in[y, source_x]) > 0]
+                displaced_count = len(pending_sources)
+                if displaced_count <= 0:
+                    continue
+                top_exposed = self._placeholder_segment_top_exposed(material_in, placeholder_id, y, left, right)
+                left_capacity = self._placeholder_side_capacity(
+                    world,
+                    material_in,
+                    phase_in,
+                    pending_in,
+                    -1,
+                    top_exposed,
+                    y,
+                    left,
+                    right,
+                    seg_len,
+                )
+                right_capacity = self._placeholder_side_capacity(
+                    world,
+                    material_in,
+                    phase_in,
+                    pending_in,
+                    1,
+                    top_exposed,
+                    y,
+                    left,
+                    right,
+                    seg_len,
+                )
+                left_quota = self._placeholder_left_quota(displaced_count, left_capacity, right_capacity)
+                for displaced_rank, source_x in enumerate(pending_sources):
                     displaced_material = int(pending_in[y, source_x])
                     if displaced_material <= 0:
                         continue
-                    idx = source_x - left
-                    for target_x, target_y, velocity in self._placeholder_candidates(
+                    side = -1 if displaced_rank < left_quota else 1
+                    side_rank = displaced_rank if side < 0 else displaced_count - 1 - displaced_rank
+                    side_rank = max(0, min(seg_len - 1, side_rank))
+                    for target_x, target_y, velocity in self._placeholder_side_candidates(
                         world,
                         material_in,
-                        placeholder_id,
-                        source_x,
+                        phase_in,
+                        pending_in,
                         y,
                         left,
                         right,
-                        idx,
                         seg_len,
+                        side,
+                        side_rank,
+                        top_exposed,
                     ):
-                        if int(material_in[target_y, target_x]) != 0 or int(world.material_id[target_y, target_x]) != 0:
+                        if int(world.material_id[target_y, target_x]) != 0:
                             continue
                         world.material_id[target_y, target_x] = displaced_material
                         world.phase[target_y, target_x] = int(Phase.LIQUID)
@@ -347,36 +595,142 @@ class LiquidSolver:
                         )
                         break
 
-    def _placeholder_candidates(
+    def _placeholder_left_quota(self, displaced_count: int, left_capacity: int, right_capacity: int) -> int:
+        total_capacity = left_capacity + right_capacity
+        if displaced_count <= 0 or total_capacity <= 0:
+            return 0
+        numerator = displaced_count * left_capacity
+        quota, remainder = divmod(numerator, total_capacity)
+        if remainder * 2 >= total_capacity:
+            quota += 1
+        return max(0, min(displaced_count, quota))
+
+    def _placeholder_segment_top_exposed(
         self,
-        world: "WorldEngine",
-        material_in: object,
+        material_in: np.ndarray,
         placeholder_id: int,
-        source_x: int,
         source_y: int,
         left: int,
         right: int,
-        idx: int,
+    ) -> bool:
+        if source_y == 0:
+            return True
+        return any(int(material_in[source_y - 1, x]) != placeholder_id for x in range(left, right))
+
+    def _placeholder_target_empty(
+        self,
+        world: "WorldEngine",
+        material_in: np.ndarray,
+        phase_in: np.ndarray,
+        pending_in: np.ndarray,
+        target_x: int,
+        target_y: int,
+    ) -> bool:
+        if not world.in_bounds(target_x, target_y):
+            return False
+        if int(material_in[target_y, target_x]) != 0:
+            return False
+        target_phase = int(phase_in[target_y, target_x])
+        if target_phase in (int(Phase.LIQUID), int(Phase.FALLING_ISLAND)):
+            return False
+        if int(pending_in[target_y, target_x]) > 0:
+            return False
+        return True
+
+    def _placeholder_side_lane_reachable(
+        self,
+        world: "WorldEngine",
+        material_in: np.ndarray,
+        phase_in: np.ndarray,
+        pending_in: np.ndarray,
+        side: int,
+        target_x: int,
+        target_y: int,
+        left: int,
+        right: int,
+    ) -> bool:
+        if target_y < 0 or target_y >= world.height:
+            return False
+        if side < 0:
+            for x in range(target_x, left):
+                if not self._placeholder_target_empty(world, material_in, phase_in, pending_in, x, target_y):
+                    return False
+            return True
+        for x in range(right, target_x + 1):
+            if not self._placeholder_target_empty(world, material_in, phase_in, pending_in, x, target_y):
+                return False
+        return True
+
+    def _placeholder_side_capacity(
+        self,
+        world: "WorldEngine",
+        material_in: np.ndarray,
+        phase_in: np.ndarray,
+        pending_in: np.ndarray,
+        side: int,
+        top_exposed: bool,
+        source_y: int,
+        left: int,
+        right: int,
         seg_len: int,
+    ) -> int:
+        capacity = 0
+        for top_lane in (False, True):
+            if top_lane and not top_exposed:
+                continue
+            target_y = source_y - 1 if top_lane else source_y
+            for slot in range(seg_len):
+                target_x = left - 1 - slot if side < 0 else right + slot
+                if self._placeholder_side_lane_reachable(
+                    world,
+                    material_in,
+                    phase_in,
+                    pending_in,
+                    side,
+                    target_x,
+                    target_y,
+                    left,
+                    right,
+                ):
+                    capacity += 1
+        return capacity
+
+    def _placeholder_side_candidates(
+        self,
+        world: "WorldEngine",
+        material_in: np.ndarray,
+        phase_in: np.ndarray,
+        pending_in: np.ndarray,
+        source_y: int,
+        left: int,
+        right: int,
+        seg_len: int,
+        side: int,
+        start_slot: int,
+        top_exposed: bool,
     ) -> list[tuple[int, int, tuple[float, float]]]:
-        prefer_left = idx * 2 < seg_len
-        left_target_x = left - 1 - idx
-        right_target_x = right + (seg_len - 1 - idx)
-        top_exposed = source_y == 0 or int(material_in[source_y - 1, source_x]) != placeholder_id
         candidates: list[tuple[int, int, tuple[float, float]]] = []
-        if prefer_left:
-            candidates.append((left_target_x, source_y, (-1.2, -0.15)))
-            candidates.append((right_target_x, source_y, (1.2, -0.15)))
-            if top_exposed:
-                candidates.append((left_target_x, source_y - 1, (-0.8, -0.65)))
-                candidates.append((right_target_x, source_y - 1, (0.8, -0.65)))
-        else:
-            candidates.append((right_target_x, source_y, (1.2, -0.15)))
-            candidates.append((left_target_x, source_y, (-1.2, -0.15)))
-            if top_exposed:
-                candidates.append((right_target_x, source_y - 1, (0.8, -0.65)))
-                candidates.append((left_target_x, source_y - 1, (-0.8, -0.65)))
-        return [(tx, ty, velocity) for tx, ty, velocity in candidates if world.in_bounds(tx, ty)]
+        for top_lane in (False, True):
+            if top_lane and not top_exposed:
+                continue
+            target_y = source_y - 1 if top_lane else source_y
+            push = (float(side) * 0.8, -0.65) if top_lane else (float(side) * 1.2, -0.15)
+            for offset in range(seg_len):
+                slot = (start_slot + offset) % seg_len
+                target_x = left - 1 - slot if side < 0 else right + slot
+                if self._placeholder_side_lane_reachable(
+                    world,
+                    material_in,
+                    phase_in,
+                    pending_in,
+                    side,
+                    target_x,
+                    target_y,
+                    left,
+                    right,
+                ):
+                    candidates.append((target_x, target_y, push))
+        return candidates
 
     def _mark_pending_placeholder_regions(self, world: "WorldEngine") -> None:
         ys, xs = np.nonzero(world.placeholder_displaced_material > 0)

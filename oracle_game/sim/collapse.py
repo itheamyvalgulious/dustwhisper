@@ -4,8 +4,28 @@ from collections import deque
 
 import numpy as np
 
+from oracle_game.gpu import ISLAND_RUNTIME_DTYPE
 from oracle_game.sim.gpu_collapse import GPUCollapsePipeline
+from oracle_game.sim.gpu_collapse_dirty import has_pending_collapse_structure_dirty_tiles
 from oracle_game.types import CollapseBehavior, FallingIslandRecord, Phase
+
+
+COLLAPSE_RUNTIME_MASK_RESOURCES = (
+    "collapse_structural_mask",
+    "collapse_support_seed_mask",
+    "collapse_supported_mask",
+    "collapse_unsupported_mask",
+    "collapse_delayed_pending_mask",
+    "collapse_immune_unsupported_mask",
+    "collapse_collapsed_cell_mask",
+)
+COLLAPSE_COMPONENT_SNAPSHOT_RESOURCES = (
+    "collapse_component_label",
+    "island_id",
+    "island_runtime",
+    "island_runtime_count",
+)
+COLLAPSE_RUNTIME_SNAPSHOT_RESOURCES = COLLAPSE_RUNTIME_MASK_RESOURCES + COLLAPSE_COMPONENT_SNAPSHOT_RESOURCES
 
 
 class CollapseSolver:
@@ -15,28 +35,106 @@ class CollapseSolver:
         self.reset_runtime_state()
 
     def step(self, world: "WorldEngine") -> None:
-        self.reset_runtime_state(world)
-        if world.collapse_deferred_regions:
-            world.collapse_dirty_regions.extend(world.collapse_deferred_regions)
+        with self.gpu_pipeline._profile_pass(world, "solver_runtime_reset"):
+            self.reset_runtime_state(world)
+        pending_regions: list[tuple[tuple[int, int, int, int], bool]] = []
+
+        def sparse_bbox_merge(
+            region: tuple[int, int, int, int],
+            other: tuple[int, int, int, int],
+        ) -> bool:
+            rx0, ry0, rx1, ry1 = region
+            ox0, oy0, ox1, oy1 = other
+            area = max(0, rx1 - rx0) * max(0, ry1 - ry0)
+            other_area = max(0, ox1 - ox0) * max(0, oy1 - oy0)
+            ix0 = max(rx0, ox0)
+            iy0 = max(ry0, oy0)
+            ix1 = min(rx1, ox1)
+            iy1 = min(ry1, oy1)
+            overlap_area = max(0, ix1 - ix0) * max(0, iy1 - iy0)
+            union_cell_area = area + other_area - overlap_area
+            bbox_area = (max(rx1, ox1) - min(rx0, ox0)) * (max(ry1, oy1) - min(ry0, oy0))
+            return bbox_area > union_cell_area
+
+        def append_region(region: tuple[int, int, int, int], from_deferred: bool) -> None:
+            rx0, ry0, rx1, ry1 = (int(value) for value in region)
+            if rx0 >= rx1 or ry0 >= ry1:
+                return
+            merged_deferred = bool(from_deferred)
+            index = 0
+            while index < len(pending_regions):
+                (ox0, oy0, ox1, oy1), existing_deferred = pending_regions[index]
+                overlaps = rx0 <= ox1 and rx1 >= ox0 and ry0 <= oy1 and ry1 >= oy0
+                if not overlaps:
+                    index += 1
+                    continue
+                if (
+                    from_deferred
+                    and existing_deferred
+                    and sparse_bbox_merge((rx0, ry0, rx1, ry1), (ox0, oy0, ox1, oy1))
+                ):
+                    index += 1
+                    continue
+                rx0 = min(rx0, ox0)
+                ry0 = min(ry0, oy0)
+                rx1 = max(rx1, ox1)
+                ry1 = max(ry1, oy1)
+                merged_deferred = merged_deferred and bool(existing_deferred)
+                pending_regions.pop(index)
+            pending_regions.append(((rx0, ry0, rx1, ry1), merged_deferred))
+
+        with self.gpu_pipeline._profile_pass(world, "solver_region_prepare"):
+            dirty_regions = list(world.collapse_dirty_regions)
+            deferred_regions = list(world.collapse_deferred_regions)
+            gpu_available = world._gpu_pipeline_available(self.gpu_pipeline, "collapse")
+            gpu_dirty_tile_queue_pending = bool(
+                gpu_available and has_pending_collapse_structure_dirty_tiles(world)
+            )
+            world.collapse_dirty_regions.clear()
             world.collapse_deferred_regions.clear()
-        self.last_dirty_region_count_before = int(len(world.collapse_dirty_regions))
-        if not world.collapse_dirty_regions:
+            self.last_dirty_region_count_before = int(
+                len(dirty_regions) + len(deferred_regions) + (1 if gpu_dirty_tile_queue_pending else 0)
+            )
+            if dirty_regions or deferred_regions:
+                for region in dirty_regions:
+                    append_region(region, False)
+                for region in deferred_regions:
+                    append_region(region, True)
+        if not dirty_regions and not deferred_regions:
+            if gpu_dirty_tile_queue_pending:
+                self.last_solve_region_count += 1
+                self._solve_formal_gpu_dirty_tile_queue(world)
+                return
             self.last_backend = "idle"
             return
-        while world.collapse_dirty_regions:
-            x0 = min(region[0] for region in world.collapse_dirty_regions)
-            y0 = min(region[1] for region in world.collapse_dirty_regions)
-            x1 = max(region[2] for region in world.collapse_dirty_regions)
-            y1 = max(region[3] for region in world.collapse_dirty_regions)
-            world.collapse_dirty_regions.clear()
+        for (x0, y0, x1, y1), processing_deferred_region in pending_regions:
             self.last_solve_region_count += 1
-            self._solve_region(world, x0, y0, x1, y1)
+            self._solve_region(
+                world,
+                x0,
+                y0,
+                x1,
+                y1,
+                formal_region_from_deferred=processing_deferred_region,
+            )
+        if gpu_dirty_tile_queue_pending:
+            self.last_solve_region_count += 1
+            self._solve_formal_gpu_dirty_tile_queue(world)
 
     def release(self) -> None:
         self.gpu_pipeline.release()
         self.reset_runtime_state()
 
-    def _solve_region(self, world: "WorldEngine", x0: int, y0: int, x1: int, y1: int) -> None:
+    def _solve_region(
+        self,
+        world: "WorldEngine",
+        x0: int,
+        y0: int,
+        x1: int,
+        y1: int,
+        *,
+        formal_region_from_deferred: bool = False,
+    ) -> None:
         gpu_available = world._gpu_pipeline_available(self.gpu_pipeline, "collapse")
         formal_gpu_frame = bool(
             gpu_available
@@ -45,7 +143,15 @@ class CollapseSolver:
         )
         structural_world: np.ndarray | None = None
         if gpu_available and formal_gpu_frame:
-            x0, y0, x1, y1 = self.gpu_pipeline.expand_region_to_component_bbox(world, x0, y0, x1, y1)
+            self._solve_formal_gpu_region(
+                world,
+                x0,
+                y0,
+                x1,
+                y1,
+                formal_region_from_deferred=formal_region_from_deferred,
+            )
+            return
         elif gpu_available:
             structural_world = self.gpu_pipeline.classify_world_structural_mask(world)
             x0, y0, x1, y1 = self._expand_region_to_component_gpu(world, structural_world, x0, y0, x1, y1)
@@ -54,63 +160,6 @@ class CollapseSolver:
             structural_world = self._world_structural_mask(world)
             x0, y0, x1, y1 = self._expand_region_to_component(structural_world, x0, y0, x1, y1)
         self.last_solve_region_mask[y0:y1, x0:x1] = True
-        if gpu_available and formal_gpu_frame:
-            classify_resources, region_width, region_height = self.gpu_pipeline.classify_region_textures(
-                world,
-                x0,
-                y0,
-                x1,
-                y1,
-            )
-            structural_metadata = self.gpu_pipeline.summarize_labeled_component_texture(
-                world,
-                classify_resources.structural_tex,
-                np.asarray([1], dtype=np.int32),
-                x0,
-                y0,
-                region_width,
-                region_height,
-            )
-            if structural_metadata.size == 0 or int(structural_metadata[0][4]) <= 0:
-                return
-            supported_texture = self.gpu_pipeline.solve_region_textures(
-                world,
-                classify_resources,
-                region_width,
-                region_height,
-                x0=x0,
-                y0=y0,
-            )
-            self.last_backend = "gpu"
-            outcome_resources, outcome_width, outcome_height = self.gpu_pipeline.resolve_supported_outcome_textures(
-                world,
-                classify_resources,
-                supported_texture,
-                x0,
-                y0,
-                region_width,
-                region_height,
-            )
-            delayed_metadata = self.gpu_pipeline.summarize_labeled_component_texture(
-                world,
-                outcome_resources.temp_out_tex,
-                np.asarray([1], dtype=np.int32),
-                x0,
-                y0,
-                outcome_width,
-                outcome_height,
-            )
-            self._queue_deferred_metadata_region(world, delayed_metadata[0] if delayed_metadata.size else None)
-            component_labels, component_island_ids, component_metadata = self.gpu_pipeline.materialize_component_texture(
-                world,
-                outcome_resources.phase_out_tex,
-                outcome_width,
-                outcome_height,
-                x0,
-                y0,
-            )
-            self._record_gpu_collapsed_components(world, component_island_ids, component_metadata)
-            return
         if gpu_available:
             structural, support_seed, behavior_region = self.gpu_pipeline.classify_region(world, x0, y0, x1, y1)
         else:
@@ -172,6 +221,113 @@ class CollapseSolver:
         else:
             self._collapse_unsupported_components(world, collapse_now, x0, y0)
 
+    def _solve_formal_gpu_region(
+        self,
+        world: "WorldEngine",
+        x0: int,
+        y0: int,
+        x1: int,
+        y1: int,
+        *,
+        formal_region_from_deferred: bool,
+    ) -> None:
+        with self.gpu_pipeline._profile_pass(world, "formal_region_prepare"):
+            if formal_region_from_deferred:
+                formal_event_region = self._align_formal_dirty_region(world, x0, y0, x1, y1)
+            else:
+                formal_event_region = self._expand_formal_dirty_region(world, x0, y0, x1, y1)
+            solve_region = self.gpu_pipeline.expand_region_to_component_bbox(world, *formal_event_region)
+            solve_x0, solve_y0, solve_x1, solve_y1 = solve_region
+            resource_region = self._formal_connected_resource_region(world, solve_x0, solve_y0, solve_x1, solve_y1)
+            mark_x0 = max(0, solve_x0 - 1)
+            mark_y0 = max(0, solve_y0 - 1)
+            mark_x1 = min(int(world.width), solve_x1 + 1)
+            mark_y1 = min(int(world.height), solve_y1 + 1)
+            self.last_solve_region_mask[mark_y0:mark_y1, mark_x0:mark_x1] = True
+
+            self.gpu_pipeline.clear_formal_deferred_region_requests(world)
+            self.last_backend = "gpu"
+        component_capacity = self.gpu_pipeline.execute_formal_connected_expansion(
+            world,
+            formal_event_region,
+            resource_region=resource_region,
+        )
+        motion_pipeline = getattr(getattr(world, "motion_solver", None), "gpu_pipeline", None)
+        if motion_pipeline is not None:
+            motion_pipeline.last_published_island_runtime_capacity = int(component_capacity)
+        has_delayed_behavior = bool(np.any(world.material_collapse_behavior == int(CollapseBehavior.DELAYED)))
+
+        if not formal_region_from_deferred and has_delayed_behavior:
+            world.collapse_deferred_regions.append((solve_x0, solve_y0, solve_x1, solve_y1))
+
+    def _formal_connected_resource_region(
+        self,
+        world: "WorldEngine",
+        x0: int,
+        y0: int,
+        x1: int,
+        y1: int,
+    ) -> tuple[int, int, int, int]:
+        world_width = int(world.width)
+        world_height = int(world.height)
+        rx0 = max(0, min(world_width, int(x0)))
+        ry0 = max(0, min(world_height, int(y0)))
+        rx1 = max(0, min(world_width, int(x1)))
+        ry1 = max(0, min(world_height, int(y1)))
+        touches_x_edge = rx0 <= 0 or rx1 >= world_width
+        touches_y_edge = ry0 <= 0 or ry1 >= world_height
+        if not touches_x_edge and not touches_y_edge:
+            return (rx0, ry0, rx1, ry1)
+
+        tile_size = max(1, int(getattr(world.active, "tile_size", 32)))
+        orthogonal_margin = max(1, tile_size + tile_size // 2)
+        seed_x0, seed_y0, seed_x1, seed_y1 = rx0, ry0, rx1, ry1
+
+        def bounded_span(lo: int, hi: int, limit: int) -> tuple[int, int]:
+            if limit <= 0:
+                return (0, 0)
+            span = max(1, int(hi) - int(lo))
+            expanded_lo = max(0, int(lo) - orthogonal_margin)
+            expanded_hi = min(int(limit), int(hi) + orthogonal_margin)
+            if expanded_lo == 0 and expanded_hi == int(limit) and span < int(limit):
+                guard = max(1, min(int(limit) - 1, max(1, tile_size // 2)))
+                target_span = min(int(limit) - guard, max(span, span + orthogonal_margin * 2))
+                center = (int(lo) + int(hi)) // 2
+                expanded_lo = max(0, min(int(limit) - target_span, center - target_span // 2))
+                expanded_hi = expanded_lo + target_span
+            return (expanded_lo, expanded_hi)
+
+        if touches_x_edge:
+            rx0, rx1 = 0, world_width
+            ry0, ry1 = bounded_span(seed_y0, seed_y1, world_height)
+        if touches_y_edge:
+            ry0, ry1 = 0, world_height
+            rx0, rx1 = bounded_span(seed_x0, seed_x1, world_width)
+        if touches_x_edge and touches_y_edge:
+            rx0, rx1 = 0, world_width
+            ry0, ry1 = bounded_span(seed_y0, seed_y1, world_height)
+            if ry0 == 0 and ry1 == world_height and world_width > 1:
+                rx0, rx1 = bounded_span(seed_x0, seed_x1, world_width)
+
+        return (rx0, ry0, rx1, ry1)
+
+    def _solve_formal_gpu_dirty_tile_queue(self, world: "WorldEngine") -> None:
+        gpu_available = world._gpu_pipeline_available(self.gpu_pipeline, "collapse")
+        formal_gpu_frame = bool(
+            gpu_available
+            and getattr(world, "simulation_backend", "") == "gpu"
+            and getattr(world, "_world_simulation_frame_active", False)
+        )
+        if not formal_gpu_frame:
+            return
+        with self.gpu_pipeline._profile_pass(world, "formal_dirty_tile_queue_prepare"):
+            self.gpu_pipeline.clear_formal_deferred_region_requests(world)
+            self.last_backend = "gpu"
+        component_capacity = self.gpu_pipeline.execute_formal_connected_dirty_tile_queue(world)
+        motion_pipeline = getattr(getattr(world, "motion_solver", None), "gpu_pipeline", None)
+        if motion_pipeline is not None:
+            motion_pipeline.last_published_island_runtime_capacity = int(component_capacity)
+
     def _resolve_unsupported_outcomes_cpu(
         self,
         world: "WorldEngine",
@@ -230,6 +386,42 @@ class CollapseSolver:
                 changed = True
             if not changed:
                 return (x0, y0, x1, y1)
+
+    def _align_formal_dirty_region(
+        self,
+        world: "WorldEngine",
+        x0: int,
+        y0: int,
+        x1: int,
+        y1: int,
+        *,
+        expand_tile_count: int = 0,
+    ) -> tuple[int, int, int, int]:
+        tile_size = max(1, int(getattr(world.active, "tile_size", 32)))
+        width = int(world.width)
+        height = int(world.height)
+        expand = max(0, int(expand_tile_count)) * tile_size
+        x0 = max(0, int(x0) - expand)
+        y0 = max(0, int(y0) - expand)
+        x1 = min(width, int(x1) + expand)
+        y1 = min(height, int(y1) + expand)
+        x0 = max(0, (x0 // tile_size) * tile_size)
+        y0 = max(0, (y0 // tile_size) * tile_size)
+        x1 = min(width, ((x1 + tile_size - 1) // tile_size) * tile_size)
+        y1 = min(height, ((y1 + tile_size - 1) // tile_size) * tile_size)
+        if x0 >= x1 or y0 >= y1:
+            return (0, 0, width, height)
+        return (x0, y0, x1, y1)
+
+    def _expand_formal_dirty_region(
+        self,
+        world: "WorldEngine",
+        x0: int,
+        y0: int,
+        x1: int,
+        y1: int,
+    ) -> tuple[int, int, int, int]:
+        return self._align_formal_dirty_region(world, x0, y0, x1, y1, expand_tile_count=1)
 
     def _expand_region_to_component_gpu(
         self,
@@ -568,42 +760,210 @@ class CollapseSolver:
         world: "WorldEngine" | None,
         resource_name: str,
         fallback: np.ndarray,
-    ) -> np.ndarray:
+        *,
+        allow_gpu_sync_readback: bool,
+    ) -> tuple[np.ndarray, bool, bool]:
         mask = fallback.copy()
         if world is None or getattr(world, "simulation_backend", "") != "gpu":
-            return mask
+            return mask, False, False
         bridge = world.bridge
         if resource_name not in bridge.gpu_authoritative_resources:
-            return mask
+            return mask, False, False
+        if not allow_gpu_sync_readback:
+            return mask, False, True
         if not bridge.enabled or bridge.ctx is None:
             raise RuntimeError(f"GPU collapse runtime snapshot requires bridge buffer {resource_name!r}")
         cell_count = int(world.width) * int(world.height)
         raw = bridge.buffers[resource_name].read(size=cell_count * 4)
         gpu_mask = np.frombuffer(raw, dtype=np.int32, count=cell_count).reshape((world.height, world.width)) != 0
-        return gpu_mask & self.last_solve_region_mask
+        return gpu_mask & self.last_solve_region_mask, True, False
 
-    def runtime_snapshot(self, world: "WorldEngine" | None = None) -> dict[str, object]:
-        structural_mask = self._runtime_mask_snapshot(world, "collapse_structural_mask", self.last_structural_mask)
-        support_seed_mask = self._runtime_mask_snapshot(world, "collapse_support_seed_mask", self.last_support_seed_mask)
-        supported_mask = self._runtime_mask_snapshot(world, "collapse_supported_mask", self.last_supported_mask)
-        unsupported_mask = self._runtime_mask_snapshot(world, "collapse_unsupported_mask", self.last_unsupported_mask)
-        delayed_pending_mask = self._runtime_mask_snapshot(
+    def _gpu_collapsed_components_snapshot(
+        self,
+        world: "WorldEngine",
+        collapsed_cell_mask: np.ndarray,
+    ) -> tuple[list[dict[str, int | tuple[int, int, int, int]]], bool]:
+        if getattr(world, "simulation_backend", "") != "gpu":
+            return [], False
+        bridge = world.bridge
+        required = {"collapse_collapsed_cell_mask", "collapse_component_label"}
+        if not required.issubset(bridge.gpu_authoritative_resources):
+            return [], False
+        if not bridge.enabled or bridge.ctx is None:
+            raise RuntimeError("GPU collapse component snapshot requires bridge GPU resources")
+        cell_count = int(world.width) * int(world.height)
+        collapsed = np.asarray(collapsed_cell_mask, dtype=np.bool_)
+        if collapsed.shape != (world.height, world.width) or not bool(np.any(collapsed)):
+            return [], False
+        labels = np.frombuffer(
+            bridge.buffers["collapse_component_label"].read(size=cell_count * np.dtype(np.int32).itemsize),
+            dtype=np.int32,
+            count=cell_count,
+        ).reshape((world.height, world.width))
+        sync_readback_performed = True
+        component_mask = collapsed & (labels > 0)
+        if not bool(np.any(component_mask)):
+            return [], sync_readback_performed
+
+        island_ids = np.zeros((world.height, world.width), dtype=np.int32)
+        if "island_id" in bridge.gpu_authoritative_resources:
+            island_ids = np.frombuffer(
+                bridge.buffers["island_id"].read(size=cell_count * np.dtype(np.int32).itemsize),
+                dtype=np.int32,
+                count=cell_count,
+            ).reshape((world.height, world.width))
+        runtime_island_ids: list[int] = []
+        if {"island_runtime", "island_runtime_count"}.issubset(bridge.gpu_authoritative_resources):
+            runtime_count = int(
+                np.frombuffer(
+                    bridge.buffers["island_runtime_count"].read(size=np.dtype(np.int32).itemsize),
+                    dtype=np.int32,
+                    count=1,
+                )[0]
+            )
+            if runtime_count > 0:
+                runtime_records = np.frombuffer(
+                    bridge.buffers["island_runtime"].read(size=runtime_count * ISLAND_RUNTIME_DTYPE.itemsize),
+                    dtype=ISLAND_RUNTIME_DTYPE,
+                    count=runtime_count,
+                )
+                runtime_island_ids = sorted(
+                    int(value) for value in np.unique(runtime_records["island_id"]) if int(value) > 0
+                )
+
+        components: list[dict[str, int | tuple[int, int, int, int]]] = []
+        labels_in_order = sorted(int(value) for value in np.unique(labels[component_mask]) if int(value) > 0)
+        for index, label in enumerate(labels_in_order):
+            label_mask = component_mask & (labels == int(label))
+            ys, xs = np.nonzero(label_mask)
+            if ys.size == 0:
+                continue
+            overlapping_ids = sorted(int(value) for value in np.unique(island_ids[label_mask]) if int(value) > 0)
+            island_id = (
+                overlapping_ids[0]
+                if overlapping_ids
+                else runtime_island_ids[index]
+                if index < len(runtime_island_ids)
+                else index + 1
+            )
+            components.append(
+                {
+                    "island_id": int(island_id),
+                    "bbox": (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1),
+                    "cell_count": int(xs.size),
+                }
+            )
+        return components, sync_readback_performed
+
+    def _gpu_authoritative_runtime_resources(self, world: "WorldEngine" | None) -> list[str]:
+        if world is None or getattr(world, "simulation_backend", "") != "gpu":
+            return []
+        bridge = world.bridge
+        return [
+            resource_name
+            for resource_name in COLLAPSE_RUNTIME_SNAPSHOT_RESOURCES
+            if resource_name in bridge.gpu_authoritative_resources
+        ]
+
+    def runtime_snapshot(
+        self,
+        world: "WorldEngine" | None = None,
+        *,
+        allow_gpu_sync_readback: bool = False,
+    ) -> dict[str, object]:
+        sync_readback_performed = False
+        stale_resources: list[str] = []
+
+        structural_mask, did_read, is_stale = self._runtime_mask_snapshot(
+            world,
+            "collapse_structural_mask",
+            self.last_structural_mask,
+            allow_gpu_sync_readback=allow_gpu_sync_readback,
+        )
+        sync_readback_performed = sync_readback_performed or did_read
+        if is_stale:
+            stale_resources.append("collapse_structural_mask")
+        support_seed_mask, did_read, is_stale = self._runtime_mask_snapshot(
+            world,
+            "collapse_support_seed_mask",
+            self.last_support_seed_mask,
+            allow_gpu_sync_readback=allow_gpu_sync_readback,
+        )
+        sync_readback_performed = sync_readback_performed or did_read
+        if is_stale:
+            stale_resources.append("collapse_support_seed_mask")
+        supported_mask, did_read, is_stale = self._runtime_mask_snapshot(
+            world,
+            "collapse_supported_mask",
+            self.last_supported_mask,
+            allow_gpu_sync_readback=allow_gpu_sync_readback,
+        )
+        sync_readback_performed = sync_readback_performed or did_read
+        if is_stale:
+            stale_resources.append("collapse_supported_mask")
+        unsupported_mask, did_read, is_stale = self._runtime_mask_snapshot(
+            world,
+            "collapse_unsupported_mask",
+            self.last_unsupported_mask,
+            allow_gpu_sync_readback=allow_gpu_sync_readback,
+        )
+        sync_readback_performed = sync_readback_performed or did_read
+        if is_stale:
+            stale_resources.append("collapse_unsupported_mask")
+        delayed_pending_mask, did_read, is_stale = self._runtime_mask_snapshot(
             world,
             "collapse_delayed_pending_mask",
             self.last_delayed_pending_mask,
+            allow_gpu_sync_readback=allow_gpu_sync_readback,
         )
-        immune_unsupported_mask = self._runtime_mask_snapshot(
+        sync_readback_performed = sync_readback_performed or did_read
+        if is_stale:
+            stale_resources.append("collapse_delayed_pending_mask")
+        immune_unsupported_mask, did_read, is_stale = self._runtime_mask_snapshot(
             world,
             "collapse_immune_unsupported_mask",
             self.last_immune_unsupported_mask,
+            allow_gpu_sync_readback=allow_gpu_sync_readback,
         )
-        collapsed_cell_mask = self._runtime_mask_snapshot(
+        sync_readback_performed = sync_readback_performed or did_read
+        if is_stale:
+            stale_resources.append("collapse_immune_unsupported_mask")
+        collapsed_cell_mask, did_read, is_stale = self._runtime_mask_snapshot(
             world,
             "collapse_collapsed_cell_mask",
             self.last_collapsed_cell_mask,
+            allow_gpu_sync_readback=allow_gpu_sync_readback,
+        )
+        sync_readback_performed = sync_readback_performed or did_read
+        if is_stale:
+            stale_resources.append("collapse_collapsed_cell_mask")
+
+        gpu_authoritative_resources = self._gpu_authoritative_runtime_resources(world)
+        collapsed_components = [dict(component) for component in self.last_collapsed_components]
+        if world is not None and not collapsed_components:
+            if allow_gpu_sync_readback:
+                collapsed_components, did_read = self._gpu_collapsed_components_snapshot(world, collapsed_cell_mask)
+                sync_readback_performed = sync_readback_performed or did_read
+            elif "collapse_component_label" in gpu_authoritative_resources:
+                stale_resources.append("collapse_component_label")
+        snapshot_stale = bool(stale_resources)
+        snapshot_source = (
+            "synchronous_gpu_readback"
+            if sync_readback_performed
+            else "cpu_shadow"
+            if gpu_authoritative_resources
+            else "cpu"
         )
         return {
             "backend": self.last_backend,
+            "gpu_authoritative": bool(gpu_authoritative_resources),
+            "gpu_authoritative_resources": gpu_authoritative_resources,
+            "snapshot_source": snapshot_source,
+            "snapshot_stale": snapshot_stale,
+            "gpu_authoritative_snapshot_stale": snapshot_stale,
+            "stale_resources": stale_resources,
+            "sync_readback_required": snapshot_stale,
+            "sync_readback_performed": bool(sync_readback_performed),
             "dirty_region_count_before": int(self.last_dirty_region_count_before),
             "solve_region_count": int(self.last_solve_region_count),
             "solve_region_mask": self.last_solve_region_mask.copy(),
@@ -614,5 +974,5 @@ class CollapseSolver:
             "delayed_pending_mask": delayed_pending_mask,
             "immune_unsupported_mask": immune_unsupported_mask,
             "collapsed_cell_mask": collapsed_cell_mask,
-            "collapsed_components": [dict(component) for component in self.last_collapsed_components],
+            "collapsed_components": collapsed_components,
         }

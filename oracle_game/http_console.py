@@ -218,6 +218,9 @@ class EngineHTTPConsole:
                     if parsed.path == "/api/read/light":
                         self._send({"illumination": engine.serialize_visible_illumination()})
                         return
+                    if parsed.path == "/api/read/demo_runtime":
+                        self._send(dict(getattr(engine, "demo_runtime_state", {})))
+                        return
                     if parsed.path == "/api/read/debug_frame":
                         view_name = query.get("view", [engine.default_debug_view.value])[0]
                         gas_species = query.get("gas_species", [None])[0]

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
+import time
 from typing import Any
 
 import numpy as np
@@ -47,6 +49,7 @@ class GPUGasPipeline:
         self.last_cpu_ambient_upload_skipped = False
         self.last_cpu_gas_upload_skipped = False
         self.last_cpu_active_upload_skipped = False
+        self.last_pass_profile: dict[str, Any] = {"passes": [], "summary": {}}
 
     def available(self, world: "WorldEngine") -> bool:
         if getattr(world, "simulation_backend", "gpu") == "cpu":
@@ -59,28 +62,72 @@ class GPUGasPipeline:
             raise RuntimeError("GPU gas pipeline requires a valid ModernGL context")
         self._ensure_programs(ctx)
         resources = self._ensure_resources(world)
-        self._upload_inputs(world, resources, solve_gas_mask)
+        self.reset_pass_profile()
+        with self._profile_pass(world, "upload_inputs"):
+            self._upload_inputs(world, resources, solve_gas_mask)
         group_x = (world.gas_width + LOCAL_SIZE - 1) // LOCAL_SIZE
         group_y = (world.gas_height + LOCAL_SIZE - 1) // LOCAL_SIZE
-        self._load_authoritative_bridge_inputs(world, resources, group_x, group_y)
+        with self._profile_pass(world, "load_bridge_inputs"):
+            self._load_authoritative_bridge_inputs(world, resources, group_x, group_y)
 
-        self._run_advect_velocity(world, dt, resources, group_x, group_y)
-        self._run_force_sources(world, dt, resources, group_x, group_y)
-        self._run_thermo_fields(world, resources, group_x, group_y)
-        self._run_thermo_forces(world, dt, resources, group_x, group_y)
-        self._run_divergence(world, resources, group_x, group_y)
-        self._run_pressure_jacobi(world, resources, group_x, group_y)
-        self._run_projection(world, resources, group_x, group_y)
-        self._run_species(world, dt, resources, group_x, group_y)
-        self._run_ambient(world, dt, resources, group_x, group_y)
-        self._publish_bridge_outputs(world, resources, group_x, group_y)
+        with self._profile_pass(world, "advect_velocity"):
+            self._run_advect_velocity(world, dt, resources, group_x, group_y)
+        with self._profile_pass(world, "force_sources"):
+            self._run_force_sources(world, dt, resources, group_x, group_y)
+        with self._profile_pass(world, "thermo_fields"):
+            self._run_thermo_fields(world, resources, group_x, group_y)
+        with self._profile_pass(world, "thermo_forces"):
+            self._run_thermo_forces(world, dt, resources, group_x, group_y)
+        with self._profile_pass(world, "divergence"):
+            self._run_divergence(world, resources, group_x, group_y)
+        with self._profile_pass(world, "pressure_jacobi"):
+            self._run_pressure_jacobi(world, resources, group_x, group_y)
+        with self._profile_pass(world, "projection"):
+            self._run_projection(world, resources, group_x, group_y)
+        with self._profile_pass(world, "species"):
+            self._run_species(world, dt, resources, group_x, group_y)
+        with self._profile_pass(world, "ambient"):
+            self._run_ambient(world, dt, resources, group_x, group_y)
+        with self._profile_pass(world, "publish_bridge_outputs"):
+            self._publish_bridge_outputs(world, resources, group_x, group_y)
         self.last_cpu_mirror_downloaded = not (
             getattr(world, "simulation_backend", "") == "gpu"
             and bool(getattr(world, "_world_simulation_frame_active", False))
         )
         if self.last_cpu_mirror_downloaded:
             ctx.finish()
-            self._download_outputs(world, resources)
+            with self._profile_pass(world, "download_outputs"):
+                self._download_outputs(world, resources)
+
+    def reset_pass_profile(self) -> None:
+        self.last_pass_profile = {"passes": [], "summary": {}}
+
+    @contextmanager
+    def _profile_pass(self, world: "WorldEngine", name: str):
+        profile = self.last_pass_profile if bool(getattr(world, "profile_passes_enabled", False)) else None
+        ctx = world.bridge.ctx if bool(getattr(world, "profile_passes_sync", False)) else None
+        if profile is not None and ctx is not None:
+            ctx.finish()
+        start = time.perf_counter() if profile is not None else 0.0
+        try:
+            yield
+        finally:
+            if profile is None:
+                return
+            if ctx is not None:
+                ctx.finish()
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            entry = {
+                "name": str(name),
+                "cpu_ms": elapsed_ms,
+                "gpu_ms": elapsed_ms if ctx is not None else None,
+            }
+            profile["passes"].append(entry)
+            summary = profile["summary"].setdefault(str(name), {"count": 0, "cpu_ms": 0.0, "gpu_ms": None})
+            summary["count"] += 1
+            summary["cpu_ms"] += elapsed_ms
+            if ctx is not None:
+                summary["gpu_ms"] = float(summary["gpu_ms"] or 0.0) + elapsed_ms
 
     def release(self) -> None:
         if self.resources is None:

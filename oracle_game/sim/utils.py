@@ -89,8 +89,20 @@ def expand_bool_mask(mask: np.ndarray, radius: int = 1) -> np.ndarray:
 
 
 def tile_mask_to_cell_mask(tile_mask: np.ndarray, *, tile_size: int, width: int, height: int) -> np.ndarray:
+    tile_mask_bool = np.asarray(tile_mask, dtype=np.bool_)
+    active_count = int(np.count_nonzero(tile_mask_bool))
+    if active_count == 0:
+        return np.zeros((height, width), dtype=np.bool_)
+    if active_count == int(tile_mask_bool.size):
+        return np.ones((height, width), dtype=np.bool_)
+
+    tile_size = max(1, int(tile_size))
+    if active_count * 4 >= int(tile_mask_bool.size):
+        expanded = np.repeat(np.repeat(tile_mask_bool, tile_size, axis=0), tile_size, axis=1)
+        return expanded[:height, :width].copy()
+
     cell_mask = np.zeros((height, width), dtype=np.bool_)
-    for tile_y, tile_x in np.argwhere(np.asarray(tile_mask, dtype=np.bool_)):
+    for tile_y, tile_x in np.argwhere(tile_mask_bool):
         x0 = int(tile_x) * tile_size
         y0 = int(tile_y) * tile_size
         x1 = min(width, x0 + tile_size)
@@ -109,8 +121,22 @@ def tile_mask_to_gas_mask(
     gas_width: int,
     gas_height: int,
 ) -> np.ndarray:
+    tile_mask_bool = np.asarray(tile_mask, dtype=np.bool_)
+    active_count = int(np.count_nonzero(tile_mask_bool))
+    if active_count == 0:
+        return np.zeros((gas_height, gas_width), dtype=np.bool_)
+    if active_count == int(tile_mask_bool.size):
+        return np.ones((gas_height, gas_width), dtype=np.bool_)
+
+    tile_size = max(1, int(tile_size))
+    gas_cell_size = max(1, int(gas_cell_size))
+    if tile_size % gas_cell_size == 0 and active_count * 4 >= int(tile_mask_bool.size):
+        gas_cells_per_tile = tile_size // gas_cell_size
+        expanded = np.repeat(np.repeat(tile_mask_bool, gas_cells_per_tile, axis=0), gas_cells_per_tile, axis=1)
+        return expanded[:gas_height, :gas_width].copy()
+
     gas_mask = np.zeros((gas_height, gas_width), dtype=np.bool_)
-    for tile_y, tile_x in np.argwhere(np.asarray(tile_mask, dtype=np.bool_)):
+    for tile_y, tile_x in np.argwhere(tile_mask_bool):
         x0 = int(tile_x) * tile_size
         y0 = int(tile_y) * tile_size
         x1 = min(width, x0 + tile_size)

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import math
-from typing import NamedTuple
+import time
+from typing import Any, NamedTuple
 
 import numpy as np
 
@@ -72,157 +74,235 @@ class OpticsSolver:
     def __init__(self) -> None:
         self.gpu_pipeline = GPUOpticsPipeline()
         self.last_backend = "idle"
+        self.last_pass_profile: dict[str, Any] = {"passes": [], "summary": {}}
         self.reset_runtime_state()
 
-    def step(self, world: "WorldEngine") -> None:
-        self.reset_runtime_state(world)
-        if getattr(world, "simulation_backend", "") == "gpu" and bool(getattr(world, "_world_simulation_frame_active", False)):
-            world._formal_gpu_frame_has_light_dose = None
-        world.bridge.sync_rule_tables(world)
-        self._load_shadow_runtime(world)
-        has_gpu_reaction_emitters = self._has_gpu_reaction_emitters(world)
-        emitters: list[dict[str, object]] = []
-        min_world_x = int(world.paging.origin_x)
-        min_world_y = int(world.paging.origin_y)
-        max_world_x = min_world_x + int(world.width)
-        max_world_y = min_world_y + int(world.height)
-        for emitter in list(world.persistent_emitters) + list(world.emitters):
-            record = dict(emitter)
-            if "world_origin" in record:
-                world_x = int(record["world_origin"][0])
-                world_y = int(record["world_origin"][1])
-            else:
-                world_x, world_y = world._buffer_to_world_position((int(record["origin"][0]), int(record["origin"][1])))
-                record["world_origin"] = (int(world_x), int(world_y))
-            if world_x < min_world_x or world_x >= max_world_x or world_y < min_world_y or world_y >= max_world_y:
+    def _profile_enabled(self, world: "WorldEngine") -> bool:
+        return bool(getattr(world, "profile_passes_enabled", False))
+
+    def reset_pass_profile(self) -> None:
+        self.last_pass_profile = {"passes": [], "summary": {}}
+
+    def _record_pass_profile_entry(self, name: str, cpu_ms: float, gpu_ms: float | None) -> None:
+        entry = {"name": str(name), "cpu_ms": float(cpu_ms), "gpu_ms": float(gpu_ms) if gpu_ms is not None else None}
+        self.last_pass_profile["passes"].append(entry)
+        summary = self.last_pass_profile["summary"].setdefault(str(name), {"count": 0, "cpu_ms": 0.0, "gpu_ms": None})
+        summary["count"] += 1
+        summary["cpu_ms"] += float(cpu_ms)
+        if gpu_ms is not None:
+            summary["gpu_ms"] = float(summary["gpu_ms"] or 0.0) + float(gpu_ms)
+
+    @contextmanager
+    def _profile_pass(self, world: "WorldEngine", name: str):
+        if not self._profile_enabled(world):
+            yield
+            return
+        ctx = world.bridge.ctx if bool(getattr(world, "profile_passes_sync", False)) else None
+        if ctx is not None:
+            ctx.finish()
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            if ctx is not None:
+                ctx.finish()
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            self._record_pass_profile_entry(str(name), elapsed_ms, elapsed_ms if ctx is not None else None)
+
+    def _merge_gpu_pass_profile(self, world: "WorldEngine") -> None:
+        if not self._profile_enabled(world):
+            return
+        gpu_profile = getattr(self.gpu_pipeline, "last_pass_profile", None)
+        if not isinstance(gpu_profile, dict):
+            return
+        for entry in gpu_profile.get("passes", []):
+            if not isinstance(entry, dict):
                 continue
-            record["origin"] = world._world_to_buffer_clamped(world_x, world_y)
-            emitters.append(record)
-        emitters.sort(key=self._emitter_sort_key)
-        world.emitters.clear()
-        self.last_emitter_count = int(len(emitters))
-        if emitters:
-            for emitter in emitters:
-                origin_x, origin_y = emitter["origin"]
-                if world.in_bounds(int(origin_x), int(origin_y)):
-                    self.last_emitter_origin_mask[int(origin_y), int(origin_x)] = True
-            self.last_emitters = [dict(emitter) for emitter in emitters]
-            self.last_public_emitters = [
-                {
-                    "light_type": str(emitter["light_type"]),
-                    "origin": [int(emitter["world_origin"][0]), int(emitter["world_origin"][1])],
-                    "direction": [float(emitter["direction"][0]), float(emitter["direction"][1])],
-                    "spread": float(emitter["spread"]),
-                    "strength": float(emitter["strength"]),
-                    "range_cells": int(emitter["range_cells"]),
-                }
-                for emitter in emitters
-            ]
-        gpu_available = world._gpu_pipeline_available(self.gpu_pipeline, "optics")
-        formal_gpu_frame = (
-            gpu_available
-            and getattr(world, "simulation_backend", "") == "gpu"
-            and bool(getattr(world, "_world_simulation_frame_active", False))
-        )
-        active_scheduler_gpu_authoritative = (
-            formal_gpu_frame and "active_tile_ttl" in world.bridge.gpu_authoritative_resources
-        )
-        if formal_gpu_frame and not active_scheduler_gpu_authoritative:
-            world._require_gpu_stage("active scheduler optics solve masks")
-        if active_scheduler_gpu_authoritative:
-            solve_tile_mask = np.ones((world.active.tile_height, world.active.tile_width), dtype=np.bool_)
-        else:
-            solve_tile_mask = self._solve_tile_mask(world, emitters)
-            if has_gpu_reaction_emitters:
-                solve_tile_mask = np.ones_like(solve_tile_mask, dtype=np.bool_)
-        solve_cell_mask = tile_mask_to_cell_mask(
-            solve_tile_mask,
-            tile_size=world.active.tile_size,
-            width=world.width,
-            height=world.height,
-        )
-        solve_gas_mask = tile_mask_to_gas_mask(
-            solve_tile_mask,
-            tile_size=world.active.tile_size,
-            gas_cell_size=world.gas_cell_size,
-            width=world.width,
-            height=world.height,
-            gas_width=world.gas_width,
-            gas_height=world.gas_height,
-        )
-        self.last_solve_tile_mask = solve_tile_mask.copy()
-        self.last_solve_cell_mask = solve_cell_mask.copy()
-        self.last_solve_gas_mask = solve_gas_mask.copy()
-        if formal_gpu_frame:
-            previous_visible = None
-            previous_cell_dose = None
-            previous_gas_dose = None
-        else:
-            previous_visible = world.visible_illumination.copy()
-            previous_cell_dose = world.cell_optical_dose.copy()
-            previous_gas_dose = world.gas_optical_dose.copy()
-            world.visible_illumination.fill(0.0)
-            world.cell_optical_dose.fill(0.0)
-            world.gas_optical_dose.fill(0.0)
-            world.bridge.clear_gpu_authoritative(
-                "light",
-                "visible_illumination",
-                "cell_optical_dose",
-                "gas_optical_dose",
+            name = str(entry.get("name", ""))
+            if not name:
+                continue
+            if name.startswith("optics."):
+                name = name[len("optics.") :]
+            gpu_ms = entry.get("gpu_ms")
+            self._record_pass_profile_entry(
+                name,
+                float(entry.get("cpu_ms") or 0.0),
+                float(gpu_ms) if gpu_ms is not None else None,
             )
+
+    def step(self, world: "WorldEngine") -> None:
+        if self._profile_enabled(world):
+            self.reset_pass_profile()
+            self.gpu_pipeline.reset_pass_profile()
+        with self._profile_pass(world, "optics_runtime_table_prep"):
+            self._reset_frame_runtime_state(world)
+            if getattr(world, "simulation_backend", "") == "gpu" and bool(getattr(world, "_world_simulation_frame_active", False)):
+                world._formal_gpu_frame_has_light_dose = None
+            world.bridge.sync_rule_tables(world)
+            self._load_shadow_runtime(world)
+            has_gpu_reaction_emitters = self._has_gpu_reaction_emitters(world)
+        with self._profile_pass(world, "optics_emitter_collection"):
+            emitters: list[dict[str, object]] = []
+            min_world_x = int(world.paging.origin_x)
+            min_world_y = int(world.paging.origin_y)
+            max_world_x = min_world_x + int(world.width)
+            max_world_y = min_world_y + int(world.height)
+            for emitter in list(world.persistent_emitters) + list(world.emitters):
+                record = dict(emitter)
+                if "world_origin" in record:
+                    world_x = int(record["world_origin"][0])
+                    world_y = int(record["world_origin"][1])
+                else:
+                    world_x, world_y = world._buffer_to_world_position(
+                        (int(record["origin"][0]), int(record["origin"][1]))
+                    )
+                    record["world_origin"] = (int(world_x), int(world_y))
+                if world_x < min_world_x or world_x >= max_world_x or world_y < min_world_y or world_y >= max_world_y:
+                    continue
+                record["origin"] = world._world_to_buffer_clamped(world_x, world_y)
+                emitters.append(record)
+            emitters.sort(key=self._emitter_sort_key)
+            world.emitters.clear()
+            self.last_emitter_count = int(len(emitters))
+            if emitters:
+                for emitter in emitters:
+                    origin_x, origin_y = emitter["origin"]
+                    if world.in_bounds(int(origin_x), int(origin_y)):
+                        self.last_emitter_origin_mask[int(origin_y), int(origin_x)] = True
+                self.last_emitters = [dict(emitter) for emitter in emitters]
+                self.last_public_emitters = [
+                    {
+                        "light_type": str(emitter["light_type"]),
+                        "origin": [int(emitter["world_origin"][0]), int(emitter["world_origin"][1])],
+                        "direction": [float(emitter["direction"][0]), float(emitter["direction"][1])],
+                        "spread": float(emitter["spread"]),
+                        "strength": float(emitter["strength"]),
+                        "range_cells": int(emitter["range_cells"]),
+                    }
+                    for emitter in emitters
+                ]
+        with self._profile_pass(world, "optics_backend_prepare"):
+            gpu_available = world._gpu_pipeline_available(self.gpu_pipeline, "optics")
+            formal_gpu_frame = (
+                gpu_available
+                and getattr(world, "simulation_backend", "") == "gpu"
+                and bool(getattr(world, "_world_simulation_frame_active", False))
+            )
+            active_scheduler_gpu_authoritative = (
+                formal_gpu_frame and "active_tile_ttl" in world.bridge.gpu_authoritative_resources
+            )
+            if formal_gpu_frame and not active_scheduler_gpu_authoritative:
+                world._require_gpu_stage("active scheduler optics solve masks")
+        with self._profile_pass(world, "optics_solve_tile_mask"):
+            if active_scheduler_gpu_authoritative:
+                solve_tile_mask = np.ones((world.active.tile_height, world.active.tile_width), dtype=np.bool_)
+            else:
+                solve_tile_mask = self._solve_tile_mask(world, emitters)
+                if has_gpu_reaction_emitters:
+                    solve_tile_mask = np.ones_like(solve_tile_mask, dtype=np.bool_)
+            has_solve_tiles = bool(np.any(solve_tile_mask))
+        with self._profile_pass(world, "optics_mask_expansion"):
+            solve_cell_mask = tile_mask_to_cell_mask(
+                solve_tile_mask,
+                tile_size=world.active.tile_size,
+                width=world.width,
+                height=world.height,
+            )
+            solve_gas_mask = tile_mask_to_gas_mask(
+                solve_tile_mask,
+                tile_size=world.active.tile_size,
+                gas_cell_size=world.gas_cell_size,
+                width=world.width,
+                height=world.height,
+                gas_width=world.gas_width,
+                gas_height=world.gas_height,
+            )
+        with self._profile_pass(world, "optics_mask_snapshots"):
+            self.last_solve_tile_mask = solve_tile_mask.copy()
+            self.last_solve_cell_mask = solve_cell_mask.copy()
+            self.last_solve_gas_mask = solve_gas_mask.copy()
+        with self._profile_pass(world, "optics_previous_output_snapshot"):
+            if formal_gpu_frame:
+                previous_visible = None
+                previous_cell_dose = None
+                previous_gas_dose = None
+            else:
+                previous_visible = world.visible_illumination.copy()
+                previous_cell_dose = world.cell_optical_dose.copy()
+                previous_gas_dose = world.gas_optical_dose.copy()
+                world.visible_illumination.fill(0.0)
+                world.cell_optical_dose.fill(0.0)
+                world.gas_optical_dose.fill(0.0)
+                world.bridge.clear_gpu_authoritative(
+                    "light",
+                    "visible_illumination",
+                    "cell_optical_dose",
+                    "gas_optical_dose",
+                )
         if gpu_available:
-            if (emitters or has_gpu_reaction_emitters) and np.any(solve_tile_mask):
+            if (emitters or has_gpu_reaction_emitters) and has_solve_tiles:
                 self.gpu_pipeline.step(world, emitters, solve_cell_mask=solve_cell_mask, solve_gas_mask=solve_gas_mask)
+                self._merge_gpu_pass_profile(world)
                 if formal_gpu_frame:
+                    # True means the GPU light-dose guard was produced for reactions; it is not a CPU dose verdict.
                     world._formal_gpu_frame_has_light_dose = True
                     world._gpu_optics_outputs_clear = False
             elif formal_gpu_frame:
                 if not bool(getattr(world, "_gpu_optics_outputs_clear", False)):
-                    self.gpu_pipeline.clear_outputs(world)
+                    with self._profile_pass(world, "optics_gpu_clear"):
+                        self.gpu_pipeline.clear_outputs(world)
+                    self._merge_gpu_pass_profile(world)
                     world._gpu_optics_outputs_clear = True
+                else:
+                    with self._profile_pass(world, "optics_gpu_guard_clear"):
+                        self.gpu_pipeline.clear_light_dose_guard(world)
+                    self._merge_gpu_pass_profile(world)
+                # False only means optics outputs are known clear and the GPU guard was reset.
                 world._formal_gpu_frame_has_light_dose = False
             if emitters and self._needs_secondary_branches(world, emitters):
-                self.last_secondary_branch_count = self._count_secondary_branch_seeds(world, emitters)
+                with self._profile_pass(world, "optics_secondary_branch_count"):
+                    self.last_secondary_branch_count = self._count_secondary_branch_seeds(world, emitters)
             self.last_backend = "gpu"
         else:
             world._require_cpu_oracle_backend("optics")
             self.last_backend = "cpu"
-            for emitter in emitters:
-                self._trace_emitter(world, emitter, solve_cell_mask=solve_cell_mask)
+            with self._profile_pass(world, "optics_cpu_trace"):
+                for emitter in emitters:
+                    self._trace_emitter(world, emitter, solve_cell_mask=solve_cell_mask)
         if self.last_backend != "gpu":
-            self._compose_visible_illumination(world)
-        if not active_scheduler_gpu_authoritative and (emitters or has_gpu_reaction_emitters) and np.any(solve_tile_mask):
-            self._mark_tiles_from_mask(world, solve_tile_mask)
-        if formal_gpu_frame:
-            self.last_visible_changed_mask[solve_cell_mask] = True
-            self.last_cell_dose_changed_mask[solve_cell_mask] = True
-            self.last_gas_dose_changed_mask[solve_gas_mask] = True
-        elif gpu_available and not self.gpu_pipeline.last_cpu_mirror_downloaded:
-            self.last_visible_changed_mask[solve_cell_mask] = True
-            self.last_cell_dose_changed_mask[solve_cell_mask] = True
-            self.last_gas_dose_changed_mask[solve_gas_mask] = True
-        else:
-            assert previous_visible is not None
-            assert previous_cell_dose is not None
-            assert previous_gas_dose is not None
-            self._refresh_active_regions(
-                world,
-                solve_tile_mask,
-                solve_cell_mask,
-                solve_gas_mask,
-                previous_visible,
-                previous_cell_dose,
-                previous_gas_dose,
-            )
-        self.last_runtime_backend = self.last_backend
-        if formal_gpu_frame:
-            self.last_visible_energy_total = 0.0
-            self.last_cell_dose_total = 0.0
-            self.last_gas_dose_total = 0.0
-        else:
-            self.last_visible_energy_total = float(np.sum(world.visible_illumination))
-            self.last_cell_dose_total = float(np.sum(world.cell_optical_dose))
-            self.last_gas_dose_total = float(np.sum(world.gas_optical_dose))
+            with self._profile_pass(world, "optics_cpu_compose"):
+                self._compose_visible_illumination(world)
+        if not active_scheduler_gpu_authoritative and (emitters or has_gpu_reaction_emitters) and has_solve_tiles:
+            with self._profile_pass(world, "optics_active_tile_marking"):
+                self._mark_tiles_from_mask(world, solve_tile_mask)
+        with self._profile_pass(world, "optics_changed_mask_updates"):
+            if formal_gpu_frame:
+                self._copy_direct_changed_masks(world, solve_cell_mask, solve_gas_mask)
+            elif gpu_available and not self.gpu_pipeline.last_cpu_mirror_downloaded:
+                self._copy_direct_changed_masks(world, solve_cell_mask, solve_gas_mask)
+            else:
+                assert previous_visible is not None
+                assert previous_cell_dose is not None
+                assert previous_gas_dose is not None
+                self._refresh_active_regions(
+                    world,
+                    solve_tile_mask,
+                    solve_cell_mask,
+                    solve_gas_mask,
+                    previous_visible,
+                    previous_cell_dose,
+                    previous_gas_dose,
+                )
+        with self._profile_pass(world, "optics_runtime_totals"):
+            self.last_runtime_backend = self.last_backend
+            if formal_gpu_frame:
+                self.last_visible_energy_total = 0.0
+                self.last_cell_dose_total = 0.0
+                self.last_gas_dose_total = 0.0
+            else:
+                self.last_visible_energy_total = float(np.sum(world.visible_illumination))
+                self.last_cell_dose_total = float(np.sum(world.cell_optical_dose))
+                self.last_gas_dose_total = float(np.sum(world.gas_optical_dose))
 
     def _trace_emitter(self, world: "WorldEngine", emitter: dict[str, object], *, solve_cell_mask: np.ndarray) -> None:
         light = self._light_runtime_by_name.get(str(emitter["light_type"]))
@@ -253,12 +333,21 @@ class OpticsSolver:
                 cy = int(y)
                 if not world.in_bounds(cx, cy):
                     break
-                self._deposit_light(world, light, cx, cy, energy, solve_cell_mask=solve_cell_mask)
                 material_id = int(world.material_id[cy, cx])
                 if material_id == 0:
+                    self._deposit_light(world, light, cx, cy, energy, absorption=0.0, solve_cell_mask=solve_cell_mask)
                     energy *= 0.97
                     continue
                 optics = self._optics_runtime(material_id, light.light_type_id)
+                self._deposit_light(
+                    world,
+                    light,
+                    cx,
+                    cy,
+                    energy,
+                    absorption=float(optics.absorption),
+                    solve_cell_mask=solve_cell_mask,
+                )
                 energy, _ = self._interact_with_material(x, y, ray_dx, ray_dy, energy, light.max_bounce, optics, light.max_bounce)
 
     def _needs_secondary_branches(self, world: "WorldEngine", emitters: list[dict[str, object]]) -> bool:
@@ -358,12 +447,21 @@ class OpticsSolver:
                 cy = int(y)
                 if not world.in_bounds(cx, cy):
                     break
-                self._deposit_light(world, light, cx, cy, energy, solve_cell_mask=solve_cell_mask)
                 material_id = int(world.material_id[cy, cx])
                 if material_id == 0:
+                    self._deposit_light(world, light, cx, cy, energy, absorption=0.0, solve_cell_mask=solve_cell_mask)
                     energy *= 0.97
                     continue
                 optics = self._optics_runtime(material_id, light.light_type_id)
+                self._deposit_light(
+                    world,
+                    light,
+                    cx,
+                    cy,
+                    energy,
+                    absorption=float(optics.absorption),
+                    solve_cell_mask=solve_cell_mask,
+                )
                 energy, spawned = self._interact_with_material(x, y, dx, dy, energy, bounce, optics, light.max_bounce)
                 stack.extend(spawned)
 
@@ -400,27 +498,41 @@ class OpticsSolver:
         cy: int,
         energy: float,
         *,
+        absorption: float,
         solve_cell_mask: np.ndarray,
     ) -> None:
         if not solve_cell_mask[cy, cx]:
             return
-        world.cell_optical_dose[light.dose_channel_id, cy, cx] += energy
+        dose_channel = int(light.dose_channel_id)
+        if dose_channel < 0 or dose_channel >= world.cell_optical_dose.shape[0]:
+            return
+        if self._visible_exposure.shape != world.cell_optical_dose.shape:
+            self._visible_exposure = np.zeros_like(world.cell_optical_dose)
+        self._visible_exposure[dose_channel, cy, cx] += energy
+        absorbed = energy * max(0.0, float(absorption))
+        if absorbed > 0.0:
+            world.cell_optical_dose[dose_channel, cy, cx] += absorbed
         gy, gx = world.cell_to_gas(cy, cx)
-        world.gas_optical_dose[light.dose_channel_id, gy, gx] += energy * 0.08
+        world.gas_optical_dose[dose_channel, gy, gx] += energy * 0.08
 
     def _compose_visible_illumination(self, world: "WorldEngine") -> None:
         frame = np.zeros_like(world.visible_illumination)
+        visible_exposure = (
+            self._visible_exposure
+            if self._visible_exposure.shape == world.cell_optical_dose.shape
+            else np.zeros_like(world.cell_optical_dose)
+        )
         for light in self._light_runtimes:
             dose_channel = int(light.dose_channel_id)
             if dose_channel < 0 or dose_channel >= world.cell_optical_dose.shape[0]:
                 continue
-            cell_dose = world.cell_optical_dose[dose_channel]
+            cell_visible = visible_exposure[dose_channel]
             gas_haze = np.repeat(
                 np.repeat(world.gas_optical_dose[dose_channel], world.gas_cell_size, axis=0),
                 world.gas_cell_size,
                 axis=1,
             )[: world.height, : world.width]
-            if not np.any(cell_dose > 0.0) and not np.any(gas_haze > 0.0):
+            if not np.any(cell_visible > 0.0) and not np.any(gas_haze > 0.0):
                 continue
             style = str(light.render_style or "diffuse")
             tint = RENDER_STYLE_TINTS.get(style, RENDER_STYLE_TINTS["diffuse"])
@@ -430,8 +542,8 @@ class OpticsSolver:
             accent = VISUAL_CHANNEL_ACCENTS[int(light.visual_channel) % len(VISUAL_CHANNEL_ACCENTS)]
             color = np.asarray(light.color, dtype=np.float32)
             frame += (
-                cell_dose[..., None] * (color[None, None, :] * tint[None, None, :] * base_scale)
-                + cell_dose[..., None] * (accent[None, None, :] * accent_scale)
+                cell_visible[..., None] * (color[None, None, :] * tint[None, None, :] * base_scale)
+                + cell_visible[..., None] * (accent[None, None, :] * accent_scale)
                 + gas_haze[..., None] * (tint[None, None, :] * haze_scale)
             )
         world.visible_illumination[:] = frame
@@ -468,13 +580,7 @@ class OpticsSolver:
         ):
             return False
         count_buffer = world.bridge.buffers.get("reaction_light_emitter_count")
-        if count_buffer is None:
-            return False
-        try:
-            count = int(np.frombuffer(count_buffer.read(size=4), dtype=np.uint32, count=1)[0])
-        except Exception:
-            return True
-        return count > 0
+        return count_buffer is not None
 
     def _emitter_sort_key(self, emitter: dict[str, object]) -> tuple[object, ...]:
         origin = emitter.get("world_origin", emitter.get("origin", (0, 0)))
@@ -498,6 +604,19 @@ class OpticsSolver:
             y0 = int(tile_y) * tile_size
             rects.append((x0, y0, min(world.width, x0 + tile_size), min(world.height, y0 + tile_size)))
         world._mark_active_rects_runtime(rects)
+
+    def _copy_direct_changed_masks(
+        self,
+        world: "WorldEngine",
+        solve_cell_mask: np.ndarray,
+        solve_gas_mask: np.ndarray,
+    ) -> None:
+        with self._profile_pass(world, "optics_changed_mask_visible"):
+            np.copyto(self.last_visible_changed_mask, solve_cell_mask)
+        with self._profile_pass(world, "optics_changed_mask_cell_dose"):
+            np.copyto(self.last_cell_dose_changed_mask, solve_cell_mask)
+        with self._profile_pass(world, "optics_changed_mask_gas_dose"):
+            np.copyto(self.last_gas_dose_changed_mask, solve_gas_mask)
 
     def _refresh_active_regions(
         self,
@@ -554,13 +673,20 @@ class OpticsSolver:
         self.reset_runtime_state()
 
     def reset_runtime_state(self, world: "WorldEngine" | None = None) -> None:
-        tile_shape = (0, 0) if world is None else (world.active.tile_height, world.active.tile_width)
-        cell_shape = (0, 0) if world is None else (world.height, world.width)
-        gas_shape = (0, 0) if world is None else (world.gas_height, world.gas_width)
+        self._reset_shadow_runtime_cache()
+        self._reset_frame_runtime_state(world)
+
+    def _reset_shadow_runtime_cache(self) -> None:
+        self._shadow_runtime_signature: tuple[int, ...] | None = None
         self._light_runtimes: list[_LightRuntime] = []
         self._light_runtime_by_name: dict[str, _LightRuntime] = {}
         self._branching_light_ids: set[int] = set()
         self._optics_runtime_by_pair: dict[tuple[int, int], _OpticsRuntime] = {}
+
+    def _reset_frame_runtime_state(self, world: "WorldEngine" | None = None) -> None:
+        tile_shape = (0, 0) if world is None else (world.active.tile_height, world.active.tile_width)
+        cell_shape = (0, 0) if world is None else (world.height, world.width)
+        gas_shape = (0, 0) if world is None else (world.gas_height, world.gas_width)
         self.last_runtime_backend = "idle"
         self.last_solve_tile_mask = np.zeros(tile_shape, dtype=np.bool_)
         self.last_solve_cell_mask = np.zeros(cell_shape, dtype=np.bool_)
@@ -569,6 +695,14 @@ class OpticsSolver:
         self.last_cell_dose_changed_mask = np.zeros(cell_shape, dtype=np.bool_)
         self.last_gas_dose_changed_mask = np.zeros(gas_shape, dtype=np.bool_)
         self.last_emitter_origin_mask = np.zeros(cell_shape, dtype=np.bool_)
+        dose_channels = 0 if world is None else int(world.cell_optical_dose.shape[0])
+        formal_gpu_frame = (
+            world is not None
+            and getattr(world, "simulation_backend", "") == "gpu"
+            and bool(getattr(world, "_world_simulation_frame_active", False))
+        )
+        exposure_shape = (0, 0, 0) if formal_gpu_frame else (dose_channels, *cell_shape)
+        self._visible_exposure = np.zeros(exposure_shape, dtype=np.float32)
         self.last_emitters: list[dict[str, object]] = []
         self.last_public_emitters: list[dict[str, object]] = []
         self.last_emitter_count = 0
@@ -577,16 +711,35 @@ class OpticsSolver:
         self.last_cell_dose_total = 0.0
         self.last_gas_dose_total = 0.0
 
-    def _load_shadow_runtime(self, world: "WorldEngine") -> None:
+    def _shadow_runtime_cache_signature(self, world: "WorldEngine") -> tuple[int, ...]:
+        table_generations = world.bridge.table_generations
+        material_table = world.bridge.shadow_typed_tables.get("material_table")
         light_table = world.bridge.shadow_typed_tables.get("light_table")
         optics_table = world.bridge.shadow_typed_tables.get("optics_table")
-        light_snapshot = world._shadow_light_type_payload()
-        optics_snapshot = world.serialize_material_optics_table()
-        self._light_runtimes = []
-        self._light_runtime_by_name = {}
-        self._branching_light_ids = set()
-        self._optics_runtime_by_pair = {}
+        material_rows = -1 if material_table is None else int(material_table.shape[0])
+        light_rows = -1 if light_table is None else int(light_table.shape[0])
+        optics_rows = -1 if optics_table is None else int(optics_table.shape[0])
+        return (
+            int(table_generations.get("materials", 0)),
+            int(table_generations.get("lights", 0)),
+            int(table_generations.get("optics", 0)),
+            material_rows,
+            light_rows,
+            optics_rows,
+        )
+
+    def _load_shadow_runtime(self, world: "WorldEngine") -> None:
+        signature = self._shadow_runtime_cache_signature(world)
+        if signature == self._shadow_runtime_signature:
+            return
+        light_table = world.bridge.shadow_typed_tables.get("light_table")
+        optics_table = world.bridge.shadow_typed_tables.get("optics_table")
+        light_runtimes: list[_LightRuntime] = []
+        light_runtime_by_name: dict[str, _LightRuntime] = {}
+        branching_light_ids: set[int] = set()
+        optics_runtime_by_pair: dict[tuple[int, int], _OpticsRuntime] = {}
         if light_table is None:
+            light_snapshot = world._shadow_light_type_payload()
             for light in light_snapshot:
                 shadow_light = world._coerce_light_type_def(light)
                 light_id = int(shadow_light.light_type_id)
@@ -602,8 +755,8 @@ class OpticsSolver:
                     dose_channel_id=int(shadow_light.dose_channel_id),
                     render_style=str(shadow_light.render_style or "diffuse"),
                 )
-                self._light_runtimes.append(runtime)
-                self._light_runtime_by_name[light_name] = runtime
+                light_runtimes.append(runtime)
+                light_runtime_by_name[light_name] = runtime
         else:
             for row in light_table:
                 if int(row["name_hash"]) == 0:
@@ -623,14 +776,15 @@ class OpticsSolver:
                     dose_channel_id=int(row["dose_channel_id"]),
                     render_style=LIGHT_RENDER_STYLE_NAMES.get(int(row["render_style_id"]), "diffuse"),
                 )
-                self._light_runtimes.append(runtime)
-                self._light_runtime_by_name[light_name] = runtime
+                light_runtimes.append(runtime)
+                light_runtime_by_name[light_name] = runtime
         if optics_table is None:
+            optics_snapshot = world.serialize_material_optics_table()
             for optics in optics_snapshot:
                 material_name = str(optics.get("material_name", ""))
                 light_name = str(optics.get("light_type", ""))
                 material_id = int(world._shadow_material_id_by_name(material_name))
-                light = self._light_runtime_by_name.get(light_name)
+                light = light_runtime_by_name.get(light_name)
                 if material_id <= 0 or light is None:
                     continue
                 runtime = _OpticsRuntime(
@@ -638,25 +792,30 @@ class OpticsSolver:
                     scattering=float(optics.get("scattering", 0.0)),
                     refraction=float(optics.get("refraction", 0.0)),
                 )
-                self._optics_runtime_by_pair[(int(material_id), light.light_type_id)] = runtime
+                optics_runtime_by_pair[(int(material_id), light.light_type_id)] = runtime
                 if runtime.scattering > 0.05 or runtime.refraction > 0.05:
-                    self._branching_light_ids.add(light.light_type_id)
-            return
-        for row in optics_table:
-            material_id = int(row["material_id"])
-            light_id = int(row["light_type_id"])
-            if not world._shadow_material_row_valid(material_id):
-                continue
-            if not world._shadow_light_row_valid(light_id):
-                continue
-            runtime = _OpticsRuntime(
-                absorption=float(row["absorption"]),
-                scattering=float(row["scattering"]),
-                refraction=float(row["refraction"]),
-            )
-            self._optics_runtime_by_pair[(material_id, light_id)] = runtime
-            if runtime.scattering > 0.05 or runtime.refraction > 0.05:
-                self._branching_light_ids.add(light_id)
+                    branching_light_ids.add(light.light_type_id)
+        else:
+            for row in optics_table:
+                material_id = int(row["material_id"])
+                light_id = int(row["light_type_id"])
+                if not world._shadow_material_row_valid(material_id):
+                    continue
+                if not world._shadow_light_row_valid(light_id):
+                    continue
+                runtime = _OpticsRuntime(
+                    absorption=float(row["absorption"]),
+                    scattering=float(row["scattering"]),
+                    refraction=float(row["refraction"]),
+                )
+                optics_runtime_by_pair[(material_id, light_id)] = runtime
+                if runtime.scattering > 0.05 or runtime.refraction > 0.05:
+                    branching_light_ids.add(light_id)
+        self._light_runtimes = light_runtimes
+        self._light_runtime_by_name = light_runtime_by_name
+        self._branching_light_ids = branching_light_ids
+        self._optics_runtime_by_pair = optics_runtime_by_pair
+        self._shadow_runtime_signature = signature
 
     def _optics_runtime(self, material_id: int, light_id: int) -> _OpticsRuntime:
         return self._optics_runtime_by_pair.get((material_id, light_id), _OpticsRuntime(0.0, 0.0, 0.0))

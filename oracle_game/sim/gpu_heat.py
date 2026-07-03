@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
+import time
 from typing import Any
 
 import numpy as np
 
+from oracle_game.sim.gpu_collapse_dirty import mark_collapse_structure_dirty_tiles_from_bridge_cell_core
 from oracle_game.types import Phase
 
 
@@ -59,6 +62,22 @@ class GPUHeatStageTargets:
     boil_targets: np.ndarray
     condense_targets: np.ndarray
 
+    @property
+    def empty(self) -> bool:
+        return (
+            self.phase_targets.size == 0
+            and self.boil_targets.size == 0
+            and self.condense_targets.size == 0
+        )
+
+    @classmethod
+    def empty_sentinel(cls) -> "GPUHeatStageTargets":
+        return cls(
+            phase_targets=np.zeros((0, 0), dtype=np.int32),
+            boil_targets=np.zeros((0, 0), dtype=np.int32),
+            condense_targets=np.zeros((0, 0, 0), dtype=np.bool_),
+        )
+
 
 class GPUHeatPipeline:
     def __init__(self) -> None:
@@ -72,11 +91,41 @@ class GPUHeatPipeline:
         self.last_cpu_ambient_upload_skipped = False
         self.last_cpu_gas_upload_skipped = False
         self.last_cpu_active_upload_skipped = False
+        self.last_pass_profile: dict[str, Any] = {"passes": [], "summary": {}}
 
     def available(self, world: "WorldEngine") -> bool:
         if getattr(world, "simulation_backend", "gpu") == "cpu":
             return False
         return bool(world.bridge.enabled and world.bridge.ctx is not None and world.bridge.ctx.version_code >= 430)
+
+    def reset_pass_profile(self) -> None:
+        self.last_pass_profile = {"passes": [], "summary": {}}
+
+    @contextmanager
+    def _profile_pass(self, world: "WorldEngine", name: str):
+        profile = self.last_pass_profile if bool(getattr(world, "profile_passes_enabled", False)) else None
+        ctx = world.bridge.ctx if bool(getattr(world, "profile_passes_sync", False)) else None
+        if profile is not None and ctx is not None:
+            ctx.finish()
+        start = time.perf_counter() if profile is not None else 0.0
+        try:
+            yield
+        finally:
+            if profile is not None:
+                if ctx is not None:
+                    ctx.finish()
+                elapsed_ms = (time.perf_counter() - start) * 1000.0
+                entry = {
+                    "name": str(name),
+                    "cpu_ms": elapsed_ms,
+                    "gpu_ms": elapsed_ms if ctx is not None else None,
+                }
+                profile["passes"].append(entry)
+                summary = profile["summary"].setdefault(str(name), {"count": 0, "cpu_ms": 0.0, "gpu_ms": None})
+                summary["count"] += 1
+                summary["cpu_ms"] += elapsed_ms
+                if ctx is not None:
+                    summary["gpu_ms"] = float(summary["gpu_ms"] or 0.0) + elapsed_ms
 
     def step(
         self,
@@ -91,30 +140,44 @@ class GPUHeatPipeline:
             raise RuntimeError("GPU heat pipeline requires a valid ModernGL context")
         self._ensure_programs(ctx)
         resources = self._ensure_resources(world)
-        self._upload_inputs(world, resources, solve_tile_mask)
+        with self._profile_pass(world, "upload_inputs"):
+            self._upload_inputs(world, resources, solve_tile_mask)
         group_x = (world.width + LOCAL_SIZE - 1) // LOCAL_SIZE
         group_y = (world.height + LOCAL_SIZE - 1) // LOCAL_SIZE
         gas_group_x = (world.gas_width + LOCAL_SIZE - 1) // LOCAL_SIZE
         gas_group_y = (world.gas_height + LOCAL_SIZE - 1) // LOCAL_SIZE
-        self._load_authoritative_bridge_inputs(world, resources, group_x, group_y, gas_group_x, gas_group_y)
-        self._run_ambient_diffuse(world, resources, gas_group_x, gas_group_y, iterations=ambient_iterations)
-        self._run_cell_heat(world, dt, resources, group_x, group_y)
-        self._run_ambient_exchange(world, dt, resources, group_x, group_y)
-        self._run_ambient_feedback(world, dt, resources, gas_group_x, gas_group_y)
-        self._run_phase_targets(world, resources, group_x, group_y)
-        self._run_boil_targets(world, resources, group_x, group_y)
-        self._run_condense_targets(world, resources, gas_group_x, gas_group_y)
-        self._run_apply_cell_targets(world, dt, resources, group_x, group_y)
-        self._run_apply_gas_targets(world, dt, resources, gas_group_x, gas_group_y)
-        self._run_apply_condense_cells(world, resources, group_x, group_y)
-        self._publish_bridge_outputs(world, resources, group_x, group_y, gas_group_x, gas_group_y)
+        with self._profile_pass(world, "load_bridge_inputs"):
+            self._load_authoritative_bridge_inputs(world, resources, group_x, group_y, gas_group_x, gas_group_y)
+        with self._profile_pass(world, "ambient_diffuse"):
+            self._run_ambient_diffuse(world, resources, gas_group_x, gas_group_y, iterations=ambient_iterations)
+        with self._profile_pass(world, "cell_heat"):
+            self._run_cell_heat(world, dt, resources, group_x, group_y)
+        with self._profile_pass(world, "ambient_exchange"):
+            self._run_ambient_exchange(world, dt, resources, group_x, group_y)
+        with self._profile_pass(world, "ambient_feedback"):
+            self._run_ambient_feedback(world, dt, resources, gas_group_x, gas_group_y)
+        with self._profile_pass(world, "phase_targets"):
+            self._run_phase_targets(world, resources, group_x, group_y)
+        with self._profile_pass(world, "boil_targets"):
+            self._run_boil_targets(world, resources, group_x, group_y)
+        with self._profile_pass(world, "condense_targets"):
+            self._run_condense_targets(world, resources, gas_group_x, gas_group_y)
+        with self._profile_pass(world, "apply_cell_targets"):
+            self._run_apply_cell_targets(world, dt, resources, group_x, group_y)
+        with self._profile_pass(world, "apply_gas_targets"):
+            self._run_apply_gas_targets(world, dt, resources, gas_group_x, gas_group_y)
+        with self._profile_pass(world, "apply_condense_cells"):
+            self._run_apply_condense_cells(world, resources, group_x, group_y)
+        with self._profile_pass(world, "publish_bridge_outputs"):
+            self._publish_bridge_outputs(world, resources, group_x, group_y, gas_group_x, gas_group_y)
         self.last_cpu_mirror_downloaded = not (
             getattr(world, "simulation_backend", "") == "gpu"
             and bool(getattr(world, "_world_simulation_frame_active", False))
         )
         if self.last_cpu_mirror_downloaded:
             ctx.finish()
-            return self._download_outputs(world, resources)
+            with self._profile_pass(world, "download_outputs"):
+                return self._download_outputs(world, resources)
         return self._empty_stage_targets(world)
 
     def release(self) -> None:
@@ -801,6 +864,9 @@ class GPUHeatPipeline:
                     return;
                 }}
                 if (!solve_gas_cell_active(gid)) {{
+                    for (int species = 0; species < gas_species_count; ++species) {{
+                        imageStore(condense_target_img, ivec3(gid, species), vec4(0.0, 0.0, 0.0, 0.0));
+                    }}
                     return;
                 }}
                 float ambient = texelFetch(ambient_tex, gid, 0).x;
@@ -963,8 +1029,8 @@ class GPUHeatPipeline:
             layout(rgba32f, binding=3) writeonly uniform image2D timer_final_img;
             layout(r32f, binding=4) writeonly uniform image2D temp_final_img;
             layout(r32f, binding=5) writeonly uniform image2D integrity_final_img;
-            layout(r32f, binding=6) writeonly uniform image2D island_id_final_img;
-            layout(r32f, binding=7) writeonly uniform image2D entity_id_final_img;
+            layout(r32f, binding=6) writeonly uniform image2D displaced_final_img;
+            layout(rg32f, binding=7) writeonly uniform image2D velocity_final_img;
 
             bool is_placeholder_material(int material_id) {{
                 if (material_id <= 0 || material_id >= {MAX_MATERIALS}) {{
@@ -992,8 +1058,8 @@ class GPUHeatPipeline:
                 imageStore(timer_final_img, cell, timer_value);
                 imageStore(temp_final_img, cell, vec4(temp_value, 0.0, 0.0, 0.0));
                 imageStore(integrity_final_img, cell, vec4(integrity_value, 0.0, 0.0, 0.0));
-                imageStore(island_id_final_img, cell, vec4(island_value, 0.0, 0.0, 0.0));
-                imageStore(entity_id_final_img, cell, vec4(entity_value, 0.0, 0.0, 0.0));
+                imageStore(displaced_final_img, cell, vec4(displaced_value, 0.0, 0.0, 0.0));
+                imageStore(velocity_final_img, cell, vec4(velocity_value, 0.0, 0.0));
             }}
 
             void copy_after_targets(ivec2 cell) {{
@@ -1427,12 +1493,9 @@ class GPUHeatPipeline:
             resources.entity_id_tex.write(world.entity_id.astype("f4").tobytes())
         if upload_displaced_from_cpu:
             resources.displaced_tex.write(world.placeholder_displaced_material.astype("f4").tobytes())
-        resources.phase_target_tex.write(np.zeros((world.height, world.width), dtype="f4").tobytes())
-        resources.boil_target_tex.write(np.zeros((world.height, world.width), dtype="f4").tobytes())
         if upload_gas_from_cpu:
             resources.gas_tex.write(world.gas_concentration.astype("f4").tobytes())
             resources.gas_out_tex.write(world.gas_concentration.astype("f4").tobytes())
-        resources.condense_target_tex.write(np.zeros(world.gas_concentration.shape, dtype="f4").tobytes())
         if upload_ambient_from_cpu:
             resources.ambient_ping.write(world.ambient_temperature.astype("f4").tobytes())
             resources.ambient_pong.write(world.ambient_temperature.astype("f4").tobytes())
@@ -1749,45 +1812,47 @@ class GPUHeatPipeline:
         group_x: int,
         group_y: int,
     ) -> None:
-        program = self.programs["apply_cell_targets"]
-        ctx = world.bridge.ctx
-        assert ctx is not None
-        self._set_uniform_if_present(program, "cell_grid_size", (world.width, world.height))
-        self._set_uniform_if_present(program, "gas_grid_size", (world.gas_width, world.gas_height))
-        self._set_uniform_if_present(program, "tile_grid_size", (world.active.tile_width, world.active.tile_height))
-        self._set_uniform_if_present(program, "gas_cell_size", world.gas_cell_size)
-        self._set_uniform_if_present(program, "tile_size", world.active.tile_size)
-        self._set_uniform_if_present(program, "dt", dt)
-        self._set_uniform_if_present(program, "phase_falling_island", int(Phase.FALLING_ISLAND))
-        self._set_uniform_if_present(program, "phase_liquid", int(Phase.LIQUID))
-        resources.material_params.bind_to_storage_buffer(binding=0)
-        resources.material_tex.use(location=1)
-        resources.active_tile_tex.use(location=2)
-        resources.material_phase_params.bind_to_storage_buffer(binding=3)
-        resources.material_response_params.bind_to_storage_buffer(binding=7)
-        resources.phase_target_tex.use(location=3)
-        resources.phase_tex.use(location=4)
-        resources.cell_flags_tex.use(location=5)
-        resources.timer_tex.use(location=6)
-        resources.boil_target_tex.use(location=7)
-        resources.temp_ping.use(location=8)
-        resources.integrity_tex.use(location=9)
-        resources.island_id_tex.use(location=10)
-        resources.entity_id_tex.use(location=11)
-        resources.displaced_tex.use(location=12)
-        resources.ambient_pong.use(location=22)
-        resources.velocity_tex.use(location=23)
-        resources.material_out_tex.bind_to_image(0, read=False, write=True)
-        resources.phase_out_tex.bind_to_image(1, read=False, write=True)
-        resources.cell_flags_out_tex.bind_to_image(2, read=False, write=True)
-        resources.timer_out_tex.bind_to_image(3, read=False, write=True)
-        resources.temp_pong.bind_to_image(4, read=False, write=True)
-        resources.integrity_out_tex.bind_to_image(5, read=False, write=True)
-        resources.island_id_out_tex.bind_to_image(6, read=False, write=True)
-        resources.entity_id_out_tex.bind_to_image(7, read=False, write=True)
-        program.run(group_x, group_y, 1)
-        self._sync_compute_writes(ctx)
-        self._run_apply_cell_aux_targets(world, dt, resources, group_x, group_y)
+        with self._profile_pass(world, "apply_cell_targets.main"):
+            program = self.programs["apply_cell_targets"]
+            ctx = world.bridge.ctx
+            assert ctx is not None
+            self._set_uniform_if_present(program, "cell_grid_size", (world.width, world.height))
+            self._set_uniform_if_present(program, "gas_grid_size", (world.gas_width, world.gas_height))
+            self._set_uniform_if_present(program, "tile_grid_size", (world.active.tile_width, world.active.tile_height))
+            self._set_uniform_if_present(program, "gas_cell_size", world.gas_cell_size)
+            self._set_uniform_if_present(program, "tile_size", world.active.tile_size)
+            self._set_uniform_if_present(program, "dt", dt)
+            self._set_uniform_if_present(program, "phase_falling_island", int(Phase.FALLING_ISLAND))
+            self._set_uniform_if_present(program, "phase_liquid", int(Phase.LIQUID))
+            resources.material_params.bind_to_storage_buffer(binding=0)
+            resources.material_tex.use(location=1)
+            resources.active_tile_tex.use(location=2)
+            resources.material_phase_params.bind_to_storage_buffer(binding=3)
+            resources.material_response_params.bind_to_storage_buffer(binding=7)
+            resources.phase_target_tex.use(location=3)
+            resources.phase_tex.use(location=4)
+            resources.cell_flags_tex.use(location=5)
+            resources.timer_tex.use(location=6)
+            resources.boil_target_tex.use(location=7)
+            resources.temp_ping.use(location=8)
+            resources.integrity_tex.use(location=9)
+            resources.island_id_tex.use(location=10)
+            resources.entity_id_tex.use(location=11)
+            resources.displaced_tex.use(location=12)
+            resources.ambient_pong.use(location=22)
+            resources.velocity_tex.use(location=23)
+            resources.material_out_tex.bind_to_image(0, read=False, write=True)
+            resources.phase_out_tex.bind_to_image(1, read=False, write=True)
+            resources.cell_flags_out_tex.bind_to_image(2, read=False, write=True)
+            resources.timer_out_tex.bind_to_image(3, read=False, write=True)
+            resources.temp_pong.bind_to_image(4, read=False, write=True)
+            resources.integrity_out_tex.bind_to_image(5, read=False, write=True)
+            resources.island_id_out_tex.bind_to_image(6, read=False, write=True)
+            resources.entity_id_out_tex.bind_to_image(7, read=False, write=True)
+            program.run(group_x, group_y, 1)
+            self._sync_compute_writes(ctx)
+        with self._profile_pass(world, "apply_cell_targets.aux"):
+            self._run_apply_cell_aux_targets(world, dt, resources, group_x, group_y)
 
     def _run_apply_cell_aux_targets(
         self,
@@ -1862,43 +1927,49 @@ class GPUHeatPipeline:
         group_x: int,
         group_y: int,
     ) -> None:
-        program = self.programs["apply_condense_cells"]
-        ctx = world.bridge.ctx
-        assert ctx is not None
-        self._set_uniform_if_present(program, "cell_grid_size", (world.width, world.height))
-        self._set_uniform_if_present(program, "gas_grid_size", (world.gas_width, world.gas_height))
-        self._set_uniform_if_present(program, "tile_grid_size", (world.active.tile_width, world.active.tile_height))
-        self._set_uniform_if_present(program, "gas_cell_size", world.gas_cell_size)
-        self._set_uniform_if_present(program, "tile_size", world.active.tile_size)
-        self._set_uniform_if_present(program, "gas_species_count", min(world.gas_concentration.shape[0], MAX_GAS_SPECIES))
-        self._set_uniform_if_present(program, "phase_falling_island", int(Phase.FALLING_ISLAND))
-        self._set_uniform_if_present(program, "phase_liquid", int(Phase.LIQUID))
-        resources.active_tile_tex.use(location=2)
-        resources.material_phase_params.bind_to_storage_buffer(binding=3)
-        resources.material_response_params.bind_to_storage_buffer(binding=7)
-        resources.gas_params.bind_to_storage_buffer(binding=8)
-        resources.material_out_tex.use(location=4)
-        resources.phase_out_tex.use(location=5)
-        resources.cell_flags_out_tex.use(location=6)
-        resources.timer_out_tex.use(location=9)
-        resources.temp_pong.use(location=10)
-        resources.integrity_out_tex.use(location=11)
-        resources.island_id_out_tex.use(location=12)
-        resources.entity_id_out_tex.use(location=13)
-        resources.displaced_out_tex.use(location=22)
-        resources.velocity_out_tex.use(location=23)
-        resources.condense_target_tex.use(location=24)
-        resources.material_tex.bind_to_image(0, read=False, write=True)
-        resources.phase_tex.bind_to_image(1, read=False, write=True)
-        resources.cell_flags_tex.bind_to_image(2, read=False, write=True)
-        resources.timer_tex.bind_to_image(3, read=False, write=True)
-        resources.temp_ping.bind_to_image(4, read=False, write=True)
-        resources.integrity_tex.bind_to_image(5, read=False, write=True)
-        resources.island_id_tex.bind_to_image(6, read=False, write=True)
-        resources.entity_id_tex.bind_to_image(7, read=False, write=True)
-        program.run(group_x, group_y, 1)
-        self._sync_compute_writes(ctx)
-        self._run_apply_condense_cell_aux(world, resources, group_x, group_y)
+        with self._profile_pass(world, "apply_condense_cells.main"):
+            program = self.programs["apply_condense_cells"]
+            ctx = world.bridge.ctx
+            assert ctx is not None
+            self._set_uniform_if_present(program, "cell_grid_size", (world.width, world.height))
+            self._set_uniform_if_present(program, "gas_grid_size", (world.gas_width, world.gas_height))
+            self._set_uniform_if_present(program, "tile_grid_size", (world.active.tile_width, world.active.tile_height))
+            self._set_uniform_if_present(program, "gas_cell_size", world.gas_cell_size)
+            self._set_uniform_if_present(program, "tile_size", world.active.tile_size)
+            self._set_uniform_if_present(
+                program,
+                "gas_species_count",
+                min(world.gas_concentration.shape[0], MAX_GAS_SPECIES),
+            )
+            self._set_uniform_if_present(program, "phase_falling_island", int(Phase.FALLING_ISLAND))
+            self._set_uniform_if_present(program, "phase_liquid", int(Phase.LIQUID))
+            resources.active_tile_tex.use(location=2)
+            resources.material_phase_params.bind_to_storage_buffer(binding=3)
+            resources.material_response_params.bind_to_storage_buffer(binding=7)
+            resources.gas_params.bind_to_storage_buffer(binding=8)
+            resources.material_out_tex.use(location=4)
+            resources.phase_out_tex.use(location=5)
+            resources.cell_flags_out_tex.use(location=6)
+            resources.timer_out_tex.use(location=9)
+            resources.temp_pong.use(location=10)
+            resources.integrity_out_tex.use(location=11)
+            resources.island_id_out_tex.use(location=12)
+            resources.entity_id_out_tex.use(location=13)
+            resources.displaced_out_tex.use(location=22)
+            resources.velocity_out_tex.use(location=23)
+            resources.condense_target_tex.use(location=24)
+            resources.material_tex.bind_to_image(0, read=False, write=True)
+            resources.phase_tex.bind_to_image(1, read=False, write=True)
+            resources.cell_flags_tex.bind_to_image(2, read=False, write=True)
+            resources.timer_tex.bind_to_image(3, read=False, write=True)
+            resources.temp_ping.bind_to_image(4, read=False, write=True)
+            resources.integrity_tex.bind_to_image(5, read=False, write=True)
+            resources.displaced_tex.bind_to_image(6, read=False, write=True)
+            resources.velocity_tex.bind_to_image(7, read=False, write=True)
+            program.run(group_x, group_y, 1)
+            self._sync_compute_writes(ctx)
+            resources.island_id_tex, resources.island_id_out_tex = resources.island_id_out_tex, resources.island_id_tex
+            resources.entity_id_tex, resources.entity_id_out_tex = resources.entity_id_out_tex, resources.entity_id_tex
 
     def _run_apply_condense_cell_aux(
         self,
@@ -1970,6 +2041,8 @@ class GPUHeatPipeline:
         )
 
     def _empty_stage_targets(self, world: "WorldEngine") -> GPUHeatStageTargets:
+        if self._formal_gpu_frame(world):
+            return GPUHeatStageTargets.empty_sentinel()
         return GPUHeatStageTargets(
             phase_targets=np.zeros((world.height, world.width), dtype=np.int32),
             boil_targets=np.zeros((world.height, world.width), dtype=np.int32),
@@ -1989,56 +2062,65 @@ class GPUHeatPipeline:
         bridge.ensure_world_resources(world)
         if not bridge.enabled or bridge.ctx is None:
             raise RuntimeError("GPU heat pipeline requires bridge GPU resources for authoritative heat state")
-        cell_program = self.programs["publish_bridge_cell"]
-        cell_program["cell_grid_size"].value = (world.width, world.height)
-        cell_program["material_tex"].value = 0
-        cell_program["phase_tex"].value = 1
-        cell_program["flags_tex"].value = 2
-        cell_program["timer_tex"].value = 3
-        cell_program["temp_tex"].value = 4
-        cell_program["integrity_tex"].value = 5
-        cell_program["island_tex"].value = 6
-        cell_program["entity_tex"].value = 7
-        cell_program["displaced_tex"].value = 8
-        cell_program["velocity_tex"].value = 9
-        resources.material_tex.use(location=0)
-        resources.phase_tex.use(location=1)
-        resources.cell_flags_tex.use(location=2)
-        resources.timer_tex.use(location=3)
-        resources.temp_ping.use(location=4)
-        resources.integrity_tex.use(location=5)
-        resources.island_id_tex.use(location=6)
-        resources.entity_id_tex.use(location=7)
-        resources.displaced_tex.use(location=8)
-        resources.velocity_tex.use(location=9)
-        bridge.textures["material"].bind_to_image(0, read=False, write=True)
-        bridge.buffers["cell_core"].bind_to_storage_buffer(binding=0)
-        bridge.buffers["island_id"].bind_to_storage_buffer(binding=1)
-        bridge.buffers["entity_id"].bind_to_storage_buffer(binding=2)
-        bridge.buffers["placeholder_displaced_material"].bind_to_storage_buffer(binding=3)
-        cell_program.run(group_x, group_y, 1)
+        with self._profile_pass(world, "publish_bridge_outputs.collapse_dirty_mark"):
+            mark_collapse_structure_dirty_tiles_from_bridge_cell_core(
+                world,
+                resources.material_tex,
+                resources.phase_tex,
+            )
+        with self._profile_pass(world, "publish_bridge_outputs.cell"):
+            cell_program = self.programs["publish_bridge_cell"]
+            cell_program["cell_grid_size"].value = (world.width, world.height)
+            cell_program["material_tex"].value = 0
+            cell_program["phase_tex"].value = 1
+            cell_program["flags_tex"].value = 2
+            cell_program["timer_tex"].value = 3
+            cell_program["temp_tex"].value = 4
+            cell_program["integrity_tex"].value = 5
+            cell_program["island_tex"].value = 6
+            cell_program["entity_tex"].value = 7
+            cell_program["displaced_tex"].value = 8
+            cell_program["velocity_tex"].value = 9
+            resources.material_tex.use(location=0)
+            resources.phase_tex.use(location=1)
+            resources.cell_flags_tex.use(location=2)
+            resources.timer_tex.use(location=3)
+            resources.temp_ping.use(location=4)
+            resources.integrity_tex.use(location=5)
+            resources.island_id_tex.use(location=6)
+            resources.entity_id_tex.use(location=7)
+            resources.displaced_tex.use(location=8)
+            resources.velocity_tex.use(location=9)
+            bridge.textures["material"].bind_to_image(0, read=False, write=True)
+            bridge.buffers["cell_core"].bind_to_storage_buffer(binding=0)
+            bridge.buffers["island_id"].bind_to_storage_buffer(binding=1)
+            bridge.buffers["entity_id"].bind_to_storage_buffer(binding=2)
+            bridge.buffers["placeholder_displaced_material"].bind_to_storage_buffer(binding=3)
+            cell_program.run(group_x, group_y, 1)
 
-        gas_program = self.programs["publish_bridge_gas"]
-        gas_program["gas_grid_size"].value = (world.gas_width, world.gas_height)
-        gas_program["species_count"].value = int(world.gas_concentration.shape[0])
-        gas_program["ambient_tex"].value = 0
-        gas_program["gas_tex"].value = 2
-        resources.ambient_pong.use(location=0)
-        resources.gas_out_tex.use(location=2)
-        bridge.textures["ambient_temperature"].bind_to_image(1, read=False, write=True)
-        bridge.buffers["gas_concentration"].bind_to_storage_buffer(binding=4)
-        gas_program.run(gas_group_x, gas_group_y, int(world.gas_concentration.shape[0]))
+        with self._profile_pass(world, "publish_bridge_outputs.gas"):
+            gas_program = self.programs["publish_bridge_gas"]
+            gas_program["gas_grid_size"].value = (world.gas_width, world.gas_height)
+            gas_program["species_count"].value = int(world.gas_concentration.shape[0])
+            gas_program["ambient_tex"].value = 0
+            gas_program["gas_tex"].value = 2
+            resources.ambient_pong.use(location=0)
+            resources.gas_out_tex.use(location=2)
+            bridge.textures["ambient_temperature"].bind_to_image(1, read=False, write=True)
+            bridge.buffers["gas_concentration"].bind_to_storage_buffer(binding=4)
+            gas_program.run(gas_group_x, gas_group_y, int(world.gas_concentration.shape[0]))
 
-        self._sync_compute_writes(bridge.ctx)
-        bridge.mark_gpu_authoritative(
-            "cell_core",
-            "material",
-            "island_id",
-            "entity_id",
-            "placeholder_displaced_material",
-            "ambient_temperature",
-            "gas_concentration",
-        )
+        with self._profile_pass(world, "publish_bridge_outputs.sync"):
+            self._sync_compute_writes(bridge.ctx)
+            bridge.mark_gpu_authoritative(
+                "cell_core",
+                "material",
+                "island_id",
+                "entity_id",
+                "placeholder_displaced_material",
+                "ambient_temperature",
+                "gas_concentration",
+            )
 
     def _set_uniform_if_present(self, program: Any, name: str, value: Any) -> None:
         try:

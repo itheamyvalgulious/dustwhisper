@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
+import inspect
 import json
 import random
+import threading
 from types import ModuleType, SimpleNamespace
 import sys
 from urllib.error import HTTPError
@@ -13,7 +15,10 @@ import numpy as np
 import pytest
 
 import oracle_game.enginedemo as enginedemo_module
+import scripts.benchmark_engine as benchmark_engine
 from oracle_game.gpu import (
+    CPU_READBACK_LATENCY_FRAMES,
+    GPU_READBACK_LATENCY_FRAMES,
     READBACK_CHANNEL_BITS,
     active_meta_dtype,
     collapse_component_dtype,
@@ -49,9 +54,13 @@ from oracle_game.gpu import (
     material_table_dtype,
 )
 from oracle_game.enginedemo import (
+    DEMO_AMBIENT_BOTTOM_LIGHT,
+    DEMO_AMBIENT_TOP_LIGHT,
     DEMO_CONTROLLER_ENTITY_ID,
     DEMO_FRAGMENT_SHADER_SOURCE,
+    DEMO_LOGICAL_WORLD_SCALE,
     DEMO_PATTERN_SCALE,
+    DEMO_TARGET_CELL_PIXELS,
     ENGINE_DEMO_TITLE,
     apply_demo_paint,
     apply_demo_render_uniforms,
@@ -61,6 +70,7 @@ from oracle_game.enginedemo import (
     build_demo_controller_state,
     build_demo_render_uniforms,
     clamp_demo_brush_radius,
+    compute_demo_grid_sizing,
     cycle_demo_brush_mode,
     cycle_demo_named_choice,
     demo_default_focus_world,
@@ -83,13 +93,50 @@ from oracle_game.enginedemo import (
     is_demo_brush_cycle_key,
     is_demo_optics_cycle_key,
     is_demo_reset_key,
+    queue_demo_paint,
     resolve_demo_paint_command,
 )
 from oracle_game.http_console import EngineHTTPConsole, EngineRunState
 from oracle_game.paging import RingPagingWindow
 from oracle_game.readback_contract import READBACK_ALLOWED_CHANNELS
 from oracle_game.readback import PBOReadbackRing
-from oracle_game.sim.gpu_reactions import GPUDeferredActionBatch
+from oracle_game.sim import gpu_collapse_dirty as collapse_dirty
+from oracle_game.sim.gpu_collapse import (
+    FORMAL_CONNECTED_CELL_FRONTIER_TILE_COUNT_BUFFER,
+    FORMAL_CONNECTED_CELL_FRONTIER_TILE_DISPATCH_ARGS_BUFFER,
+    FORMAL_CONNECTED_CELL_FRONTIER_TILE_FLAGS_BUFFER,
+    FORMAL_CONNECTED_CELL_FRONTIER_TILE_LIST_BUFFER,
+    FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_COUNT_BUFFER,
+    FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_DISPATCH_ARGS_BUFFER,
+    FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_FLAGS_BUFFER,
+    FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_LIST_BUFFER,
+    FORMAL_CONNECTED_FRONTIER_BUFFER,
+    FORMAL_CONNECTED_FRONTIER_SCRATCH_BUFFER,
+    FORMAL_CONNECTED_PROCESSED_BUFFER,
+    FORMAL_CONNECTED_TILE_COUNT_BUFFER,
+    FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER,
+    FORMAL_CONNECTED_TILE_FRONTIER_BUFFER,
+    FORMAL_CONNECTED_TILE_FRONTIER_DISPATCH_ARGS_BUFFER,
+    FORMAL_CONNECTED_TILE_FRONTIER_LIST_BUFFER,
+    FORMAL_CONNECTED_TILE_LIST_BUFFER,
+    FORMAL_CONNECTED_TILE_REFINE_PASS_COUNT,
+    FORMAL_CONNECTED_TILE_SCRATCH_DISPATCH_ARGS_BUFFER,
+    GPUCollapsePipeline,
+)
+from oracle_game.sim.gpu_collapse_dirty import (
+    COLLAPSE_STRUCTURE_ACTIVE_TILE_COUNT_BUFFER,
+    COLLAPSE_STRUCTURE_ACTIVE_TILE_DISPATCH_ARGS_BUFFER,
+    COLLAPSE_STRUCTURE_ACTIVE_TILE_LIST_BUFFER,
+    COLLAPSE_STRUCTURE_DIRTY_TILE_MASK_BUFFER,
+    set_collapse_structure_dirty_tile_bounds,
+)
+from oracle_game.sim.gpu_heat import GPUHeatPipeline, GPUHeatStageTargets
+from oracle_game.sim.gpu_reactions import (
+    FORMAL_GPU_EMPTY_DEFERRED_BATCH,
+    GPUDeferredActionBatch,
+    GPUReactionBridgeInputLoads,
+    GPUReactionPipeline,
+)
 from oracle_game.sim.gpu_motion import (
     ISLAND_RESOLVE_BLOCKED,
     ISLAND_RESOLVE_DIRECT,
@@ -97,9 +144,14 @@ from oracle_game.sim.gpu_motion import (
     POWDER_RESOLVE_BLOCKED,
     POWDER_RESOLVE_DDA,
     POWDER_RESOLVE_FALLBACK,
+    GPUMotionPipeline,
     falling_island_reservation_dtype,
     powder_reservation_dtype,
 )
+from oracle_game.sim.gpu_liquid import GPULiquidPipeline, PASS_LOCAL_SIZE
+from oracle_game.sim.gpu_optics import GPUOpticsPipeline
+from oracle_game.sim.optics import OpticsSolver
+from oracle_game.sim.utils import tile_mask_to_cell_mask, tile_mask_to_gas_mask
 from oracle_game.types import CarrierIntent, CellFlag, ChangeIntent, CollapseBehavior, DebugView, Direction, EntityObservationSpec, EntityPlaceholder, EntityState, EntityStatePatch, FallingIslandRecord, ForceSource, ObservationTarget, PageStripeUpdate, PairReactionRule, Phase, ReactionAction, ReactionType, ReadbackRequest, SelfReactionRule, TargetQuery, WorldCommand, WorldFrameInput
 from oracle_game.world import WorldEngine
 
@@ -165,6 +217,131 @@ def _read_bridge_texture_f32(engine: WorldEngine, name: str, shape: tuple[int, .
 def _read_bridge_buffer_f32(engine: WorldEngine, name: str, shape: tuple[int, ...]) -> np.ndarray:
     buffer = engine.bridge.buffers[name]
     return np.frombuffer(buffer.read(), dtype="f4").reshape(shape)
+
+
+def _reference_tile_mask_to_cell_mask(tile_mask: np.ndarray, *, tile_size: int, width: int, height: int) -> np.ndarray:
+    cell_mask = np.zeros((height, width), dtype=np.bool_)
+    for tile_y, tile_x in np.argwhere(np.asarray(tile_mask, dtype=np.bool_)):
+        x0 = int(tile_x) * tile_size
+        y0 = int(tile_y) * tile_size
+        x1 = min(width, x0 + tile_size)
+        y1 = min(height, y0 + tile_size)
+        cell_mask[y0:y1, x0:x1] = True
+    return cell_mask
+
+
+def _reference_tile_mask_to_gas_mask(
+    tile_mask: np.ndarray,
+    *,
+    tile_size: int,
+    gas_cell_size: int,
+    width: int,
+    height: int,
+    gas_width: int,
+    gas_height: int,
+) -> np.ndarray:
+    gas_mask = np.zeros((gas_height, gas_width), dtype=np.bool_)
+    for tile_y, tile_x in np.argwhere(np.asarray(tile_mask, dtype=np.bool_)):
+        x0 = int(tile_x) * tile_size
+        y0 = int(tile_y) * tile_size
+        x1 = min(width, x0 + tile_size)
+        y1 = min(height, y0 + tile_size)
+        gx0 = max(0, x0 // gas_cell_size)
+        gy0 = max(0, y0 // gas_cell_size)
+        gx1 = min(gas_width, (x1 + gas_cell_size - 1) // gas_cell_size)
+        gy1 = min(gas_height, (y1 + gas_cell_size - 1) // gas_cell_size)
+        gas_mask[gy0:gy1, gx0:gx1] = True
+    return gas_mask
+
+
+def test_tile_mask_to_cell_mask_dense_and_full_paths_match_reference() -> None:
+    tile_mask = np.array(
+        [
+            [True, False, True],
+            [True, True, False],
+        ],
+        dtype=np.bool_,
+    )
+
+    dense_mask = tile_mask_to_cell_mask(tile_mask, tile_size=32, width=70, height=50)
+    full_mask = tile_mask_to_cell_mask(np.ones((2, 3), dtype=np.bool_), tile_size=32, width=70, height=50)
+    empty_mask = tile_mask_to_cell_mask(np.zeros((2, 3), dtype=np.bool_), tile_size=32, width=70, height=50)
+
+    assert np.array_equal(
+        dense_mask,
+        _reference_tile_mask_to_cell_mask(tile_mask, tile_size=32, width=70, height=50),
+    )
+    assert full_mask.shape == (50, 70)
+    assert bool(np.all(full_mask))
+    assert empty_mask.shape == (50, 70)
+    assert not bool(np.any(empty_mask))
+
+
+def test_tile_mask_to_gas_mask_dense_full_and_non_divisible_paths_match_reference() -> None:
+    tile_mask = np.array(
+        [
+            [True, False, True],
+            [True, True, False],
+        ],
+        dtype=np.bool_,
+    )
+    gas_width = (70 + 4 - 1) // 4
+    gas_height = (50 + 4 - 1) // 4
+
+    dense_mask = tile_mask_to_gas_mask(
+        tile_mask,
+        tile_size=32,
+        gas_cell_size=4,
+        width=70,
+        height=50,
+        gas_width=gas_width,
+        gas_height=gas_height,
+    )
+    full_mask = tile_mask_to_gas_mask(
+        np.ones((2, 3), dtype=np.bool_),
+        tile_size=32,
+        gas_cell_size=4,
+        width=70,
+        height=50,
+        gas_width=gas_width,
+        gas_height=gas_height,
+    )
+    non_divisible_mask = tile_mask_to_gas_mask(
+        tile_mask,
+        tile_size=10,
+        gas_cell_size=4,
+        width=21,
+        height=17,
+        gas_width=(21 + 4 - 1) // 4,
+        gas_height=(17 + 4 - 1) // 4,
+    )
+
+    assert np.array_equal(
+        dense_mask,
+        _reference_tile_mask_to_gas_mask(
+            tile_mask,
+            tile_size=32,
+            gas_cell_size=4,
+            width=70,
+            height=50,
+            gas_width=gas_width,
+            gas_height=gas_height,
+        ),
+    )
+    assert full_mask.shape == (gas_height, gas_width)
+    assert bool(np.all(full_mask))
+    assert np.array_equal(
+        non_divisible_mask,
+        _reference_tile_mask_to_gas_mask(
+            tile_mask,
+            tile_size=10,
+            gas_cell_size=4,
+            width=21,
+            height=17,
+            gas_width=(21 + 4 - 1) // 4,
+            gas_height=(17 + 4 - 1) // 4,
+        ),
+    )
 
 
 def _expected_compiled_material_action(row: np.void) -> tuple[np.ndarray, np.ndarray]:
@@ -256,10 +433,87 @@ def _readback_cell_window(
     request = ReadbackRequest(center_x=center_x, center_y=center_y, width=width, height=height, channels=("cell",))
     payload = engine._make_readback_payload(request)
     assert engine.bridge.queue_readback(engine.frame_id, request, payload)
-    result = engine.bridge.poll_readback(engine.frame_id + 1)
+    result = engine.bridge.poll_readback(_next_bridge_readback_min_poll_frame(engine.bridge))
     assert result is not None
     cell = result.payload["cell"]
     return unpack_cell_core(cell["core_words"]), cell
+
+
+def _next_bridge_readback_min_poll_frame(bridge: GPUBridge) -> int:
+    min_poll_frames = [
+        int(slot.min_poll_frame_id)
+        for slot in bridge.readback_slots
+        if slot.request is not None and slot.min_poll_frame_id >= 0
+    ]
+    assert min_poll_frames
+    return min(min_poll_frames)
+
+
+def _collect_ready_readbacks_at_min_poll(engine: WorldEngine) -> None:
+    engine._collect_ready_readbacks(_next_bridge_readback_min_poll_frame(engine.bridge))
+
+
+def _run_cpu_frame_until_next_readback_min_poll(engine: WorldEngine) -> object:
+    min_poll_frame = _next_bridge_readback_min_poll_frame(engine.bridge)
+    while engine.frame_id + 1 < min_poll_frame:
+        engine.run_cpu_frame()
+    return engine.run_cpu_frame()
+
+
+def _http_tick_until_bridge_readback_min_poll(base_url: str, engine: WorldEngine) -> None:
+    min_poll_frame = _next_bridge_readback_min_poll_frame(engine.bridge)
+    while engine.frame_id < min_poll_frame:
+        _http_json("POST", f"{base_url}/api/control/tick", {})
+
+
+def _bridge_island_runtime_records(engine: WorldEngine) -> np.ndarray:
+    capacity = int(np.frombuffer(engine.bridge.buffers["island_runtime_count"].read(size=4), dtype=np.int32, count=1)[0])
+    if capacity <= 0:
+        return np.zeros((0,), dtype=island_runtime_dtype())
+    records = np.frombuffer(
+        engine.bridge.buffers["island_runtime"].read(size=capacity * island_runtime_dtype().itemsize),
+        dtype=island_runtime_dtype(),
+        count=capacity,
+    )
+    return records[records["island_id"] > 0].copy()
+
+
+def _bridge_collapse_deferred_region_requests(engine: WorldEngine) -> list[tuple[int, int, int, int]]:
+    count_name = "collapse_deferred_region_request_count"
+    request_name = "collapse_deferred_region_requests"
+    if count_name not in engine.bridge.buffers or request_name not in engine.bridge.buffers:
+        return []
+    count = int(np.frombuffer(engine.bridge.buffers[count_name].read(size=4), dtype=np.uint32, count=1)[0])
+    if count <= 0:
+        return []
+    capacity = int(engine.bridge.buffers[request_name].size) // (4 * np.dtype(np.int32).itemsize)
+    count = min(count, capacity)
+    requests = np.frombuffer(
+        engine.bridge.buffers[request_name].read(size=count * 4 * np.dtype(np.int32).itemsize),
+        dtype=np.int32,
+        count=count * 4,
+    ).reshape((count, 4))
+    return [tuple(int(value) for value in request.tolist()) for request in requests]
+
+
+def _forbid_formal_cpu_connected_dispatch(monkeypatch: pytest.MonkeyPatch, engine: WorldEngine) -> None:
+    def fail_region_layers(*args: object, **kwargs: object) -> list[list[tuple[int, int, int, int]]]:
+        raise AssertionError("formal collapse must not dispatch connected expansion through CPU region layers")
+
+    def fail_candidate_regions(*args: object, **kwargs: object) -> list[tuple[int, int, int, int]]:
+        raise AssertionError("formal collapse must not build connected candidate rectangles on CPU")
+
+    def fail_horizontal_search_region(*args: object, **kwargs: object) -> tuple[int, int, int, int]:
+        raise AssertionError("formal collapse must not use a CPU-derived horizontal connected search band")
+
+    monkeypatch.setattr(engine.collapse_solver, "_formal_connected_region_layers", fail_region_layers, raising=False)
+    monkeypatch.setattr(engine.collapse_solver, "_formal_connected_candidate_regions", fail_candidate_regions, raising=False)
+    monkeypatch.setattr(
+        engine.collapse_solver.gpu_pipeline,
+        "_formal_horizontal_search_region",
+        fail_horizontal_search_region,
+        raising=False,
+    )
 
 
 def _bridge_cell_core(engine: WorldEngine) -> dict[str, np.ndarray]:
@@ -973,6 +1227,48 @@ def test_patch_material_changes_material_gas_tag_mask_solver_behavior_in_cpu_and
     assert cpu_enabled > 0.0
 
 
+def test_gpu_reaction_action_filter_includes_material_gas_tag_trigger_slots() -> None:
+    engine = WorldEngine(width=32, height=24)
+    if not engine.reaction_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU reaction pipeline is not available")
+    tag_mask = 1
+    engine.patch_gas("poison_gas", material_reaction_tag_mask=tag_mask)
+    engine.patch_material("gold_solid", material_tag_mask=0, gas_tag_mask=tag_mask)
+    action_index = len(engine.rulebook.reaction_actions)
+    engine.update_reaction_table(
+        [ReactionAction(ReactionType.MODIFY_TEMPERATURE, delta=8.0, duration=0)],
+        {
+            "material_material": [],
+            "material_gas": [
+                PairReactionRule(
+                    lhs_tag_mask=tag_mask,
+                    rhs_tag_mask=tag_mask,
+                    threshold=0.1,
+                    trigger_slot_index=0,
+                )
+            ],
+            "material_light": [],
+            "gas_gas": [],
+            "gas_light": [],
+            "self_rules": [],
+        },
+    )
+    slots = engine.rulebook.materials_by_name["gold_solid"].reaction_slots
+    engine.patch_material("gold_solid", reaction_slots=(action_index,) + tuple(slots[1:]))
+    engine.clear_cell_region(0, 0, engine.width, engine.height)
+    engine.set_cell(8, 8, "gold_solid", mark_dirty=False)
+    poison_gas = engine.rulebook.gas_id("poison_gas")
+    gy, gx = engine.cell_to_gas(8, 8)
+    engine.gas_concentration[poison_gas, gy, gx] = 0.5
+    engine.active.mark_rect(0, 0, engine.width, engine.height)
+
+    before = float(engine.cell_temperature[8, 8])
+    engine.reaction_solver._run_material_gas(engine)
+
+    assert engine.reaction_solver.last_backend == "gpu"
+    assert np.isclose(float(engine.cell_temperature[8, 8]), before + 4.0)
+
+
 def test_patch_material_changes_material_light_tag_mask_solver_behavior_in_cpu_and_gpu_paths() -> None:
     def run_case(*, use_gpu: bool, light_tag_mask: int) -> float:
         engine = WorldEngine(width=32, height=24, simulation_backend="gpu" if use_gpu else "cpu")
@@ -1020,6 +1316,47 @@ def test_patch_material_changes_material_light_tag_mask_solver_behavior_in_cpu_a
     assert cpu_enabled > 0.0
 
 
+def test_gpu_reaction_action_filter_includes_material_light_tag_trigger_slots() -> None:
+    engine = WorldEngine(width=32, height=24)
+    if not engine.reaction_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU reaction pipeline is not available")
+    tag_mask = 1
+    engine.patch_material("gold_solid", material_tag_mask=0, light_tag_mask=tag_mask)
+    action_index = len(engine.rulebook.reaction_actions)
+    engine.update_reaction_table(
+        [ReactionAction(ReactionType.MODIFY_TEMPERATURE, delta=10.0, duration=0)],
+        {
+            "material_material": [],
+            "material_gas": [],
+            "material_light": [
+                PairReactionRule(
+                    lhs_tag_mask=tag_mask,
+                    rhs_light="magic_light",
+                    threshold=0.1,
+                    trigger_slot_index=0,
+                )
+            ],
+            "gas_gas": [],
+            "gas_light": [],
+            "self_rules": [],
+        },
+    )
+    slots = engine.rulebook.materials_by_name["gold_solid"].reaction_slots
+    engine.patch_material("gold_solid", reaction_slots=(action_index,) + tuple(slots[1:]))
+    engine.clear_cell_region(0, 0, engine.width, engine.height)
+    engine.set_cell(8, 8, "gold_solid", mark_dirty=False)
+    magic_light = engine.rulebook.light_id("magic_light")
+    dose_channel = engine.rulebook.lights_by_id[magic_light].dose_channel_id
+    engine.cell_optical_dose[dose_channel, 8, 8] = 0.4
+    engine.active.mark_rect(0, 0, engine.width, engine.height)
+
+    before = float(engine.cell_temperature[8, 8])
+    engine.reaction_solver._run_material_light(engine)
+
+    assert engine.reaction_solver.last_backend == "gpu"
+    assert np.isclose(float(engine.cell_temperature[8, 8]), before + 4.0)
+
+
 def test_patch_material_changes_liquid_solver_kind_behavior_in_cpu_and_gpu_paths() -> None:
     water_id = WorldEngine(width=4, height=4).rulebook.material_id("water_liquid")
 
@@ -1048,6 +1385,48 @@ def test_patch_material_changes_liquid_solver_kind_behavior_in_cpu_and_gpu_paths
     assert cpu_tile[1] == water_id
     assert cpu_columnar[0] == water_id
     assert cpu_columnar[1] == 0
+
+
+def test_gpu_liquid_vertical_seam_moves_continuous_run_into_neighbor_tile_empty_run() -> None:
+    engine = WorldEngine(width=64, height=64, simulation_backend="gpu")
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    water_id = engine.rulebook.material_id("water_liquid")
+    engine.clear_cell_region(0, 0, engine.width, engine.height)
+    for x in range(29, 32):
+        engine.set_cell(x, 10, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.set_cell(x, 11, "raw_stone_solid", mark_dirty=False)
+    engine.set_cell(28, 10, "raw_stone_solid", mark_dirty=False)
+    engine.active.mark_rect(0, 0, 32, 32)
+
+    engine.liquid_solver.step(engine)
+
+    assert engine.liquid_solver.last_backend == "gpu"
+    assert [int(engine.material_id[10, x]) for x in range(29, 32)] == [0, 0, 0]
+    assert [int(engine.material_id[10, x]) for x in range(32, 35)] == [water_id, water_id, water_id]
+
+
+def test_gpu_liquid_horizontal_seam_packs_run_around_explicit_blockers() -> None:
+    engine = WorldEngine(width=64, height=64, simulation_backend="gpu")
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    water_id = engine.rulebook.material_id("water_liquid")
+    placeholder_id = engine.rulebook.material_id("placeholder_solid")
+    engine.clear_cell_region(0, 0, engine.width, engine.height)
+    for x in range(14, 18):
+        engine.set_cell(x, 31, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+    engine.set_cell(14, 32, "placeholder_solid", mark_dirty=False)
+    engine.phase[32, 18] = int(Phase.FALLING_ISLAND)
+    engine.active.mark_rect(0, 0, 32, 32)
+
+    engine.liquid_solver.step(engine)
+
+    assert engine.liquid_solver.last_backend == "gpu"
+    assert int(engine.material_id[32, 14]) == placeholder_id
+    assert int(engine.phase[32, 18]) == int(Phase.FALLING_ISLAND)
+    assert [int(engine.material_id[32, x]) for x in range(15, 18)] == [water_id, water_id, water_id]
+    assert int(engine.material_id[32, 18]) == 0
+    assert [int(engine.material_id[31, x]) for x in range(14, 18)] == [0, 0, 0, water_id]
 
 
 def test_patch_material_changes_collapse_behavior_in_cpu_and_gpu_paths() -> None:
@@ -1146,7 +1525,7 @@ def test_patch_material_changes_max_dda_step_motion_behavior_in_cpu_and_gpu_path
         engine.set_cell(5, 9, "raw_stone_solid", mark_dirty=False)
         engine.set_cell(4, 9, "raw_stone_solid", mark_dirty=False)
         engine.set_cell(6, 9, "raw_stone_solid", mark_dirty=False)
-        engine.velocity[8, 5] = np.array([4.0, 0.0], dtype=np.float32)
+        engine.velocity[8, 5] = np.array([120.0, 0.0], dtype=np.float32)
 
         engine.motion_solver.step(engine, 1.0 / 60.0)
         return int(engine.material_id[8, 5]), int(engine.material_id[8, 7])
@@ -1175,7 +1554,7 @@ def test_patch_material_changes_friction_motion_behavior_in_cpu_and_gpu_paths() 
         engine.set_cell(7, 9, "raw_stone_solid", mark_dirty=False)
         engine.set_cell(8, 9, "raw_stone_solid", mark_dirty=False)
         engine.set_cell(9, 9, "raw_stone_solid", mark_dirty=False)
-        engine.velocity[8, 8] = np.array([0.4, 0.9], dtype=np.float32)
+        engine.velocity[8, 8] = np.array([24.0, 54.0], dtype=np.float32)
 
         engine.motion_solver.step(engine, 1.0 / 60.0)
         return (
@@ -1213,7 +1592,7 @@ def test_patch_material_changes_elasticity_motion_behavior_in_cpu_and_gpu_paths(
         engine.set_cell(7, 9, "raw_stone_solid", mark_dirty=False)
         engine.set_cell(8, 9, "raw_stone_solid", mark_dirty=False)
         engine.set_cell(9, 9, "raw_stone_solid", mark_dirty=False)
-        engine.velocity[8, 8] = np.array([0.0, 1.0], dtype=np.float32)
+        engine.velocity[8, 8] = np.array([0.0, 60.0], dtype=np.float32)
 
         engine.motion_solver.step(engine, 1.0 / 60.0)
         return (
@@ -1251,7 +1630,7 @@ def test_patch_material_changes_gravity_scale_motion_behavior_in_cpu_and_gpu_pat
         engine.set_cell(8, 8, "pollution_powder", phase=Phase.POWDER, mark_dirty=False)
         engine.velocity.fill(0.0)
 
-        engine.motion_solver.step(engine, 1.0 / 60.0)
+        engine.motion_solver.step(engine, 1.0)
         ys, xs = np.nonzero(engine.material_id == pollution_id)
         return int(xs[0]), int(ys[0])
 
@@ -1278,7 +1657,7 @@ def test_patch_material_changes_wind_coupling_motion_behavior_in_cpu_and_gpu_pat
         engine.set_cell(8, 8, "pollution_powder", phase=Phase.POWDER, mark_dirty=False)
         engine.velocity.fill(0.0)
         engine.flow_velocity.fill(0.0)
-        engine.inject_velocity(8, 8, (20.0, 0.0), radius=4, carrier="flow", mode="set", immediate=True)
+        engine.inject_velocity(8, 8, (600.0, 0.0), radius=4, carrier="flow", mode="set", immediate=True)
 
         for _ in range(6):
             engine.motion_solver.step(engine, 1.0 / 60.0)
@@ -1311,7 +1690,7 @@ def test_patch_material_changes_drag_scale_motion_behavior_in_cpu_and_gpu_paths(
         engine.set_cell(4, 9, "raw_stone_solid", mark_dirty=False)
         engine.set_cell(6, 9, "raw_stone_solid", mark_dirty=False)
         engine.velocity.fill(0.0)
-        engine.velocity[8, 5] = np.array([0.6, 0.0], dtype=np.float32)
+        engine.velocity[8, 5] = np.array([60.0, 0.0], dtype=np.float32)
 
         engine.motion_solver.step(engine, 1.0 / 60.0)
         return int(engine.material_id[8, 5]), int(engine.material_id[8, 6])
@@ -1325,6 +1704,70 @@ def test_patch_material_changes_drag_scale_motion_behavior_in_cpu_and_gpu_paths(
     assert cpu_damped == gpu_damped
     assert cpu_free == (0, sand_id)
     assert cpu_damped == (sand_id, 0)
+
+
+def test_gpu_motion_powder_dda_reservation_blocks_crossing_path_intents() -> None:
+    engine = WorldEngine(width=24, height=24, simulation_backend="gpu")
+    if not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU motion pipeline is not available")
+    sand_id = engine.rulebook.material_id("sand_powder")
+    engine.patch_material("sand_powder", gravity_scale=0.0, wind_coupling=0.0, drag_scale=0.0, max_dda_step=4)
+    engine.clear_cell_region(0, 0, engine.width, engine.height)
+    engine.velocity.fill(0.0)
+    engine.set_cell(4, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
+    engine.set_cell(6, 10, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
+    engine.velocity[8, 4] = np.array([240.0, 0.0], dtype=np.float32)
+    engine.velocity[10, 6] = np.array([0.0, -240.0], dtype=np.float32)
+
+    engine.motion_solver.step(engine, 1.0 / 60.0)
+
+    reservations = {
+        tuple(int(value) for value in record["source_xy"]): record
+        for record in engine.motion_solver.last_powder_reservations
+    }
+    assert engine.motion_solver.last_backend == "gpu"
+    assert reservations[(4, 8)]["reserved_target_xy"].tolist() == [8, 8]
+    assert reservations[(4, 8)]["resolved_target_xy"].tolist() == [5, 8]
+    assert int(reservations[(4, 8)]["resolve_state"]) == POWDER_RESOLVE_DDA
+    assert reservations[(6, 10)]["reserved_target_xy"].tolist() == [6, 6]
+    assert reservations[(6, 10)]["resolved_target_xy"].tolist() == [6, 6]
+    assert int(reservations[(6, 10)]["resolve_state"]) == POWDER_RESOLVE_DDA
+    assert int(engine.material_id[8, 5]) == sand_id
+    assert int(engine.material_id[6, 6]) == sand_id
+    assert int(engine.material_id[8, 8]) == 0
+
+
+def test_gpu_motion_liquid_dda_reservation_blocks_crossing_path_intents() -> None:
+    engine = WorldEngine(width=24, height=24, simulation_backend="gpu")
+    if not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU motion pipeline is not available")
+    water_id = engine.rulebook.material_id("water_liquid")
+    engine.patch_material("water_liquid", gravity_scale=0.0, wind_coupling=0.0, drag_scale=0.0, max_dda_step=4)
+    engine.clear_cell_region(0, 0, engine.width, engine.height)
+    engine.velocity.fill(0.0)
+    engine.set_cell(4, 8, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+    engine.set_cell(6, 10, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+    engine.velocity[8, 4] = np.array([240.0, 0.0], dtype=np.float32)
+    engine.velocity[10, 6] = np.array([0.0, -240.0], dtype=np.float32)
+
+    engine.motion_solver.step(engine, 1.0 / 60.0)
+
+    reservations = {
+        tuple(int(value) for value in record["source_xy"]): record
+        for record in engine.motion_solver.last_powder_reservations
+    }
+    assert engine.motion_solver.last_backend == "gpu"
+    assert reservations[(4, 8)]["reserved_target_xy"].tolist() == [8, 8]
+    assert reservations[(4, 8)]["resolved_target_xy"].tolist() == [5, 8]
+    assert int(reservations[(4, 8)]["resolve_state"]) == POWDER_RESOLVE_DDA
+    assert reservations[(6, 10)]["reserved_target_xy"].tolist() == [6, 6]
+    assert reservations[(6, 10)]["resolved_target_xy"].tolist() == [6, 6]
+    assert int(reservations[(6, 10)]["resolve_state"]) == POWDER_RESOLVE_DDA
+    assert int(engine.material_id[8, 5]) == water_id
+    assert int(engine.phase[8, 5]) == int(Phase.LIQUID)
+    assert int(engine.material_id[6, 6]) == water_id
+    assert int(engine.phase[6, 6]) == int(Phase.LIQUID)
+    assert int(engine.material_id[8, 8]) == 0
 
 
 def test_update_material_table_changes_heat_solver_behavior_in_cpu_and_gpu_paths() -> None:
@@ -1682,7 +2125,7 @@ def test_update_material_table_changes_max_dda_step_motion_behavior_in_cpu_and_g
         engine.set_cell(5, 9, "raw_stone_solid", mark_dirty=False)
         engine.set_cell(4, 9, "raw_stone_solid", mark_dirty=False)
         engine.set_cell(6, 9, "raw_stone_solid", mark_dirty=False)
-        engine.velocity[8, 5] = np.array([4.0, 0.0], dtype=np.float32)
+        engine.velocity[8, 5] = np.array([120.0, 0.0], dtype=np.float32)
 
         engine.motion_solver.step(engine, 1.0 / 60.0)
         return int(engine.material_id[8, 5]), int(engine.material_id[8, 7])
@@ -1721,7 +2164,7 @@ def test_update_material_table_changes_friction_motion_behavior_in_cpu_and_gpu_p
         engine.set_cell(7, 9, "raw_stone_solid", mark_dirty=False)
         engine.set_cell(8, 9, "raw_stone_solid", mark_dirty=False)
         engine.set_cell(9, 9, "raw_stone_solid", mark_dirty=False)
-        engine.velocity[8, 8] = np.array([0.4, 0.9], dtype=np.float32)
+        engine.velocity[8, 8] = np.array([24.0, 54.0], dtype=np.float32)
 
         engine.motion_solver.step(engine, 1.0 / 60.0)
         return (
@@ -1769,7 +2212,7 @@ def test_update_material_table_changes_elasticity_motion_behavior_in_cpu_and_gpu
         engine.set_cell(7, 9, "raw_stone_solid", mark_dirty=False)
         engine.set_cell(8, 9, "raw_stone_solid", mark_dirty=False)
         engine.set_cell(9, 9, "raw_stone_solid", mark_dirty=False)
-        engine.velocity[8, 8] = np.array([0.0, 1.0], dtype=np.float32)
+        engine.velocity[8, 8] = np.array([0.0, 60.0], dtype=np.float32)
 
         engine.motion_solver.step(engine, 1.0 / 60.0)
         return (
@@ -1817,7 +2260,7 @@ def test_update_material_table_changes_gravity_scale_motion_behavior_in_cpu_and_
         engine.set_cell(8, 8, "pollution_powder", phase=Phase.POWDER, mark_dirty=False)
         engine.velocity.fill(0.0)
 
-        engine.motion_solver.step(engine, 1.0 / 60.0)
+        engine.motion_solver.step(engine, 1.0)
         ys, xs = np.nonzero(engine.material_id == pollution_id)
         return int(xs[0]), int(ys[0])
 
@@ -1853,7 +2296,7 @@ def test_update_material_table_changes_wind_coupling_motion_behavior_in_cpu_and_
         engine.set_cell(8, 8, "pollution_powder", phase=Phase.POWDER, mark_dirty=False)
         engine.velocity.fill(0.0)
         engine.flow_velocity.fill(0.0)
-        engine.inject_velocity(8, 8, (20.0, 0.0), radius=4, carrier="flow", mode="set", immediate=True)
+        engine.inject_velocity(8, 8, (600.0, 0.0), radius=4, carrier="flow", mode="set", immediate=True)
 
         for _ in range(6):
             engine.motion_solver.step(engine, 1.0 / 60.0)
@@ -1896,7 +2339,7 @@ def test_update_material_table_changes_drag_scale_motion_behavior_in_cpu_and_gpu
         engine.set_cell(4, 9, "raw_stone_solid", mark_dirty=False)
         engine.set_cell(6, 9, "raw_stone_solid", mark_dirty=False)
         engine.velocity.fill(0.0)
-        engine.velocity[8, 5] = np.array([0.6, 0.0], dtype=np.float32)
+        engine.velocity[8, 5] = np.array([60.0, 0.0], dtype=np.float32)
 
         engine.motion_solver.step(engine, 1.0 / 60.0)
         return int(engine.material_id[8, 5]), int(engine.material_id[8, 6])
@@ -1937,7 +2380,7 @@ def test_patch_material_optics_changes_optics_solver_behavior_in_cpu_and_gpu_pat
         engine.optics_solver.step(engine)
         visible_id = engine.rulebook.light_id("visible_light")
         return (
-            float(engine.cell_optical_dose[visible_id, 4, 12]),
+            float(engine.cell_optical_dose[visible_id, 4, 10]),
             float(engine.visible_illumination[4, 12].sum()),
         )
 
@@ -1948,7 +2391,9 @@ def test_patch_material_optics_changes_optics_solver_behavior_in_cpu_and_gpu_pat
 
     assert np.allclose(cpu_clear, gpu_clear, atol=1.0e-6)
     assert np.allclose(cpu_blocked, gpu_blocked, atol=1.0e-6)
-    assert cpu_clear[0] > cpu_blocked[0]
+    assert np.isclose(cpu_clear[0], 0.0, atol=1.0e-6)
+    assert cpu_blocked[0] > 0.0
+    assert cpu_clear[1] > 0.0
     assert cpu_clear[1] > cpu_blocked[1]
 
 
@@ -2054,7 +2499,7 @@ def test_update_material_optics_table_changes_optics_solver_behavior_in_cpu_and_
         engine.optics_solver.step(engine)
         visible_id = engine.rulebook.light_id("visible_light")
         return (
-            float(engine.cell_optical_dose[visible_id, 4, 12]),
+            float(engine.cell_optical_dose[visible_id, 4, 10]),
             float(engine.visible_illumination[4, 12].sum()),
         )
 
@@ -2065,7 +2510,9 @@ def test_update_material_optics_table_changes_optics_solver_behavior_in_cpu_and_
 
     assert np.allclose(cpu_clear, gpu_clear, atol=1.0e-6)
     assert np.allclose(cpu_blocked, gpu_blocked, atol=1.0e-6)
-    assert cpu_clear[0] > cpu_blocked[0]
+    assert np.isclose(cpu_clear[0], 0.0, atol=1.0e-6)
+    assert cpu_blocked[0] > 0.0
+    assert cpu_clear[1] > 0.0
     assert cpu_clear[1] > cpu_blocked[1]
 
 
@@ -3537,7 +3984,7 @@ def test_enginedemo_screen_mapping_targets_active_window_not_full_buffer() -> No
         active_height=96,
         buffer_origin_x=64,
         buffer_origin_y=32,
-    ) == (64, 127)
+    ) == (64, 32)
     assert demo_screen_to_buffer_cell(
         99,
         49,
@@ -3549,7 +3996,7 @@ def test_enginedemo_screen_mapping_targets_active_window_not_full_buffer() -> No
         active_height=96,
         buffer_origin_x=64,
         buffer_origin_y=32,
-    ) == (191, 32)
+    ) == (191, 127)
 
 
 def test_enginedemo_screen_mapping_targets_active_world_window_after_paging() -> None:
@@ -3562,7 +4009,7 @@ def test_enginedemo_screen_mapping_targets_active_world_window_after_paging() ->
         active_height=96,
         world_origin_x=64,
         world_origin_y=32,
-    ) == (64, 127)
+    ) == (64, 32)
     assert demo_screen_to_world_cell(
         99,
         49,
@@ -3572,7 +4019,7 @@ def test_enginedemo_screen_mapping_targets_active_world_window_after_paging() ->
         active_height=96,
         world_origin_x=64,
         world_origin_y=32,
-    ) == (191, 32)
+    ) == (191, 127)
 
 
 def test_enginedemo_status_helpers_select_contextual_view_and_brush_labels() -> None:
@@ -3972,6 +4419,19 @@ def test_enginedemo_default_focus_world_tracks_current_paging_origin() -> None:
     assert demo_default_focus_world(paging) == (80, 8)
 
 
+def test_compute_demo_grid_sizing_uses_screen_cells_active_margin_and_logical_world_scale() -> None:
+    sizing = compute_demo_grid_sizing(1440, 900)
+
+    assert sizing["visible_width"] == 1440
+    assert sizing["visible_height"] == 900
+    assert sizing["active_width"] == 2160
+    assert sizing["active_height"] == 1350
+    assert sizing["buffer_width"] == 2160
+    assert sizing["buffer_height"] == 1350
+    assert sizing["logical_world_width"] == 28800
+    assert sizing["logical_world_height"] == 18000
+
+
 def test_enginedemo_main_requires_moderngl_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "moderngl", None)
     monkeypatch.setitem(sys.modules, "moderngl_window", None)
@@ -4085,18 +4545,33 @@ def test_enginedemo_instance_starts_http_console_and_closes_resources(
             return None
 
     class FakeEngine:
-        def __init__(self, width: int, height: int, gpu_context: object) -> None:
+        def __init__(
+            self,
+            width: int,
+            height: int,
+            *,
+            active_width: int | None = None,
+            active_height: int | None = None,
+            gpu_context: object,
+        ) -> None:
             self.width = int(width)
             self.height = int(height)
+            self.active_width = active_width
+            self.active_height = active_height
             self.state_lock = _Lock()
             self.bridge = _Bridge()
             self.paging = _Paging()
             self.gas_name_by_id = ["", "water_gas"]
             self.default_debug_view = DebugView.MATERIAL
             self.closed = False
+            self.prewarm_count = 0
 
         def close(self) -> None:
             self.closed = True
+
+        def prewarm_formal_connected_collapse(self) -> bool:
+            self.prewarm_count += 1
+            return True
 
     class FakeHTTPConsole:
         def __init__(self, engine: object, state: object, host: str = "127.0.0.1", port: int = 8765) -> None:
@@ -4125,6 +4600,16 @@ def test_enginedemo_instance_starts_http_console_and_closes_resources(
     demo = config()
 
     assert isinstance(demo.http, FakeHTTPConsole)
+    sizing = compute_demo_grid_sizing(1440, 900)
+    assert demo.engine.width == sizing["buffer_width"]
+    assert demo.engine.height == sizing["buffer_height"]
+    assert demo.engine.active_width == sizing["active_width"]
+    assert demo.engine.active_height == sizing["active_height"]
+    assert demo.demo_visible_width == 1440 // DEMO_TARGET_CELL_PIXELS
+    assert demo.demo_visible_height == 900 // DEMO_TARGET_CELL_PIXELS
+    assert demo.demo_logical_world_width == demo.demo_visible_width * DEMO_LOGICAL_WORLD_SCALE
+    assert demo.demo_logical_world_height == demo.demo_visible_height * DEMO_LOGICAL_WORLD_SCALE
+    assert demo.engine.prewarm_count == 1
     assert demo.http.started is True
     assert demo.http.host == "127.0.0.1"
     assert demo.http.state is demo.state
@@ -4175,6 +4660,12 @@ def _make_enginedemo_harness(
     )
     demo = type("DemoHarness", (), {})()
     demo.engine = engine
+    demo.demo_visible_width = min(screen_width, active_width)
+    demo.demo_visible_height = min(screen_height, active_height)
+    demo.demo_logical_world_width = demo.demo_visible_width * DEMO_LOGICAL_WORLD_SCALE
+    demo.demo_logical_world_height = demo.demo_visible_height * DEMO_LOGICAL_WORLD_SCALE
+    engine.demo_visible_width = demo.demo_visible_width
+    engine.demo_visible_height = demo.demo_visible_height
     demo.state = EngineRunState()
     demo.selected_material = "sand"
     demo.debug_view = DebugView.MATERIAL
@@ -4183,6 +4674,7 @@ def _make_enginedemo_harness(
     demo.optics_view_light = None
     demo.brush_mode = "material"
     demo.focus_x, demo.focus_y = demo_default_focus_world(engine.paging)
+    demo._last_present_time = 0.0
     demo.controller_debug_enabled = False
     demo.controller_debug_cycle = 0
     demo.controller_debug_dirty = False
@@ -4190,12 +4682,17 @@ def _make_enginedemo_harness(
     demo.controller_debug_saved_state = None
     demo.cpu_fps = 0.0
     demo.gpu_fps = 0.0
+    demo.frame_ms = 0.0
+    demo.sim_ms = 0.0
+    demo.sync_ms = 0.0
+    demo.render_ms = 0.0
     demo._cpu_fps_sample_time = 0.0
     demo._gpu_fps_sample_time = 0.0
     demo._cpu_frame_count = 0
     demo._gpu_step_count = 0
+    demo._last_status_title_update_time = 0.0
     demo._status_title = ""
-    demo.http = type("HttpHarness", (), {"port": 8765})()
+    demo.http = type("HttpHarness", (), {"port": 8765, "own_gpu_context": False})()
     demo.wnd = type("WndHarness", (), {"width": screen_width, "height": screen_height, "title": ""})()
     demo._record_cpu_frame = lambda now: config._record_cpu_frame(demo, now)
     demo._record_gpu_steps = lambda steps, now: config._record_gpu_steps(demo, steps, now)
@@ -4305,6 +4802,8 @@ def test_enginedemo_status_title_formats_current_debug_and_brush_state() -> None
 
 
 def test_demo_fragment_shader_repeats_material_pattern_in_world_space() -> None:
+    assert "ivec2 raw_display_cell" in DEMO_FRAGMENT_SHADER_SOURCE
+    assert "ivec2 display_cell = ivec2(raw_display_cell.x, active_size.y - 1 - raw_display_cell.y);" in DEMO_FRAGMENT_SHADER_SOURCE
     assert "ivec2 logical_cell = world_origin + display_cell;" in DEMO_FRAGMENT_SHADER_SOURCE
     assert "vec2 repeat_uv = fract(vec2(logical_cell) / pattern_scale);" in DEMO_FRAGMENT_SHADER_SOURCE
     assert "(display_cell.x + buffer_origin.x) % buffer_size.x" in DEMO_FRAGMENT_SHADER_SOURCE
@@ -4312,29 +4811,37 @@ def test_demo_fragment_shader_repeats_material_pattern_in_world_space() -> None:
 
 def test_demo_fragment_shader_blends_light_into_materials_and_empty_space() -> None:
     assert "vec3 light_rgb = clamp(texelFetch(light_tex, cell, 0).rgb, 0.0, 2.0);" in DEMO_FRAGMENT_SHADER_SOURCE
+    assert "uniform vec3 ambient_top_light;" in DEMO_FRAGMENT_SHADER_SOURCE
+    assert "uniform vec3 ambient_bottom_light;" in DEMO_FRAGMENT_SHADER_SOURCE
+    assert "vec3 ambient_light = mix(ambient_bottom_light, ambient_top_light, top_factor);" in DEMO_FRAGMENT_SHADER_SOURCE
     assert "fragColor = vec4(clamp(sky + light_rgb * 0.45, 0.0, 1.0), 1.0);" in DEMO_FRAGMENT_SHADER_SOURCE
-    assert "vec3 color = base * (0.35 + clamp(length(light_rgb), 0.0, 1.5)) + light_rgb * 0.85;" in DEMO_FRAGMENT_SHADER_SOURCE
+    assert "vec3 color = base * (ambient_light + clamp(light_rgb, 0.0, 1.5)) + light_rgb * 0.65;" in DEMO_FRAGMENT_SHADER_SOURCE
 
 
 def test_demo_fragment_shader_uses_debug_texture_when_not_in_material_view() -> None:
-    assert "if (view_mode != 0) {" in DEMO_FRAGMENT_SHADER_SOURCE
+    assert "if (force_debug_texture || view_mode != 0) {" in DEMO_FRAGMENT_SHADER_SOURCE
     assert "fragColor = vec4(texelFetch(debug_tex, cell, 0).rgb, 1.0);" in DEMO_FRAGMENT_SHADER_SOURCE
     assert "return;" in DEMO_FRAGMENT_SHADER_SOURCE
 
 
 def test_build_demo_render_uniforms_follow_paging_and_debug_view() -> None:
     engine = WorldEngine(width=64, height=32, active_width=32, active_height=16)
+    engine.demo_visible_width = 24
+    engine.demo_visible_height = 12
     engine.bridge.ensure_world_resources(engine)
 
     initial = build_demo_render_uniforms(engine, debug_view=DebugView.MATERIAL)
     assert initial == {
         "buffer_size": (64, 32),
-        "active_size": (32, 16),
+        "active_size": (24, 12),
         "buffer_origin": (0, 0),
         "world_origin": (0, 0),
         "atlas_grid": tuple(engine.bridge.atlas_grid),
         "view_mode": 0,
+        "force_debug_texture": False,
         "pattern_scale": DEMO_PATTERN_SCALE,
+        "ambient_top_light": DEMO_AMBIENT_TOP_LIGHT,
+        "ambient_bottom_light": DEMO_AMBIENT_BOTTOM_LIGHT,
     }
 
     engine.advance_paging(48, 8, immediate=True)
@@ -4342,12 +4849,15 @@ def test_build_demo_render_uniforms_follow_paging_and_debug_view() -> None:
 
     assert paged["buffer_origin"] == (engine.paging.buffer_origin_x, engine.paging.buffer_origin_y)
     assert paged["world_origin"] == (engine.paging.origin_x, engine.paging.origin_y)
-    assert paged["active_size"] == (engine.paging.active_width, engine.paging.active_height)
+    assert paged["active_size"] == (24, 12)
     assert paged["atlas_grid"] == tuple(engine.bridge.atlas_grid)
     assert paged["buffer_origin"] != initial["buffer_origin"]
     assert paged["world_origin"] != initial["world_origin"]
     assert paged["view_mode"] == 1
+    assert paged["force_debug_texture"] is True
     assert paged["pattern_scale"] == DEMO_PATTERN_SCALE
+    assert paged["ambient_top_light"] == DEMO_AMBIENT_TOP_LIGHT
+    assert paged["ambient_bottom_light"] == DEMO_AMBIENT_BOTTOM_LIGHT
 
 
 def test_apply_demo_render_uniforms_assigns_every_render_field() -> None:
@@ -4378,6 +4888,8 @@ def test_apply_demo_render_uniforms_assigns_every_render_field() -> None:
         "atlas_grid": (4, 8),
         "view_mode": 1,
         "pattern_scale": DEMO_PATTERN_SCALE,
+        "ambient_top_light": DEMO_AMBIENT_TOP_LIGHT,
+        "ambient_bottom_light": DEMO_AMBIENT_BOTTOM_LIGHT,
     }
 
     apply_demo_render_uniforms(program, uniforms)
@@ -4451,7 +4963,13 @@ def test_enginedemo_window_events_support_scroll_focus_paint_and_reset(
     config.on_mouse_press_event(demo, 0, 8, 1)
 
     buffer_x, buffer_y = demo.engine.paging.world_to_buffer(world_x, world_y)
-    assert int(demo.engine.material_id[buffer_y, buffer_x]) == demo.engine.rulebook.material_id("gold_solid")
+    assert int(demo.engine.material_id[buffer_y, buffer_x]) == 0
+    assert len(demo.engine.command_queue) == 1
+    queued = demo.engine.command_queue[0]
+    assert queued.kind == "inject_material"
+    assert queued.payload["material"] == "gold"
+    assert queued.payload["x"] == world_x
+    assert queued.payload["y"] == world_y
 
     original_reset_world = demo.engine.reset_world
     reset_calls = {"count": 0}
@@ -4506,14 +5024,106 @@ def test_enginedemo_mouse_press_non_primary_button_updates_focus_and_pages_witho
     assert demo.controller_debug_dirty is True
     assert demo.engine.paging.origin_x == 0
     assert demo.engine.paging.buffer_origin_x == 0
-    assert demo.engine.paging.origin_y == -32
+    assert demo.engine.paging.origin_y == 0
     assert demo.engine.paging.buffer_origin_y == 0
     buffer_x, buffer_y = demo.engine.paging.world_to_buffer(world_x, world_y)
     assert int(demo.engine.material_id[buffer_y, buffer_x]) == 0
     config._refresh_status_title(demo)
     assert f"focus=({world_x},{world_y})" in demo.wnd.title
-    assert "origin=(0,-32)" in demo.wnd.title
+    assert "origin=(0,0)" in demo.wnd.title
     assert "probe=empty" in demo.wnd.title
+
+
+def test_queue_demo_paint_is_consumed_in_gpu_frame_without_cpu_state_resync() -> None:
+    engine = WorldEngine(width=32, height=24, gas_cell_size=4)
+    if not engine.grid_command_pipeline.available(engine):
+        pytest.skip("GPU world command pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(10, 8, "gold_solid", mark_dirty=False)
+        engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "ambient_temperature",
+            "flow_velocity",
+            "gas_concentration",
+        )
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine._gpu_cpu_dirty_resources.clear()
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "ambient_temperature",
+            "flow_velocity",
+            "gas_concentration",
+        )
+
+        kind, payload = queue_demo_paint(
+            engine,
+            "material",
+            x=4,
+            y=5,
+            selected_material="gold_solid",
+            gas_species="water_gas",
+            light_type=None,
+            radius=0,
+        )
+        assert kind == "inject_material"
+        assert payload["material"] == "gold_solid"
+
+        engine.step(1.0 / 60.0)
+
+        request = ReadbackRequest(center_x=16, center_y=12, width=32, height=24, channels=("cell",))
+        payload = engine._make_readback_payload(request)
+        assert engine.bridge.queue_readback(1, request, payload)
+        result = engine.bridge.poll_readback(_next_bridge_readback_min_poll_frame(engine.bridge))
+        assert result is not None
+        unpacked = unpack_cell_core(result.payload["cell"]["core_words"])
+        assert int(unpacked["material_id"][8, 10]) == engine.rulebook.material_id("gold_solid")
+        assert int(unpacked["material_id"][5, 4]) == engine.rulebook.material_id("gold_solid")
+    finally:
+        engine.close()
+
+
+def test_gpu_demo_initial_active_scheduler_is_empty_until_paint() -> None:
+    engine = WorldEngine(width=128, height=128, gas_cell_size=4)
+    if not engine.grid_command_pipeline.available(engine):
+        pytest.skip("GPU world command pipeline is not available")
+    try:
+        assert "active_tile_ttl" in engine.bridge.gpu_authoritative_resources
+        initial_ttl = np.frombuffer(
+            engine.bridge.buffers["active_tile_ttl"].read(size=engine.active.tile_width * engine.active.tile_height * 4),
+            dtype=np.int32,
+        ).reshape((engine.active.tile_height, engine.active.tile_width))
+        assert np.array_equal(initial_ttl, np.zeros((4, 4), dtype=np.int32))
+
+        queue_demo_paint(
+            engine,
+            "material",
+            x=48,
+            y=48,
+            selected_material="sand_powder",
+            gas_species="water_gas",
+            light_type=None,
+            radius=0,
+        )
+        engine.step(1.0 / 60.0)
+
+        painted_ttl = np.frombuffer(
+            engine.bridge.buffers["active_tile_ttl"].read(size=engine.active.tile_width * engine.active.tile_height * 4),
+            dtype=np.int32,
+        ).reshape((engine.active.tile_height, engine.active.tile_width))
+        assert painted_ttl[1, 1] > 0
+        assert np.count_nonzero(painted_ttl > 0) <= 4
+    finally:
+        engine.close()
 
 
 def test_enginedemo_refresh_status_title_updates_probe_for_current_view(
@@ -4537,6 +5147,7 @@ def test_enginedemo_refresh_status_title_updates_probe_for_current_view(
     assert "ambientT=20.0" in demo.wnd.title
 
     demo.debug_view = DebugView.PRESSURE
+    demo._last_status_title_update_time = 0.0
     config._refresh_status_title(demo)
     assert "view=pressure" in demo.wnd.title
     assert "pressure=0.00" in demo.wnd.title
@@ -4544,6 +5155,7 @@ def test_enginedemo_refresh_status_title_updates_probe_for_current_view(
 
     demo.debug_view = DebugView.OPTICS
     demo.optics_view_light = "holy_light"
+    demo._last_status_title_update_time = 0.0
     config._refresh_status_title(demo)
     assert "view=optics" in demo.wnd.title
     assert "dose=holy_light:" in demo.wnd.title
@@ -4581,7 +5193,62 @@ def test_enginedemo_controller_cycle_title_includes_latest_observation_summary(
     assert "dose=holy_light:" in demo.wnd.title
 
 
-def test_enginedemo_render_uses_current_debug_frame_and_syncs_bridge(
+def test_enginedemo_prime_render_textures_uses_display_sync_without_cpu_resource_force(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _capture_enginedemo_config_class(monkeypatch)
+    demo = _make_enginedemo_harness(config)
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class _Bridge:
+        def ensure_world_resources(self, engine: object) -> None:
+            calls.append(("ensure_world_resources", {"engine": engine}))
+
+        def sync_display_textures(self, engine: object) -> None:
+            calls.append(("sync_display_textures", {"engine": engine}))
+
+        def sync_world(self, engine: object, **kwargs: object) -> None:
+            if kwargs.get("force_cpu_resource_upload") is True:
+                raise AssertionError("enginedemo prime must not force CPU resource upload")
+            calls.append(("sync_world", {"engine": engine, **kwargs}))
+
+    demo.engine.bridge = _Bridge()
+    demo._bind_gui_gpu_context = lambda: calls.append(("_bind_gui_gpu_context", {}))
+
+    config._prime_render_textures(demo)
+
+    assert calls == [
+        ("_bind_gui_gpu_context", {}),
+        ("ensure_world_resources", {"engine": demo.engine}),
+        ("sync_display_textures", {"engine": demo.engine}),
+    ]
+
+
+def test_enginedemo_prime_render_textures_legacy_sync_omits_cpu_resource_force(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _capture_enginedemo_config_class(monkeypatch)
+    demo = _make_enginedemo_harness(config)
+    sync_calls: list[dict[str, object]] = []
+
+    class _Bridge:
+        def ensure_world_resources(self, engine: object) -> None:
+            return None
+
+        def sync_world(self, engine: object, **kwargs: object) -> None:
+            sync_calls.append({"engine": engine, **kwargs})
+
+    demo.engine.bridge = _Bridge()
+    demo._bind_gui_gpu_context = lambda: None
+
+    config._prime_render_textures(demo)
+
+    assert sync_calls == [{"engine": demo.engine, "upload_debug_texture": False}]
+    assert "force_cpu_resource_upload" not in sync_calls[0]
+    assert "debug_frame" not in sync_calls[0]
+
+
+def test_enginedemo_render_uses_gpu_debug_texture_without_cpu_debug_upload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _capture_enginedemo_config_class(monkeypatch)
@@ -4590,6 +5257,7 @@ def test_enginedemo_render_uses_current_debug_frame_and_syncs_bridge(
     assigned_uniforms: dict[str, object] = {}
     used_units: dict[str, int] = {}
     sync_calls: list[dict[str, object]] = []
+    gpu_debug_calls: list[dict[str, object]] = []
     debug_calls: list[tuple[DebugView, str | None, str | None]] = []
     step_dt: list[float] = []
     debug_frame = np.full((demo.engine.height, demo.engine.width, 3), 0.25, dtype=np.float32)
@@ -4623,6 +5291,27 @@ def test_enginedemo_render_uses_current_debug_frame_and_syncs_bridge(
 
         def sync_world(self, engine: object, *, debug_frame: np.ndarray) -> None:
             sync_calls.append({"engine": engine, "debug_frame": debug_frame.copy()})
+
+        def sync_rule_tables(self, engine: object) -> None:
+            return None
+
+        def sync_debug_display_texture(
+            self,
+            engine: object,
+            *,
+            view: str,
+            gas_species_id: int = -1,
+            light_dose_channel: int = -1,
+        ) -> bool:
+            gpu_debug_calls.append(
+                {
+                    "engine": engine,
+                    "view": view,
+                    "gas_species_id": gas_species_id,
+                    "light_dose_channel": light_dose_channel,
+                }
+            )
+            return True
 
         def texture(self, name: str) -> _Texture:
             return textures[str(name)]
@@ -4666,15 +5355,23 @@ def test_enginedemo_render_uses_current_debug_frame_and_syncs_bridge(
         return debug_frame.copy()
 
     demo.engine.debug_frame = _debug_frame
+    demo.engine._resolve_sanctioned_gas_id = lambda name: 3 if name == "poison_gas" else -1
     demo.engine.step = lambda dt: step_dt.append(float(dt))
     demo.engine.bridge = _Bridge()
 
     config.on_render(demo, 1.0, 1.0 / 60.0)
 
     assert step_dt == [pytest.approx(1.0 / 60.0)]
-    assert debug_calls == [(DebugView.GAS, "poison_gas", "holy_light")]
-    assert np.allclose(sync_calls[0]["debug_frame"], debug_frame)
-    assert sync_calls[0]["engine"] is demo.engine
+    assert debug_calls == []
+    assert sync_calls == []
+    assert gpu_debug_calls == [
+        {
+            "engine": demo.engine,
+            "view": "gas",
+            "gas_species_id": 3,
+            "light_dose_channel": -1,
+        }
+    ]
     assert demo.engine.default_debug_view == DebugView.GAS
     assert assigned_uniforms["view_mode"] == 1
     assert assigned_uniforms["atlas_grid"] == tuple(demo.engine.bridge.atlas_grid)
@@ -4682,6 +5379,8 @@ def test_enginedemo_render_uses_current_debug_frame_and_syncs_bridge(
     assert vao.mode == ctx.TRIANGLE_STRIP
     assert ctx.clear_calls == [(0.02, 0.03, 0.05)]
     assert demo._status_title == "refreshed"
+    assert demo.engine.demo_runtime_state["backend_report"]["simulation_backend"] == demo.engine.simulation_backend
+    assert "gpu_realtime_budget" in demo.engine.demo_runtime_state["backend_report"]
 
 
 def test_enginedemo_render_single_step_advances_once_and_clears_flag(
@@ -4834,8 +5533,8 @@ def test_enginedemo_render_caps_fixed_step_catchup_and_preserves_remainder(
     config.on_render(demo, 0.0, 0.1)
 
     fixed_dt = 1.0 / 60.0
-    assert step_dt == [pytest.approx(fixed_dt)] * 4
-    assert demo.accumulator == pytest.approx(0.1 - fixed_dt * 4)
+    assert step_dt == [pytest.approx(fixed_dt)]
+    assert demo.accumulator == pytest.approx(fixed_dt)
     assert assigned_uniforms["view_mode"] == 0
 
 
@@ -5171,17 +5870,15 @@ def test_enginedemo_mouse_drag_event_applies_force_brush_in_world_coordinates_af
 
     config.on_mouse_drag_event(demo, 0, 8, 3, 4)
 
-    assert len(demo.engine.force_sources) == 1
-    force_source = demo.engine.force_sources[0]
-    buffer_x, buffer_y = demo.engine.paging.world_to_buffer(world_x, world_y)
-    assert force_source.x == float(buffer_x)
-    assert force_source.y == float(buffer_y)
-    assert force_source.world_x == float(world_x)
-    assert force_source.world_y == float(world_y)
-    assert force_source.direction == (0.6, -0.8)
-    assert force_source.radius == 8.0
-    assert force_source.strength == 2.0
-    assert force_source.lifetime == 0.4
+    assert len(demo.engine.command_queue) == 1
+    command = demo.engine.command_queue[0]
+    assert command.kind == "inject_force"
+    assert command.payload["x"] == world_x
+    assert command.payload["y"] == world_y
+    assert command.payload["direction"] == (0.6, -0.8)
+    assert command.payload["radius"] == 8.0
+    assert command.payload["strength"] == 2.0
+    assert command.payload["lifetime"] == 0.4
 
 
 def test_enginedemo_mouse_drag_event_applies_light_brush_in_world_coordinates_after_paging(
@@ -5208,27 +5905,15 @@ def test_enginedemo_mouse_drag_event_applies_light_brush_in_world_coordinates_af
 
     config.on_mouse_drag_event(demo, 0, 8, 3, 4)
 
-    assert len(demo.engine.emitters) == 1
-    emitter = demo.engine.emitters[0]
-    expected_range = int(demo.engine.light_default_range[demo.engine.rulebook.light_id("holy_light")])
-    assert emitter["origin"] == demo.engine.paging.world_to_buffer(world_x, world_y)
-    assert emitter["world_origin"] == (world_x, world_y)
-    assert emitter["light_type"] == "holy_light"
-    assert emitter["direction"] == (0.6, -0.8)
-    assert emitter["spread"] == 0.05
-    assert emitter["strength"] == 1.25
-    assert emitter["range_cells"] == expected_range
-    assert demo.engine.serialize_emitters()["queued_emitters"] == [
-        {
-            "x": world_x,
-            "y": world_y,
-            "light_type": "holy_light",
-            "direction": [0.6, -0.8],
-            "spread": 0.05,
-            "strength": 1.25,
-            "radius": expected_range,
-        }
-    ]
+    assert len(demo.engine.command_queue) == 1
+    command = demo.engine.command_queue[0]
+    assert command.kind == "inject_light"
+    assert command.payload["x"] == world_x
+    assert command.payload["y"] == world_y
+    assert command.payload["light_type"] == "holy_light"
+    assert command.payload["direction"] == (0.6, -0.8)
+    assert command.payload["spread"] == 0.05
+    assert command.payload["strength"] == 1.25
 
 
 def test_enginedemo_mouse_drag_event_applies_velocity_brush_in_world_coordinates_after_paging(
@@ -5254,8 +5939,15 @@ def test_enginedemo_mouse_drag_event_applies_velocity_brush_in_world_coordinates
 
     config.on_mouse_drag_event(demo, 0, 8, 3, 5)
 
-    buffer_x, buffer_y = demo.engine.paging.world_to_buffer(world_x, world_y)
-    assert np.allclose(demo.engine.velocity[buffer_y, buffer_x], np.array([0.36, -0.6], dtype=np.float32))
+    assert len(demo.engine.command_queue) == 1
+    command = demo.engine.command_queue[0]
+    assert command.kind == "inject_velocity"
+    assert command.payload["x"] == world_x
+    assert command.payload["y"] == world_y
+    assert command.payload["velocity"] == pytest.approx((0.36, -0.6))
+    assert command.payload["radius"] == 1
+    assert command.payload["carrier"] == "cell"
+    assert command.payload["mode"] == "add"
 
 
 def test_enginedemo_mouse_press_event_applies_gas_brush_in_world_coordinates_after_paging(
@@ -5282,10 +5974,14 @@ def test_enginedemo_mouse_press_event_applies_gas_brush_in_world_coordinates_aft
 
     config.on_mouse_press_event(demo, 0, 8, 1)
 
-    water_gas_id = demo.engine.rulebook.gas_id("water_gas")
-    buffer_x, buffer_y = demo.engine.paging.world_to_buffer(world_x, world_y)
-    gas_y, gas_x = demo.engine.cell_to_gas(buffer_y, buffer_x)
-    assert float(demo.engine.gas_concentration[water_gas_id, gas_y, gas_x]) > 0.0
+    assert len(demo.engine.command_queue) == 1
+    command = demo.engine.command_queue[0]
+    assert command.kind == "inject_gas"
+    assert command.payload["x"] == world_x
+    assert command.payload["y"] == world_y
+    assert command.payload["species"] == "water_gas"
+    assert command.payload["amount"] == 0.75
+    assert command.payload["radius"] == 1
 
 
 def test_enginedemo_number_key_selects_material_and_mouse_press_paints_after_paging(
@@ -5311,8 +6007,13 @@ def test_enginedemo_number_key_selects_material_and_mouse_press_paints_after_pag
     config.on_mouse_press_event(demo, 0, 8, 1)
 
     assert demo.selected_material == "water"
-    buffer_x, buffer_y = demo.engine.paging.world_to_buffer(world_x, world_y)
-    assert int(demo.engine.material_id[buffer_y, buffer_x]) == demo.engine.rulebook.material_id("water_liquid")
+    assert len(demo.engine.command_queue) == 1
+    command = demo.engine.command_queue[0]
+    assert command.kind == "inject_material"
+    assert command.payload["x"] == world_x
+    assert command.payload["y"] == world_y
+    assert command.payload["material"] == "water"
+    assert command.payload["radius"] == 3
 
 
 def test_enginedemo_temperature_brush_cycle_and_mouse_press_apply_heat_after_paging(
@@ -5341,8 +6042,13 @@ def test_enginedemo_temperature_brush_cycle_and_mouse_press_apply_heat_after_pag
     config.on_mouse_press_event(demo, 0, 8, 1)
 
     assert demo.brush_mode == "temperature"
-    buffer_x, buffer_y = demo.engine.paging.world_to_buffer(world_x, world_y)
-    assert float(demo.engine.cell_temperature[buffer_y, buffer_x]) > 20.0
+    assert len(demo.engine.command_queue) == 1
+    command = demo.engine.command_queue[0]
+    assert command.kind == "inject_temperature"
+    assert command.payload["x"] == world_x
+    assert command.payload["y"] == world_y
+    assert command.payload["delta"] == 40.0
+    assert command.payload["radius"] == 2
 
 
 def test_enginedemo_controller_preview_queues_probe_observation_after_multi_page_paging() -> None:
@@ -13408,6 +14114,7 @@ def test_sync_entity_states_persistent_observe_channels_queue_readbacks_on_plain
 
     engine.step()
 
+    _collect_ready_readbacks_at_min_poll(engine)
     result = engine.poll_readbacks(request_id)
 
     assert result is not None
@@ -14995,6 +15702,7 @@ def test_consume_entity_observation_results_drains_ready_readbacks_into_structur
     engine.step()
     engine.step()
 
+    _collect_ready_readbacks_at_min_poll(engine)
     consumed = engine.consume_entity_observation_results()
 
     assert consumed["frame_id"] == 2
@@ -15052,6 +15760,7 @@ def test_request_observation_resolves_inline_target_queries_and_consumes_into_ob
         engine.bridge.shadow_buffers["world_command_payload"],
     )
     engine.step()
+    _collect_ready_readbacks_at_min_poll(engine)
     consumed = engine.consume_entity_observation_results()
 
     assert uploaded["kind"] == "request_readback"
@@ -15657,6 +16366,7 @@ def test_request_world_command_assigns_request_id_for_readback_command() -> None
     engine.step()
     engine.step()
 
+    _collect_ready_readbacks_at_min_poll(engine)
     result = engine.poll_readbacks(request_id)
     assert result is not None
     assert result.request.request_id == request_id
@@ -15782,7 +16492,7 @@ def test_http_console_entity_observations_consume_drains_ready_readbacks_into_st
         )
 
         _http_json("POST", f"{base_url}/api/control/tick", {})
-        _http_json("POST", f"{base_url}/api/control/tick", {})
+        _http_tick_until_bridge_readback_min_poll(base_url, engine)
 
         consumed = _http_json("POST", f"{base_url}/api/entity/observations/consume", {})
         stored = _http_json("GET", f"{base_url}/api/entity/observations/consumed")
@@ -15790,7 +16500,7 @@ def test_http_console_entity_observations_consume_drains_ready_readbacks_into_st
     finally:
         console.stop()
 
-    assert consumed["frame_id"] == 2
+    assert consumed["frame_id"] == 3
     assert consumed["consumed"] == 1
     assert consumed["consumed_readbacks"][0]["request"]["observer_id"] == 31
     assert consumed["observations"]["31"]["request"]["label"] == "loop_probe"
@@ -15838,12 +16548,10 @@ def test_http_console_entity_observations_request_resolves_inline_target_queries
             },
         )
 
-        engine.step()
-        uploaded = _decode_uploaded_command(
-            engine.bridge.shadow_buffers["world_command"][0],
-            engine.bridge.shadow_buffers["world_command_payload"],
-        )
-        engine.step()
+        pending = _http_json("GET", f"{base_url}/api/commands/pending")
+        uploaded = pending["commands"][0]
+        _http_json("POST", f"{base_url}/api/control/tick", {})
+        _http_tick_until_bridge_readback_min_poll(base_url, engine)
         consumed = _http_json("POST", f"{base_url}/api/entity/observations/consume", {})
     finally:
         console.stop()
@@ -19251,8 +19959,8 @@ def test_http_console_motion_read_exposes_latest_reservation_runtime() -> None:
     sand_id = engine.rulebook.material_id("sand_powder")
     engine.set_cell(4, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
     engine.set_cell(6, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
-    engine.velocity[8, 4] = np.array([1.0, 0.0], dtype=np.float32)
-    engine.velocity[8, 6] = np.array([-1.0, 0.0], dtype=np.float32)
+    engine.velocity[8, 4] = np.array([60.0, 0.0], dtype=np.float32)
+    engine.velocity[8, 6] = np.array([-60.0, 0.0], dtype=np.float32)
     engine.motion_solver.step(engine, 1.0 / 60.0)
 
     console = EngineHTTPConsole(engine, EngineRunState(), port=0)
@@ -19343,8 +20051,8 @@ def test_completed_motion_runtime_keeps_world_coordinates_after_later_paging_cha
 
     engine.set_cell(4, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
     engine.set_cell(6, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
-    engine.velocity[8, 4] = np.array([1.0, 0.0], dtype=np.float32)
-    engine.velocity[8, 6] = np.array([-1.0, 0.0], dtype=np.float32)
+    engine.velocity[8, 4] = np.array([60.0, 0.0], dtype=np.float32)
+    engine.velocity[8, 6] = np.array([-60.0, 0.0], dtype=np.float32)
     engine.motion_solver.step(engine, 1.0 / 60.0)
 
     engine.advance_paging(16, 8, immediate=True)
@@ -20306,15 +21014,15 @@ def test_debug_frame_motion_visualizes_runtime_reservations() -> None:
     engine.clear_cell_region(0, 0, engine.width, engine.height)
     engine.set_cell(4, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
     engine.set_cell(6, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
-    engine.velocity[8, 4] = np.array([1.0, 0.0], dtype=np.float32)
-    engine.velocity[8, 6] = np.array([-1.0, 0.0], dtype=np.float32)
+    engine.velocity[8, 4] = np.array([60.0, 0.0], dtype=np.float32)
+    engine.velocity[8, 6] = np.array([-60.0, 0.0], dtype=np.float32)
     for x, y in ((12, 8), (13, 8), (12, 9), (13, 9)):
         engine.set_cell(x, y, "log_solid", phase=Phase.FALLING_ISLAND, mark_dirty=False)
         engine.island_id[y, x] = 61
     engine.islands[61] = FallingIslandRecord(
         island_id=61,
         bbox=(12, 8, 14, 10),
-        velocity_xy=(2.0, -0.49),
+        velocity_xy=(120.0, -0.49),
         subcell_offset=(0.0, 0.0),
     )
 
@@ -20974,8 +21682,8 @@ def test_http_console_page_stripe_apply_immediate_restores_loaded_region() -> No
 
 
 def test_http_console_page_stripe_apply_deferred_queues_command_until_step() -> None:
-    src = WorldEngine(width=64, height=16, gas_cell_size=4)
-    dst = WorldEngine(width=64, height=16, gas_cell_size=4)
+    src = WorldEngine(width=64, height=16, gas_cell_size=4, simulation_backend="cpu")
+    dst = WorldEngine(width=64, height=16, gas_cell_size=4, simulation_backend="cpu")
     src.clear_cell_region(0, 0, src.width, src.height)
     dst.clear_cell_region(0, 0, dst.width, dst.height)
     stone_id = src.rulebook.material_id("raw_stone_solid")
@@ -21026,7 +21734,7 @@ def test_http_console_page_stripe_apply_deferred_queues_command_until_step() -> 
 
     assert tick["ok"] is True
     assert tick["pending_commands"] == 0
-    assert dst.material_id[4, 37] == 0
+    assert dst.material_id[4, 37] == stone_id
     assert restored["payload"]["cell"]["material_id"][4][5] == stone_id
 
 
@@ -21897,8 +22605,7 @@ def test_http_console_async_readback_request_and_poll() -> None:
         assert uploaded["kind"] == "request_readback"
         assert int(uploaded["payload"]["request_id"]) == request_id
 
-        _http_json("POST", f"{base_url}/api/control/tick", {})
-
+        _http_tick_until_bridge_readback_min_poll(base_url, engine)
         third_poll = _http_json("GET", f"{base_url}/api/readback/poll?request_id={request_id}")
     finally:
         console.stop()
@@ -21939,13 +22646,10 @@ def test_http_console_readback_request_preserves_target_query_metadata() -> None
             },
         )
         request_id = int(queued["request_id"])
+        uploaded = engine.serialize_world_command(engine.command_queue[-1])
 
         _http_json("POST", f"{base_url}/api/control/tick", {})
-        uploaded = _decode_uploaded_command(
-            engine.bridge.shadow_buffers["world_command"][0],
-            engine.bridge.shadow_buffers["world_command_payload"],
-        )
-        engine.step()
+        _http_tick_until_bridge_readback_min_poll(base_url, engine)
         polled = _http_json("GET", f"{base_url}/api/readback/poll?request_id={request_id}")
     finally:
         console.stop()
@@ -21998,14 +22702,11 @@ def test_http_console_readback_request_resolves_inline_target_queries() -> None:
             },
         )
         request_id = int(queued["request_id"])
+        uploaded = engine.serialize_world_command(engine.command_queue[-1])
 
         _http_json("POST", f"{base_url}/api/control/tick", {})
-        uploaded = _decode_uploaded_command(
-            engine.bridge.shadow_buffers["world_command"][0],
-            engine.bridge.shadow_buffers["world_command_payload"],
-        )
 
-        _http_json("POST", f"{base_url}/api/control/tick", {})
+        _http_tick_until_bridge_readback_min_poll(base_url, engine)
         polled = _http_json("GET", f"{base_url}/api/readback/poll?request_id={request_id}")
     finally:
         console.stop()
@@ -22214,7 +22915,7 @@ def test_http_console_async_readback_poll_all_returns_all_ready_results() -> Non
         )
 
         _http_json("POST", f"{base_url}/api/control/tick", {})
-        _http_json("POST", f"{base_url}/api/control/tick", {})
+        _http_tick_until_bridge_readback_min_poll(base_url, engine)
 
         results = _http_json("GET", f"{base_url}/api/readback/poll_all")
         drained = _http_json("GET", f"{base_url}/api/readback/poll")
@@ -22250,7 +22951,7 @@ def test_http_console_readback_ready_endpoint_reports_completed_results_without_
         engine.step()
         before_ready = _http_json("GET", f"{base_url}/api/readback/ready")
 
-        engine.step()
+        _http_tick_until_bridge_readback_min_poll(base_url, engine)
         ready_before_poll = _http_json("GET", f"{base_url}/api/readback/ready")
         polled = _http_json("GET", f"{base_url}/api/readback/poll")
         ready_after_poll = _http_json("GET", f"{base_url}/api/readback/ready")
@@ -24537,8 +25238,15 @@ def test_run_cpu_frame_change_intent_require_empty_falls_back_to_nearest_legal_c
     fallback_x, fallback_y = resolved.center_position
     assert resolved.generated_commands[0].payload["x"] == fallback_x
     assert resolved.generated_commands[0].payload["y"] == fallback_y
+    uploaded = _decode_uploaded_command(
+        engine.bridge.shadow_buffers["world_command"][0],
+        engine.bridge.shadow_buffers["world_command_payload"],
+    )
+    assert uploaded["kind"] == "inject_material"
+    assert uploaded["payload"]["x"] == fallback_x
+    assert uploaded["payload"]["y"] == fallback_y
+    assert uploaded["payload"]["resolved_change_intent_id"] == "safe_drop"
     bridge_cells = _bridge_cell_core(engine)
-    assert bridge_cells["material_id"][fallback_y, fallback_x] == engine.rulebook.material_id("gold_solid")
     assert bridge_cells["material_id"][9, 12] == engine.rulebook.material_id("raw_stone_solid")
 
 
@@ -24788,7 +25496,7 @@ def test_run_cpu_frame_target_queries_queue_observations_and_readbacks_from_reso
     assert int(uploaded_readbacks[1]["center_x"]) == 20
     assert int(uploaded_readbacks[1]["center_y"]) == 8
 
-    second = engine.run_cpu_frame()
+    second = _run_cpu_frame_until_next_readback_min_poll(engine)
 
     assert 401 in second.observations
     observation = second.observations[401]
@@ -27136,6 +27844,8 @@ def test_readback_uses_ping_pong_delay() -> None:
     engine.step()
     assert engine.poll_readbacks() is None
     engine.step()
+    assert engine.poll_readbacks() is None
+    _collect_ready_readbacks_at_min_poll(engine)
     result = engine.poll_readbacks()
     assert result is not None
     assert result.request.width == 8
@@ -27149,7 +27859,7 @@ def test_poll_all_readbacks_returns_every_ready_result() -> None:
     engine.step()
     engine.step()
 
-    results = engine.poll_all_readbacks()
+    results = engine.poll_all_readbacks(current_frame_id=_next_bridge_readback_min_poll_frame(engine.bridge))
 
     assert [result.request.center_x for result in results] == [10, 20]
     assert engine.poll_readbacks() is None
@@ -27190,7 +27900,8 @@ def test_readback_returns_structured_local_field_windows() -> None:
     engine._finish_readbacks()
 
     assert engine.bridge.poll_readback(1) is None
-    result = engine.bridge.poll_readback(2)
+    assert engine.bridge.poll_readback(2) is None
+    result = engine.bridge.poll_readback(3)
     assert result is not None
 
     cell = result.payload["cell"]
@@ -27296,7 +28007,8 @@ def test_readback_stitches_windows_across_paging_buffer_seam(monkeypatch: pytest
 
     engine._finish_readbacks(world_synced=True)
 
-    result = engine.bridge.poll_readback(2)
+    assert engine.bridge.poll_readback(2) is None
+    result = engine.bridge.poll_readback(3)
 
     assert result is not None
     assert result.payload["cell"]["origin"] == [60, 8]
@@ -27455,9 +28167,10 @@ def test_multiple_readbacks_can_be_polled_sequentially() -> None:
     engine._finish_readbacks()
 
     assert engine.bridge.poll_readback(1) is None
-    first = engine.bridge.poll_readback(2)
-    second = engine.bridge.poll_readback(2)
-    third = engine.bridge.poll_readback(2)
+    assert engine.bridge.poll_readback(2) is None
+    first = engine.bridge.poll_readback(3)
+    second = engine.bridge.poll_readback(3)
+    third = engine.bridge.poll_readback(3)
 
     assert first is not None
     assert second is not None
@@ -27479,17 +28192,18 @@ def test_request_readback_normalizes_channels_and_window_limits() -> None:
     )
     engine.step()
 
-    uploaded_command = _decode_uploaded_command(
-        engine.bridge.shadow_buffers["world_command"][0],
-        engine.bridge.shadow_buffers["world_command_payload"],
-    )
     uploaded_request = engine.bridge.shadow_buffers["readback_request"][0]
 
-    assert uploaded_command["kind"] == "request_readback"
-    assert int(uploaded_command["payload"]["request_id"]) == request_id
-    assert uploaded_command["payload"]["width"] == 64
-    assert uploaded_command["payload"]["height"] == 1
-    assert uploaded_command["payload"]["channels"] == ["cell", "pressure", "gas"]
+    if engine.bridge.shadow_buffers["world_command"].shape[0] > 0:
+        uploaded_command = _decode_uploaded_command(
+            engine.bridge.shadow_buffers["world_command"][0],
+            engine.bridge.shadow_buffers["world_command_payload"],
+        )
+        assert uploaded_command["kind"] == "request_readback"
+        assert int(uploaded_command["payload"]["request_id"]) == request_id
+        assert uploaded_command["payload"]["width"] == 64
+        assert uploaded_command["payload"]["height"] == 1
+        assert uploaded_command["payload"]["channels"] == ["cell", "pressure", "gas"]
     assert int(uploaded_request["request_id"]) == request_id
     assert int(uploaded_request["width"]) == 64
     assert int(uploaded_request["height"]) == 1
@@ -27499,6 +28213,7 @@ def test_request_readback_normalizes_channels_and_window_limits() -> None:
     assert _decode_uploaded_label(uploaded_request, engine.bridge.shadow_buffers["readback_request_label"]) == "normalized_probe"
 
     engine.step()
+    _collect_ready_readbacks_at_min_poll(engine)
     result = engine.poll_readbacks()
 
     assert result is not None
@@ -27524,19 +28239,21 @@ def test_request_readback_preserves_target_query_metadata() -> None:
     )
     engine.step()
 
-    uploaded_command = _decode_uploaded_command(
-        engine.bridge.shadow_buffers["world_command"][0],
-        engine.bridge.shadow_buffers["world_command_payload"],
-    )
     uploaded_request = engine.bridge.shadow_buffers["readback_request"][0]
 
-    assert uploaded_command["kind"] == "request_readback"
-    assert uploaded_command["payload"]["target_query_id"] == "enemy_above"
-    assert uploaded_command["payload"]["target_dx"] == 2
-    assert uploaded_command["payload"]["target_dy"] == -1
+    if engine.bridge.shadow_buffers["world_command"].shape[0] > 0:
+        uploaded_command = _decode_uploaded_command(
+            engine.bridge.shadow_buffers["world_command"][0],
+            engine.bridge.shadow_buffers["world_command_payload"],
+        )
+        assert uploaded_command["kind"] == "request_readback"
+        assert uploaded_command["payload"]["target_query_id"] == "enemy_above"
+        assert uploaded_command["payload"]["target_dx"] == 2
+        assert uploaded_command["payload"]["target_dy"] == -1
     assert int(uploaded_request["request_id"]) == request_id
 
     engine.step()
+    _collect_ready_readbacks_at_min_poll(engine)
     result = engine.poll_readbacks()
 
     assert result is not None
@@ -27595,6 +28312,7 @@ def test_request_readback_resolves_inline_target_queries_to_concrete_center() ->
     assert int(uploaded_request["center_y"]) == 8
 
     engine.step()
+    _collect_ready_readbacks_at_min_poll(engine)
     result = engine.poll_readbacks()
 
     assert result is not None
@@ -27709,7 +28427,7 @@ def test_finish_readbacks_normalizes_direct_pending_requests() -> None:
     engine.frame_id = 1
 
     engine._finish_readbacks()
-    result = engine.bridge.poll_readback(2)
+    result = engine.bridge.poll_readback(_next_bridge_readback_min_poll_frame(engine.bridge))
 
     assert result is not None
     assert result.request.width == 64
@@ -27780,7 +28498,7 @@ def test_gpu_bridge_readback_reuses_free_fixed_ring_slot_without_growing() -> No
     assert last_ready.request.label == "third"
 
 
-def test_gpu_bridge_readback_does_not_read_current_frame_slot() -> None:
+def test_gpu_bridge_readback_does_not_read_current_frame_slot(monkeypatch: pytest.MonkeyPatch) -> None:
     class NoCurrentFrameReadBuffer:
         def __init__(self, reserve: int) -> None:
             self.size = int(reserve)
@@ -27810,16 +28528,43 @@ def test_gpu_bridge_readback_does_not_read_current_frame_slot() -> None:
 
     bridge = GPUBridge(ctx=FakeContext())
     request = ReadbackRequest(center_x=2, center_y=2, width=4, height=4, channels=("cell",), label="delayed")
+    payload = {
+        "value": GPUBufferReadbackSource(
+            resource_name="fake_value",
+            dtype=np.dtype(np.int32).str,
+            shape=(1,),
+            chunk_size=np.dtype(np.int32).itemsize,
+            start=0,
+            step=np.dtype(np.int32).itemsize,
+            count=1,
+        )
+    }
 
-    assert bridge.queue_readback(7, request, {"value": np.asarray([42], dtype=np.int32)}) is True
+    def fill_fake_gpu_source(
+        _bridge: GPUBridge,
+        slot_buffer: NoCurrentFrameReadBuffer,
+        offset: int,
+        _source: object,
+        *,
+        require_gpu_source: bool = False,
+    ) -> None:
+        slot_buffer.write(np.asarray([42], dtype=np.int32).tobytes(), offset=offset)
+
+    monkeypatch.setattr(GPUBridge, "_fill_readback_slot_from_gpu", fill_fake_gpu_source)
+
+    assert bridge.queue_readback(7, request, payload) is True
     slot = next(slot for slot in bridge.readback_slots if slot.request is not None)
 
     assert slot.ready_frame_id == 8
+    assert slot.min_poll_frame_id == 9
+    assert slot.latency_frames == GPU_READBACK_LATENCY_FRAMES
+    assert slot.gpu_backed is True
     assert bridge.poll_readback(7) is None
+    assert bridge.poll_readback(8) is None
     assert slot.buffer.read_calls == 0
 
     slot.buffer.fail_reads = False
-    result = bridge.poll_readback(8)
+    result = bridge.poll_readback(9)
 
     assert result is not None
     assert result.frame_id == 7
@@ -27922,7 +28667,7 @@ def test_finish_readbacks_leaves_unscheduled_requests_pending_when_readback_ring
     assert [request.label for request in engine.pending_readbacks] == ["overflow"]
     assert len(engine.bridge_frame_readback_requests) == 2
 
-    engine._collect_ready_readbacks(2)
+    _collect_ready_readbacks_at_min_poll(engine)
     assert [result.request.label for result in engine.completed_readbacks] == ["left", "right"]
 
     engine.frame_id = 2
@@ -27980,7 +28725,7 @@ def test_world_step_without_output_or_readback_skips_frame_end_bridge_sync(monke
     assert sync_calls == 0
 
 
-def test_world_step_with_pending_readback_keeps_single_bridge_sync(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_world_step_with_pending_readback_skips_full_bridge_sync(monkeypatch: pytest.MonkeyPatch) -> None:
     engine = WorldEngine(width=16, height=12)
     sync_calls = 0
     original_sync_world = GPUBridge.sync_world
@@ -27996,7 +28741,7 @@ def test_world_step_with_pending_readback_keeps_single_bridge_sync(monkeypatch: 
 
     engine.step()
 
-    assert sync_calls == 1
+    assert sync_calls == 0
     assert len(engine.inflight_readbacks) == 1
 
 
@@ -28020,7 +28765,7 @@ def test_gpu_bridge_zero_byte_readback_does_not_issue_zero_length_buffer_read() 
     slot = next(slot for slot in engine.bridge.readback_slots if slot.request is not None)
     slot.buffer = NoZeroReadBuffer(slot.buffer)
 
-    result = engine.bridge.poll_readback(2)
+    result = engine.bridge.poll_readback(_next_bridge_readback_min_poll_frame(engine.bridge))
 
     assert result is not None
     assert result.request.channels == ()
@@ -28104,7 +28849,7 @@ def test_gpu_window_readback_avoids_cpu_chunk_staging() -> None:
     request = ReadbackRequest(center_x=1, center_y=1, width=4, height=4, channels=("cell", "gas"))
     payload = engine._make_readback_payload(request)
     engine.bridge.queue_readback(1, request, payload)
-    result = engine.bridge.poll_readback(2)
+    result = engine.bridge.poll_readback(_next_bridge_readback_min_poll_frame(engine.bridge))
 
     assert result is not None
     unpacked = unpack_cell_core(result.payload["cell"]["core_words"])
@@ -28197,7 +28942,8 @@ def test_gpu_optics_frame_publishes_bridge_dose_without_cpu_mirror_download(monk
     assert bridge_dose_sum > 0.0
     assert np.isclose(cpu_dose_sum, 0.0)
 
-    engine.step()
+    for _ in range(GPU_READBACK_LATENCY_FRAMES):
+        engine.step()
     result = engine.poll_readbacks(request_id)
 
     assert result is not None
@@ -28301,6 +29047,26 @@ def test_formal_gpu_gas_uses_bridge_authoritative_inputs_without_cpu_mirror_uplo
     assert not np.allclose(bridge_gas, -9.0)
 
 
+def test_gpu_heat_apply_condense_cells_fuses_aux_outputs_into_main_shader() -> None:
+    programs_source = inspect.getsource(GPUHeatPipeline._ensure_programs)
+    run_source = inspect.getsource(GPUHeatPipeline._run_apply_condense_cells)
+    main_shader_source = programs_source.split(
+        'self.programs["apply_condense_cells"] = ctx.compute_shader(',
+        1,
+    )[1].split('self.programs["apply_condense_cell_aux"] = ctx.compute_shader(', 1)[0]
+
+    assert '"apply_condense_cells.aux"' not in run_source
+    assert "_run_apply_condense_cell_aux" not in run_source
+    assert "resources.displaced_tex.bind_to_image(6, read=False, write=True)" in run_source
+    assert "resources.velocity_tex.bind_to_image(7, read=False, write=True)" in run_source
+    assert "layout(r32f, binding=6) writeonly uniform image2D displaced_final_img;" in main_shader_source
+    assert "layout(rg32f, binding=7) writeonly uniform image2D velocity_final_img;" in main_shader_source
+    assert "imageStore(displaced_final_img, cell, vec4(displaced_value" in main_shader_source
+    assert "imageStore(velocity_final_img, cell, vec4(velocity_value" in main_shader_source
+    assert "resources.island_id_tex, resources.island_id_out_tex =" in run_source
+    assert "resources.entity_id_tex, resources.entity_id_out_tex =" in run_source
+
+
 def test_formal_gpu_heat_uses_bridge_authoritative_inputs_without_cpu_mirror_upload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -28350,6 +29116,10 @@ def test_formal_gpu_heat_uses_bridge_authoritative_inputs_without_cpu_mirror_upl
         raise AssertionError("Formal GPU heat must not finalize runtime state from CPU mirrors")
 
     monkeypatch.setattr(engine.heat_solver, "_finalize_runtime_state", fail_cpu_finalize)
+    pipeline = engine.heat_solver.gpu_pipeline
+    engine.profile_passes_enabled = True
+    engine.profile_passes_sync = True
+    pipeline.reset_pass_profile()
 
     previous_frame_active = engine._world_simulation_frame_active
     engine._world_simulation_frame_active = True
@@ -28358,7 +29128,6 @@ def test_formal_gpu_heat_uses_bridge_authoritative_inputs_without_cpu_mirror_upl
     finally:
         engine._world_simulation_frame_active = previous_frame_active
 
-    pipeline = engine.heat_solver.gpu_pipeline
     assert engine.heat_solver.last_backend == "gpu"
     assert pipeline.last_cpu_cell_state_upload_skipped is True
     assert pipeline.last_cpu_island_id_upload_skipped is True
@@ -28387,6 +29156,163 @@ def test_formal_gpu_heat_uses_bridge_authoritative_inputs_without_cpu_mirror_upl
     assert float(bridge_gas[air].sum()) > 0.0
     assert np.all(bridge_gas >= 0.0)
     assert not np.allclose(bridge_gas, -9.0)
+    expected_profile_names = {
+        "apply_cell_targets",
+        "apply_cell_targets.main",
+        "apply_cell_targets.aux",
+        "apply_condense_cells",
+        "apply_condense_cells.main",
+        "publish_bridge_outputs",
+        "publish_bridge_outputs.collapse_dirty_mark",
+        "publish_bridge_outputs.cell",
+        "publish_bridge_outputs.gas",
+        "publish_bridge_outputs.sync",
+    }
+    expected_benchmark_keys = {f"heat.{name}" for name in expected_profile_names}
+    profile_names = {entry["name"] for entry in pipeline.last_pass_profile["passes"]}
+    benchmark_summary = benchmark_engine.summarize_pass_profiles([{"heat": pipeline.last_pass_profile}])
+    assert expected_profile_names.issubset(profile_names)
+    assert "apply_condense_cells.aux" not in profile_names
+    for profile_name in expected_profile_names:
+        assert pipeline.last_pass_profile["summary"][profile_name]["count"] == 1
+    assert expected_benchmark_keys.issubset(benchmark_summary)
+
+
+def test_formal_gpu_heat_structural_change_marks_collapse_dirty_without_cpu_cell_readback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NoReadBuffer:
+        def __init__(self, buffer: object, name: str) -> None:
+            self._buffer = buffer
+            self._name = name
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._buffer, name)
+
+        def read(self, *args: object, **kwargs: object) -> bytes:
+            raise AssertionError(f"formal GPU heat must not read full {self._name} on CPU for collapse dirty")
+
+    engine = WorldEngine(width=64, height=64, gas_cell_size=4)
+    if not engine.heat_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU heat pipeline is not available")
+    try:
+        gold_id = engine.rulebook.material_id("gold_solid")
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(8, 8, "gold_solid", mark_dirty=False)
+        engine.cell_temperature.fill(20.0)
+        engine.cell_temperature[8, 8] = 2200.0
+        engine.ambient_temperature.fill(20.0)
+        _seed_gpu_authoritative_active_tiles(engine, [(0, 0)])
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "ambient_temperature",
+            "gas_concentration",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+        engine.material_id.fill(0)
+        engine.phase.fill(0)
+        engine.cell_temperature.fill(-999.0)
+        engine.collapse_dirty_regions.clear()
+        engine.collapse_deferred_regions.clear()
+
+        def fail_cpu_dirty_mark(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal GPU heat must not use CPU heat target mirrors for collapse dirty")
+
+        monkeypatch.setattr(engine.heat_solver, "_mark_heat_target_collapse_dirty_region", fail_cpu_dirty_mark)
+        raw_cell_core = engine.bridge.buffers["cell_core"]
+        engine.bridge.buffers["cell_core"] = NoReadBuffer(raw_cell_core, "cell_core")
+        previous_frame_active = engine._world_simulation_frame_active
+        try:
+            engine._world_simulation_frame_active = True
+            engine.heat_solver.step(engine, 1.0 / 60.0)
+            dirty_tiles = _read_gpu_collapse_structure_dirty_tile_mask(engine)
+            assert int(dirty_tiles[0, 0]) == 1
+
+            assert engine.collapse_dirty_regions == []
+            engine.collapse_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+            engine.bridge.buffers["cell_core"] = raw_cell_core
+
+        assert engine.heat_solver.gpu_pipeline.last_cpu_mirror_downloaded is False
+        assert engine.heat_solver.gpu_pipeline.last_cpu_cell_state_upload_skipped is True
+        assert engine.collapse_solver.last_dirty_region_count_before > 0
+        assert engine.collapse_solver.last_backend == "gpu"
+        assert int(engine.material_id[8, 8]) == 0
+        assert gold_id > 0
+        assert not np.any(_read_gpu_collapse_structure_dirty_tile_mask(engine))
+    finally:
+        engine.close()
+
+
+def test_formal_gpu_heat_skips_cpu_stage_target_mirror_copy_and_scans(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NoCopyArray(np.ndarray):
+        def copy(self, *args: object, **kwargs: object) -> np.ndarray:
+            raise AssertionError("formal GPU heat must not copy CPU stage target mirrors")
+
+    def no_copy_empty(shape: tuple[int, ...], dtype: np.dtype | type) -> np.ndarray:
+        return np.zeros(shape, dtype=dtype).view(NoCopyArray)
+
+    engine = WorldEngine(width=16, height=16, gas_cell_size=4)
+    pipeline = engine.heat_solver.gpu_pipeline
+    engine.profile_passes_enabled = True
+    engine.bridge.mark_gpu_authoritative("active_tile_ttl")
+    pipeline.reset_pass_profile()
+
+    def fake_available(world: WorldEngine) -> bool:
+        return True
+
+    def fake_step(
+        world: WorldEngine,
+        dt: float,
+        *,
+        solve_tile_mask: np.ndarray,
+        ambient_iterations: int,
+    ) -> GPUHeatStageTargets:
+        pipeline.last_cpu_mirror_downloaded = False
+        return GPUHeatStageTargets(
+            phase_targets=no_copy_empty((0, 0), np.int32),
+            boil_targets=no_copy_empty((0, 0), np.int32),
+            condense_targets=no_copy_empty((0, 0, 0), np.bool_),
+        )
+
+    def fail_public_capture(*args: object, **kwargs: object) -> tuple[list[dict[str, object]], ...]:
+        raise AssertionError("formal GPU heat must not scan empty CPU target mirrors for public targets")
+
+    def fail_dirty_mark(*args: object, **kwargs: object) -> None:
+        raise AssertionError("formal GPU heat must not scan empty CPU target mirrors for dirty marking")
+
+    monkeypatch.setattr(pipeline, "available", fake_available)
+    monkeypatch.setattr(pipeline, "step", fake_step)
+    monkeypatch.setattr(engine.heat_solver, "_capture_public_runtime_targets", fail_public_capture)
+    monkeypatch.setattr(engine.heat_solver, "_mark_heat_target_collapse_dirty_region", fail_dirty_mark)
+
+    previous_frame_active = engine._world_simulation_frame_active
+    engine._world_simulation_frame_active = True
+    try:
+        engine.heat_solver.step(engine, 1.0 / 60.0)
+    finally:
+        engine._world_simulation_frame_active = previous_frame_active
+
+    assert engine.heat_solver.last_phase_targets.shape == (0, 0)
+    assert engine.heat_solver.last_boil_targets.shape == (0, 0)
+    assert engine.heat_solver.last_condense_targets.shape == (0, 0, 0)
+    profile_names = {entry["name"] for entry in pipeline.last_pass_profile["passes"]}
+    assert {
+        "mask_prep",
+        "stage_target_store",
+        "public_target_capture_skipped",
+        "heat_target_dirty_marking_skipped",
+        "active_refresh",
+    }.issubset(profile_names)
 
 
 def test_gpu_buffer_window_readback_avoids_cpu_chunk_staging() -> None:
@@ -28425,7 +29351,7 @@ def test_gpu_buffer_window_readback_avoids_cpu_chunk_staging() -> None:
     request = ReadbackRequest(center_x=1, center_y=1, width=4, height=4, channels=("cell", "optics"))
     payload = engine._make_readback_payload(request)
     engine.bridge.queue_readback(1, request, payload)
-    result = engine.bridge.poll_readback(2)
+    result = engine.bridge.poll_readback(_next_bridge_readback_min_poll_frame(engine.bridge))
 
     assert result is not None
     cell = result.payload["cell"]
@@ -28461,7 +29387,7 @@ def test_gpu_texture_window_readback_avoids_framebuffer_staging() -> None:
     request = ReadbackRequest(center_x=1, center_y=1, width=4, height=4, channels=("ambient_temperature", "pressure", "velocity", "optics"))
     payload = engine._make_readback_payload(request)
     engine.bridge.queue_readback(1, request, payload)
-    result = engine.bridge.poll_readback(2)
+    result = engine.bridge.poll_readback(_next_bridge_readback_min_poll_frame(engine.bridge))
 
     assert result is not None
     assert float(result.payload["ambient_temperature"]["values"][0, 0]) == 42.0
@@ -28515,7 +29441,7 @@ def test_readback_can_source_synced_fields_from_gpu_resources() -> None:
     )
     payload = engine._make_readback_payload(request)
     engine.bridge.queue_readback(1, request, payload)
-    result = engine.bridge.poll_readback(2)
+    result = engine.bridge.poll_readback(_next_bridge_readback_min_poll_frame(engine.bridge))
 
     assert result is not None
     cell = result.payload["cell"]
@@ -29076,7 +30002,7 @@ def test_motion_solver_settled_falling_island_clears_placeholder_runtime_fields(
     engine.islands[21] = FallingIslandRecord(
         island_id=21,
         bbox=(10, 8, 12, 10),
-        velocity_xy=(0.0, 0.2),
+        velocity_xy=(0.0, 60.0),
         subcell_offset=(0.0, 0.0),
     )
     engine.active.mark_rect(0, 0, engine.width, engine.height)
@@ -29622,9 +30548,10 @@ def test_run_cpu_frame_batches_planned_cpu_side_uploads_and_consumes_previous_re
     assert int(frame_meta["page_update_count"]) == 2
     assert int(frame_meta["page_stripe_section_count"]) == 22
 
-    second = engine.run_cpu_frame()
+    min_poll_frame = _next_bridge_readback_min_poll_frame(engine.bridge)
+    second = _run_cpu_frame_until_next_readback_min_poll(engine)
 
-    assert second.frame_id == 2
+    assert second.frame_id == min_poll_frame
     assert len(second.consumed_readbacks) == 1
     assert second.consumed_readbacks[0].request.center_x == 40
     assert second.paging_updates == []
@@ -29668,7 +30595,7 @@ def test_run_cpu_frame_observation_targets_build_entity_scoped_readbacks() -> No
         for channel in ("cell", "ambient_temperature", "pressure", "velocity", "gas", "optics")
     )
 
-    second = engine.run_cpu_frame()
+    second = _run_cpu_frame_until_next_readback_min_poll(engine)
 
     assert 101 in second.observations
     observation = second.observations[101]
@@ -29730,7 +30657,7 @@ def test_run_cpu_frame_observation_targets_support_explicit_centers_and_skip_mis
     assert int(uploaded_readbacks[0]["observer_id"]) == 201
     assert _decode_uploaded_label(uploaded_readbacks[0], engine.bridge.shadow_buffers["readback_request_label"]) == "manual_probe"
 
-    second = engine.run_cpu_frame()
+    second = _run_cpu_frame_until_next_readback_min_poll(engine)
 
     assert 201 in second.observations
     assert 202 not in second.observations
@@ -29796,7 +30723,7 @@ def test_run_cpu_frame_entities_auto_sync_placeholders_and_observations() -> Non
         (19, 10),
     }
 
-    second = engine.run_cpu_frame()
+    second = _run_cpu_frame_until_next_readback_min_poll(engine)
 
     assert 31 in second.observations
     observation = second.observations[31]
@@ -29838,7 +30765,7 @@ def test_serialize_frame_output_observation_payload_uses_world_origin_after_pagi
         )
     )
 
-    second = engine.run_cpu_frame()
+    second = _run_cpu_frame_until_next_readback_min_poll(engine)
     serialized = engine.serialize_frame_output(second)
 
     assert serialized["observations"]["31"]["payload"]["cell"]["origin"] == [73, 7]
@@ -29866,6 +30793,7 @@ def test_request_readback_uses_world_coordinates_after_multi_page_paging() -> No
 
     engine.step()
 
+    _collect_ready_readbacks_at_min_poll(engine)
     result = engine.poll_readbacks(request_id)
 
     assert result is not None
@@ -29929,6 +30857,7 @@ def test_request_readback_resolves_inline_target_queries_to_non_symmetric_paged_
     assert int(uploaded_request["center_y"]) == 4
 
     engine.step()
+    _collect_ready_readbacks_at_min_poll(engine)
     result = engine.poll_readbacks()
 
     assert result is not None
@@ -29955,6 +30884,7 @@ def test_completed_readback_keeps_world_coordinates_after_later_paging_change() 
     engine.step()
     engine.advance_paging(16, 8, immediate=True)
 
+    _collect_ready_readbacks_at_min_poll(engine)
     result = engine.poll_readbacks(request_id)
 
     assert result is not None
@@ -29981,6 +30911,7 @@ def test_serialize_ready_readbacks_keeps_world_coordinates_after_later_paging_ch
     engine.step()
     engine.advance_paging(16, 8, immediate=True)
 
+    _collect_ready_readbacks_at_min_poll(engine)
     ready = engine.serialize_ready_readbacks()
 
     assert ready["ready"] == 1
@@ -30006,7 +30937,7 @@ def test_poll_all_readbacks_keeps_world_coordinates_after_later_paging_change() 
     engine.step()
     engine.advance_paging(16, 8, immediate=True)
 
-    results = engine.poll_all_readbacks()
+    results = engine.poll_all_readbacks(current_frame_id=_next_bridge_readback_min_poll_frame(engine.bridge))
 
     assert len(results) == 1
     assert results[0].request.center_x == world_x
@@ -30040,7 +30971,7 @@ def test_poll_all_readbacks_collects_ready_results_for_current_frame_after_later
     engine._finish_readbacks()
     engine.advance_paging(16, 8, immediate=True)
 
-    results = engine.poll_all_readbacks(current_frame_id=2)
+    results = engine.poll_all_readbacks(current_frame_id=_next_bridge_readback_min_poll_frame(engine.bridge))
 
     assert len(results) == 1
     assert results[0].request.center_x == world_x
@@ -30087,7 +31018,7 @@ def test_finished_readback_gas_channels_use_world_coordinates_for_non_symmetric_
     engine.frame_id = 1
     engine._finish_readbacks()
 
-    result = engine.bridge.poll_readback(2)
+    result = engine.bridge.poll_readback(_next_bridge_readback_min_poll_frame(engine.bridge))
 
     assert result is not None
     assert result.request.center_x == world_x
@@ -30123,6 +31054,7 @@ def test_request_readback_cell_and_optics_use_world_coordinates_for_non_symmetri
     engine.step()
     engine.step()
 
+    _collect_ready_readbacks_at_min_poll(engine)
     result = engine.poll_readbacks(request_id)
 
     assert result is not None
@@ -30177,7 +31109,7 @@ def test_finished_readback_cell_and_optics_channels_use_world_coordinates_for_no
     engine.frame_id = 1
     engine._finish_readbacks()
 
-    result = engine.bridge.poll_readback(2)
+    result = engine.bridge.poll_readback(_next_bridge_readback_min_poll_frame(engine.bridge))
 
     assert result is not None
     assert result.request.center_x == world_x
@@ -30230,7 +31162,7 @@ def test_http_console_async_readback_cell_and_optics_use_world_coordinates_for_n
         request_id = int(queued["request_id"])
 
         _http_json("POST", f"{base_url}/api/control/tick", {})
-        _http_json("POST", f"{base_url}/api/control/tick", {})
+        _http_tick_until_bridge_readback_min_poll(base_url, engine)
 
         polled = _http_json("GET", f"{base_url}/api/readback/poll?request_id={request_id}")
     finally:
@@ -30275,9 +31207,11 @@ def test_http_console_readback_ready_keeps_world_coordinates_after_later_paging_
         )
 
         _http_json("POST", f"{base_url}/api/control/tick", {})
-        _http_json("POST", f"{base_url}/api/control/tick", {})
+        min_poll_frame = _next_bridge_readback_min_poll_frame(engine.bridge)
+        while engine.frame_id < min_poll_frame - 1:
+            _http_json("POST", f"{base_url}/api/control/tick", {})
         _http_json("POST", f"{base_url}/api/paging/focus", {"x": 16, "y": 8})
-        _http_json("POST", f"{base_url}/api/control/tick", {})
+        _http_tick_until_bridge_readback_min_poll(base_url, engine)
 
         ready = _http_json("GET", f"{base_url}/api/readback/ready")
         polled = _http_json("GET", f"{base_url}/api/readback/poll")
@@ -30322,7 +31256,7 @@ def test_http_console_readback_poll_all_keeps_world_coordinates_after_later_pagi
         )
 
         _http_json("POST", f"{base_url}/api/control/tick", {})
-        _http_json("POST", f"{base_url}/api/control/tick", {})
+        _http_tick_until_bridge_readback_min_poll(base_url, engine)
 
         results = _http_json("GET", f"{base_url}/api/readback/poll_all")
         _http_json("POST", f"{base_url}/api/paging/focus", {"x": 16, "y": 8})
@@ -30385,7 +31319,7 @@ def test_http_console_readback_request_resolves_inline_target_queries_to_non_sym
             engine.bridge.shadow_buffers["world_command_payload"],
         )
 
-        _http_json("POST", f"{base_url}/api/control/tick", {})
+        _http_tick_until_bridge_readback_min_poll(base_url, engine)
         polled = _http_json("GET", f"{base_url}/api/readback/poll?request_id={request_id}")
     finally:
         console.stop()
@@ -30425,7 +31359,7 @@ def test_entity_observation_feedback_handles_readback_window_across_paging_buffe
         )
     )
 
-    second = engine.run_cpu_frame()
+    second = _run_cpu_frame_until_next_readback_min_poll(engine)
 
     assert first.queued_observations == 1
     assert 31 in second.observations
@@ -30468,7 +31402,7 @@ def test_readback_request_serialization_uses_world_coordinates_after_multi_page_
     assert preview["observation_requests"][0]["center_x"] == 74
     assert preview["observation_requests"][0]["center_y"] == 8
 
-    second = engine.run_cpu_frame()
+    second = _run_cpu_frame_until_next_readback_min_poll(engine)
     serialized = engine.serialize_frame_output(second)
 
     assert serialized["observations"]["31"]["request"]["center_x"] == 74
@@ -30497,7 +31431,7 @@ def test_completed_observation_snapshot_keeps_world_coordinates_after_later_pagi
         )
     )
 
-    second = engine.run_cpu_frame()
+    second = _run_cpu_frame_until_next_readback_min_poll(engine)
     assert 31 in second.observations
     engine.advance_paging(16, 8, immediate=True)
 
@@ -30509,7 +31443,7 @@ def test_completed_observation_snapshot_keeps_world_coordinates_after_later_pagi
 
 
 def test_serialize_entity_feedback_snapshot_keeps_world_coordinates_after_later_paging_change() -> None:
-    engine = WorldEngine(width=64, height=16, active_width=32, active_height=16, gas_cell_size=4)
+    engine = WorldEngine(width=64, height=16, active_width=32, active_height=16, gas_cell_size=4, simulation_backend="cpu")
     engine.clear_cell_region(0, 0, engine.width, engine.height)
 
     engine.run_cpu_frame(
@@ -30568,9 +31502,10 @@ def test_consume_entity_observation_results_collects_current_frame_readbacks_aft
     )
     engine.advance_paging(16, 8, immediate=True)
 
-    consumed = engine.consume_entity_observation_results(current_frame_id=2)
+    min_poll_frame = _next_bridge_readback_min_poll_frame(engine.bridge)
+    consumed = engine.consume_entity_observation_results(current_frame_id=min_poll_frame)
 
-    assert consumed["frame_id"] == 2
+    assert consumed["frame_id"] == min_poll_frame
     assert consumed["consumed"] == 1
     assert consumed["consumed_readbacks"][0]["request"]["observer_id"] == 31
     assert consumed["consumed_readbacks"][0]["request"]["center_x"] == 75
@@ -30765,15 +31700,17 @@ def test_run_cpu_frame_entity_placeholders_use_buffer_coordinates_after_multi_pa
         )
     )
 
-    assert engine.entity_placeholders[9] == {(2, 5)}
+    buffer_x, buffer_y = engine._world_to_buffer_clamped(2, 5)
+    world_x, world_y = engine._buffer_to_world_position((buffer_x, buffer_y))
+    assert engine.entity_placeholders[9] == {(buffer_x, buffer_y)}
     assert engine.serialize_entity_placeholders()["placeholders"] == [
         {
             "entity_id": 9,
-            "bbox": [66, 5, 67, 6],
+            "bbox": [world_x, world_y, world_x + 1, world_y + 1],
             "cells": [
                 {
-                    "x": 66,
-                    "y": 5,
+                    "x": world_x,
+                    "y": world_y,
                     "material_id": engine.rulebook.material_id("placeholder_solid"),
                     "material": "placeholder_solid",
                     "phase": int(Phase.STATIC_SOLID),
@@ -32567,7 +33504,7 @@ def test_run_cpu_frame_entity_feedback_reports_placeholder_conversion_and_loss()
 
     assert first.entity_feedback == {}
 
-    second = engine.run_cpu_frame()
+    second = _run_cpu_frame_until_next_readback_min_poll(engine)
 
     assert 51 in second.entity_feedback
     feedback = second.entity_feedback[51]
@@ -32603,7 +33540,7 @@ def test_run_cpu_frame_entity_feedback_uses_world_coordinates_after_paging() -> 
 
     assert first.entity_feedback == {}
 
-    second = engine.run_cpu_frame()
+    second = _run_cpu_frame_until_next_readback_min_poll(engine)
 
     assert 31 in second.entity_feedback
     feedback = second.entity_feedback[31]
@@ -33270,6 +34207,109 @@ def test_serialize_entity_placeholders_uses_shadow_material_names_not_live_array
     ]
 
 
+def test_gpu_entity_placeholders_default_do_not_sync_read_authoritative_buffers() -> None:
+    engine = WorldEngine(width=16, height=12, simulation_backend="gpu")
+    if not engine.bridge.enabled or engine.bridge.ctx is None:
+        pytest.skip("GPU bridge is not available")
+    engine.entity_placeholders = {5: {(7, 6)}}
+    engine.bridge.sync_world(engine)
+
+    class NoReadBuffer:
+        def __init__(self, wrapped: object, name: str) -> None:
+            self._wrapped = wrapped
+            self._name = name
+
+        def read(self, *args: object, **kwargs: object) -> bytes:
+            raise AssertionError(f"default entity placeholder snapshot must not read {self._name}")
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._wrapped, name)
+
+    protected_resources = ("cell_core", "entity_id", "placeholder_displaced_material")
+    if any(name not in engine.bridge.buffers for name in protected_resources):
+        pytest.skip("GPU entity placeholder buffers are not available")
+    originals = {name: engine.bridge.buffers[name] for name in protected_resources}
+    for name, buffer in originals.items():
+        engine.bridge.buffers[name] = NoReadBuffer(buffer, name)
+    engine.bridge.mark_gpu_authoritative(*protected_resources)
+    try:
+        payload = engine.serialize_entity_placeholders()
+    finally:
+        engine.bridge.buffers.update(originals)
+
+    placeholder_id = engine.rulebook.material_id("placeholder_solid")
+    assert payload == {
+        "placeholders": [
+            {
+                "entity_id": 5,
+                "bbox": [7, 6, 8, 7],
+                "cells": [
+                    {
+                        "x": 7,
+                        "y": 6,
+                        "material_id": placeholder_id,
+                        "material": "placeholder_solid",
+                        "phase": int(Phase.STATIC_SOLID),
+                        "displaced_material_id": 0,
+                        "displaced_material": None,
+                    }
+                ],
+            }
+        ]
+    }
+
+
+def test_gpu_entity_feedback_default_uses_consumed_snapshot_without_sync_read() -> None:
+    engine = WorldEngine(width=16, height=12, simulation_backend="gpu")
+    if not engine.bridge.enabled or engine.bridge.ctx is None:
+        pytest.skip("GPU bridge is not available")
+    engine.sync_entity_states([EntityState(entity_id=5, x=7, y=6, width=1, height=1)], immediate=True)
+    stored_feedback = {
+        "5": {
+            "entity_id": 5,
+            "bbox": [7, 6, 8, 7],
+            "cells": [
+                {
+                    "x": 7,
+                    "y": 6,
+                    "present": True,
+                    "material_id": engine.rulebook.material_id("placeholder_solid"),
+                    "phase": int(Phase.STATIC_SOLID),
+                    "integrity": 1.0,
+                    "entity_id": 5,
+                }
+            ],
+        }
+    }
+    engine.last_entity_observation_consume_snapshot["entity_feedback"] = deepcopy(stored_feedback)
+    engine.bridge.sync_world(engine)
+
+    class NoReadBuffer:
+        def __init__(self, wrapped: object, name: str) -> None:
+            self._wrapped = wrapped
+            self._name = name
+
+        def read(self, *args: object, **kwargs: object) -> bytes:
+            raise AssertionError(f"default entity feedback snapshot must not read {self._name}")
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._wrapped, name)
+
+    protected_resources = ("cell_core", "entity_id", "placeholder_displaced_material")
+    if any(name not in engine.bridge.buffers for name in protected_resources):
+        pytest.skip("GPU entity feedback buffers are not available")
+    originals = {name: engine.bridge.buffers[name] for name in protected_resources}
+    for name, buffer in originals.items():
+        engine.bridge.buffers[name] = NoReadBuffer(buffer, name)
+    engine.bridge.mark_gpu_authoritative(*protected_resources)
+    try:
+        payload = engine.serialize_entity_feedback_snapshot()
+    finally:
+        engine.bridge.buffers.update(originals)
+
+    assert payload == {"feedback": stored_feedback}
+
+
 def test_swap_cells_move_into_empty_cell_clears_source_runtime_fields() -> None:
     engine = WorldEngine(width=24, height=16)
     engine.clear_cell_region(0, 0, engine.width, engine.height)
@@ -33447,20 +34487,24 @@ def test_gpu_bridge_sync_world_uploads_visible_illumination_into_light_textures(
 
 def test_gpu_bridge_sync_world_uploads_debug_texture_from_supplied_frame_with_clipping() -> None:
     engine = WorldEngine(width=16, height=12)
-    debug_frame = np.zeros((engine.height, engine.width, 3), dtype=np.float32)
-    debug_frame[3, 6] = np.array([1.5, 0.5, -0.25], dtype=np.float32)
-    debug_frame[8, 2] = np.array([0.2, 2.0, 0.75], dtype=np.float32)
+    try:
+        debug_frame = np.zeros((engine.height, engine.width, 3), dtype=np.float32)
+        debug_frame[3, 6] = np.array([1.5, 0.5, -0.25], dtype=np.float32)
+        debug_frame[8, 2] = np.array([0.2, 2.0, 0.75], dtype=np.float32)
 
-    engine.bridge.sync_world(engine, debug_frame=debug_frame)
+        engine.bridge.sync_world(engine, debug_frame=debug_frame)
 
-    debug_texture = engine.bridge.texture("debug")
-    assert debug_texture is not None
-    uploaded = np.frombuffer(debug_texture.read(), dtype="f4").reshape((engine.height, engine.width, 3))
+        debug_texture = engine.bridge.texture("debug")
+        assert debug_texture is not None
+        uploaded = np.frombuffer(debug_texture.read(), dtype="f4").reshape((engine.height, engine.width, 4))
 
-    assert np.allclose(uploaded[3, 6], np.array([1.0, 0.5, 0.0], dtype=np.float32))
-    assert np.allclose(uploaded[8, 2], np.array([0.2, 1.0, 0.75], dtype=np.float32))
-    assert np.all(uploaded >= 0.0)
-    assert np.all(uploaded <= 1.0)
+        assert np.allclose(uploaded[3, 6, :3], np.array([1.0, 0.5, 0.0], dtype=np.float32))
+        assert np.allclose(uploaded[8, 2, :3], np.array([0.2, 1.0, 0.75], dtype=np.float32))
+        assert np.allclose(uploaded[..., 3], 1.0)
+        assert np.all(uploaded[..., :3] >= 0.0)
+        assert np.all(uploaded[..., :3] <= 1.0)
+    finally:
+        engine.close()
 
 
 def test_atlas_texture_stays_constant_when_render_group_changes_without_base_color_change() -> None:
@@ -33634,6 +34678,76 @@ def test_gpu_bridge_sync_world_preserves_gpu_authoritative_active_scheduler_buff
     assert np.array_equal(gpu_chunk_mask, expected_chunk_mask.astype(np.int32))
 
 
+def test_gpu_bridge_sync_display_textures_derives_material_from_gpu_cell_core() -> None:
+    engine = WorldEngine(width=16, height=12)
+    if not engine.bridge.enabled:
+        pytest.skip("GPU bridge is not available")
+    try:
+        gold_id = engine.rulebook.material_id("gold_solid")
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(3, 4, "gold_solid", mark_dirty=False)
+        engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+        visible = np.zeros((engine.height, engine.width, 4), dtype=np.float32)
+        visible[4, 3, :3] = (0.25, 0.5, 0.75)
+        visible[..., 3] = 1.0
+        engine.bridge.textures["visible_illumination"].write(visible.tobytes())
+        engine.bridge.mark_gpu_authoritative("cell_core", "material", "visible_illumination")
+        engine.bridge.textures["material"].write(np.zeros((engine.height, engine.width), dtype=np.float32).tobytes())
+        engine.bridge.textures["light"].write(np.zeros((engine.height, engine.width, 4), dtype=np.float32).tobytes())
+
+        engine.bridge.sync_display_textures(engine)
+
+        material = np.frombuffer(engine.bridge.textures["material"].read(), dtype=np.float32).reshape((engine.height, engine.width))
+        light = np.frombuffer(engine.bridge.textures["light"].read(), dtype=np.float32).reshape((engine.height, engine.width, 4))
+        assert int(material[4, 3]) == gold_id
+        assert int(material[0, 0]) == 0
+        assert np.allclose(light[4, 3, :3], (0.25, 0.5, 0.75))
+        assert float(light[4, 3, 3]) == pytest.approx(1.0)
+    finally:
+        engine.close()
+
+
+def test_gpu_bridge_sync_debug_display_texture_generates_temperature_view_on_gpu() -> None:
+    engine = WorldEngine(width=16, height=12)
+    if not engine.bridge.enabled:
+        pytest.skip("GPU bridge is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(3, 4, "gold_solid", mark_dirty=False)
+        engine.cell_temperature[4, 3] = 180.0
+        engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+        engine.bridge.mark_gpu_authoritative("cell_core")
+
+        assert engine.bridge.sync_debug_display_texture(engine, view="temperature")
+
+        debug = np.frombuffer(engine.bridge.textures["debug"].read(), dtype=np.float32).reshape((engine.height, engine.width, 4))
+        assert float(debug[4, 3, 0]) > float(debug[4, 3, 2])
+    finally:
+        engine.close()
+
+
+def test_gpu_bridge_sync_debug_display_texture_generates_active_view_on_gpu() -> None:
+    engine = WorldEngine(width=64, height=64)
+    if not engine.bridge.enabled:
+        pytest.skip("GPU bridge is not available")
+    try:
+        engine.bridge.clear_gpu_authoritative("active_meta", "active_tile_ttl", "active_chunk_mask")
+        for tile_y in range(engine.active.tile_height):
+            for tile_x in range(engine.active.tile_width):
+                engine.active.active_tile_ttl[tile_y][tile_x] = 0
+        engine.active.active_tile_ttl[0][0] = engine.active.active_ttl_reset
+        engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+        engine.bridge.mark_gpu_authoritative("active_tile_ttl")
+
+        assert engine.bridge.sync_debug_display_texture(engine, view="active")
+
+        debug = np.frombuffer(engine.bridge.textures["debug"].read(), dtype=np.float32).reshape((engine.height, engine.width, 4))
+        assert float(debug[1, 1, 1]) > 0.5
+        assert np.allclose(debug[-1, -1, :3], np.zeros(3, dtype=np.float32))
+    finally:
+        engine.close()
+
+
 def test_gpu_bridge_decay_active_scheduler_updates_gpu_buffers_without_cpu_active_mutation() -> None:
     engine = WorldEngine(width=64, height=64)
     if not engine.bridge.enabled:
@@ -33805,6 +34919,201 @@ def _read_gpu_active_tile_ttl(engine: WorldEngine) -> np.ndarray:
         engine.bridge.buffers["active_tile_ttl"].read(size=engine.active.tile_width * engine.active.tile_height * 4),
         dtype=np.int32,
     ).reshape((engine.active.tile_height, engine.active.tile_width))
+
+
+def _read_gpu_collapse_structure_dirty_tile_mask(engine: WorldEngine) -> np.ndarray:
+    return np.frombuffer(
+        engine.bridge.buffers[COLLAPSE_STRUCTURE_DIRTY_TILE_MASK_BUFFER].read(
+            size=engine.active.tile_width * engine.active.tile_height * np.dtype(np.uint32).itemsize
+        ),
+        dtype=np.uint32,
+    ).reshape((engine.active.tile_height, engine.active.tile_width))
+
+
+def test_gpu_collapse_dirty_mark_formal_frame_uses_active_tile_indirect_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=96, height=64, gas_cell_size=4)
+    if not engine.bridge.enabled:
+        pytest.skip("GPU bridge is not available")
+    material_tex = None
+    phase_tex = None
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+        _seed_gpu_authoritative_active_tiles(engine, [(1, 0)])
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+        for tile_y in range(engine.active.tile_height):
+            for tile_x in range(engine.active.tile_width):
+                engine.active.active_tile_ttl[tile_y][tile_x] = 0
+        for chunk_y in range(engine.active.chunk_height):
+            for chunk_x in range(engine.active.chunk_width):
+                engine.active.active_chunk_mask[chunk_y][chunk_x] = False
+
+        collapse_dirty.clear_collapse_structure_dirty_tile_mask(engine)
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        gold_id = engine.rulebook.material_id("gold_solid")
+        material_out = np.zeros((engine.height, engine.width), dtype="f4")
+        phase_out = np.zeros((engine.height, engine.width), dtype="f4")
+        material_out[20, 40] = float(gold_id)
+        phase_out[20, 40] = float(Phase.STATIC_SOLID)
+        material_tex = ctx.texture((engine.width, engine.height), 1, dtype="f4")
+        phase_tex = ctx.texture((engine.width, engine.height), 1, dtype="f4")
+        material_tex.write(material_out.tobytes())
+        phase_tex.write(phase_out.tobytes())
+
+        dirty_program = collapse_dirty._dirty_mark_program(engine)
+        original_indirect = dirty_program.run_indirect
+        indirect_dispatch_args: list[list[int]] = []
+
+        def fail_direct_run(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal GPU collapse dirty mark must not use full-world cell-grid run")
+
+        def count_indirect(indirect_buffer: object) -> object:
+            assert indirect_buffer is engine.bridge.buffers[COLLAPSE_STRUCTURE_ACTIVE_TILE_DISPATCH_ARGS_BUFFER]
+            indirect_dispatch_args.append(
+                np.frombuffer(
+                    engine.bridge.buffers[COLLAPSE_STRUCTURE_ACTIVE_TILE_DISPATCH_ARGS_BUFFER].read(size=12),
+                    dtype=np.uint32,
+                    count=3,
+                ).tolist()
+            )
+            return original_indirect(indirect_buffer)
+
+        monkeypatch.setattr(dirty_program, "run", fail_direct_run)
+        monkeypatch.setattr(dirty_program, "run_indirect", count_indirect)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        try:
+            engine._world_simulation_frame_active = True
+            assert collapse_dirty.mark_collapse_structure_dirty_tiles_from_bridge_cell_core(
+                engine,
+                material_tex,
+                phase_tex,
+            )
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        active_count = int(
+            np.frombuffer(
+                engine.bridge.buffers[COLLAPSE_STRUCTURE_ACTIVE_TILE_COUNT_BUFFER].read(size=4),
+                dtype=np.uint32,
+                count=1,
+            )[0]
+        )
+        active_tiles = np.frombuffer(
+            engine.bridge.buffers[COLLAPSE_STRUCTURE_ACTIVE_TILE_LIST_BUFFER].read(
+                size=active_count * 2 * np.dtype(np.int32).itemsize
+            ),
+            dtype=np.int32,
+            count=active_count * 2,
+        ).reshape((active_count, 2))
+        dirty_tiles = _read_gpu_collapse_structure_dirty_tile_mask(engine)
+
+        assert indirect_dispatch_args == [[collapse_dirty._active_tile_workgroups_per_tile(engine) * 6, 1, 1]]
+        assert {tuple(tile.tolist()) for tile in active_tiles} == {
+            (0, 0),
+            (1, 0),
+            (2, 0),
+            (0, 1),
+            (1, 1),
+            (2, 1),
+        }
+        assert int(dirty_tiles[0, 1]) == 1
+        assert int(np.count_nonzero(dirty_tiles)) == 1
+    finally:
+        if material_tex is not None:
+            material_tex.release()
+        if phase_tex is not None:
+            phase_tex.release()
+        engine.close()
+
+
+def test_gpu_collapse_dirty_queue_full_active_scheduler_avoids_full_world_region_staging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=64, height=64, gas_cell_size=4)
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    material_tex = None
+    phase_tex = None
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(8, 8, "log_solid", mark_dirty=False)
+        engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+        full_active_tiles = [
+            (tile_x, tile_y)
+            for tile_y in range(engine.active.tile_height)
+            for tile_x in range(engine.active.tile_width)
+        ]
+        _seed_gpu_authoritative_active_tiles(engine, full_active_tiles)
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "collapse_delay_pending",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+        engine.collapse_dirty_regions.clear()
+        engine.collapse_deferred_regions.clear()
+        collapse_dirty.clear_collapse_structure_dirty_tile_mask(engine)
+
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        material_tex = ctx.texture((engine.width, engine.height), 1, dtype="f4")
+        phase_tex = ctx.texture((engine.width, engine.height), 1, dtype="f4")
+        material_tex.write(np.zeros((engine.height, engine.width), dtype="f4").tobytes())
+        phase_tex.write(np.zeros((engine.height, engine.width), dtype="f4").tobytes())
+
+        def fail_active_source_bounds(*args: object, **kwargs: object) -> object:
+            raise AssertionError("formal dirty producer must not derive bounds from CPU active shadows")
+
+        def fail_upload_region_state(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal dirty queue must not stage a resource region through _upload_region_state")
+
+        def fail_region_input_load(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal dirty queue must not load bridge inputs through full-region dispatch")
+
+        monkeypatch.setattr(collapse_dirty, "_active_source_tile_bounds", fail_active_source_bounds)
+        monkeypatch.setattr(pipeline, "_upload_region_state", fail_upload_region_state)
+        monkeypatch.setattr(pipeline, "_load_authoritative_bridge_region_inputs", fail_region_input_load)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        try:
+            engine._world_simulation_frame_active = True
+            assert collapse_dirty.mark_collapse_structure_dirty_tiles_from_bridge_cell_core(
+                engine,
+                material_tex,
+                phase_tex,
+            )
+            assert collapse_dirty.get_collapse_structure_dirty_tile_bounds(engine) is None
+            engine.collapse_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        unpacked, cell = _readback_cell_window(engine, center_x=8, center_y=8, width=3, height=3)
+        assert engine.collapse_solver.last_backend == "gpu"
+        assert engine._gpu_collapse_structure_dirty_tiles_pending is False
+        assert int(unpacked["phase"][1, 1]) == int(Phase.FALLING_ISLAND)
+        assert int(cell["island_id"][1, 1]) > 0
+    finally:
+        if material_tex is not None:
+            material_tex.release()
+        if phase_tex is not None:
+            phase_tex.release()
+        engine.close()
 
 
 def test_gpu_gas_refresh_active_regions_formal_frame_marks_active_scheduler_on_gpu(
@@ -34030,6 +35339,23 @@ def _prepare_gpu_authoritative_active_tile(engine: WorldEngine) -> None:
             engine.active.active_chunk_mask[chunk_y][chunk_x] = False
 
 
+def _seed_gpu_authoritative_active_tiles(engine: WorldEngine, active_tiles: list[tuple[int, int]]) -> None:
+    engine.bridge.clear_gpu_authoritative("active_meta", "active_tile_ttl", "active_chunk_mask")
+    for tile_y in range(engine.active.tile_height):
+        for tile_x in range(engine.active.tile_width):
+            engine.active.active_tile_ttl[tile_y][tile_x] = 0
+    for chunk_y in range(engine.active.chunk_height):
+        for chunk_x in range(engine.active.chunk_width):
+            engine.active.active_chunk_mask[chunk_y][chunk_x] = False
+    for tile_x, tile_y in active_tiles:
+        engine.active.active_tile_ttl[tile_y][tile_x] = 1
+        chunk_x = min(engine.active.chunk_width - 1, tile_x // engine.active.chunk_tiles)
+        chunk_y = min(engine.active.chunk_height - 1, tile_y // engine.active.chunk_tiles)
+        engine.active.active_chunk_mask[chunk_y][chunk_x] = True
+    engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+    engine.bridge.mark_gpu_authoritative("active_meta", "active_tile_ttl", "active_chunk_mask")
+
+
 def test_gpu_gas_formal_frame_loads_active_mask_from_gpu_active_ttl() -> None:
     engine = WorldEngine(width=96, height=96, gas_cell_size=4)
     if not engine.bridge.enabled:
@@ -34122,13 +35448,11 @@ def test_gpu_liquid_formal_frame_loads_active_mask_from_gpu_active_ttl() -> None
     assert pipeline.last_cpu_active_upload_skipped is True
     assert np.array_equal(active_tiles, expected_solve)
 
-    pipeline._load_authoritative_active_tile_mask(engine, resources, expansion_radius=1)
-    post_tiles = np.frombuffer(resources.active_tile_tex.read(), dtype=np.float32).reshape(
+    pipeline._load_authoritative_active_tile_mask(engine, resources, expansion_radius=0)
+    seam_tiles = np.frombuffer(resources.active_tile_tex.read(), dtype=np.float32).reshape(
         (engine.active.tile_height, engine.active.tile_width)
     )
-    expected_post = np.zeros((engine.active.tile_height, engine.active.tile_width), dtype=np.float32)
-    expected_post[:2, :2] = 1.0
-    assert np.array_equal(post_tiles, expected_post)
+    assert np.array_equal(seam_tiles, expected_solve)
 
 
 def test_gpu_gas_solver_formal_active_scheduler_does_not_read_cpu_active(
@@ -34212,6 +35536,228 @@ def test_gpu_liquid_solver_formal_active_scheduler_does_not_read_cpu_active(
     assert engine.liquid_solver.gpu_pipeline.last_cpu_active_upload_skipped is True
 
 
+def test_gpu_liquid_tile_solve_uses_compacted_active_tile_list_for_indirect_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=96, height=64, gas_cell_size=4)
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(10, 10, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.set_cell(40, 10, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.bridge.clear_gpu_authoritative("active_meta", "active_tile_ttl", "active_chunk_mask")
+        for tile_y in range(engine.active.tile_height):
+            for tile_x in range(engine.active.tile_width):
+                engine.active.active_tile_ttl[tile_y][tile_x] = 0
+        for chunk_y in range(engine.active.chunk_height):
+            for chunk_x in range(engine.active.chunk_width):
+                engine.active.active_chunk_mask[chunk_y][chunk_x] = False
+        engine.active.active_tile_ttl[0][1] = 1
+        engine.active.active_chunk_mask[0][0] = True
+        engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+
+        pipeline = engine.liquid_solver.gpu_pipeline
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        tile_solve_dispatch_args: list[list[int]] = []
+        chunk_compact_calls: list[str] = []
+        original_run_tile_solve = pipeline._run_tile_solve
+        legacy_compact = pipeline.programs["compact_active_tiles"]
+        chunk_compact = pipeline.programs["compact_active_tiles_from_chunks"]
+        original_chunk_indirect = chunk_compact.run_indirect
+
+        def capture_run_tile_solve(world: WorldEngine, resources: Any) -> None:
+            tile_solve_dispatch_args.append(
+                np.frombuffer(resources.active_tile_dispatch_args.read(size=12), dtype=np.uint32, count=3).tolist()
+            )
+            original_run_tile_solve(world, resources)
+
+        def fail_legacy_compact(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal liquid active tile compact must use active chunk list indirect dispatch")
+
+        def count_chunk_compact(indirect_buffer: object) -> object:
+            chunk_compact_calls.append("compact_active_tiles_from_chunks")
+            return original_chunk_indirect(indirect_buffer)
+
+        monkeypatch.setattr(pipeline, "_run_tile_solve", capture_run_tile_solve)
+        monkeypatch.setattr(legacy_compact, "run", fail_legacy_compact)
+        monkeypatch.setattr(chunk_compact, "run_indirect", count_chunk_compact)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.liquid_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        resources = engine.liquid_solver.gpu_pipeline.resources
+        assert resources is not None
+        active_count = np.frombuffer(resources.active_tile_count.read(size=4), dtype=np.uint32, count=1)
+        active_list_head = np.frombuffer(resources.active_tile_list.read(size=8), dtype=np.int32, count=2)
+        unpacked, _cell = _readback_cell_window(engine, center_x=48, center_y=32, width=96, height=64)
+
+        assert int(active_count[0]) == 1
+        assert chunk_compact_calls
+        assert tile_solve_dispatch_args == [[1, 1, 1]]
+        assert active_list_head.tolist() == [1, 0]
+        assert int(unpacked["material_id"][10, 10]) == water_id
+        assert int(unpacked["material_id"][11, 10]) == 0
+        assert int(unpacked["material_id"][10, 40]) == 0
+        assert int(unpacked["material_id"][11, 40]) == water_id
+    finally:
+        engine.close()
+
+
+def test_gpu_liquid_motion_refreshes_gpu_active_scheduler_for_moving_water() -> None:
+    engine = WorldEngine(width=128, height=128, gas_cell_size=4)
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.bridge.clear_gpu_authoritative("active_meta", "active_tile_ttl", "active_chunk_mask")
+        for tile_y in range(engine.active.tile_height):
+            for tile_x in range(engine.active.tile_width):
+                engine.active.active_tile_ttl[tile_y][tile_x] = 0
+        engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+        engine.bridge.mark_gpu_authoritative("active_meta", "active_tile_ttl", "active_chunk_mask")
+        engine.queue_command("inject_material", x=48, y=20, material="water_liquid", radius=2)
+
+        active_counts = []
+        ttl_maxes = []
+        for _ in range(engine.active.active_ttl_reset + 3):
+            engine.step(1.0 / 60.0)
+            ttl = np.frombuffer(
+                engine.bridge.buffers["active_tile_ttl"].read(size=engine.active.tile_width * engine.active.tile_height * 4),
+                dtype=np.int32,
+            ).reshape((engine.active.tile_height, engine.active.tile_width))
+            active_counts.append(int(np.count_nonzero(ttl > 0)))
+            ttl_maxes.append(int(ttl.max(initial=0)))
+
+        assert min(active_counts) > 0
+        assert ttl_maxes[-1] >= engine.active.active_ttl_reset - 1
+    finally:
+        engine.close()
+
+
+def test_gpu_liquid_motion_refresh_marks_only_actual_source_and_target_tiles(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = WorldEngine(width=96, height=64, gas_cell_size=4)
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(10, 10, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.bridge.clear_gpu_authoritative("active_meta", "active_tile_ttl", "active_chunk_mask")
+        for tile_y in range(engine.active.tile_height):
+            for tile_x in range(engine.active.tile_width):
+                engine.active.active_tile_ttl[tile_y][tile_x] = 0
+        engine.active.active_tile_ttl[0][0] = 1
+        engine.active.active_chunk_mask[0][0] = True
+        engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+
+        pipeline = engine.motion_solver.gpu_pipeline
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        chunk_compact_calls: list[str] = []
+        legacy_compact = pipeline.programs["compact_active_tiles"]
+        chunk_compact = pipeline.programs["compact_active_tiles_from_chunks"]
+        original_chunk_indirect = chunk_compact.run_indirect
+
+        def fail_legacy_compact(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal motion active tile compact must use active chunk list indirect dispatch")
+
+        def count_chunk_compact(indirect_buffer: object) -> object:
+            chunk_compact_calls.append("compact_active_tiles_from_chunks")
+            return original_chunk_indirect(indirect_buffer)
+
+        monkeypatch.setattr(legacy_compact, "run", fail_legacy_compact)
+        monkeypatch.setattr(chunk_compact, "run_indirect", count_chunk_compact)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.liquid_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        ttl = _read_gpu_active_tile_ttl(engine)
+
+        ttl_shape = (engine.active.tile_height, engine.active.tile_width)
+        expected = np.zeros(ttl_shape, dtype=np.int32)
+        expected[0, 0] = engine.active.active_ttl_reset
+        assert np.array_equal(ttl, expected)
+    finally:
+        engine.close()
+
+
+def test_gpu_liquid_formal_active_mask_does_not_solve_neighbor_seam_water_tile() -> None:
+    engine = WorldEngine(width=96, height=64, gas_cell_size=4)
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(63, 10, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.set_cell(62, 10, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(63, 11, "raw_stone_solid", mark_dirty=False)
+        engine.bridge.clear_gpu_authoritative("active_meta", "active_tile_ttl", "active_chunk_mask")
+        for tile_y in range(engine.active.tile_height):
+            for tile_x in range(engine.active.tile_width):
+                engine.active.active_tile_ttl[tile_y][tile_x] = 0
+        engine.active.active_tile_ttl[0][0] = 1
+        engine.active.active_chunk_mask[0][0] = True
+        engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.liquid_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        unpacked, _cell = _readback_cell_window(engine, center_x=48, center_y=32, width=96, height=64)
+        ttl = _read_gpu_active_tile_ttl(engine)
+        assert int(unpacked["material_id"][10, 63]) == water_id
+        assert int(unpacked["material_id"][10, 64]) == 0
+        assert int(ttl[0, 1]) == 0
+        assert int(ttl[0, 2]) == 0
+    finally:
+        engine.close()
+
+
 def test_gpu_optics_formal_frame_loads_active_mask_from_gpu_active_ttl() -> None:
     engine = WorldEngine(width=96, height=96, gas_cell_size=4)
     if not engine.bridge.enabled:
@@ -34249,6 +35795,487 @@ def test_gpu_optics_formal_frame_loads_active_mask_from_gpu_active_ttl() -> None
     assert pipeline.last_cpu_active_upload_skipped is True
     assert np.array_equal(active_cells, expected_cells)
     assert np.array_equal(active_gas, expected_gas)
+
+
+def test_gpu_optics_formal_reaction_emitter_check_does_not_read_authoritative_count() -> None:
+    class NoReadBuffer:
+        def __init__(self, inner: object) -> None:
+            self.inner = inner
+            self.read_calls = 0
+
+        def read(self, *args: object, **kwargs: object) -> bytes:
+            self.read_calls += 1
+            raise AssertionError("formal optics must not read GPU-authoritative reaction_light_emitter_count")
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self.inner, name)
+
+    engine = WorldEngine(width=16, height=16, simulation_backend="cpu")
+    raw_count = engine.bridge.buffers.get("reaction_light_emitter_count", object())
+    no_read_count = NoReadBuffer(raw_count)
+    engine.bridge.buffers["reaction_light_emitter_count"] = no_read_count
+    engine.bridge.mark_gpu_authoritative("reaction_light_emitter_count")
+    engine.simulation_backend = "gpu"
+    previous_frame_active = engine._world_simulation_frame_active
+    engine._world_simulation_frame_active = True
+    try:
+        assert engine.optics_solver._has_gpu_reaction_emitters(engine) is True
+    finally:
+        engine._world_simulation_frame_active = previous_frame_active
+        engine.close()
+
+    assert no_read_count.read_calls == 0
+
+
+def test_gpu_optics_formal_reaction_emitter_count_uses_full_active_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=96, height=96, gas_cell_size=4)
+    if not engine.bridge.enabled:
+        pytest.skip("GPU bridge is not available")
+    _prepare_gpu_authoritative_active_tile(engine)
+    engine.bridge.mark_gpu_authoritative("reaction_light_emitter_count")
+
+    pipeline = engine.optics_solver.gpu_pipeline
+    ctx = engine.bridge.ctx
+    assert ctx is not None
+    pipeline._ensure_programs(ctx)
+    resources = pipeline._ensure_resources(engine)
+    force_all_active_values: list[bool] = []
+
+    def record_load_authoritative_active_masks(
+        world: WorldEngine,
+        resources_arg: object,
+        *,
+        force_all_active: bool,
+    ) -> None:
+        assert world is engine
+        assert resources_arg is resources
+        force_all_active_values.append(force_all_active)
+
+    monkeypatch.setattr(pipeline, "_load_authoritative_active_masks", record_load_authoritative_active_masks)
+    previous_frame_active = engine._world_simulation_frame_active
+    engine._world_simulation_frame_active = True
+    try:
+        pipeline._upload_inputs(
+            engine,
+            resources,
+            [],
+            solve_cell_mask=np.zeros((engine.height, engine.width), dtype=np.bool_),
+            solve_gas_mask=np.zeros((engine.gas_height, engine.gas_width), dtype=np.bool_),
+        )
+    finally:
+        engine._world_simulation_frame_active = previous_frame_active
+        engine.close()
+
+    assert pipeline.last_cpu_active_upload_skipped is True
+    assert force_all_active_values == [True]
+
+
+def test_gpu_optics_trace_force_all_active_requires_formal_reaction_emitters() -> None:
+    engine = WorldEngine(width=96, height=96, gas_cell_size=4)
+    if not engine.bridge.enabled:
+        pytest.skip("GPU bridge is not available")
+    try:
+        _prepare_gpu_authoritative_active_tile(engine)
+        pipeline = engine.optics_solver.gpu_pipeline
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            assert pipeline._trace_force_all_active(engine) is False
+            engine.bridge.mark_gpu_authoritative("reaction_light_emitter_count")
+            assert pipeline._trace_force_all_active(engine) is True
+            engine.bridge.clear_gpu_authoritative("active_tile_ttl")
+            assert pipeline._trace_force_all_active(engine) is False
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+    finally:
+        engine.close()
+
+
+def test_formal_gpu_optics_reset_elides_cpu_visible_exposure_scratch() -> None:
+    engine = WorldEngine(width=32, height=24, gas_cell_size=4, simulation_backend="gpu")
+    try:
+        solver = engine.optics_solver
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            solver._reset_frame_runtime_state(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        assert solver._visible_exposure.shape == (0, 0, 0)
+
+        solver._reset_frame_runtime_state(engine)
+        assert solver._visible_exposure.shape == engine.cell_optical_dose.shape
+    finally:
+        engine.close()
+
+
+def test_cpu_optics_deposit_recreates_visible_exposure_after_formal_empty_scratch() -> None:
+    engine = WorldEngine(width=16, height=16, gas_cell_size=4, simulation_backend="cpu")
+    try:
+        solver = engine.optics_solver
+        solver._visible_exposure = np.zeros((0, 0, 0), dtype=np.float32)
+        light = SimpleNamespace(dose_channel_id=0)
+        solve_cell_mask = np.ones((engine.height, engine.width), dtype=np.bool_)
+
+        solver._deposit_light(engine, light, 4, 5, 1.25, absorption=0.5, solve_cell_mask=solve_cell_mask)
+
+        assert solver._visible_exposure.shape == engine.cell_optical_dose.shape
+        assert float(solver._visible_exposure[0, 5, 4]) == pytest.approx(1.25)
+        assert float(engine.cell_optical_dose[0, 5, 4]) == pytest.approx(0.625)
+    finally:
+        engine.close()
+
+
+def test_gpu_optics_trace_emitters_marks_light_dose_guard_once_per_ray_source() -> None:
+    source = inspect.getsource(GPUOpticsPipeline._ensure_programs)
+    trace_start = source.index("trace_body = (")
+    trace_end = source.index('self.programs["trace_emitters"]', trace_start)
+    trace_source = source[trace_start:trace_end]
+
+    assert "atomicMax(light_dose_guard[0]" not in trace_source
+    assert "bool deposit_light(" in trace_source
+    assert "bool trace_single_ray(" in trace_source
+    assert "bool any_deposit = false;" in trace_source
+    assert "light_dose_guard[0] = 1u;" not in trace_source
+    assert trace_source.count("atomicExchange(light_dose_guard[0], 1u);") == 1
+
+
+def test_gpu_optics_trace_emitters_uses_fixed_point_atomic_accumulators_source() -> None:
+    source = inspect.getsource(GPUOpticsPipeline._ensure_programs)
+    trace_start = source.index("trace_body = (")
+    trace_end = source.index('self.programs["trace_emitters"]', trace_start)
+    trace_source = source[trace_start:trace_end]
+
+    assert "layout(std430, binding=5) buffer CellDoseAccum" in trace_source
+    assert "layout(std430, binding=6) buffer GasDoseAccum" in trace_source
+    assert "layout(std430, binding=7) buffer IllumAccum" in trace_source
+    assert "uint quantize_accum(float value, float scale)" in trace_source
+    assert "atomicAdd(illum_accum[cell_index], quantize_accum(energy, ILLUM_ACCUM_SCALE));" in trace_source
+    assert "atomicAdd(cell_dose_accum[cell_index], quantize_accum(absorbed, CELL_ACCUM_SCALE));" in trace_source
+    assert "atomicAdd(gas_dose_accum[gas_index], quantize_accum(energy * 0.08, GAS_ACCUM_SCALE));" in trace_source
+    assert "imageLoad(" not in trace_source
+    assert "imageStore(" not in trace_source
+
+
+def test_gpu_optics_trace_emitters_dispatches_concurrent_ray_lanes_source() -> None:
+    source = inspect.getsource(GPUOpticsPipeline._ensure_programs)
+    trace_start = source.index("trace_body = (")
+    trace_end = source.index('self.programs["trace_emitters"]', trace_start)
+    trace_source = source[trace_start:trace_end]
+    main_source = trace_source[trace_source.index("void main()") :]
+    run_source = inspect.getsource(GPUOpticsPipeline._run_emitter_buffer_rays)
+
+    assert "layout(local_size_x={RAY_LOCAL_SIZE}" in source
+    assert "uint lane = gl_GlobalInvocationID.x;" in main_source
+    assert "uint emitter_index = lane / 8u;" in main_source
+    assert "int ray_index = int(lane - emitter_index * 8u);" in main_source
+    assert "for (uint emitter_index" not in main_source
+    assert "for (int ray_index" not in main_source
+    assert "if (ray_index >= ray_count)" in main_source
+    assert "lane_count = MAX_EMITTERS * 8" in run_source
+    assert "groups_x = (lane_count + RAY_LOCAL_SIZE - 1) // RAY_LOCAL_SIZE" in run_source
+    assert "program.run(groups_x, 1, 1)" in run_source
+    assert "program.run(1, 1, 1)" not in run_source
+
+
+def test_gpu_optics_accumulator_convert_pass_runs_before_compose_source() -> None:
+    programs_source = inspect.getsource(GPUOpticsPipeline._ensure_programs)
+    step_source = inspect.getsource(GPUOpticsPipeline.step)
+    convert_source = inspect.getsource(GPUOpticsPipeline._convert_accumulators)
+
+    assert programs_source.index('self.programs["convert_accumulators"]') < programs_source.index(
+        'self.programs["compose_visible"]'
+    )
+    assert step_source.index('"optics_convert_accumulators"') < step_source.index('"optics_compose_visible"')
+    assert 'program = self.programs["convert_accumulators"]' in convert_source
+    assert "resources.cell_dose_accum.bind_to_storage_buffer(binding=0)" in convert_source
+    assert "resources.gas_dose_accum.bind_to_storage_buffer(binding=1)" in convert_source
+    assert "resources.illum_accum.bind_to_storage_buffer(binding=2)" in convert_source
+    assert "resources.cell_dose.bind_to_image(3, read=False, write=True)" in convert_source
+    assert "resources.gas_dose.bind_to_image(4, read=False, write=True)" in convert_source
+    assert "resources.illum_layers.bind_to_image(5, read=False, write=True)" in convert_source
+
+
+def test_gpu_optics_trace_emitters_hoists_dose_channel_bounds_to_emitter_source() -> None:
+    source = inspect.getsource(GPUOpticsPipeline._ensure_programs)
+    trace_start = source.index("trace_body = (")
+    trace_end = source.index('self.programs["trace_emitters"]', trace_start)
+    trace_source = source[trace_start:trace_end]
+    trace_single_start = trace_source.index("bool trace_single_ray(")
+    trace_single_end = trace_source.index("void main()", trace_single_start)
+    trace_single_source = trace_source[trace_single_start:trace_single_end]
+
+    assert "dose_channel >= dose_channel_count" not in trace_single_source
+    assert "range_cells <= 0 || dose_channel < 0 || dose_channel >= dose_channel_count" in trace_source
+
+
+def test_gpu_optics_trace_emitters_deposit_light_elides_redundant_gas_bounds_source() -> None:
+    source = inspect.getsource(GPUOpticsPipeline._ensure_programs)
+    trace_start = source.index("trace_body = (")
+    trace_end = source.index('self.programs["trace_emitters"]', trace_start)
+    trace_source = source[trace_start:trace_end]
+    deposit_start = trace_source.index("bool deposit_light(")
+    deposit_end = trace_source.index("const float SCATTER_ROT_COS", deposit_start)
+    deposit_source = trace_source[deposit_start:deposit_end]
+
+    assert "ivec2 gas_cell = ivec2(cell.x / gas_cell_size, cell.y / gas_cell_size);" in deposit_source
+    assert "if (solve_gas_active(gas_cell))" in deposit_source
+    assert "gas_cell.x >= 0" not in deposit_source
+    assert "gas_cell.y >= 0" not in deposit_source
+    assert "gas_cell.x < gas_grid_size.x" not in deposit_source
+    assert "gas_cell.y < gas_grid_size.y" not in deposit_source
+
+
+def test_gpu_optics_trace_emitters_full_active_power_of_two_shader_uses_gas_cell_shift_source() -> None:
+    class CaptureShaderContext:
+        def compute_shader(self, source: str) -> str:
+            return source
+
+    pipeline = GPUOpticsPipeline()
+    pipeline._ensure_programs(CaptureShaderContext())
+
+    sparse_source = pipeline.programs["trace_emitters"]
+    full_active_source = pipeline.programs["trace_emitters_full_active"]
+    shift_source = pipeline.programs["trace_emitters_full_active_shift"]
+
+    division_expr = "ivec2 gas_cell = ivec2(cell.x / gas_cell_size, cell.y / gas_cell_size);"
+    shift_expr = "ivec2 gas_cell = ivec2(cell.x >> gas_cell_shift, cell.y >> gas_cell_shift);"
+    assert division_expr in sparse_source
+    assert division_expr in full_active_source
+    assert division_expr not in shift_source
+    assert shift_expr in shift_source
+    assert "uniform int gas_cell_shift;" in shift_source
+    assert "uniform int gas_cell_shift;" not in sparse_source
+    assert "uniform int gas_cell_shift;" not in full_active_source
+
+
+def test_gpu_optics_trace_emitter_program_selection_uses_shift_only_for_full_active_power_of_two() -> None:
+    pipeline = GPUOpticsPipeline()
+    world = SimpleNamespace(gas_cell_size=4)
+
+    assert (
+        pipeline._trace_emitter_program_name(world, force_all_active=True)
+        == "trace_emitters_full_active_shift"
+    )
+    assert pipeline._trace_emitter_program_name(world, force_all_active=False) == "trace_emitters"
+
+    world.gas_cell_size = 6
+    assert pipeline._trace_emitter_program_name(world, force_all_active=True) == "trace_emitters_full_active"
+    assert pipeline._trace_emitter_program_name(world, force_all_active=False) == "trace_emitters"
+
+
+def test_gpu_optics_trace_emitters_bypasses_active_mask_fetch_when_force_all_active_source() -> None:
+    programs_source = inspect.getsource(GPUOpticsPipeline._ensure_programs)
+    sparse_start = programs_source.index('trace_helper = f"""')
+    sparse_end = programs_source.index('trace_full_active_helper = f"""', sparse_start)
+    sparse_source = programs_source[sparse_start:sparse_end]
+    full_start = programs_source.index('trace_full_active_helper = f"""', sparse_end)
+    full_end = programs_source.index('\n        active_helper = f"""', full_start)
+    full_source = programs_source[full_start:full_end]
+    run_source = inspect.getsource(GPUOpticsPipeline._run_emitter_buffer_rays)
+
+    assert "texelFetch(active_cell_tex, cell, 0)" in sparse_source
+    assert "texelFetch(active_gas_tex, gas_cell, 0)" in sparse_source
+    assert "uniform bool force_all_active;" not in sparse_source
+    assert "texelFetch(active_cell_tex, cell, 0)" not in full_source
+    assert "texelFetch(active_gas_tex, gas_cell, 0)" not in full_source
+    assert full_source.count("return true;") == 2
+    assert 'self.programs["trace_emitters_full_active"]' in programs_source
+    assert 'self.programs["trace_emitters_full_active_shift"]' in programs_source
+    assert "program_name = self._trace_emitter_program_name(world, force_all_active=force_all_active)" in run_source
+
+
+def test_gpu_optics_trace_helpers_use_material_major_optics_table_source() -> None:
+    programs_source = inspect.getsource(GPUOpticsPipeline._ensure_programs)
+    sparse_start = programs_source.index('trace_helper = f"""')
+    sparse_end = programs_source.index('trace_full_active_helper = f"""', sparse_start)
+    sparse_source = programs_source[sparse_start:sparse_end]
+    full_start = programs_source.index('trace_full_active_helper = f"""', sparse_end)
+    full_end = programs_source.index('\n        active_helper = f"""', full_start)
+    full_source = programs_source[full_start:full_end]
+
+    for helper_source in (sparse_source, full_source):
+        assert (
+            "optics_params[material_id * {MAX_LIGHTS} + light_id]" in helper_source
+            or "optics_params[material_id * MAX_LIGHTS + light_id]" in helper_source
+        )
+        assert "optics_params[light_id * {MAX_MATERIALS} + material_id]" not in helper_source
+        assert "optics_params[light_id * MAX_MATERIALS + material_id]" not in helper_source
+
+
+def test_gpu_optics_trace_emitters_uses_normalized_rotation_source() -> None:
+    source = inspect.getsource(GPUOpticsPipeline._ensure_programs)
+    trace_start = source.index("trace_body = (")
+    trace_end = source.index('self.programs["trace_emitters"]', trace_start)
+    trace_source = source[trace_start:trace_end]
+
+    assert "atan(" not in trace_source
+    assert "vec2 rotate_unit(" in trace_source
+    assert "vec2 rotate_normalized(" in trace_source
+    assert "const float SCATTER_ROT_COS" in trace_source
+    assert "const float SCATTER_ROT_SIN" in trace_source
+    assert "const float REFRACT_ROT_COS" in trace_source
+    assert "const float REFRACT_ROT_SIN" in trace_source
+    assert "float spread_cos = cos(spread);" in trace_source
+    assert "float spread_sin = sin(spread);" in trace_source
+    assert "rotate_normalized(dir, SCATTER_ROT_COS, SCATTER_ROT_SIN)" in trace_source
+    assert "rotate_normalized(dir, REFRACT_ROT_COS, REFRACT_ROT_SIN)" in trace_source
+
+
+def test_gpu_reactions_light_dose_guard_builds_zero_and_full_indirect_args() -> None:
+    engine = WorldEngine(width=16, height=16, gas_cell_size=4)
+    pipeline = engine.reaction_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU reaction pipeline is not available")
+    try:
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        resources = pipeline._ensure_resources(engine)
+        guard = ctx.buffer(np.zeros((4,), dtype=np.uint32).tobytes(), dynamic=True)
+        try:
+            pipeline._build_light_dose_guarded_dispatch_args(engine, resources, guard, 7, 5, 3)
+            args = np.frombuffer(
+                resources.light_dose_guarded_dispatch_args.read(size=3 * 4),
+                dtype=np.uint32,
+            ).astype(int)
+            assert args.tolist() == [0, 1, 1]
+
+            marked = np.zeros((4,), dtype=np.uint32)
+            marked[0] = 1
+            guard.write(marked.tobytes())
+            pipeline._build_light_dose_guarded_dispatch_args(engine, resources, guard, 7, 5, 3)
+            args = np.frombuffer(
+                resources.light_dose_guarded_dispatch_args.read(size=3 * 4),
+                dtype=np.uint32,
+            ).astype(int)
+            assert args.tolist() == [7, 5, 3]
+        finally:
+            guard.release()
+    finally:
+        engine.close()
+
+
+def test_gpu_optics_formal_upload_inputs_clears_runtime_outputs_on_gpu_without_cpu_zero_writes() -> None:
+    class NoCPUZeroTexture:
+        def __init__(self, texture: object, name: str, *, allow_runtime_clear: bool = True) -> None:
+            self._texture = texture
+            self.name = name
+            self.allow_runtime_clear = allow_runtime_clear
+
+        def write(self, *args: object, **kwargs: object) -> None:
+            raise AssertionError(f"formal optics input upload must not CPU-zero {self.name}")
+
+        def bind_to_image(self, *args: object, **kwargs: object) -> object:
+            if not self.allow_runtime_clear:
+                raise AssertionError(f"unused optics texture must not be runtime-cleared: {self.name}")
+            return self._texture.bind_to_image(*args, **kwargs)
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._texture, name)
+
+    engine = WorldEngine(width=16, height=16, gas_cell_size=4)
+    pipeline = engine.optics_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU optics pipeline is not available")
+    try:
+        _prepare_gpu_authoritative_active_tile(engine)
+        engine.bridge.mark_gpu_authoritative("material")
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        resources = pipeline._ensure_resources(engine)
+        light_count = int(engine.cell_optical_dose.shape[0])
+
+        resources.cell_dose.write(np.full(engine.cell_optical_dose.shape, 2.0, dtype="f4").tobytes())
+        resources.gas_dose.write(np.full(engine.gas_optical_dose.shape, 3.0, dtype="f4").tobytes())
+        resources.illum_layers.write(np.full((light_count, engine.height, engine.width), 4.0, dtype="f4").tobytes())
+        resources.visible_tex.write(np.full((engine.height, engine.width, 4), 5.0, dtype="f4").tobytes())
+
+        raw_cell_dose = resources.cell_dose
+        raw_gas_dose = resources.gas_dose
+        raw_illum_layers = resources.illum_layers
+        raw_visible_tex = resources.visible_tex
+        resources.cell_dose = NoCPUZeroTexture(raw_cell_dose, "cell_dose")  # type: ignore[assignment]
+        resources.gas_dose = NoCPUZeroTexture(raw_gas_dose, "gas_dose")  # type: ignore[assignment]
+        resources.illum_layers = NoCPUZeroTexture(raw_illum_layers, "illum_layers")  # type: ignore[assignment]
+        resources.visible_tex = NoCPUZeroTexture(
+            raw_visible_tex,
+            "visible_tex",
+            allow_runtime_clear=False,
+        )  # type: ignore[assignment]
+
+        engine.profile_passes_enabled = True
+        pipeline._reset_pass_profile()
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            pipeline._upload_inputs(
+                engine,
+                resources,
+                [],
+                solve_cell_mask=np.zeros((engine.height, engine.width), dtype=np.bool_),
+                solve_gas_mask=np.zeros((engine.gas_height, engine.gas_width), dtype=np.bool_),
+            )
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+            resources.cell_dose = raw_cell_dose
+            resources.gas_dose = raw_gas_dose
+            resources.illum_layers = raw_illum_layers
+            resources.visible_tex = raw_visible_tex
+
+        cell_dose = np.frombuffer(raw_cell_dose.read(), dtype="f4").reshape(engine.cell_optical_dose.shape)
+        gas_dose = np.frombuffer(raw_gas_dose.read(), dtype="f4").reshape(engine.gas_optical_dose.shape)
+        illum_layers = np.frombuffer(raw_illum_layers.read(), dtype="f4").reshape(
+            (light_count, engine.height, engine.width)
+        )
+        visible = np.frombuffer(raw_visible_tex.read(), dtype="f4").reshape((engine.height, engine.width, 4))
+        profile_names = {entry["name"] for entry in pipeline.last_pass_profile["passes"]}
+
+        assert np.count_nonzero(cell_dose) == 0
+        assert np.count_nonzero(gas_dose) == 0
+        assert np.count_nonzero(illum_layers) == 0
+        assert np.all(visible == 5.0)
+        assert "optics_upload_inputs.clear_runtime" in profile_names
+
+        pipeline._compose_visible_illumination(engine, resources)
+        visible = np.frombuffer(raw_visible_tex.read(), dtype="f4").reshape((engine.height, engine.width, 4))
+        assert np.count_nonzero(visible[..., :3]) == 0
+        assert np.all(visible[..., 3] == 1.0)
+    finally:
+        engine.close()
+
+
+def test_gpu_optics_runtime_clear_omits_internal_visible_store_source() -> None:
+    programs_source = inspect.getsource(GPUOpticsPipeline._ensure_programs)
+    clear_runtime_start = programs_source.index('self.programs["clear_runtime_outputs"]')
+    clear_bridge_start = programs_source.index('self.programs["clear_bridge_outputs"]')
+    clear_runtime_shader = programs_source[clear_runtime_start:clear_bridge_start]
+    compose_start = programs_source.index('self.programs["compose_visible"]')
+    publish_start = programs_source.index('self.programs["publish_bridge_cell"]')
+    compose_shader = programs_source[compose_start:publish_start]
+    clear_bridge_shader = programs_source[clear_bridge_start:]
+    clear_method_source = inspect.getsource(GPUOpticsPipeline._clear_runtime_outputs)
+
+    assert "visible_img" not in clear_runtime_shader
+    assert "layout(std430, binding=0) buffer CellDoseAccum" in clear_runtime_shader
+    assert "layout(std430, binding=1) buffer GasDoseAccum" in clear_runtime_shader
+    assert "layout(std430, binding=2) buffer IllumAccum" in clear_runtime_shader
+    assert "cell_dose_accum[cell_index] = 0u;" in clear_runtime_shader
+    assert "gas_dose_accum[gas_index] = 0u;" in clear_runtime_shader
+    assert "illum_accum[cell_index] = 0u;" in clear_runtime_shader
+    assert "layout(r32f, binding=2) writeonly uniform image2DArray illum_layer_img;" in clear_runtime_shader
+    assert "layout(rgba32f, binding=2) writeonly uniform image2DArray illum_layer_img;" not in clear_runtime_shader
+    assert "resources.cell_dose_accum.bind_to_storage_buffer(binding=0)" in clear_method_source
+    assert "resources.gas_dose_accum.bind_to_storage_buffer(binding=1)" in clear_method_source
+    assert "resources.illum_accum.bind_to_storage_buffer(binding=2)" in clear_method_source
+    assert "resources.visible_tex.bind_to_image" not in clear_method_source
+    assert "imageStore(visible_img" in compose_shader
+    assert "bridge_visible_img" in clear_bridge_shader
+    assert "imageStore(bridge_visible_img" in clear_bridge_shader
 
 
 def test_gpu_optics_solver_formal_active_scheduler_does_not_read_cpu_active(
@@ -34305,9 +36332,47 @@ def test_gpu_motion_formal_frame_loads_active_mask_from_gpu_active_ttl() -> None
         (engine.active.tile_height, engine.active.tile_width)
     )
     expected = np.zeros((engine.active.tile_height, engine.active.tile_width), dtype=np.float32)
-    expected[:2, :2] = 1.0
+    expected[0, 0] = 1.0
     assert pipeline.last_cpu_active_upload_skipped is True
     assert np.array_equal(active_tiles, expected)
+
+
+def test_gpu_motion_formal_input_upload_does_not_cpu_clear_powder_targets() -> None:
+    engine = WorldEngine(width=96, height=96, gas_cell_size=4)
+    if not engine.bridge.enabled:
+        pytest.skip("GPU bridge is not available")
+    _prepare_gpu_authoritative_active_tile(engine)
+
+    pipeline = engine.motion_solver.gpu_pipeline
+    ctx = engine.bridge.ctx
+    assert ctx is not None
+    pipeline._ensure_programs(ctx)
+    resources = pipeline._ensure_resources(engine)
+
+    class NoCPUClearTexture:
+        def __init__(self, texture: object) -> None:
+            self._texture = texture
+
+        def write(self, *_args: object, **_kwargs: object) -> None:
+            raise AssertionError("formal motion input staging must not CPU-clear powder_target_tex")
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._texture, name)
+
+    original_target_tex = resources.powder_target_tex
+    resources.powder_target_tex = NoCPUClearTexture(original_target_tex)
+    previous_frame_active = engine._world_simulation_frame_active
+    engine._world_simulation_frame_active = True
+    try:
+        pipeline._upload_inputs(
+            engine,
+            resources,
+            np.zeros((engine.active.tile_height, engine.active.tile_width), dtype=np.bool_),
+        )
+    finally:
+        engine._world_simulation_frame_active = previous_frame_active
+        resources.powder_target_tex = original_target_tex
+        engine.close()
 
 
 def test_gpu_motion_solver_formal_active_scheduler_does_not_read_cpu_active(
@@ -34375,29 +36440,512 @@ def test_gpu_reaction_formal_frame_loads_active_mask_from_gpu_active_ttl() -> No
     assert np.array_equal(active_gas, expected_gas)
 
 
+def test_formal_gpu_reaction_segment_defers_cell_publish_until_flush(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=16, height=16, simulation_backend="cpu")
+    engine.simulation_backend = "gpu"
+    engine._world_simulation_frame_active = True
+    pipeline = engine.reaction_solver.gpu_pipeline
+    resources = SimpleNamespace(
+        signature=(engine.width, engine.height, engine.gas_width, engine.gas_height, engine.gas_concentration.shape[0], 1),
+        segment_cell_reset_tex=object(),
+        segment_reaction_latched_tex=object(),
+    )
+    pipeline.resources = resources  # type: ignore[assignment]
+    pipeline.begin_formal_reaction_segment(engine, "before_motion")
+    pipeline._formal_state_cache_key = pipeline._formal_reaction_segment_cache_key(
+        engine,
+        resources,  # type: ignore[arg-type]
+        "before_motion",
+    )
+    pipeline._formal_segment_batch_key = pipeline._formal_state_cache_key
+    pipeline._set_formal_cell_read_role("ping")
+    publish_calls = 0
+    promote_calls = 0
+    accumulate_calls = 0
+    publish_source_roles: list[object] = []
+
+    def count_publish(*args: object, **kwargs: object) -> None:
+        nonlocal publish_calls
+        publish_calls += 1
+        publish_source_roles.append(kwargs.get("source_role"))
+
+    def count_promote(*args: object, **kwargs: object) -> None:
+        nonlocal promote_calls
+        promote_calls += 1
+
+    def count_accumulate(*args: object, **kwargs: object) -> None:
+        nonlocal accumulate_calls
+        accumulate_calls += 1
+
+    monkeypatch.setattr(pipeline, "_publish_bridge_cell_state", count_publish)
+    monkeypatch.setattr(pipeline, "_promote_cell_pong_to_ping", count_promote)
+    monkeypatch.setattr(pipeline, "_accumulate_segment_cell_transient_state", count_accumulate)
+    try:
+        pipeline._download_cell_state(engine, resources)  # type: ignore[arg-type]
+        pipeline._download_cell_state(engine, resources)  # type: ignore[arg-type]
+
+        assert publish_calls == 0
+        assert promote_calls == 0
+        assert accumulate_calls == 2
+
+        assert pipeline.flush_formal_reaction_segment(engine, "before_motion") is True
+        assert publish_calls == 1
+        assert publish_source_roles == ["ping"]
+    finally:
+        pipeline.end_formal_reaction_segment(engine, "before_motion")
+        pipeline.resources = None
+        engine._world_simulation_frame_active = False
+
+
+def test_gpu_reaction_formal_before_motion_profile_uses_resident_roles_until_flush(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=32, height=32, gas_cell_size=4)
+    pipeline = engine.reaction_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU reaction pipeline is not available")
+
+    engine.clear_cell_region(0, 0, engine.width, engine.height)
+    timed_action = len(engine.rulebook.reaction_actions)
+    self_action = timed_action + 1
+    material_material_action = timed_action + 2
+    material_gas_action = timed_action + 3
+    engine.update_reaction_table(
+        [
+            ReactionAction(ReactionType.MODIFY_TEMPERATURE, delta=1.0, duration=0),
+            ReactionAction(ReactionType.MODIFY_TEMPERATURE, delta=2.0, duration=0),
+            ReactionAction(ReactionType.MODIFY_TEMPERATURE, delta=4.0, duration=0),
+            ReactionAction(ReactionType.MODIFY_GAS, gas_species="water_gas", speed=4.0, duration=0),
+        ],
+        {
+            "material_material": [
+                PairReactionRule(
+                    lhs_material="gold_solid",
+                    rhs_material="raw_stone_solid",
+                    min_temperature=22.5,
+                    result_action=material_material_action,
+                )
+            ],
+            "material_gas": [
+                PairReactionRule(
+                    lhs_material="gold_solid",
+                    rhs_gas="poison_gas",
+                    min_temperature=26.5,
+                    threshold=0.1,
+                    result_action=material_gas_action,
+                )
+            ],
+            "material_light": [],
+            "gas_gas": [],
+            "gas_light": [],
+            "self_rules": [
+                SelfReactionRule(
+                    material="gold_solid",
+                    trigger_slot_index=4,
+                    min_temperature=20.5,
+                )
+            ],
+        },
+    )
+    gold_slots = engine.rulebook.materials_by_name["gold_solid"].reaction_slots
+    engine.patch_material(
+        "gold_solid",
+        reaction_slots=(timed_action, gold_slots[1], gold_slots[2], gold_slots[3], self_action, *gold_slots[5:]),
+    )
+    engine.set_cell(8, 8, "gold_solid", mark_dirty=False)
+    engine.set_cell(9, 8, "raw_stone_solid", mark_dirty=False)
+    engine.cell_temperature[8, 8] = 20.0
+    engine.timer_pack[8, 8, 0] = 1
+    poison_gas = engine.rulebook.gas_id("poison_gas")
+    water_gas = engine.rulebook.gas_id("water_gas")
+    gy, gx = engine.cell_to_gas(8, 8)
+    engine.gas_concentration[poison_gas, gy, gx] = 0.5
+    engine.active.mark_rect(0, 0, engine.width, engine.height)
+    engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+    engine.bridge.mark_gpu_authoritative(
+        "cell_core",
+        "material",
+        "gas_concentration",
+        "ambient_temperature",
+        "flow_velocity",
+        "cell_optical_dose",
+        "gas_optical_dose",
+        "active_meta",
+        "active_tile_ttl",
+        "active_chunk_mask",
+    )
+
+    def fail_sync_world(bridge: GPUBridge, world: WorldEngine, **kwargs: object) -> None:
+        if bridge is engine.bridge:
+            raise AssertionError("formal GPU reaction must not sync CPU mirrors during resident role execution")
+
+    monkeypatch.setattr(GPUBridge, "sync_world", fail_sync_world)
+    engine.profile_passes_enabled = True
+    engine.profile_passes_sync = True
+    engine.reaction_solver.reset_runtime_state(engine)
+    pipeline.reset_pass_profile()
+    previous_frame_active = engine._world_simulation_frame_active
+    engine._world_simulation_frame_active = True
+    try:
+        assert pipeline.begin_formal_reaction_segment(engine, "before_motion") is True
+        try:
+            engine.reaction_solver._advance_timed_slots(engine)
+            engine.reaction_solver._run_self_rules(engine)
+            assert pipeline.flush_formal_reaction_segment(engine, "before_motion") is True
+        finally:
+            pipeline.end_formal_reaction_segment(engine, "before_motion")
+    finally:
+        engine._world_simulation_frame_active = previous_frame_active
+
+    summary = pipeline.last_pass_profile["summary"]
+    assert summary.get("load_bridge_cell", {}).get("count", 0) == 1
+    assert summary.get("load_bridge_gas", {}).get("count", 0) == 1
+    assert summary.get("load_bridge_dose", {}).get("count", 0) == 0
+    assert summary.get("timed_upload_state.load_bridge_inputs", {}).get("count", 0) == 1
+    assert summary.get("timed_upload_state.load_bridge_cell", {}).get("count", 0) == 1
+    for split_name in ("load_bridge_cell_core", "load_bridge_cell_aux", "load_bridge_cell_sync"):
+        assert summary.get(split_name, {}).get("count", 0) == 1
+        assert summary.get(f"timed_upload_state.{split_name}", {}).get("count", 0) == 1
+    assert summary.get("self_upload_state.clear_transient", {}).get("count", 0) == 1
+    assert summary.get("promote_cell_pong", {}).get("count", 0) == 0
+    assert summary.get("publish_bridge_cell", {}).get("count", 0) == 1
+    assert pipeline.last_cpu_mirror_downloaded is False
+    assert pipeline.last_cpu_cell_state_upload_skipped is True
+    assert pipeline.last_cpu_active_upload_skipped is True
+
+    core = _bridge_cell_core(engine)
+    assert np.isclose(float(core["cell_temperature"][8, 8]), 23.0)
+    assert int(core["timer_pack"][8, 8, 0]) == 0
+
+
+def test_formal_gpu_reaction_active_mask_cache_reuses_within_segment_and_reloads_across_segments_and_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=16, height=16, simulation_backend="cpu")
+    engine.simulation_backend = "gpu"
+    engine._world_simulation_frame_active = True
+    engine.bridge.mark_gpu_authoritative("active_tile_ttl")
+    engine.bridge.buffers["active_tile_ttl"] = object()
+    engine.bridge.buffers["active_chunk_mask"] = object()
+    engine.bridge.buffers["active_meta"] = object()
+    pipeline = engine.reaction_solver.gpu_pipeline
+    resources = SimpleNamespace(
+        signature=(engine.width, engine.height, engine.gas_width, engine.gas_height, engine.gas_concentration.shape[0], 1),
+    )
+    load_calls = 0
+
+    def count_load(*args: object, **kwargs: object) -> None:
+        nonlocal load_calls
+        load_calls += 1
+
+    monkeypatch.setattr(pipeline, "_load_authoritative_active_masks", count_load)
+
+    pipeline.begin_formal_reaction_segment(engine, "before_motion")
+    pipeline._upload_active_masks(engine, resources, None, None, reaction_group="timed")  # type: ignore[arg-type]
+    pipeline._upload_active_masks(engine, resources, None, None, reaction_group="self")  # type: ignore[arg-type]
+    assert load_calls == 1
+    pipeline.end_formal_reaction_segment(engine, "before_motion")
+
+    pipeline.begin_formal_reaction_segment(engine, "after_optics")
+    pipeline._upload_active_masks(engine, resources, None, None, reaction_group="material_material")  # type: ignore[arg-type]
+    pipeline._upload_active_masks(engine, resources, None, None, reaction_group="material_gas")  # type: ignore[arg-type]
+    pipeline._upload_active_masks(engine, resources, None, None, reaction_group="material_light")  # type: ignore[arg-type]
+    pipeline._upload_active_masks(engine, resources, None, None, reaction_group="gas_light")  # type: ignore[arg-type]
+    assert load_calls == 2
+    pipeline.end_formal_reaction_segment(engine, "after_optics")
+
+    engine.frame_id += 1
+    pipeline.begin_formal_reaction_segment(engine, "after_optics")
+    pipeline._upload_active_masks(engine, resources, None, None, reaction_group="gas_gas")  # type: ignore[arg-type]
+    assert load_calls == 3
+    assert pipeline.last_cpu_active_upload_skipped is True
+    pipeline.end_formal_reaction_segment(engine, "after_optics")
+
+
+def test_formal_gpu_guarded_light_reactions_use_full_gpu_authoritative_sentinel_without_cpu_masks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=32, height=24, simulation_backend="cpu")
+    engine.simulation_backend = "gpu"
+    engine._world_simulation_frame_active = True
+    engine.bridge.mark_gpu_authoritative("active_tile_ttl", "optics_light_dose_guard")
+    engine.bridge.buffers["optics_light_dose_guard"] = object()
+    engine.active.active_tile_ttl = object()  # type: ignore[assignment]
+    solver = engine.reaction_solver
+    solver.reset_runtime_state(engine)
+
+    def fail_cpu_mask_build(*args: object, **kwargs: object) -> np.ndarray:
+        raise AssertionError("formal guarded light reactions must not build CPU full masks")
+
+    def fail_ones(*args: object, **kwargs: object) -> np.ndarray:
+        raise AssertionError("formal guarded light reactions must not allocate np.ones masks")
+
+    monkeypatch.setattr(solver, "_full_solve_masks", fail_cpu_mask_build)
+    monkeypatch.setattr(solver, "_solve_tile_mask", fail_cpu_mask_build)
+    monkeypatch.setattr("oracle_game.sim.reactions.tile_mask_to_cell_mask", fail_cpu_mask_build)
+    monkeypatch.setattr("oracle_game.sim.reactions.tile_mask_to_gas_mask", fail_cpu_mask_build)
+    monkeypatch.setattr(np, "ones", fail_ones)
+
+    solve_tile_mask, solve_cell_mask, solve_gas_mask = solver._solve_masks(
+        engine,
+        seed_timer_cells=True,
+        stage="material_light",
+    )
+    assert getattr(solve_tile_mask, "full_gpu_authoritative", False) is True
+    assert getattr(solve_cell_mask, "full_gpu_authoritative", False) is True
+    assert getattr(solve_gas_mask, "full_gpu_authoritative", False) is True
+
+    solver._record_stage_solve_masks("material_light", solve_tile_mask, solve_cell_mask, solve_gas_mask)
+    previous_state = solver._capture_activity_state(engine, solve_cell_mask, solve_gas_mask)
+    assert previous_state["full_gpu_authoritative"] is True
+    assert solver._stage_extra_changed_cell_mask is None
+    solver._current_stage = "material_light"
+    solver._finalize_stage_runtime(engine, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state)
+    snapshot = solver.runtime_snapshot()
+
+    assert solver.last_stage_solve_modes["material_light"] == "full_gpu_authoritative"
+    assert snapshot["full_gpu_authoritative_solve_stages"] == ["material_light"]
+    assert snapshot["full_gpu_authoritative_changed_stages"] == ["material_light"]
+    assert not np.any(solver.last_solve_cell_mask)
+    assert not np.any(solver.last_solve_gas_mask)
+    assert not np.any(solver.last_changed_cell_mask)
+    assert not np.any(solver.last_changed_gas_mask)
+
+
+def test_formal_gpu_before_motion_reactions_use_full_gpu_authoritative_sentinel_without_cpu_masks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeGpuObject:
+        value: object = None
+
+        def write(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        def use(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        def bind_to_storage_buffer(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        def bind_to_image(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        def run(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        def __getitem__(self, name: str) -> object:
+            raise KeyError(name)
+
+    class FakeResources:
+        def __init__(self, signature: tuple[int, ...]) -> None:
+            self.signature = signature
+
+        def __getattr__(self, name: str) -> FakeGpuObject:
+            value = FakeGpuObject()
+            setattr(self, name, value)
+            return value
+
+    engine = WorldEngine(width=32, height=24, simulation_backend="cpu")
+    engine.simulation_backend = "gpu"
+    engine._world_simulation_frame_active = True
+    engine.bridge.mark_gpu_authoritative("active_tile_ttl")
+    engine.bridge.buffers["active_tile_ttl"] = object()
+    engine.bridge.buffers["active_chunk_mask"] = object()
+    engine.bridge.buffers["active_meta"] = object()
+    engine.active.active_tile_ttl = object()  # type: ignore[assignment]
+
+    solver = engine.reaction_solver
+    pipeline = solver.gpu_pipeline
+    solver.reset_runtime_state(engine)
+    compiled_actions = (
+        np.zeros((1, 4), dtype=np.int32),
+        np.zeros((1, 4), dtype=np.float32),
+    )
+    rule_i = np.zeros((1, 4), dtype=np.int32)
+    rule_f = np.zeros((1, 4), dtype=np.float32)
+    rule_tags = np.zeros((1, 4), dtype=np.uint32)
+    fake_resources = FakeResources(
+        (engine.width, engine.height, engine.gas_width, engine.gas_height, engine.gas_concentration.shape[0], 1),
+    )
+    uploaded_groups: list[str | None] = []
+    original_full_solve_masks = solver._full_solve_masks
+    original_np_ones = np.ones
+
+    def fail_cpu_mask_build(*args: object, **kwargs: object) -> np.ndarray:
+        raise AssertionError("formal before-motion reactions must not build CPU full masks")
+
+    def fail_ones(*args: object, **kwargs: object) -> np.ndarray:
+        raise AssertionError("formal before-motion reactions must not allocate np.ones masks")
+
+    def record_active_upload(
+        world: WorldEngine,
+        resources: object,
+        solve_cell_mask: object | None,
+        solve_gas_mask: object | None,
+        *,
+        reaction_group: str | None = None,
+        **kwargs: object,
+    ) -> None:
+        assert solve_cell_mask is None
+        assert solve_gas_mask is None
+        uploaded_groups.append(reaction_group)
+
+    monkeypatch.setattr(solver, "_solve_tile_mask", fail_cpu_mask_build)
+    monkeypatch.setattr("oracle_game.sim.reactions.tile_mask_to_cell_mask", fail_cpu_mask_build)
+    monkeypatch.setattr("oracle_game.sim.reactions.tile_mask_to_gas_mask", fail_cpu_mask_build)
+    monkeypatch.setattr(pipeline, "available", lambda world: True)
+    monkeypatch.setattr(pipeline, "_ensure_programs", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline, "_ensure_resources", lambda *args, **kwargs: fake_resources)
+    monkeypatch.setattr(pipeline, "_upload_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline, "_upload_active_masks", record_active_upload)
+    monkeypatch.setattr(pipeline, "_upload_local_metadata", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline, "_run_local_cell_action_pass", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline, "_download_cell_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline, "_download_deferred_batch", lambda *args, **kwargs: FORMAL_GPU_EMPTY_DEFERRED_BATCH)
+    monkeypatch.setattr(pipeline, "_sync_compute_writes", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline, "_bind_local_cell_action_output_images", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline, "_copy_current_velocity_to_next_role", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline, "_compile_action_buffers", lambda *args, **kwargs: compiled_actions)
+    pipeline.programs["material_material"] = FakeGpuObject()
+    pipeline.programs["material_gas"] = FakeGpuObject()
+
+    stage_masks = {}
+    for stage in ("timed", "self"):
+        solve_tile_mask, solve_cell_mask, solve_gas_mask = solver._solve_masks(
+            engine,
+            seed_timer_cells=True,
+            stage=stage,
+        )
+        assert isinstance(solve_tile_mask, np.ndarray)
+        assert isinstance(solve_cell_mask, np.ndarray)
+        assert isinstance(solve_gas_mask, np.ndarray)
+        assert getattr(solve_tile_mask, "full_gpu_authoritative", False) is False
+        assert getattr(solve_cell_mask, "full_gpu_authoritative", False) is False
+        assert getattr(solve_gas_mask, "full_gpu_authoritative", False) is False
+        solver._record_stage_solve_masks(stage, solve_tile_mask, solve_cell_mask, solve_gas_mask)
+        previous_state = solver._capture_activity_state(engine, solve_cell_mask, solve_gas_mask)
+        assert previous_state["full_gpu_authoritative"] is False
+        solver._current_stage = stage
+        solver._finalize_stage_runtime(engine, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state)
+        stage_masks[stage] = solve_cell_mask
+
+    monkeypatch.setattr(solver, "_full_solve_masks", fail_cpu_mask_build)
+    monkeypatch.setattr(np, "ones", fail_ones)
+
+    for stage in ("material_material", "material_gas"):
+        solve_tile_mask, solve_cell_mask, solve_gas_mask = solver._solve_masks(
+            engine,
+            seed_timer_cells=True,
+            stage=stage,
+        )
+        assert getattr(solve_tile_mask, "full_gpu_authoritative", False) is True
+        assert getattr(solve_cell_mask, "full_gpu_authoritative", False) is True
+        assert getattr(solve_gas_mask, "full_gpu_authoritative", False) is True
+        solver._record_stage_solve_masks(stage, solve_tile_mask, solve_cell_mask, solve_gas_mask)
+        previous_state = solver._capture_activity_state(engine, solve_cell_mask, solve_gas_mask)
+        assert previous_state["full_gpu_authoritative"] is True
+        solver._current_stage = stage
+        solver._finalize_stage_runtime(engine, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state)
+        stage_masks[stage] = solve_cell_mask
+
+    assert solver.last_stage_solve_modes["timed"] == "materialized"
+    assert solver.last_stage_solve_modes["self"] == "materialized"
+    assert solver.last_stage_solve_modes["material_material"] == "full_gpu_authoritative"
+    assert solver.last_stage_solve_modes["material_gas"] == "full_gpu_authoritative"
+    assert solver.last_full_gpu_authoritative_solve_stages == {"material_material", "material_gas"}
+    assert solver.last_full_gpu_authoritative_changed_stages == {"material_material", "material_gas"}
+    snapshot = solver.runtime_snapshot()
+    assert set(snapshot["full_gpu_authoritative_solve_stages"]) == {"material_material", "material_gas"}
+    assert set(snapshot["full_gpu_authoritative_changed_stages"]) == {"material_material", "material_gas"}
+
+    assert pipeline.run_timed_actions(engine, solve_cell_mask=stage_masks["timed"]) is FORMAL_GPU_EMPTY_DEFERRED_BATCH
+    assert pipeline.run_self_actions(engine, solve_cell_mask=stage_masks["self"]) is FORMAL_GPU_EMPTY_DEFERRED_BATCH
+    assert (
+        pipeline._run_cell_pass(
+            engine,
+            "material_material",
+            compiled_actions,
+            rule_i,
+            rule_f,
+            rule_tags,
+            1,
+            stage_masks["material_material"],
+            lhs_rule_candidate_masks=np.zeros((1, 1), dtype=np.uint32),
+        )
+        is FORMAL_GPU_EMPTY_DEFERRED_BATCH
+    )
+    assert (
+        pipeline._run_cell_pass(
+            engine,
+            "material_gas",
+            compiled_actions,
+            rule_i,
+            rule_f,
+            rule_tags,
+            1,
+            stage_masks["material_gas"],
+            lhs_rule_candidate_masks=np.zeros((1, 1), dtype=np.uint32),
+        )
+        is FORMAL_GPU_EMPTY_DEFERRED_BATCH
+    )
+    assert uploaded_groups == ["timed", "self", "material_material", "material_gas"]
+
+    monkeypatch.setattr(solver, "_full_solve_masks", original_full_solve_masks)
+    monkeypatch.setattr(np, "ones", original_np_ones)
+    monkeypatch.setattr(pipeline, "run_timed_actions", lambda *args, **kwargs: None)
+    with pytest.raises(RuntimeError, match="timed reaction actions.*CPU fallback is disabled"):
+        solver._advance_timed_slots(engine)
+
+
 def test_reaction_solver_formal_active_scheduler_does_not_read_cpu_active(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     engine = WorldEngine(width=96, height=96, gas_cell_size=4)
     _prepare_gpu_authoritative_active_tile(engine)
+    solver = engine.reaction_solver
+    solver.reset_runtime_state(engine)
 
-    def fail_solve_tile_mask(*args: object, **kwargs: object) -> np.ndarray:
-        raise AssertionError("GPU reaction active scheduling must not read CPU active_tile_ttl")
+    def fail_cpu_mask_build(*args: object, **kwargs: object) -> np.ndarray:
+        raise AssertionError("GPU reaction active scheduling must not build CPU active masks")
 
-    monkeypatch.setattr(engine.reaction_solver, "_solve_tile_mask", fail_solve_tile_mask)
+    monkeypatch.setattr(solver, "_solve_tile_mask", fail_cpu_mask_build)
+    monkeypatch.setattr("oracle_game.sim.reactions.tile_mask_to_cell_mask", fail_cpu_mask_build)
+    monkeypatch.setattr("oracle_game.sim.reactions.tile_mask_to_gas_mask", fail_cpu_mask_build)
     previous_frame_active = engine._world_simulation_frame_active
     engine._world_simulation_frame_active = True
     try:
-        solve_tile_mask, solve_cell_mask, solve_gas_mask = engine.reaction_solver._solve_masks(
+        solve_tile_mask, solve_cell_mask, solve_gas_mask = solver._solve_masks(
             engine,
             seed_timer_cells=True,
         )
+        solve_tile_mask[0, 0] = False
+        solve_cell_mask[0, 0] = False
+        solve_gas_mask[0, 0] = False
+        solve_tile_mask, solve_cell_mask, solve_gas_mask = solver._solve_masks(
+            engine,
+            seed_timer_cells=True,
+        )
+        previous_state = solver._capture_activity_state(engine, solve_cell_mask, solve_gas_mask)
+        solver._record_stage_solve_masks("timed", solve_tile_mask, solve_cell_mask, solve_gas_mask)
+        solver._finalize_stage_runtime(engine, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state)
     finally:
         engine._world_simulation_frame_active = previous_frame_active
 
+    assert solve_tile_mask.shape == (engine.active.tile_height, engine.active.tile_width)
+    assert solve_cell_mask.shape == (engine.height, engine.width)
+    assert solve_gas_mask.shape == (engine.gas_height, engine.gas_width)
     assert np.all(solve_tile_mask)
     assert np.all(solve_cell_mask)
     assert np.all(solve_gas_mask)
+    assert np.all(solver.last_stage_tile_masks["timed"])
+    assert np.all(solver.last_solve_cell_mask)
+    assert np.all(solver.last_solve_gas_mask)
+    assert np.all(solver.last_changed_cell_mask)
+    assert np.all(solver.last_changed_gas_mask)
+    assert np.all(solver.last_ambient_changed_mask)
+    assert np.all(solver.last_timer_changed_mask)
 
 
 def test_reaction_solver_formal_active_scheduler_does_not_refresh_cpu_active(
@@ -34528,14 +37076,14 @@ def test_gpu_bridge_sync_world_uploads_cpu_oracle_motion_reservation_runtime_buf
     engine.clear_cell_region(0, 0, engine.width, engine.height)
     engine.set_cell(5, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
     engine.set_cell(8, 8, "raw_stone_solid", mark_dirty=False)
-    engine.velocity[8, 5] = np.array([4.0, 0.0], dtype=np.float32)
+    engine.velocity[8, 5] = np.array([120.0, 0.0], dtype=np.float32)
     for x, y in ((12, 8), (13, 8), (12, 9), (13, 9)):
         engine.set_cell(x, y, "log_solid", phase=Phase.FALLING_ISLAND, mark_dirty=False)
         engine.island_id[y, x] = 51
     engine.islands[51] = FallingIslandRecord(
         island_id=51,
         bbox=(12, 8, 14, 10),
-        velocity_xy=(2.0, -0.49),
+        velocity_xy=(120.0, -0.49),
         subcell_offset=(0.0, 0.0),
     )
 
@@ -35431,6 +37979,7 @@ def test_cpu_gas_solver_derives_pressure_from_temperature_and_concentration() ->
     water_gas = engine.rulebook.gas_id("water_gas")
     engine.gas_concentration[water_gas].fill(0.0)
     engine.gas_concentration[water_gas, 2, 2] = 1.5
+    engine.active.mark_rect(0, 0, engine.width, engine.height)
 
     engine.gas_solver.step(engine, 1.0 / 60.0)
 
@@ -35450,6 +37999,7 @@ def test_cpu_gas_solver_pressure_gradient_and_density_drive_flow() -> None:
     engine.gas_concentration[water_gas, :, :4] = 1.25
     engine.gas_concentration[oil_gas, 5, 3] = 1.5
     before_y = float(engine.flow_velocity[5, 3, 1])
+    engine.active.mark_rect(0, 0, engine.width, engine.height)
 
     engine.gas_solver.step(engine, 1.0 / 60.0)
 
@@ -35465,6 +38015,7 @@ def test_gpu_gas_solver_derives_pressure_from_temperature_and_concentration() ->
     water_gas = engine.rulebook.gas_id("water_gas")
     engine.gas_concentration[water_gas].fill(0.0)
     engine.gas_concentration[water_gas, 2, 2] = 1.5
+    engine.active.mark_rect(0, 0, engine.width, engine.height)
 
     engine.gas_solver.step(engine, 1.0 / 60.0)
 
@@ -35483,6 +38034,7 @@ def test_gpu_gas_solver_pressure_gradient_and_density_drive_flow() -> None:
     engine.gas_concentration[water_gas, :, :4] = 1.25
     engine.gas_concentration[oil_gas, 5, 3] = 1.5
     before_y = float(engine.flow_velocity[5, 3, 1])
+    engine.active.mark_rect(0, 0, engine.width, engine.height)
 
     engine.gas_solver.step(engine, 1.0 / 60.0)
 
@@ -35797,6 +38349,7 @@ def test_gpu_heat_pipeline_material_params_read_bridge_typed_tables_not_live_rul
     mutated = replace(engine.rulebook.materials_by_id[stone_id], conductivity=9.5, ambient_exchange_rate=7.5)
     engine.rulebook.materials_by_id[stone_id] = mutated
     engine.rulebook.materials_by_name["raw_stone_solid"] = mutated
+    engine.active.mark_rect(0, 0, engine.width, engine.height)
 
     engine.heat_solver.step(engine, 1.0 / 60.0)
 
@@ -35814,6 +38367,7 @@ def test_gpu_heat_pipeline_material_response_params_read_bridge_typed_tables_not
     mutated = replace(engine.rulebook.materials_by_id[stone_id], heat_capacity=4.25)
     engine.rulebook.materials_by_id[stone_id] = mutated
     engine.rulebook.materials_by_name["raw_stone_solid"] = mutated
+    engine.active.mark_rect(0, 0, engine.width, engine.height)
 
     engine.heat_solver.step(engine, 1.0 / 60.0)
 
@@ -35837,6 +38391,7 @@ def test_gpu_reaction_pipeline_material_uploads_read_bridge_typed_tables_not_liv
     )
     engine.rulebook.materials_by_id[root_id] = mutated
     engine.rulebook.materials_by_name["root_solid"] = mutated
+    engine.active.mark_rect(0, 0, engine.width, engine.height)
 
     engine.reaction_solver._advance_timed_slots(engine)
 
@@ -35854,6 +38409,59 @@ def test_gpu_reaction_pipeline_material_uploads_read_bridge_typed_tables_not_liv
     assert int(round(float(params[root_id, 1]))) != int(mutated.default_phase)
     assert slots_lo[root_id].tolist() != list(mutated.reaction_slots[:4])
     assert slots_hi[root_id].tolist() != list(mutated.reaction_slots[4:8])
+
+
+def test_gpu_reaction_action_compile_cache_uses_bridge_generation_and_invalidates_on_patch() -> None:
+    engine = WorldEngine(width=32, height=24)
+    pipeline = engine.reaction_solver.gpu_pipeline
+    action_rows = engine.bridge.shadow_typed_tables["reaction_action_table"]
+    material_rows = engine.bridge.shadow_typed_tables["material_table"]
+
+    used_indices = pipeline._cached_used_action_indices_for_material_slots(engine, material_rows)
+    assert used_indices is not None
+    action_index = next(
+        index
+        for index in sorted(used_indices)
+        if int(action_rows[index]["reaction_type_id"]) == int(ReactionType.MODIFY_TEMPERATURE.value)
+    )
+    original_delta = float(action_rows[action_index]["delta"])
+
+    compiled = pipeline._compile_action_buffers_cached(engine, action_rows, used_indices)
+    assert compiled is not None
+    cached_used_indices = pipeline._cached_used_action_indices_for_material_slots(engine, material_rows)
+    cached_compiled = pipeline._compile_action_buffers_cached(engine, action_rows, cached_used_indices)
+
+    assert cached_used_indices is used_indices
+    assert cached_compiled is compiled
+    assert np.isclose(float(compiled[1][action_index, 0]), original_delta)
+
+    engine.rulebook.reaction_actions[action_index] = replace(
+        engine.rulebook.reaction_actions[action_index],
+        delta=original_delta + 99.0,
+    )
+    live_mutated_compiled = pipeline._compile_action_buffers_cached(engine, action_rows, used_indices)
+    assert live_mutated_compiled is compiled
+    assert np.isclose(float(live_mutated_compiled[1][action_index, 0]), original_delta)
+
+    engine.patch_reaction_action(action_index, delta=original_delta + 5.0)
+    patched_action_rows = engine.bridge.shadow_typed_tables["reaction_action_table"]
+    patched_material_rows = engine.bridge.shadow_typed_tables["material_table"]
+    patched_used_indices = pipeline._cached_used_action_indices_for_material_slots(engine, patched_material_rows)
+    patched_compiled = pipeline._compile_action_buffers_cached(engine, patched_action_rows, patched_used_indices)
+
+    assert patched_used_indices is used_indices
+    assert patched_compiled is not None
+    assert patched_compiled is not compiled
+    assert np.isclose(float(patched_compiled[1][action_index, 0]), original_delta + 5.0)
+
+
+def test_gpu_reaction_action_compile_paths_use_generation_caches_source() -> None:
+    assert "_cached_used_action_indices_for_material_slots" in inspect.getsource(GPUReactionPipeline.run_timed_actions)
+    assert "_cached_used_action_indices_for_self_rules" in inspect.getsource(GPUReactionPipeline.run_self_actions)
+    assert "_cached_used_action_indices_for_pair_rules" in inspect.getsource(GPUReactionPipeline.run_material_material)
+    assert "_cached_used_action_indices_for_pair_rules" in inspect.getsource(GPUReactionPipeline.run_material_gas)
+    assert "_cached_used_action_indices_for_pair_rules" in inspect.getsource(GPUReactionPipeline.run_material_light)
+    assert "_compile_action_buffers_cached" in inspect.getsource(GPUReactionPipeline._compile_action_buffers_cached)
 
 
 def test_gpu_reaction_pipeline_self_rule_metadata_reads_bridge_typed_tables_not_live_rulebook() -> None:
@@ -35938,6 +38546,7 @@ def test_gpu_reaction_pipeline_material_pair_rules_and_actions_read_bridge_typed
         result_action=0,
         threshold=float(original_rule_row["threshold"]) + 7.0,
     )
+    engine.active.mark_rect(0, 0, engine.width, engine.height)
 
     engine.reaction_solver._run_material_material(engine)
 
@@ -35991,6 +38600,7 @@ def test_gpu_reaction_pipeline_gas_pair_rules_and_actions_read_bridge_typed_tabl
         result_action=0,
         threshold=float(original_rule_row["threshold"]) + 0.7,
     )
+    engine.active.mark_rect(0, 0, engine.width, engine.height)
 
     engine.reaction_solver._run_gas_gas(engine)
 
@@ -36652,6 +39262,80 @@ def test_gpu_reaction_formal_frame_publishes_cell_state_without_cpu_mirror_downl
     assert np.isclose(float(unpacked["cell_temperature"][0, 0]), 37.0)
 
 
+def test_formal_gpu_reaction_structural_change_marks_collapse_dirty_without_cpu_cell_readback() -> None:
+    class NoReadBuffer:
+        def __init__(self, buffer: object, name: str) -> None:
+            self._buffer = buffer
+            self._name = name
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._buffer, name)
+
+        def read(self, *args: object, **kwargs: object) -> bytes:
+            raise AssertionError(f"formal GPU reaction must not read full {self._name} on CPU for collapse dirty")
+
+    engine = WorldEngine(width=64, height=64)
+    pipeline = engine.reaction_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU reaction pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+        _seed_gpu_authoritative_active_tiles(engine, [(1, 1)])
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        resources = pipeline._ensure_resources(engine)
+        gold_id = engine.rulebook.material_id("gold_solid")
+        material_out = np.zeros((engine.height, engine.width), dtype="f4")
+        phase_out = np.zeros((engine.height, engine.width), dtype="f4")
+        material_out[40, 40] = float(gold_id)
+        phase_out[40, 40] = float(Phase.STATIC_SOLID)
+        resources.material_pong.write(material_out.tobytes())
+        resources.phase_pong.write(phase_out.tobytes())
+        resources.temp_pong.write(np.full((engine.height, engine.width), 37.0, dtype="f4").tobytes())
+        resources.integrity_pong.write(np.full((engine.height, engine.width), 12.0, dtype="f4").tobytes())
+        resources.velocity_pong.write(np.zeros((engine.height, engine.width, 2), dtype="f4").tobytes())
+        resources.timer_pong.write(np.zeros((engine.height, engine.width, 4), dtype="f4").tobytes())
+        resources.cell_reset_tex.write(np.zeros((engine.height, engine.width), dtype="f4").tobytes())
+        resources.reaction_latched_tex.write(np.zeros((engine.height, engine.width), dtype="f4").tobytes())
+        engine.material_id.fill(0)
+        engine.phase.fill(0)
+        engine.collapse_dirty_regions.clear()
+        engine.collapse_deferred_regions.clear()
+
+        raw_cell_core = engine.bridge.buffers["cell_core"]
+        engine.bridge.buffers["cell_core"] = NoReadBuffer(raw_cell_core, "cell_core")
+        previous_frame_active = engine._world_simulation_frame_active
+        try:
+            engine._world_simulation_frame_active = True
+            pipeline._download_cell_state(engine, resources)
+            dirty_tiles = _read_gpu_collapse_structure_dirty_tile_mask(engine)
+            assert int(dirty_tiles[1, 1]) == 1
+
+            assert engine.collapse_dirty_regions == []
+            engine.collapse_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+            engine.bridge.buffers["cell_core"] = raw_cell_core
+
+        assert pipeline.last_cpu_mirror_downloaded is False
+        assert int(engine.material_id[40, 40]) == 0
+        assert engine.collapse_solver.last_dirty_region_count_before > 0
+        assert engine.collapse_solver.last_backend == "gpu"
+        assert not np.any(_read_gpu_collapse_structure_dirty_tile_mask(engine))
+    finally:
+        engine.close()
+
+
 def test_gpu_reaction_formal_frame_publishes_gas_and_dose_without_cpu_mirror_download() -> None:
     engine = WorldEngine(width=16, height=16, gas_cell_size=4)
     pipeline = engine.reaction_solver.gpu_pipeline
@@ -36802,6 +39486,119 @@ def test_gpu_reaction_formal_frame_loads_authoritative_bridge_inputs_over_cpu_mi
     assert np.isclose(float(gas_dose[0, 1, 2]), 0.5)
 
 
+def test_gpu_reaction_formal_cache_reuses_resident_state_between_after_optics_groups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=32, height=32, gas_cell_size=4)
+    pipeline = engine.reaction_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU reaction pipeline is not available")
+    engine.replace_reaction_table(
+        [
+            ReactionAction(ReactionType.MODIFY_TEMPERATURE, delta=6.0, duration=0),
+            ReactionAction(ReactionType.MODIFY_TEMPERATURE, delta=4.0, duration=0),
+        ],
+        {
+            "material_material": [
+                PairReactionRule(lhs_material="gold_solid", rhs_material="water_liquid", result_action=1),
+            ],
+            "material_gas": [
+                PairReactionRule(
+                    lhs_material="gold_solid",
+                    rhs_gas="poison_gas",
+                    threshold=0.1,
+                    min_temperature=25.0,
+                    result_action=2,
+                ),
+            ],
+            "material_light": [],
+            "gas_gas": [],
+            "gas_light": [],
+            "self_rules": [],
+        },
+    )
+    engine.clear_cell_region(0, 0, engine.width, engine.height)
+    engine.set_cell(8, 8, "gold_solid", mark_dirty=False)
+    engine.set_cell(9, 8, "water_liquid", mark_dirty=False)
+    engine.cell_temperature[8, 8] = 20.0
+    poison_gas = engine.rulebook.gas_id("poison_gas")
+    gy, gx = engine.cell_to_gas(8, 8)
+    engine.gas_concentration[poison_gas, gy, gx] = 0.5
+    _seed_gpu_authoritative_active_tiles(engine, [(0, 0)])
+    engine.bridge.mark_gpu_authoritative(
+        "cell_core",
+        "gas_concentration",
+        "ambient_temperature",
+        "flow_velocity",
+        "cell_optical_dose",
+        "gas_optical_dose",
+    )
+
+    load_calls: list[tuple[str, ...]] = []
+    publish_calls = 0
+    promote_calls = 0
+    publish_source_roles: list[object] = []
+    original_load = pipeline._load_authoritative_bridge_inputs
+    original_publish = pipeline._publish_bridge_cell_state
+    original_promote = pipeline._promote_cell_pong_to_ping
+
+    def count_load(world: WorldEngine, resources: object, **kwargs: object) -> None:
+        bridge_input_loads = kwargs.get("bridge_input_loads")
+        if isinstance(bridge_input_loads, GPUReactionBridgeInputLoads):
+            load_calls.append(bridge_input_loads.resource_names())
+        else:
+            load_calls.append(())
+        original_load(world, resources, **kwargs)
+
+    def count_publish(world: WorldEngine, resources: object, **kwargs: object) -> None:
+        nonlocal publish_calls
+        publish_calls += 1
+        publish_source_roles.append(kwargs.get("source_role"))
+        original_publish(world, resources, **kwargs)  # type: ignore[arg-type]
+
+    def count_promote(world: WorldEngine, resources: object) -> None:
+        nonlocal promote_calls
+        promote_calls += 1
+        original_promote(world, resources)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(pipeline, "_load_authoritative_bridge_inputs", count_load)
+    monkeypatch.setattr(pipeline, "_publish_bridge_cell_state", count_publish)
+    monkeypatch.setattr(pipeline, "_promote_cell_pong_to_ping", count_promote)
+    engine.profile_passes_enabled = True
+    engine.profile_passes_sync = True
+    pipeline.reset_pass_profile()
+    previous_frame_active = engine._world_simulation_frame_active
+    engine._world_simulation_frame_active = True
+    try:
+        engine.reaction_solver.reset_runtime_state(engine)
+        pipeline.begin_formal_reaction_segment(engine, "after_optics")
+        engine.reaction_solver._run_material_material(engine)
+        engine.reaction_solver._run_material_gas(engine)
+        unflushed_core = _bridge_cell_core(engine)
+        assert publish_calls == 0
+        assert promote_calls == 2
+        assert np.isclose(float(unflushed_core["cell_temperature"][8, 8]), 20.0)
+        assert pipeline.flush_formal_reaction_segment(engine, "after_optics") is True
+    finally:
+        pipeline.end_formal_reaction_segment(engine, "after_optics")
+        engine._world_simulation_frame_active = previous_frame_active
+
+    core = _bridge_cell_core(engine)
+    assert load_calls == [("cell_core",), ("gas_concentration",)]
+    assert publish_calls == 1
+    assert publish_source_roles == [None]
+    assert np.isclose(float(core["cell_temperature"][8, 8]), 28.0)
+    summary = pipeline.last_pass_profile["summary"]
+    assert summary.get("load_bridge_inputs", {}).get("count", 0) == 2
+    assert summary.get("material_material_upload_state.load_bridge_inputs", {}).get("count", 0) == 1
+    assert summary.get("material_material_upload_state.load_bridge_cell", {}).get("count", 0) == 1
+    for split_name in ("load_bridge_cell_core", "load_bridge_cell_aux", "load_bridge_cell_sync"):
+        assert summary.get(split_name, {}).get("count", 0) == 1
+        assert summary.get(f"material_material_upload_state.{split_name}", {}).get("count", 0) == 1
+    assert summary.get("material_gas_upload_state.load_bridge_inputs", {}).get("count", 0) == 1
+    assert summary.get("material_gas_upload_state.load_bridge_gas", {}).get("count", 0) == 1
+
+
 def test_gpu_reaction_formal_frame_applies_flow_sources_to_bridge_without_cpu_force_source_readback() -> None:
     engine = WorldEngine(width=16, height=16, gas_cell_size=4)
     pipeline = engine.reaction_solver.gpu_pipeline
@@ -36873,6 +39670,7 @@ def test_gpu_reaction_formal_frame_deferred_batch_skips_full_grid_readback() -> 
     pipeline._ensure_programs(ctx)
     resources = pipeline._ensure_resources(engine)
     counts = np.zeros((16,), dtype=np.uint32)
+    counts[0] = 1
     counts[1] = 3
     counts[1 + GPU_ACTION_TYPE_MODIFY_GAS] = 2
     counts[1 + GPU_ACTION_TYPE_EMIT_MATERIAL] = 1
@@ -36910,6 +39708,185 @@ def test_gpu_reaction_formal_frame_deferred_batch_skips_full_grid_readback() -> 
     assert np.allclose(bridge_emitters[0, 1], emitters[0, 1])
 
 
+def test_formal_gpu_reaction_transient_clear_does_not_zero_light_emitter_buffer_on_cpu() -> None:
+    class NoWriteBuffer:
+        def __init__(self, inner: object) -> None:
+            self.inner = inner
+
+        def write(self, *args: object, **kwargs: object) -> None:
+            raise AssertionError("formal reaction clear must not CPU-zero the light emitter buffer")
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self.inner, name)
+
+    engine = WorldEngine(width=16, height=16, gas_cell_size=4)
+    pipeline = engine.reaction_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU reaction pipeline is not available")
+    ctx = engine.bridge.ctx
+    assert ctx is not None
+    pipeline._ensure_programs(ctx)
+    resources = pipeline._ensure_resources(engine)
+    engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+    engine.bridge.mark_gpu_authoritative(
+        "cell_core",
+        "gas_concentration",
+        "ambient_temperature",
+        "flow_velocity",
+        "cell_optical_dose",
+        "gas_optical_dose",
+    )
+    resources.light_emitter_buffer = NoWriteBuffer(resources.light_emitter_buffer)  # type: ignore[assignment]
+    engine.profile_passes_enabled = True
+    pipeline.reset_pass_profile()
+
+    compiled_actions = (
+        np.zeros((8, 4), dtype=np.int32),
+        np.zeros((8, 4), dtype=np.float32),
+    )
+    previous_frame_active = engine._world_simulation_frame_active
+    engine._world_simulation_frame_active = True
+    try:
+        pipeline._upload_state(
+            engine,
+            resources,
+            reaction_group="material_material",
+            compiled_actions=compiled_actions,
+        )
+    finally:
+        engine._world_simulation_frame_active = previous_frame_active
+
+    reaction_counts = np.frombuffer(resources.light_emitter_count.read(size=16 * 4), dtype=np.uint32, count=16)
+    profile_names = {entry["name"] for entry in pipeline.last_pass_profile["passes"]}
+    assert np.count_nonzero(reaction_counts) == 0
+    assert {
+        "clear_transient_full_cell_outputs_skipped",
+        "clear_transient_light_counters",
+        "clear_transient_emit_material_skipped",
+        "clear_transient_flow_sources_skipped",
+    }.issubset(profile_names)
+
+
+def test_formal_gpu_reaction_light_counters_clear_once_per_segment() -> None:
+    engine = WorldEngine(width=16, height=16, gas_cell_size=4)
+    pipeline = engine.reaction_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU reaction pipeline is not available")
+    ctx = engine.bridge.ctx
+    assert ctx is not None
+    pipeline._ensure_programs(ctx)
+    resources = pipeline._ensure_resources(engine)
+    engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+    engine.bridge.mark_gpu_authoritative(
+        "cell_core",
+        "gas_concentration",
+        "ambient_temperature",
+        "flow_velocity",
+        "cell_optical_dose",
+        "gas_optical_dose",
+    )
+    compiled_actions = (
+        np.zeros((8, 4), dtype=np.int32),
+        np.zeros((8, 4), dtype=np.float32),
+    )
+    engine.profile_passes_enabled = True
+    pipeline.reset_pass_profile()
+    previous_frame_active = engine._world_simulation_frame_active
+    engine._world_simulation_frame_active = True
+    try:
+        assert pipeline.begin_formal_reaction_segment(engine, "before_motion") is True
+        try:
+            pipeline._upload_state(
+                engine,
+                resources,
+                reaction_group="timed",
+                compiled_actions=compiled_actions,
+            )
+            counts = np.zeros((16,), dtype=np.uint32)
+            counts[0] = 2
+            counts[1] = 9
+            resources.light_emitter_count.write(counts.tobytes())
+
+            pipeline._upload_state(
+                engine,
+                resources,
+                reaction_group="self",
+                compiled_actions=compiled_actions,
+            )
+            preserved = np.frombuffer(resources.light_emitter_count.read(size=16 * 4), dtype=np.uint32, count=16)
+            profile_names = {entry["name"] for entry in pipeline.last_pass_profile["passes"]}
+
+            assert int(preserved[0]) == 2
+            assert int(preserved[1]) == 9
+            assert "clear_transient_light_counters" in profile_names
+            assert "clear_transient_light_counters_skipped" in profile_names
+        finally:
+            pipeline.end_formal_reaction_segment(engine, "before_motion")
+
+        counts = np.zeros((16,), dtype=np.uint32)
+        counts[0] = 3
+        counts[1] = 11
+        resources.light_emitter_count.write(counts.tobytes())
+        engine.frame_id += 1
+        assert pipeline.begin_formal_reaction_segment(engine, "before_motion") is True
+        try:
+            pipeline._upload_state(
+                engine,
+                resources,
+                reaction_group="timed",
+                compiled_actions=compiled_actions,
+            )
+            cleared = np.frombuffer(resources.light_emitter_count.read(size=16 * 4), dtype=np.uint32, count=16)
+            assert int(cleared[0]) == 0
+            assert int(cleared[1]) == 0
+        finally:
+            pipeline.end_formal_reaction_segment(engine, "before_motion")
+    finally:
+        engine._world_simulation_frame_active = previous_frame_active
+        engine.close()
+
+
+def test_formal_gpu_reaction_light_emitter_publish_uses_counter_prefix() -> None:
+    engine = WorldEngine(width=16, height=16, gas_cell_size=4)
+    pipeline = engine.reaction_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU reaction pipeline is not available")
+    ctx = engine.bridge.ctx
+    assert ctx is not None
+    pipeline._ensure_programs(ctx)
+    resources = pipeline._ensure_resources(engine)
+
+    stale_bridge_emitters = np.full((256, 2, 4), 7.0, dtype="f4")
+    source_emitters = np.full((256, 2, 4), 3.0, dtype="f4")
+    counts = np.zeros((16,), dtype=np.uint32)
+    engine.bridge.buffers["reaction_light_emitter"].write(stale_bridge_emitters.tobytes())
+    resources.light_emitter_buffer.write(source_emitters.tobytes())
+    resources.light_emitter_count.write(counts.tobytes())
+
+    pipeline._publish_bridge_light_emitters(engine, resources)
+
+    bridge_emitters = np.frombuffer(
+        engine.bridge.buffers["reaction_light_emitter"].read(),
+        dtype="f4",
+    ).reshape((256, 2, 4))
+    bridge_counts = np.frombuffer(engine.bridge.buffers["reaction_light_emitter_count"].read(), dtype=np.uint32, count=16)
+    assert int(bridge_counts[0]) == 0
+    assert np.allclose(bridge_emitters[0], stale_bridge_emitters[0])
+
+    counts[0] = 1
+    resources.light_emitter_count.write(counts.tobytes())
+    pipeline._publish_bridge_light_emitters(engine, resources)
+
+    bridge_emitters = np.frombuffer(
+        engine.bridge.buffers["reaction_light_emitter"].read(),
+        dtype="f4",
+    ).reshape((256, 2, 4))
+    bridge_counts = np.frombuffer(engine.bridge.buffers["reaction_light_emitter_count"].read(), dtype=np.uint32, count=16)
+    assert int(bridge_counts[0]) == 1
+    assert np.allclose(bridge_emitters[0], source_emitters[0])
+    assert np.allclose(bridge_emitters[1], stale_bridge_emitters[1])
+
+
 def test_gpu_optics_formal_frame_traces_bridge_reaction_emitters_without_cpu_rays(monkeypatch: pytest.MonkeyPatch) -> None:
     engine = WorldEngine(width=16, height=16, gas_cell_size=4)
     pipeline = engine.optics_solver.gpu_pipeline
@@ -36940,15 +39917,18 @@ def test_gpu_optics_formal_frame_traces_bridge_reaction_emitters_without_cpu_ray
     finally:
         engine._world_simulation_frame_active = previous_frame_active
 
-    bridge_dose = np.frombuffer(engine.bridge.buffers["cell_optical_dose"].read(), dtype="f4").reshape(
-        engine.cell_optical_dose.shape
+    bridge_visible = _read_bridge_texture_f32(
+        engine,
+        "visible_illumination",
+        (engine.height, engine.width, 4),
     )
     assert engine.optics_solver.last_backend == "gpu"
     assert pipeline.last_cpu_mirror_downloaded is False
     assert engine.emitters == []
     assert int(engine.optics_solver.last_emitter_count) == 0
     assert "cell_optical_dose" in engine.bridge.gpu_authoritative_resources
-    assert float(bridge_dose.sum()) > 0.0
+    assert "visible_illumination" in engine.bridge.gpu_authoritative_resources
+    assert float(bridge_visible[..., :3].sum()) > 0.0
 
 
 def test_timed_reaction_slots_batch_trigger_from_predecrement_state_in_cpu_and_gpu_paths() -> None:
@@ -37323,6 +40303,14 @@ def test_gpu_optics_pipeline_matches_cpu_primary_ray_outputs_for_non_branching_s
             "spread": 0.0,
             "strength": 1.0,
             "range_cells": 12,
+        },
+        {
+            "light_type": "holy_light",
+            "origin": (4, 8),
+            "direction": (1.0, 0.0),
+            "spread": 0.0,
+            "strength": 1.0,
+            "range_cells": 12,
         }
     ]
 
@@ -37332,9 +40320,27 @@ def test_gpu_optics_pipeline_matches_cpu_primary_ray_outputs_for_non_branching_s
             engine.use_cpu_oracle_backend()
             engine.optics_solver.gpu_pipeline.available = lambda world: False
         engine.clear_cell_region(0, 0, engine.width, engine.height)
-        engine.patch_material_optics("raw_stone_solid", "visible_light", scattering=0.0, refraction=0.0)
+        distinct_optics = [
+            ("raw_stone_solid", "visible_light", 0.11),
+            ("raw_stone_solid", "holy_light", 0.23),
+            ("gold_solid", "visible_light", 0.37),
+            ("gold_solid", "holy_light", 0.53),
+        ]
+        engine.update_material_optics_table(
+            [
+                replace(
+                    engine.rulebook.optics[(material_name, light_name)],
+                    absorption=absorption,
+                    scattering=0.0,
+                    refraction=0.0,
+                )
+                for material_name, light_name, absorption in distinct_optics
+            ]
+        )
         engine.set_cell(10, 4, "raw_stone_solid", mark_dirty=False)
         engine.set_cell(11, 4, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(10, 8, "gold_solid", mark_dirty=False)
+        engine.set_cell(11, 8, "gold_solid", mark_dirty=False)
         engine.active.mark_rect(0, 0, engine.width, engine.height)
         return engine
 
@@ -37381,6 +40387,99 @@ def test_gpu_optics_pipeline_matches_cpu_primary_ray_outputs_at_negative_boundar
     assert np.allclose(gpu_engine.cell_optical_dose, cpu_engine.cell_optical_dose, atol=1e-6)
     assert np.allclose(gpu_engine.gas_optical_dose, cpu_engine.gas_optical_dose, atol=1e-6)
     assert np.allclose(gpu_engine.visible_illumination, cpu_engine.visible_illumination, atol=1e-6)
+
+
+def test_gpu_optics_pipeline_matches_cpu_tail_gas_cell_on_non_divisible_grid() -> None:
+    emitters = [
+        {
+            "light_type": "visible_light",
+            "origin": (16, 17),
+            "direction": (1.0, 0.0),
+            "spread": 0.0,
+            "strength": 1.0,
+            "range_cells": 3,
+        }
+    ]
+
+    def build_engine(*, use_gpu: bool) -> WorldEngine:
+        engine = WorldEngine(width=18, height=18, gas_cell_size=4)
+        if not use_gpu:
+            engine.use_cpu_oracle_backend()
+            engine.optics_solver.gpu_pipeline.available = lambda world: False
+        elif not engine.optics_solver.gpu_pipeline.available(engine):
+            pytest.skip("GPU optics pipeline is not available")
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.active.mark_rect(0, 0, engine.width, engine.height)
+        return engine
+
+    cpu_engine = build_engine(use_gpu=False)
+    gpu_engine = build_engine(use_gpu=True)
+    try:
+        light_id = cpu_engine.rulebook.light_id("visible_light")
+        assert cpu_engine.gas_width == 5
+        assert cpu_engine.gas_height == 5
+
+        cpu_engine.emitters.extend(dict(emitter) for emitter in emitters)
+        cpu_engine.optics_solver.step(cpu_engine)
+        gpu_engine.optics_solver.gpu_pipeline.step(gpu_engine, [dict(emitter) for emitter in emitters])
+
+        assert float(gpu_engine.gas_optical_dose[light_id, 4, 4]) > 0.0
+        assert np.allclose(gpu_engine.cell_optical_dose, cpu_engine.cell_optical_dose, atol=1.0e-6)
+        assert np.allclose(gpu_engine.gas_optical_dose, cpu_engine.gas_optical_dose, atol=1.0e-6)
+        assert np.allclose(gpu_engine.visible_illumination, cpu_engine.visible_illumination, atol=1.0e-6)
+    finally:
+        cpu_engine.close()
+        gpu_engine.close()
+
+
+def test_gpu_optics_pipeline_matches_cpu_secondary_rotation_for_non_axis_spread_scene() -> None:
+    emitters = [
+        {
+            "light_type": "visible_light",
+            "origin": (4, 4),
+            "direction": (0.8, 0.6),
+            "spread": 0.18,
+            "strength": 1.25,
+            "range_cells": 14,
+        }
+    ]
+
+    def build_engine(*, use_gpu: bool) -> WorldEngine:
+        engine = WorldEngine(width=32, height=24, gas_cell_size=4)
+        if not use_gpu:
+            engine.use_cpu_oracle_backend()
+            engine.optics_solver.gpu_pipeline.available = lambda world: False
+        elif not engine.optics_solver.gpu_pipeline.available(engine):
+            pytest.skip("GPU optics pipeline is not available")
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.patch_material_optics(
+            "raw_stone_solid",
+            "visible_light",
+            absorption=0.02,
+            scattering=0.72,
+            refraction=0.61,
+        )
+        for x, y in ((5, 5), (6, 5), (6, 6), (8, 7), (9, 8)):
+            engine.set_cell(x, y, "raw_stone_solid", mark_dirty=False)
+        engine.active.mark_rect(0, 0, engine.width, engine.height)
+        return engine
+
+    cpu_engine = build_engine(use_gpu=False)
+    gpu_engine = build_engine(use_gpu=True)
+    try:
+        cpu_engine.emitters.extend(dict(emitter) for emitter in emitters)
+        gpu_engine.emitters.extend(dict(emitter) for emitter in emitters)
+
+        cpu_engine.optics_solver.step(cpu_engine)
+        gpu_engine.optics_solver.step(gpu_engine)
+
+        assert gpu_engine.optics_solver.last_secondary_branch_count > 0
+        assert np.allclose(gpu_engine.cell_optical_dose, cpu_engine.cell_optical_dose, atol=1.0e-6)
+        assert np.allclose(gpu_engine.gas_optical_dose, cpu_engine.gas_optical_dose, atol=1.0e-6)
+        assert np.allclose(gpu_engine.visible_illumination, cpu_engine.visible_illumination, atol=1.0e-5)
+    finally:
+        cpu_engine.close()
+        gpu_engine.close()
 
 
 def test_optics_solver_matches_cpu_and_gpu_across_multiple_seeded_mixed_emitter_scenes() -> None:
@@ -37467,6 +40566,39 @@ def test_gpu_reaction_pipeline_random_targets_follow_typed_material_chaos_candid
     assert pipeline.random_target_count == len(expected)
     assert pipeline.random_targets[: len(expected)].tolist() == expected.tolist()
     assert np.all(pipeline.random_targets[len(expected) :] == 0)
+
+
+def test_gpu_reaction_formal_cache_reuses_random_target_metadata_until_material_generation_changes() -> None:
+    class CountingBuffer:
+        def __init__(self, inner: object) -> None:
+            self.inner = inner
+            self.write_count = 0
+
+        def write(self, *args: object, **kwargs: object) -> object:
+            self.write_count += 1
+            return self.inner.write(*args, **kwargs)  # type: ignore[attr-defined]
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self.inner, name)
+
+    engine = WorldEngine(width=32, height=24)
+    pipeline = engine.reaction_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU reaction pipeline is not available")
+    resources = pipeline._ensure_resources(engine)
+    pipeline._upload_state(engine, resources)
+
+    counting_random_targets = CountingBuffer(resources.random_targets)
+    resources.random_targets = counting_random_targets  # type: ignore[assignment]
+
+    pipeline._upload_state(engine, resources)
+    assert counting_random_targets.write_count == 0
+
+    engine.bridge.table_generations["materials"] = int(engine.bridge.table_generations.get("materials", 0)) + 1
+    pipeline._upload_state(engine, resources)
+
+    assert counting_random_targets.write_count == 1
+    assert pipeline.random_target_count == len(engine.random_convert_material_ids)
 
 
 def test_gpu_reaction_pipeline_material_spawn_temperature_reads_bridge_typed_tables_not_live_runtime_array() -> None:
@@ -37572,7 +40704,7 @@ def test_inject_velocity_command_path_updates_world_and_uploads_payload() -> Non
     request = ReadbackRequest(center_x=16, center_y=12, width=32, height=24, channels=("cell", "velocity"))
     payload = engine._make_readback_payload(request)
     assert engine.bridge.queue_readback(1, request, payload)
-    result = engine.bridge.poll_readback(2)
+    result = engine.bridge.poll_readback(_next_bridge_readback_min_poll_frame(engine.bridge))
 
     assert result is not None
     unpacked = unpack_cell_core(result.payload["cell"]["core_words"])
@@ -37676,7 +40808,7 @@ def test_gpu_world_grid_commands_publish_bridge_state_without_cpu_mirror_downloa
     request = ReadbackRequest(center_x=16, center_y=16, width=32, height=32, channels=("cell", "velocity", "gas"))
     payload = engine._make_readback_payload(request)
     assert engine.bridge.queue_readback(1, request, payload)
-    result = engine.bridge.poll_readback(2)
+    result = engine.bridge.poll_readback(_next_bridge_readback_min_poll_frame(engine.bridge))
 
     assert result is not None
     unpacked = unpack_cell_core(result.payload["cell"]["core_words"])
@@ -38601,12 +41733,20 @@ def test_gpu_heat_solver_boiling_only_updates_active_tile_neighborhoods() -> Non
 def test_gpu_optics_solver_runs_compute_path() -> None:
     engine = WorldEngine(width=32, height=24)
     engine.clear_cell_region(0, 0, engine.width, engine.height)
+    engine.patch_material_optics(
+        "raw_stone_solid",
+        "visible_light",
+        absorption=1.0,
+        scattering=0.0,
+        refraction=0.0,
+    )
+    engine.set_cell(5, 4, "raw_stone_solid", mark_dirty=False)
     engine.emitters.append(
         {
             "light_type": "visible_light",
             "origin": (4, 4),
-            "direction": (0.0, 0.0),
-            "spread": 0.25,
+            "direction": (1.0, 0.0),
+            "spread": 0.0,
             "strength": 1.0,
             "range_cells": 12,
         }
@@ -38621,6 +41761,48 @@ def test_gpu_optics_solver_runs_compute_path() -> None:
     assert float(engine.cell_optical_dose[light_id].sum()) > 0.0
     assert float(engine.gas_optical_dose[light_id].sum()) > 0.0
     assert float(engine.visible_illumination.sum()) > 0.0
+
+
+def test_gpu_optics_trace_emitters_accumulates_overlapping_rays_and_emitters() -> None:
+    def run_case(emitter_count: int, *, strength: float = 1.0) -> float:
+        engine = WorldEngine(width=32, height=24)
+        if not engine.optics_solver.gpu_pipeline.available(engine):
+            pytest.skip("GPU optics pipeline is not available")
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.patch_material_optics(
+            "raw_stone_solid",
+            "visible_light",
+            absorption=1.0,
+            scattering=0.0,
+            refraction=0.0,
+        )
+        engine.set_cell(5, 4, "raw_stone_solid", mark_dirty=False)
+        for _ in range(emitter_count):
+            engine.emitters.append(
+                {
+                    "light_type": "visible_light",
+                            "origin": (4, 4),
+                            "direction": (1.0, 0.0),
+                            "spread": 0.0,
+                            "strength": strength,
+                            "range_cells": 4,
+                        }
+                    )
+        light_id = engine.rulebook.light_id("visible_light")
+        try:
+            engine.optics_solver.step(engine)
+            assert engine.optics_solver.last_backend == "gpu"
+            return float(engine.cell_optical_dose[light_id, 4, 5])
+        finally:
+            engine.close()
+
+    single_dose = run_case(1)
+    double_dose = run_case(2)
+    saturated_dose = run_case(256, strength=2.0)
+
+    assert single_dose > 2.5
+    assert double_dose == pytest.approx(single_dose * 2.0, rel=1.0e-5, abs=1.0e-5)
+    assert saturated_dose == pytest.approx(single_dose * 512.0, rel=1.0e-5, abs=1.0e-5)
 
 
 def test_gpu_optics_solver_composes_visible_illumination_without_cpu_path(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -39121,6 +42303,123 @@ def test_optics_solver_runtime_loader_skips_typed_optics_rows_with_invalid_mater
     assert visible_id not in engine.optics_solver._branching_light_ids
 
 
+def test_optics_solver_shadow_runtime_cache_uses_typed_tables_without_serializing(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = WorldEngine(width=16, height=16)
+    engine.use_cpu_oracle_backend()
+    engine.optics_solver.gpu_pipeline.available = lambda world: False
+    engine.bridge.sync_rule_tables(engine)
+    serialize_calls = 0
+
+    def fail_serialize_material_optics_table() -> list[dict[str, object]]:
+        nonlocal serialize_calls
+        serialize_calls += 1
+        raise AssertionError("typed optics runtime path should not serialize optics payload")
+
+    monkeypatch.setattr(engine, "serialize_material_optics_table", fail_serialize_material_optics_table)
+
+    engine.optics_solver._load_shadow_runtime(engine)
+    cached_optics_runtime = engine.optics_solver._optics_runtime_by_pair
+    engine.optics_solver._load_shadow_runtime(engine)
+
+    assert serialize_calls == 0
+    assert engine.optics_solver._optics_runtime_by_pair is cached_optics_runtime
+
+
+def test_optics_solver_shadow_runtime_cache_invalidates_on_material_optics_patch() -> None:
+    engine = WorldEngine(width=16, height=16)
+    engine.use_cpu_oracle_backend()
+    engine.optics_solver.gpu_pipeline.available = lambda world: False
+    stone_id = engine.rulebook.material_id("raw_stone_solid")
+    visible_id = engine.rulebook.light_id("visible_light")
+
+    engine.optics_solver._load_shadow_runtime(engine)
+    baseline_runtime_map = engine.optics_solver._optics_runtime_by_pair
+    engine.patch_material_optics(
+        "raw_stone_solid",
+        "visible_light",
+        absorption=0.37,
+        scattering=0.23,
+        refraction=0.0,
+    )
+    engine.optics_solver._load_shadow_runtime(engine)
+    runtime = engine.optics_solver._optics_runtime(stone_id, visible_id)
+
+    assert engine.optics_solver._optics_runtime_by_pair is not baseline_runtime_map
+    assert runtime.absorption == pytest.approx(0.37)
+    assert runtime.scattering == pytest.approx(0.23)
+    assert visible_id in engine.optics_solver._branching_light_ids
+
+
+def test_optics_solver_shadow_runtime_cache_invalidates_on_light_table_update() -> None:
+    engine = WorldEngine(width=16, height=16)
+    engine.use_cpu_oracle_backend()
+    engine.optics_solver.gpu_pipeline.available = lambda world: False
+    visible_id = engine.rulebook.light_id("visible_light")
+
+    engine.optics_solver._load_shadow_runtime(engine)
+    baseline_light_runtime = engine.optics_solver._light_runtime_by_name["visible_light"]
+    engine.update_light_type_table(
+        [
+            replace(
+                engine.rulebook.lights_by_id[visible_id],
+                default_range=int(baseline_light_runtime.default_range) + 3,
+                max_bounce=int(baseline_light_runtime.max_bounce) + 1,
+            )
+        ]
+    )
+    engine.optics_solver._load_shadow_runtime(engine)
+    updated_light_runtime = engine.optics_solver._light_runtime_by_name["visible_light"]
+
+    assert updated_light_runtime is not baseline_light_runtime
+    assert updated_light_runtime.default_range == int(baseline_light_runtime.default_range) + 3
+    assert updated_light_runtime.max_bounce == int(baseline_light_runtime.max_bounce) + 1
+
+
+def test_optics_solver_shadow_runtime_cache_invalidates_on_material_table_update() -> None:
+    engine = WorldEngine(width=16, height=16)
+    engine.use_cpu_oracle_backend()
+    engine.optics_solver.gpu_pipeline.available = lambda world: False
+    stone_id = engine.rulebook.material_id("raw_stone_solid")
+    material = engine.rulebook.materials_by_id[stone_id]
+
+    engine.optics_solver._load_shadow_runtime(engine)
+    baseline_optics_runtime = engine.optics_solver._optics_runtime_by_pair
+    baseline_signature = engine.optics_solver._shadow_runtime_signature
+    engine.update_material_table([replace(material, density=float(material.density) + 0.125)])
+    engine.optics_solver._load_shadow_runtime(engine)
+
+    assert engine.optics_solver._shadow_runtime_signature != baseline_signature
+    assert engine.optics_solver._optics_runtime_by_pair is not baseline_optics_runtime
+
+
+def test_optics_solver_step_resets_frame_state_while_reusing_shadow_runtime_cache() -> None:
+    engine = WorldEngine(width=16, height=16)
+    engine.use_cpu_oracle_backend()
+    engine.optics_solver.gpu_pipeline.available = lambda world: False
+    engine.clear_cell_region(0, 0, engine.width, engine.height)
+    engine.emitters.append(
+        {
+            "light_type": "visible_light",
+            "origin": (4, 4),
+            "direction": (1.0, 0.0),
+            "spread": 0.0,
+            "strength": 1.0,
+            "range_cells": 6,
+        }
+    )
+
+    engine.optics_solver.step(engine)
+    cached_optics_runtime = engine.optics_solver._optics_runtime_by_pair
+    assert engine.optics_solver.last_emitter_count == 1
+    assert bool(np.any(engine.optics_solver.last_emitter_origin_mask))
+
+    engine.optics_solver.step(engine)
+
+    assert engine.optics_solver._optics_runtime_by_pair is cached_optics_runtime
+    assert engine.optics_solver.last_emitter_count == 0
+    assert not bool(np.any(engine.optics_solver.last_emitter_origin_mask))
+
+
 def test_optics_solver_visual_channel_changes_visible_accent_without_changing_dose_buffers() -> None:
     engine = WorldEngine(width=32, height=24)
     engine.use_cpu_oracle_backend()
@@ -39240,6 +42539,414 @@ def test_liquid_solver_row_snapshot_prevents_lateral_double_claim_and_same_step_
     assert int(cpu_engine.material_id[10, 9]) == water_id
     assert int(cpu_engine.material_id[10, 10]) == oil_id
     assert int(cpu_engine.material_id[11, 9]) == 0
+
+
+def test_gpu_liquid_tile_solver_shader_uses_parallel_row_mapping() -> None:
+    source = inspect.getsource(GPULiquidPipeline._ensure_programs)
+    tile_solve_start = source.index('self.programs["tile_solve"]')
+    tile_solve_end = source.index('self.programs["seam_x"]', tile_solve_start)
+    tile_solve_source = source[tile_solve_start:tile_solve_end]
+
+    assert "local_size_y=1" in tile_solve_source
+    assert "ivec2 local = ivec2(gl_LocalInvocationID.x, 0)" in tile_solve_source
+    assert "for (int y = 0; y < TILE_SIZE; ++y)" in tile_solve_source
+    assert "local.y == row" not in tile_solve_source
+    assert "local.y == row && local.x == 0" not in tile_solve_source
+    assert "below_empty_mask" not in tile_solve_source
+    assert "claimed_source_mask" not in tile_solve_source
+    assert "tile_downfill_target_for_source" not in tile_solve_source
+    assert "for (int bx = liquid_start" not in tile_solve_source
+    assert "for (int sx = 0; sx < TILE_SIZE" not in tile_solve_source
+    assert "while (" not in tile_solve_source
+    assert "s_liquid_run_start[TILE_SIZE]" in tile_solve_source
+    assert "s_liquid_run_end[TILE_SIZE]" in tile_solve_source
+    assert "s_empty_segment_start[TILE_SIZE]" in tile_solve_source
+    assert "s_empty_segment_end[TILE_SIZE]" in tile_solve_source
+    assert "s_liquid_run_first_empty_x[TILE_SIZE]" in tile_solve_source
+    assert "atomicMin(s_liquid_run_first_empty_x[liquid_start], local.x)" in tile_solve_source
+    assert "atomicMin(s_down_source_x[target_x], local.x)" in tile_solve_source
+    assert "s_down_target_x[local.x]" in tile_solve_source
+    assert "s_down_source_x[local.x]" in tile_solve_source
+    assert "s_lateral_source_x[local.x]" in tile_solve_source
+    assert "shared int s_row_any_liquid;" in tile_solve_source
+    assert "shared int s_row_any_below_empty;" in tile_solve_source
+    row_loop_index = tile_solve_source.index("for (int row = TILE_SIZE - 2; row >= 0; --row)")
+    row_any_reset_index = tile_solve_source.index("s_row_any_liquid = 0;", row_loop_index)
+    row_liquid_predicate_index = tile_solve_source.index("bool row_liquid = ", row_any_reset_index)
+    row_any_liquid_or_index = tile_solve_source.index("atomicOr(s_row_any_liquid, 1);", row_liquid_predicate_index)
+    row_any_below_or_index = tile_solve_source.index(
+        "atomicOr(s_row_any_below_empty, 1);",
+        row_any_liquid_or_index,
+    )
+    no_liquid_guard_index = tile_solve_source.index("if (s_row_any_liquid == 0)", row_any_below_or_index)
+    below_empty_guard_index = tile_solve_source.index(
+        "if (s_row_any_below_empty != 0)",
+        no_liquid_guard_index,
+    )
+    blocker_init_index = tile_solve_source.index(
+        "s_liquid_left_blocker[local.x] = row_liquid ? -1 : local.x;",
+        no_liquid_guard_index,
+    )
+    blocker_scan_index = tile_solve_source.index(
+        "for (int stride = 1; stride < TILE_SIZE; stride *= 2)",
+        no_liquid_guard_index,
+    )
+    vertical_guard_end_index = tile_solve_source.index(
+        "                    }}\n                    barrier();\n\n                    s_lateral_target_x[local.x] = -1;",
+        below_empty_guard_index,
+    )
+    lateral_reset_index = tile_solve_source.index(
+        "s_lateral_target_x[local.x] = -1;",
+        below_empty_guard_index,
+    )
+
+    assert row_any_reset_index > row_loop_index
+    assert row_liquid_predicate_index > row_any_reset_index
+    assert row_any_below_or_index > row_any_liquid_or_index
+    assert "if (s_row_any_liquid == 0) {{\n                        continue;\n                    }}" in tile_solve_source
+    assert blocker_init_index > no_liquid_guard_index
+    assert blocker_scan_index > below_empty_guard_index
+    assert vertical_guard_end_index > blocker_scan_index
+    assert lateral_reset_index > below_empty_guard_index
+    assert lateral_reset_index > vertical_guard_end_index
+
+
+def test_gpu_liquid_tile_solver_shader_elides_clean_cell_writeback() -> None:
+    source = inspect.getsource(GPULiquidPipeline._ensure_programs)
+    tile_solve_start = source.index('self.programs["tile_solve"]')
+    tile_solve_end = source.index('self.programs["seam_x"]', tile_solve_start)
+    tile_solve_source = source[tile_solve_start:tile_solve_end]
+    clear_cell_start = tile_solve_source.index("void clear_cell")
+    clear_cell_end = tile_solve_source.index("void write_cell", clear_cell_start)
+    write_cell_start = clear_cell_end
+    write_cell_end = tile_solve_source.index("int liquid_kind_for", write_cell_start)
+    clean_guard_index = tile_solve_source.index("if (s_changed[y][local.x] == 0)", write_cell_end)
+    continue_index = tile_solve_source.index("continue;", clean_guard_index)
+
+    assert "shared int s_changed[TILE_SIZE][TILE_SIZE];" in tile_solve_source
+    assert "s_changed[y][local.x] = 0;" in tile_solve_source
+    assert "s_changed[y][x] = 1;" in tile_solve_source[clear_cell_start:clear_cell_end]
+    assert "s_changed[y][x] = 1;" in tile_solve_source[write_cell_start:write_cell_end]
+    assert tile_solve_source.index("texelFetch(timer_in_tex", clean_guard_index) > continue_index
+    assert tile_solve_source.index("texelFetch(temp_in_tex", clean_guard_index) > continue_index
+    assert tile_solve_source.index("texelFetch(integrity_in_tex", clean_guard_index) > continue_index
+    assert tile_solve_source.index("texelFetch(velocity_in_tex", clean_guard_index) > continue_index
+    assert tile_solve_source.index("imageStore(material_out_img", clean_guard_index) > continue_index
+    assert tile_solve_source.index("imageStore(velocity_out_img", clean_guard_index) > continue_index
+
+
+def test_gpu_liquid_tile_solver_no_move_active_cells_preserve_runtime_fields() -> None:
+    engine = WorldEngine(width=32, height=32)
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        stone_id = engine.rulebook.material_id("raw_stone_solid")
+        water_xy = (10, 10)
+        stone_xy = (10, 11)
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(*water_xy, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.set_cell(9, 10, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(11, 10, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(*stone_xy, "raw_stone_solid", mark_dirty=False)
+        engine.cell_flags[water_xy[1], water_xy[0]] = int(CellFlag.PHASE_LOCKED | CellFlag.REACTION_LATCHED)
+        engine.timer_pack[water_xy[1], water_xy[0]] = np.array([7, 6, 5, 4], dtype=np.uint8)
+        engine.cell_temperature[water_xy[1], water_xy[0]] = 83.25
+        engine.integrity[water_xy[1], water_xy[0]] = 37.0
+        engine.velocity[water_xy[1], water_xy[0]] = np.array([1.5, -0.75], dtype=np.float32)
+        engine.cell_flags[stone_xy[1], stone_xy[0]] = int(CellFlag.REACTION_LATCHED)
+        engine.timer_pack[stone_xy[1], stone_xy[0]] = np.array([1, 2, 3, 4], dtype=np.uint8)
+        engine.cell_temperature[stone_xy[1], stone_xy[0]] = 41.5
+        engine.integrity[stone_xy[1], stone_xy[0]] = 92.0
+        engine.velocity[stone_xy[1], stone_xy[0]] = np.array([-2.0, 0.5], dtype=np.float32)
+        expected_water = {
+            "material": int(engine.material_id[water_xy[1], water_xy[0]]),
+            "phase": int(engine.phase[water_xy[1], water_xy[0]]),
+            "flags": int(engine.cell_flags[water_xy[1], water_xy[0]]),
+            "timer": engine.timer_pack[water_xy[1], water_xy[0]].copy(),
+            "temp": float(engine.cell_temperature[water_xy[1], water_xy[0]]),
+            "integrity": float(engine.integrity[water_xy[1], water_xy[0]]),
+            "velocity": engine.velocity[water_xy[1], water_xy[0]].copy(),
+        }
+        expected_stone = {
+            "material": int(engine.material_id[stone_xy[1], stone_xy[0]]),
+            "phase": int(engine.phase[stone_xy[1], stone_xy[0]]),
+            "flags": int(engine.cell_flags[stone_xy[1], stone_xy[0]]),
+            "timer": engine.timer_pack[stone_xy[1], stone_xy[0]].copy(),
+            "temp": float(engine.cell_temperature[stone_xy[1], stone_xy[0]]),
+            "integrity": float(engine.integrity[stone_xy[1], stone_xy[0]]),
+            "velocity": engine.velocity[stone_xy[1], stone_xy[0]].copy(),
+        }
+        engine.active.mark_rect(0, 0, 32, 32)
+
+        engine.liquid_solver.step(engine)
+
+        assert engine.liquid_solver.last_backend == "gpu"
+        assert int(engine.material_id[water_xy[1], water_xy[0]]) == water_id == expected_water["material"]
+        assert int(engine.phase[water_xy[1], water_xy[0]]) == expected_water["phase"]
+        assert int(engine.cell_flags[water_xy[1], water_xy[0]]) == expected_water["flags"]
+        assert np.array_equal(engine.timer_pack[water_xy[1], water_xy[0]], expected_water["timer"])
+        assert np.isclose(float(engine.cell_temperature[water_xy[1], water_xy[0]]), expected_water["temp"])
+        assert np.isclose(float(engine.integrity[water_xy[1], water_xy[0]]), expected_water["integrity"])
+        assert np.allclose(engine.velocity[water_xy[1], water_xy[0]], expected_water["velocity"])
+        assert int(engine.material_id[stone_xy[1], stone_xy[0]]) == stone_id == expected_stone["material"]
+        assert int(engine.phase[stone_xy[1], stone_xy[0]]) == expected_stone["phase"]
+        assert int(engine.cell_flags[stone_xy[1], stone_xy[0]]) == expected_stone["flags"]
+        assert np.array_equal(engine.timer_pack[stone_xy[1], stone_xy[0]], expected_stone["timer"])
+        assert np.isclose(float(engine.cell_temperature[stone_xy[1], stone_xy[0]]), expected_stone["temp"])
+        assert np.isclose(float(engine.integrity[stone_xy[1], stone_xy[0]]), expected_stone["integrity"])
+        assert np.allclose(engine.velocity[stone_xy[1], stone_xy[0]], expected_stone["velocity"])
+    finally:
+        engine.close()
+
+
+def test_gpu_liquid_tile_solver_spreads_liquid_run_into_reachable_below_empty_run() -> None:
+    engine = WorldEngine(width=32, height=32)
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        for x in range(8, 12):
+            engine.set_cell(x, 10, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        for x in range(8, 10):
+            engine.set_cell(x, 11, "raw_stone_solid", mark_dirty=False)
+        for x in range(12, 14):
+            engine.set_cell(x, 11, "raw_stone_solid", mark_dirty=False)
+        engine.active.mark_rect(0, 0, 32, 32)
+
+        engine.liquid_solver.step(engine)
+
+        assert engine.liquid_solver.last_backend == "gpu"
+        assert np.count_nonzero(engine.material_id[11, 10:12] == water_id) == 2
+        assert np.count_nonzero(engine.material_id[10, 8:12] == water_id) == 2
+    finally:
+        engine.close()
+
+
+def test_gpu_liquid_tile_solver_blocks_falling_island_phase_empty_target() -> None:
+    engine = WorldEngine(width=32, height=32)
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(10, 10, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.phase[11, 10] = int(Phase.FALLING_ISLAND)
+        engine.set_cell(9, 10, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(11, 10, "raw_stone_solid", mark_dirty=False)
+        engine.active.mark_rect(0, 0, 32, 32)
+
+        engine.liquid_solver.step(engine)
+
+        assert engine.liquid_solver.last_backend == "gpu"
+        assert int(engine.material_id[10, 10]) == water_id
+        assert int(engine.material_id[11, 10]) == 0
+        assert int(engine.phase[11, 10]) == int(Phase.FALLING_ISLAND)
+    finally:
+        engine.close()
+
+
+def test_gpu_liquid_tile_solver_blocks_entity_placeholder_lateral_target() -> None:
+    engine = WorldEngine(width=32, height=32)
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(10, 10, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.set_cell(10, 11, "raw_stone_solid", mark_dirty=False)
+        engine.entity_id[10, 9] = 9
+        engine.placeholder_displaced_material[10, 9] = water_id
+        engine.set_cell(11, 10, "raw_stone_solid", mark_dirty=False)
+        engine.active.mark_rect(0, 0, 32, 32)
+
+        engine.liquid_solver.step(engine)
+
+        assert engine.liquid_solver.last_backend == "gpu"
+        assert int(engine.material_id[10, 10]) == water_id
+        assert int(engine.material_id[10, 9]) == 0
+        assert int(engine.entity_id[10, 9]) == 9
+        assert int(engine.placeholder_displaced_material[10, 9]) == water_id
+    finally:
+        engine.close()
+
+
+def _cpu_liquid_test_engine(*, width: int = 64, height: int = 64) -> WorldEngine:
+    engine = WorldEngine(width=width, height=height, simulation_backend="cpu")
+    engine.use_cpu_oracle_backend()
+    engine.liquid_solver.gpu_pipeline.available = lambda world: False
+    engine.clear_cell_region(0, 0, engine.width, engine.height)
+    return engine
+
+
+def test_cpu_liquid_tile_solve_downfills_run_into_reachable_empty_segment_and_preserves_fields() -> None:
+    engine = _cpu_liquid_test_engine(width=32, height=32)
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        for x in range(8, 12):
+            engine.set_cell(x, 10, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        for x in range(8, 10):
+            engine.set_cell(x, 11, "raw_stone_solid", mark_dirty=False)
+        for x in range(12, 14):
+            engine.set_cell(x, 11, "raw_stone_solid", mark_dirty=False)
+        engine.cell_flags[10, 8] = int(CellFlag.PHASE_LOCKED | CellFlag.REACTION_LATCHED)
+        engine.timer_pack[10, 8] = np.array([1, 3, 5, 7], dtype=np.uint8)
+        engine.cell_temperature[10, 8] = 81.0
+        engine.integrity[10, 8] = 42.0
+        engine.velocity[10, 8] = np.array([0.75, -0.25], dtype=np.float32)
+        engine.active.mark_rect(0, 0, 32, 32)
+
+        engine.liquid_solver.step(engine)
+
+        assert engine.liquid_solver.last_backend == "cpu"
+        assert [int(engine.material_id[10, x]) for x in range(8, 12)] == [0, 0, water_id, water_id]
+        assert [int(engine.material_id[11, x]) for x in range(8, 14)] == [
+            engine.rulebook.material_id("raw_stone_solid"),
+            engine.rulebook.material_id("raw_stone_solid"),
+            water_id,
+            water_id,
+            engine.rulebook.material_id("raw_stone_solid"),
+            engine.rulebook.material_id("raw_stone_solid"),
+        ]
+        assert int(engine.phase[10, 8]) == 0
+        assert int(engine.cell_flags[11, 10]) == int(CellFlag.PHASE_LOCKED | CellFlag.REACTION_LATCHED)
+        assert np.array_equal(engine.timer_pack[11, 10], np.array([1, 3, 5, 7], dtype=np.uint8))
+        assert np.isclose(float(engine.cell_temperature[11, 10]), 81.0)
+        assert np.isclose(float(engine.integrity[11, 10]), 42.0)
+        assert np.allclose(engine.velocity[11, 10], np.array([0.75, -0.25], dtype=np.float32))
+    finally:
+        engine.close()
+
+
+def test_cpu_liquid_tile_solve_blocks_falling_island_placeholder_entity_and_displaced_targets() -> None:
+    engine = _cpu_liquid_test_engine(width=32, height=24)
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        placeholder_id = engine.rulebook.material_id("placeholder_solid")
+        source_y = 8
+        target_y = 9
+        blocker_columns = {
+            "static": 6,
+            "falling": 10,
+            "entity": 14,
+            "placeholder": 18,
+            "displaced": 22,
+        }
+        for x in blocker_columns.values():
+            engine.set_cell(x, source_y, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+            engine.set_cell(x - 1, source_y, "raw_stone_solid", mark_dirty=False)
+            engine.set_cell(x + 1, source_y, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(blocker_columns["static"], target_y, "raw_stone_solid", mark_dirty=False)
+        engine.phase[target_y, blocker_columns["falling"]] = int(Phase.FALLING_ISLAND)
+        engine.entity_id[target_y, blocker_columns["entity"]] = 41
+        engine.set_cell(blocker_columns["placeholder"], target_y, "placeholder_solid", mark_dirty=False)
+        engine.placeholder_displaced_material[target_y, blocker_columns["displaced"]] = water_id
+        engine.active.mark_rect(0, 0, 32, 24)
+
+        engine.liquid_solver.step(engine)
+
+        assert engine.liquid_solver.last_backend == "cpu"
+        assert [int(engine.material_id[source_y, x]) for x in blocker_columns.values()] == [water_id] * len(blocker_columns)
+        assert int(engine.material_id[target_y, blocker_columns["static"]]) == engine.rulebook.material_id("raw_stone_solid")
+        assert int(engine.material_id[target_y, blocker_columns["falling"]]) == 0
+        assert int(engine.phase[target_y, blocker_columns["falling"]]) == int(Phase.FALLING_ISLAND)
+        assert int(engine.material_id[target_y, blocker_columns["entity"]]) == 0
+        assert int(engine.entity_id[target_y, blocker_columns["entity"]]) == 41
+        assert int(engine.material_id[target_y, blocker_columns["placeholder"]]) == placeholder_id
+        assert int(engine.material_id[target_y, blocker_columns["displaced"]]) == 0
+        assert int(engine.placeholder_displaced_material[target_y, blocker_columns["displaced"]]) == water_id
+    finally:
+        engine.close()
+
+
+def test_cpu_liquid_horizontal_seam_run_continues_until_blocker_occupancy() -> None:
+    engine = _cpu_liquid_test_engine(width=96, height=64)
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        placeholder_id = engine.rulebook.material_id("placeholder_solid")
+        blocker_rows = {
+            "static": 8,
+            "falling": 10,
+            "entity": 12,
+            "placeholder": 14,
+            "displaced": 16,
+        }
+        for blocker_kind, y in blocker_rows.items():
+            for x in range(28, 32):
+                engine.set_cell(x, y, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+                engine.set_cell(x, y + 1, "raw_stone_solid", mark_dirty=False)
+            engine.set_cell(27, y, "raw_stone_solid", mark_dirty=False)
+            if blocker_kind == "static":
+                engine.set_cell(34, y, "raw_stone_solid", mark_dirty=False)
+            elif blocker_kind == "falling":
+                engine.phase[y, 34] = int(Phase.FALLING_ISLAND)
+            elif blocker_kind == "entity":
+                engine.entity_id[y, 34] = 41
+            elif blocker_kind == "placeholder":
+                engine.set_cell(34, y, "placeholder_solid", mark_dirty=False)
+            elif blocker_kind == "displaced":
+                engine.placeholder_displaced_material[y, 34] = water_id
+        engine.active.mark_rect(0, 0, 64, 32)
+
+        engine.liquid_solver.step(engine)
+
+        assert engine.liquid_solver.last_backend == "cpu"
+        for blocker_kind, y in blocker_rows.items():
+            assert [int(engine.material_id[y, x]) for x in range(28, 34)] == [
+                water_id,
+                water_id,
+                0,
+                0,
+                water_id,
+                water_id,
+            ]
+            assert int(engine.material_id[y, 35]) == 0
+            if blocker_kind == "static":
+                assert int(engine.material_id[y, 34]) == engine.rulebook.material_id("raw_stone_solid")
+            elif blocker_kind == "falling":
+                assert int(engine.material_id[y, 34]) == 0
+                assert int(engine.phase[y, 34]) == int(Phase.FALLING_ISLAND)
+            elif blocker_kind == "entity":
+                assert int(engine.material_id[y, 34]) == 0
+                assert int(engine.entity_id[y, 34]) == 41
+            elif blocker_kind == "placeholder":
+                assert int(engine.material_id[y, 34]) == placeholder_id
+            elif blocker_kind == "displaced":
+                assert int(engine.material_id[y, 34]) == 0
+                assert int(engine.placeholder_displaced_material[y, 34]) == water_id
+    finally:
+        engine.close()
+
+
+def test_cpu_liquid_columnar_solver_stays_vertical_only_with_runs_and_tile_seams() -> None:
+    engine = _cpu_liquid_test_engine(width=64, height=64)
+    try:
+        engine.patch_material("water_liquid", liquid_solver_kind="columnar")
+        water_id = engine.rulebook.material_id("water_liquid")
+        for x in range(10, 14):
+            engine.set_cell(x, 10, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.set_cell(10, 11, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(13, 11, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(31, 20, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.set_cell(31, 21, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(30, 20, "raw_stone_solid", mark_dirty=False)
+        engine.active.mark_rect(0, 0, 64, 64)
+
+        engine.liquid_solver.step(engine)
+
+        assert engine.liquid_solver.last_backend == "cpu"
+        assert [int(engine.material_id[10, x]) for x in range(9, 15)] == [0, water_id, 0, 0, water_id, 0]
+        assert [int(engine.material_id[11, x]) for x in range(10, 14)] == [
+            engine.rulebook.material_id("raw_stone_solid"),
+            water_id,
+            water_id,
+            engine.rulebook.material_id("raw_stone_solid"),
+        ]
+        assert int(engine.material_id[20, 31]) == water_id
+        assert int(engine.material_id[20, 32]) == 0
+    finally:
+        engine.close()
 
 
 def test_liquid_solver_buoyancy_uses_pair_snapshot_without_multi_cell_chain_in_cpu_and_gpu() -> None:
@@ -39405,6 +43112,31 @@ def test_gpu_liquid_seam_correction_moves_across_tile_boundary() -> None:
     assert np.array_equal(engine.timer_pack[10, 32], np.array([1, 2, 3, 4], dtype=np.uint8))
 
 
+def test_gpu_liquid_seam_blocks_entity_placeholder_target() -> None:
+    engine = WorldEngine(width=40, height=64)
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(31, 10, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.set_cell(31, 11, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(30, 10, "raw_stone_solid", mark_dirty=False)
+        engine.entity_id[10, 32] = 9
+        engine.placeholder_displaced_material[10, 32] = water_id
+        engine.active.mark_rect(30, 8, 34, 13)
+
+        engine.liquid_solver.step(engine)
+
+        assert engine.liquid_solver.last_backend == "gpu"
+        assert int(engine.material_id[10, 31]) == water_id
+        assert int(engine.material_id[10, 32]) == 0
+        assert int(engine.entity_id[10, 32]) == 9
+        assert int(engine.placeholder_displaced_material[10, 32]) == water_id
+    finally:
+        engine.close()
+
+
 def test_columnar_liquid_solver_kind_disables_vertical_boundary_sideflow() -> None:
     engine = WorldEngine(width=40, height=64)
     engine.patch_material("water_liquid", liquid_solver_kind="columnar")
@@ -39507,6 +43239,97 @@ def test_gpu_placeholder_segment_distributes_displaced_liquid_to_both_sides() ->
     assert engine.placeholder_displaced_material[20, 21] == 0
 
 
+def test_gpu_placeholder_displacement_claims_conflicting_targets_without_losing_liquid() -> None:
+    engine = WorldEngine(width=64, height=64)
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        for x in (10, 12):
+            engine.set_cell(x, 20, "placeholder_solid", mark_dirty=False)
+            engine.placeholder_displaced_material[20, x] = water_id
+        engine.set_cell(9, 20, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(13, 20, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(9, 19, "raw_stone_solid", mark_dirty=False)
+        engine.active.mark_rect(8, 18, 14, 22)
+
+        before_total = int(np.count_nonzero(engine.material_id == water_id)) + int(
+            np.count_nonzero(engine.placeholder_displaced_material == water_id)
+        )
+        engine.liquid_solver.step(engine)
+        targets = {
+            (int(x), int(y))
+            for y, x in zip(*np.nonzero(engine.material_id == water_id), strict=True)
+        }
+        after_total = len(targets) + int(np.count_nonzero(engine.placeholder_displaced_material == water_id))
+
+        assert engine.liquid_solver.last_backend == "gpu"
+        assert before_total == 2
+        assert after_total == 2
+        assert targets == {(11, 19), (11, 20)}
+        assert int(engine.placeholder_displaced_material[20, 10]) == 0
+        assert int(engine.placeholder_displaced_material[20, 12]) == 0
+    finally:
+        engine.close()
+
+
+def test_gpu_placeholder_displacement_preserves_source_target_count_across_side_batch() -> None:
+    engine = WorldEngine(width=64, height=64)
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        for x in range(20, 24):
+            engine.set_cell(x, 20, "placeholder_solid", mark_dirty=False)
+            engine.placeholder_displaced_material[20, x] = water_id
+        engine.active.mark_rect(16, 18, 28, 22)
+
+        source_count = int(np.count_nonzero(engine.placeholder_displaced_material[20, 20:24] == water_id))
+        engine.liquid_solver.step(engine)
+
+        assert engine.liquid_solver.last_backend == "gpu"
+        assert source_count == 4
+        assert int(np.count_nonzero(engine.material_id == water_id)) == source_count
+        assert int(np.count_nonzero(engine.placeholder_displaced_material == water_id)) == 0
+        assert int(np.count_nonzero(engine.material_id[20, 18:20] == water_id)) == 2
+        assert int(np.count_nonzero(engine.material_id[20, 24:26] == water_id)) == 2
+    finally:
+        engine.close()
+
+
+def test_gpu_placeholder_segment_redistributes_displaced_liquid_by_side_capacity_coefficients() -> None:
+    engine = WorldEngine(width=64, height=64)
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        stone_id = engine.rulebook.material_id("raw_stone_solid")
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        for x in range(20, 24):
+            engine.set_cell(x, 20, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+            engine.set_cell(x, 20, "placeholder_solid", mark_dirty=False)
+        engine.set_cell(17, 20, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(19, 19, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(26, 19, "raw_stone_solid", mark_dirty=False)
+        engine.active.mark_rect(16, 18, 28, 22)
+
+        engine.liquid_solver.step(engine)
+
+        assert engine.liquid_solver.last_backend == "gpu"
+        assert int(engine.material_id[20, 17]) == stone_id
+        assert int(engine.material_id[19, 19]) == stone_id
+        assert int(engine.material_id[19, 26]) == stone_id
+        assert int(np.count_nonzero(engine.material_id[20, 16:20] == water_id)) == 1
+        assert int(np.count_nonzero(engine.material_id[20, 24:28] == water_id)) == 3
+        assert [int(engine.material_id[20, x]) for x in range(18, 20)] == [0, water_id]
+        assert [int(engine.material_id[20, x]) for x in range(24, 28)] == [water_id, water_id, water_id, 0]
+        assert int(np.count_nonzero(engine.placeholder_displaced_material[20, 20:24] == water_id)) == 0
+    finally:
+        engine.close()
+
+
 def test_gpu_placeholder_displacement_keeps_pending_when_blocked() -> None:
     engine = WorldEngine(width=64, height=64)
     engine.clear_cell_region(0, 0, engine.width, engine.height)
@@ -39530,6 +43353,7 @@ def test_liquid_solver_normalizes_stale_placeholder_and_island_runtime_metadata(
             engine.use_cpu_oracle_backend()
             engine.liquid_solver.gpu_pipeline.available = lambda world: False
         engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.patch_material("water_liquid", liquid_solver_kind="columnar")
         water_id = engine.rulebook.material_id("water_liquid")
         engine.set_cell(10, 8, "water_liquid", mark_dirty=False)
         engine.entity_id[8, 10] = 5
@@ -39665,6 +43489,88 @@ def test_formal_gpu_liquid_uses_bridge_authoritative_inputs_without_cpu_mirror_s
     assert engine.liquid_solver.gpu_pipeline.last_cpu_entity_id_upload_skipped is True
     assert engine.liquid_solver.gpu_pipeline.last_cpu_displaced_material_upload_skipped is True
     assert engine.liquid_solver.gpu_pipeline.last_cpu_mirror_downloaded is False
+
+
+def test_gpu_liquid_bridge_input_load_batches_copy_barrier() -> None:
+    source = inspect.getsource(GPULiquidPipeline._load_authoritative_bridge_inputs)
+    sync_marker = "self._sync_compute_writes(bridge.ctx)"
+    sync_index = source.index(sync_marker)
+    expected_profile_names = (
+        "liquid_load_bridge_inputs.active_tile_compact",
+        "liquid_load_bridge_inputs.load_cell_in",
+        "liquid_load_bridge_inputs.load_cell_out",
+        "liquid_load_bridge_inputs.load_aux",
+        "liquid_load_bridge_inputs.sync",
+    )
+
+    assert source.count(sync_marker) == 1
+    for profile_name in expected_profile_names:
+        assert f'"{profile_name}"' in source
+    assert source.index('self.programs["load_bridge_cell"]') < sync_index
+    assert source.index('self.programs["load_bridge_cell_out"]') < sync_index
+    assert source.index('self.programs["load_bridge_cell_aux"]') < sync_index
+    assert source.index('"liquid_load_bridge_inputs.sync"') < sync_index
+    assert "ran_copy = False" in source
+    assert "if ran_copy:" in source
+
+
+def test_gpu_liquid_pre_motion_bridge_input_load_uses_flow_intent_subset() -> None:
+    prepare_source = inspect.getsource(GPULiquidPipeline.prepare_motion_flow_intent)
+    loader_source = inspect.getsource(GPULiquidPipeline._load_authoritative_bridge_flow_intent_inputs)
+    programs_source = inspect.getsource(GPULiquidPipeline._ensure_programs)
+    shader_start = programs_source.index('self.programs["load_bridge_flow_intent_inputs"]')
+    shader_end = programs_source.index('self.programs["load_bridge_cell_out"]')
+    shader_source = programs_source[shader_start:shader_end]
+
+    assert "_load_authoritative_bridge_flow_intent_inputs" in prepare_source
+    assert "_load_authoritative_bridge_inputs" not in prepare_source
+    assert 'self.programs["load_bridge_flow_intent_inputs"]' in loader_source
+    assert 'self.programs["load_bridge_cell"]' not in loader_source
+    assert 'self.programs["load_bridge_cell_out"]' not in loader_source
+    assert 'self.programs["load_bridge_cell_aux"]' not in loader_source
+    assert "material_in_img" in shader_source
+    assert "phase_in_img" in shader_source
+    assert "velocity_in_img" in shader_source
+    assert "entity_in_img" in shader_source
+    assert "displaced_in_img" in shader_source
+    assert "material_pre_img" not in shader_source
+    assert "material_out_img" not in shader_source
+    assert "flags_in_img" not in shader_source
+    assert "timer_in_img" not in shader_source
+    assert "temp_in_img" not in shader_source
+    assert "integrity_in_img" not in shader_source
+    assert "island_in_img" not in shader_source
+
+
+def test_gpu_liquid_copy_core_state_omits_displaced_payload_for_pre_placeholder_copies() -> None:
+    programs_source = inspect.getsource(GPULiquidPipeline._ensure_programs)
+    full_copy_start = programs_source.index('self.programs["copy_with_pending"]')
+    core_copy_start = programs_source.index('self.programs["copy_core_state"]')
+    placeholder_start = programs_source.index('self.programs["placeholder_displace"]')
+    full_copy_shader = programs_source[full_copy_start:core_copy_start]
+    core_copy_shader = programs_source[core_copy_start:placeholder_start]
+    step_source = inspect.getsource(GPULiquidPipeline.step)
+    tile_copy_source = step_source[
+        step_source.index('"liquid_copy_tile_solve"') : step_source.index('"liquid_build_seam_x_boundaries"')
+    ]
+    seam_copy_source = step_source[
+        step_source.index('"liquid_copy_seam_x"') : step_source.index('"liquid_build_seam_y_boundaries"')
+    ]
+    placeholder_copy_source = step_source[
+        step_source.index('"liquid_copy_for_placeholder"') : step_source.index('"liquid_placeholder_displacement"')
+    ]
+
+    assert "displaced_in_tex" not in core_copy_shader
+    assert "displaced_out_img" not in core_copy_shader
+    assert "displaced_in.use" not in inspect.getsource(GPULiquidPipeline._run_copy_core_state)
+    assert "displaced_out.bind_to_image" not in inspect.getsource(GPULiquidPipeline._run_copy_core_state)
+    assert "displaced_in_tex" in full_copy_shader
+    assert "displaced_out_img" in full_copy_shader
+    assert "_run_copy_core_state" in tile_copy_source
+    assert "_run_copy_for_placeholder" not in tile_copy_source
+    assert "_run_copy_core_state" in seam_copy_source
+    assert "_run_copy_for_placeholder" not in seam_copy_source
+    assert "_run_copy_for_placeholder" in placeholder_copy_source
 
 
 def test_cpu_liquid_seam_correction_only_updates_active_tile_neighborhoods() -> None:
@@ -41583,6 +45489,430 @@ def test_gpu_material_gas_rule_respects_tag_masks() -> None:
     assert np.isclose(float(engine.cell_temperature[8, 12]), before_iron)
 
 
+def test_material_gas_lhs_candidate_wildcard_rule_matches_cpu_and_gpu() -> None:
+    def run_case(*, use_gpu: bool) -> tuple[float, float]:
+        engine = WorldEngine(width=32, height=24, simulation_backend="gpu" if use_gpu else "cpu")
+        if use_gpu and not engine.reaction_solver.gpu_pipeline.available(engine):
+            pytest.skip("GPU reaction pipeline is not available")
+        if not use_gpu:
+            engine.use_cpu_oracle_backend()
+            engine.reaction_solver.gpu_pipeline.available = lambda world: False
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        action_index = len(engine.rulebook.reaction_actions)
+        engine.update_reaction_table(
+            [ReactionAction(ReactionType.MODIFY_TEMPERATURE, delta=8.0, duration=0)],
+            {
+                "material_material": [],
+                "material_gas": [
+                    PairReactionRule(lhs_material="iron_solid", rhs_gas="poison_gas", threshold=0.1, result_action=action_index),
+                    PairReactionRule(rhs_gas="poison_gas", threshold=0.1, result_action=action_index),
+                ],
+                "material_light": [],
+                "gas_gas": [],
+                "gas_light": [],
+                "self_rules": [],
+            },
+        )
+        engine.set_cell(8, 8, "gold_solid", mark_dirty=False)
+        engine.set_cell(12, 8, "iron_solid", mark_dirty=False)
+        poison_gas = engine.rulebook.gas_id("poison_gas")
+        gy0, gx0 = engine.cell_to_gas(8, 8)
+        gy1, gx1 = engine.cell_to_gas(8, 12)
+        engine.gas_concentration[poison_gas, gy0, gx0] = 0.5
+        engine.gas_concentration[poison_gas, gy1, gx1] = 0.5
+        before_gold = float(engine.cell_temperature[8, 8])
+        before_iron = float(engine.cell_temperature[8, 12])
+
+        engine.reaction_solver._run_material_gas(engine)
+
+        assert engine.reaction_solver.last_backend == ("gpu" if use_gpu else "cpu")
+        return (
+            float(engine.cell_temperature[8, 8]) - before_gold,
+            float(engine.cell_temperature[8, 12]) - before_iron,
+        )
+
+    cpu_result = run_case(use_gpu=False)
+    gpu_result = run_case(use_gpu=True)
+
+    assert np.allclose(gpu_result, cpu_result)
+    assert cpu_result[0] > 0.0
+    assert cpu_result[1] > cpu_result[0]
+
+
+def test_material_light_lhs_candidate_wildcard_rule_matches_cpu_and_gpu() -> None:
+    def run_case(*, use_gpu: bool) -> tuple[float, float]:
+        engine = WorldEngine(width=32, height=24, simulation_backend="gpu" if use_gpu else "cpu")
+        if use_gpu and not engine.reaction_solver.gpu_pipeline.available(engine):
+            pytest.skip("GPU reaction pipeline is not available")
+        if not use_gpu:
+            engine.use_cpu_oracle_backend()
+            engine.reaction_solver.gpu_pipeline.available = lambda world: False
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        action_index = len(engine.rulebook.reaction_actions)
+        engine.update_reaction_table(
+            [ReactionAction(ReactionType.MODIFY_TEMPERATURE, delta=8.0, duration=0)],
+            {
+                "material_material": [],
+                "material_gas": [],
+                "material_light": [
+                    PairReactionRule(lhs_material="iron_solid", rhs_light="magic_light", threshold=0.1, result_action=action_index),
+                    PairReactionRule(rhs_light="magic_light", threshold=0.1, result_action=action_index),
+                ],
+                "gas_gas": [],
+                "gas_light": [],
+                "self_rules": [],
+            },
+        )
+        engine.set_cell(8, 8, "gold_solid", mark_dirty=False)
+        engine.set_cell(12, 8, "iron_solid", mark_dirty=False)
+        magic_light = engine.rulebook.light_id("magic_light")
+        dose_channel = int(engine.rulebook.lights_by_id[magic_light].dose_channel_id)
+        engine.cell_optical_dose[dose_channel, 8, 8] = 0.5
+        engine.cell_optical_dose[dose_channel, 8, 12] = 0.5
+        before_gold = float(engine.cell_temperature[8, 8])
+        before_iron = float(engine.cell_temperature[8, 12])
+
+        engine.reaction_solver._run_material_light(engine)
+
+        assert engine.reaction_solver.last_backend == ("gpu" if use_gpu else "cpu")
+        return (
+            float(engine.cell_temperature[8, 8]) - before_gold,
+            float(engine.cell_temperature[8, 12]) - before_iron,
+        )
+
+    cpu_result = run_case(use_gpu=False)
+    gpu_result = run_case(use_gpu=True)
+
+    assert np.allclose(gpu_result, cpu_result)
+    assert cpu_result[0] > 0.0
+    assert cpu_result[1] > cpu_result[0]
+
+
+def test_material_light_temperature_filter_rule_matches_cpu_and_gpu() -> None:
+    def run_case(*, use_gpu: bool) -> tuple[float, float]:
+        engine = WorldEngine(width=32, height=24, simulation_backend="gpu" if use_gpu else "cpu")
+        if use_gpu and not engine.reaction_solver.gpu_pipeline.available(engine):
+            pytest.skip("GPU reaction pipeline is not available")
+        if not use_gpu:
+            engine.use_cpu_oracle_backend()
+            engine.reaction_solver.gpu_pipeline.available = lambda world: False
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        action_index = len(engine.rulebook.reaction_actions)
+        engine.update_reaction_table(
+            [ReactionAction(ReactionType.MODIFY_TEMPERATURE, delta=9.0, duration=0)],
+            {
+                "material_material": [],
+                "material_gas": [],
+                "material_light": [
+                    PairReactionRule(
+                        lhs_material="gold_solid",
+                        rhs_light="magic_light",
+                        threshold=0.1,
+                        result_action=action_index,
+                        min_temperature=50.0,
+                        max_temperature=100.0,
+                    )
+                ],
+                "gas_gas": [],
+                "gas_light": [],
+                "self_rules": [],
+            },
+        )
+        engine.set_cell(8, 8, "gold_solid", mark_dirty=False)
+        engine.set_cell(12, 8, "gold_solid", mark_dirty=False)
+        magic_light = engine.rulebook.light_id("magic_light")
+        dose_channel = int(engine.rulebook.lights_by_id[magic_light].dose_channel_id)
+        engine.cell_optical_dose[dose_channel, 8, 8] = 0.5
+        engine.cell_optical_dose[dose_channel, 8, 12] = 0.5
+        engine.cell_temperature[8, 8] = 20.0
+        engine.cell_temperature[8, 12] = 60.0
+        before_cold = float(engine.cell_temperature[8, 8])
+        before_hot = float(engine.cell_temperature[8, 12])
+
+        engine.reaction_solver._run_material_light(engine)
+
+        assert engine.reaction_solver.last_backend == ("gpu" if use_gpu else "cpu")
+        return (
+            float(engine.cell_temperature[8, 8]) - before_cold,
+            float(engine.cell_temperature[8, 12]) - before_hot,
+        )
+
+    cpu_result = run_case(use_gpu=False)
+    gpu_result = run_case(use_gpu=True)
+
+    assert np.allclose(gpu_result, cpu_result)
+    assert np.isclose(cpu_result[0], 0.0)
+    assert cpu_result[1] > 0.0
+
+
+def test_gpu_material_pair_main_shaders_use_lhs_candidate_masks() -> None:
+    source = inspect.getsource(GPUReactionPipeline._ensure_programs)
+    mm_start = source.index('self.programs["material_material"]')
+    mg_start = source.index('self.programs["material_gas"]', mm_start)
+    ml_start = source.index('self.programs["material_light"]', mg_start)
+    gg_start = source.index('self.programs["gas_gas"]', ml_start)
+    material_material = source[mm_start:mg_start]
+    material_gas = source[mg_start:ml_start]
+    material_light = source[ml_start:gg_start]
+    mm_main_start = material_material.index("int material_id = int(material_value + 0.5);")
+    mm_main_scan = material_material[
+        mm_main_start:
+        material_material.index("consume_rhs_material_sources(", mm_main_start)
+    ]
+
+    assert "uniform int rule_candidate_word_count;" in source
+    assert "lhs_rule_candidate_word" in mm_main_scan
+    assert "lhs_rule_candidate_word" in material_gas
+    assert "lhs_rule_candidate_word" in material_light
+    assert "for (int word_index = 0; word_index < rule_candidate_word_count; ++word_index)" in mm_main_scan
+    assert "for (int word_index = 0; word_index < rule_candidate_word_count; ++word_index)" in material_gas
+    assert "for (int word_index = 0; word_index < rule_candidate_word_count; ++word_index)" in material_light
+    assert "for (int word_index = 0; word_index < RULE_CANDIDATE_WORDS; ++word_index)" not in mm_main_scan
+    assert "for (int word_index = 0; word_index < RULE_CANDIDATE_WORDS; ++word_index)" not in material_gas
+    assert "for (int word_index = 0; word_index < RULE_CANDIDATE_WORDS; ++word_index)" not in material_light
+    assert "for (int rule_index = 0; rule_index < rule_count; ++rule_index)" not in mm_main_scan
+    assert "for (int rule_index = 0; rule_index < rule_count; ++rule_index)" not in material_gas
+    assert "for (int rule_index = 0; rule_index < rule_count; ++rule_index)" not in material_light
+    run_material_light_source = inspect.getsource(GPUReactionPipeline.run_material_light)
+    formal_material_light_source = inspect.getsource(GPUReactionPipeline._run_formal_guarded_material_light)
+    run_cell_pass_source = inspect.getsource(GPUReactionPipeline._run_cell_pass)
+    word_count_source = inspect.getsource(GPUReactionPipeline._rule_candidate_word_count)
+    assert 'material_tag_field="light_tag_mask"' in run_material_light_source
+    assert "lhs_rule_candidate_masks=lhs_candidate_masks" in run_material_light_source
+    assert "resources.rule_lhs_candidate_masks.write(lhs_rule_candidate_masks.tobytes())" in formal_material_light_source
+    assert "resources.rule_lhs_candidate_masks.bind_to_storage_buffer(binding=12)" in formal_material_light_source
+    assert '"rule_candidate_word_count", self._rule_candidate_word_count(rule_count)' in formal_material_light_source
+    assert '_build_light_dose_guarded_dispatch_args(' in formal_material_light_source
+    assert "program.run_indirect(dispatch_args)" in formal_material_light_source
+    assert '"rule_candidate_word_count", self._rule_candidate_word_count(rule_count)' in run_cell_pass_source
+    assert "min(RULE_CANDIDATE_WORDS, max(0, (int(rule_count) + 31) // 32))" in word_count_source
+    assert 'if program_name in {' in run_cell_pass_source
+    assert '"material_material"' in run_cell_pass_source
+    assert '"material_gas"' in run_cell_pass_source
+    assert '"material_light"' in run_cell_pass_source
+
+
+def test_gpu_material_material_rhs_consume_noop_guard_source() -> None:
+    run_cell_pass_source = inspect.getsource(GPUReactionPipeline._run_cell_pass)
+
+    assert "has_rhs_consume = self._compiled_rules_include_rhs_consume(rule_tags)" in run_cell_pass_source
+    assert 'self._set_uniform_if_present(program, "has_rhs_consume", has_rhs_consume)' in run_cell_pass_source
+
+    source = inspect.getsource(GPUReactionPipeline._ensure_programs)
+    mm_start = source.index('self.programs["material_material"]')
+    mg_start = source.index('self.programs["material_gas"]', mm_start)
+    material_material = source[mm_start:mg_start]
+    main_start = material_material.index("void main()")
+    rhs_helper_start = material_material.index("void consume_rhs_material_sources(")
+    rhs_helper = material_material[rhs_helper_start:main_start]
+    rhs_consume_call = material_material.index("consume_rhs_material_sources(", main_start)
+    guard_start = material_material.rfind("if (has_rhs_consume)", main_start, rhs_consume_call)
+    guard_end = material_material.index(");", rhs_consume_call)
+
+    assert "uniform bool has_rhs_consume;" in material_material
+    assert "for (int rule_index = 0; rule_index < rule_count; ++rule_index)" in rhs_helper
+    assert "if (rt.w != CONSUME_POLICY_RHS_ID && rt.w != CONSUME_POLICY_BOTH_ID)" in rhs_helper
+    assert "source_matches_material_rule(source, ri, rf, rt) && source_selects_rhs_target" in rhs_helper
+    assert guard_start != -1
+    assert "consume_rhs_material_sources(" in material_material[guard_start:guard_end]
+
+
+def test_gpu_reaction_load_bridge_cell_main_shader_omits_aux_unpack_fields() -> None:
+    source = inspect.getsource(GPUReactionPipeline._ensure_programs)
+
+    def shader_block(program_name: str, next_program_name: str) -> str:
+        start = f'self.programs["{program_name}"] = ctx.compute_shader('
+        end = f'self.programs["{next_program_name}"] = ctx.compute_shader('
+        assert start in source
+        assert end in source
+        return source.split(start, 1)[1].split(end, 1)[0]
+
+    load_bridge_cell = shader_block("load_bridge_cell", "load_bridge_cell_role")
+    load_bridge_cell_role = shader_block("load_bridge_cell_role", "load_bridge_cell_aux")
+    load_bridge_cell_aux = shader_block("load_bridge_cell_aux", "load_bridge_cell_aux_role")
+    load_bridge_cell_aux_role = shader_block("load_bridge_cell_aux_role", "load_bridge_gas")
+
+    assert "copy_cell_core" not in load_bridge_cell
+    assert "unpack_timer" not in load_bridge_cell
+    assert "unpackHalf2x16" not in load_bridge_cell
+    assert "material_pong_img" in load_bridge_cell
+    assert "material_pong_img" not in load_bridge_cell_role
+    assert "layout(r32f, binding=0) writeonly uniform image2D material_img" in load_bridge_cell_role
+    assert "unpack_timer" in load_bridge_cell_aux
+    assert "unpackHalf2x16" in load_bridge_cell_aux
+    assert "velocity_pong_img" in load_bridge_cell_aux
+    assert "velocity_pong_img" not in load_bridge_cell_aux_role
+    assert "layout(rg32f, binding=0) writeonly uniform image2D velocity_img" in load_bridge_cell_aux_role
+
+
+def test_gpu_reaction_formal_bridge_cell_load_role_specialization_is_bounded() -> None:
+    upload_source = inspect.getsource(GPUReactionPipeline._upload_state)
+    loader_source = inspect.getsource(GPUReactionPipeline._load_authoritative_bridge_inputs)
+    helper_source = inspect.getsource(GPUReactionPipeline._bridge_cell_core_read_role_only_load)
+
+    assert "reaction_group=reaction_group" in upload_source
+    assert "load_bridge_cell_role" in loader_source
+    assert "load_bridge_cell_aux_role" in loader_source
+    assert '"load_bridge_cell_aux_role" if read_role_only_cell_core else "load_bridge_cell_aux"' in loader_source
+    assert "DIRECT_CORE_OUTPUT_REACTION_GROUPS" in helper_source
+
+    for direct_group in ("timed", "self", "material_material", "material_gas", "material_light"):
+        assert direct_group in inspect.getsource(GPUReactionPipeline._reaction_state_segment)
+    assert "gas_gas" not in helper_source
+    assert "gas_light" not in helper_source
+
+
+def test_gpu_reaction_formal_bridge_cell_load_uses_single_role_only_for_direct_groups() -> None:
+    class FakeUniform:
+        def __init__(self) -> None:
+            self.value: object | None = None
+
+    class FakeProgram:
+        def __init__(self, name: str, calls: list[str]) -> None:
+            self.name = name
+            self.calls = calls
+            self.uniforms: dict[str, FakeUniform] = {}
+
+        def __getitem__(self, name: str) -> FakeUniform:
+            return self.uniforms.setdefault(name, FakeUniform())
+
+        def run(self, group_x: int, group_y: int, group_z: int = 1) -> None:
+            self.calls.append(self.name)
+
+    class FakeTexture:
+        def __init__(self, name: str, binds: list[tuple[str, int]]) -> None:
+            self.name = name
+            self.binds = binds
+
+        def bind_to_image(self, location: int, *, read: bool = True, write: bool = False) -> None:
+            self.binds.append((self.name, location))
+
+    class FakeBuffer:
+        def bind_to_storage_buffer(self, *, binding: int) -> None:
+            pass
+
+    class FakeCtx:
+        SHADER_IMAGE_ACCESS_BARRIER_BIT = 1
+        TEXTURE_FETCH_BARRIER_BIT = 2
+
+        def memory_barrier(self, bits: int) -> None:
+            pass
+
+    class FakeBridge:
+        def __init__(self) -> None:
+            self.enabled = True
+            self.ctx = FakeCtx()
+            self.gpu_authoritative_resources = {"cell_core"}
+            self.buffers = {"cell_core": FakeBuffer()}
+
+        def ensure_world_resources(self, world: object) -> None:
+            pass
+
+    def run_loader(reaction_group: str, *, segment: str, read_role: str = "ping") -> tuple[list[str], list[tuple[str, int]]]:
+        pipeline = GPUReactionPipeline()
+        program_calls: list[str] = []
+        image_binds: list[tuple[str, int]] = []
+        pipeline.programs = {
+            name: FakeProgram(name, program_calls)
+            for name in (
+                "load_bridge_cell",
+                "load_bridge_cell_role",
+                "load_bridge_cell_aux",
+                "load_bridge_cell_aux_role",
+            )
+        }
+        resources = SimpleNamespace(
+            signature=(1, 1, 1, 1, 1, 1),
+            material_ping=FakeTexture("material_ping", image_binds),
+            material_pong=FakeTexture("material_pong", image_binds),
+            phase_ping=FakeTexture("phase_ping", image_binds),
+            phase_pong=FakeTexture("phase_pong", image_binds),
+            temp_ping=FakeTexture("temp_ping", image_binds),
+            temp_pong=FakeTexture("temp_pong", image_binds),
+            integrity_ping=FakeTexture("integrity_ping", image_binds),
+            integrity_pong=FakeTexture("integrity_pong", image_binds),
+            velocity_ping=FakeTexture("velocity_ping", image_binds),
+            velocity_pong=FakeTexture("velocity_pong", image_binds),
+            timer_ping=FakeTexture("timer_ping", image_binds),
+            timer_pong=FakeTexture("timer_pong", image_binds),
+        )
+        world = SimpleNamespace(
+            width=16,
+            height=8,
+            simulation_backend="gpu",
+            _world_simulation_frame_active=True,
+            bridge=FakeBridge(),
+        )
+        cache_key = (id(world), 7, segment, id(resources), tuple(resources.signature))
+        pipeline._formal_state_cache_key = cache_key
+        pipeline._formal_cell_state_role_key = cache_key
+        pipeline._formal_cell_state_read_role = read_role
+        pipeline._load_authoritative_bridge_inputs(
+            world,
+            resources,  # type: ignore[arg-type]
+            bridge_input_loads=GPUReactionBridgeInputLoads(
+                cell_core=True,
+                gas=False,
+                ambient=False,
+                flow_velocity=False,
+                cell_dose=False,
+                gas_dose=False,
+            ),
+            reaction_group=reaction_group,
+        )
+        return program_calls, image_binds
+
+    for direct_group in ("timed", "self"):
+        direct_before_motion_calls, direct_before_motion_binds = run_loader(
+            direct_group,
+            segment="before_motion",
+            read_role="pong",
+        )
+        assert direct_before_motion_calls == ["load_bridge_cell_role", "load_bridge_cell_aux_role"]
+        assert direct_before_motion_binds == [
+            ("material_pong", 0),
+            ("phase_pong", 1),
+            ("temp_pong", 2),
+            ("integrity_pong", 3),
+            ("velocity_pong", 0),
+            ("timer_pong", 1),
+        ]
+
+    for direct_group in ("material_material", "material_gas", "material_light"):
+        direct_after_optics_calls, direct_after_optics_binds = run_loader(
+            direct_group,
+            segment="after_optics",
+            read_role="pong",
+        )
+        assert direct_after_optics_calls == ["load_bridge_cell_role", "load_bridge_cell_aux_role"]
+        assert direct_after_optics_binds == [
+            ("material_ping", 0),
+            ("phase_ping", 1),
+            ("temp_ping", 2),
+            ("integrity_ping", 3),
+            ("velocity_ping", 0),
+            ("timer_ping", 1),
+        ]
+
+    for gas_group in ("gas_gas", "gas_light"):
+        gas_calls, gas_binds = run_loader(gas_group, segment="after_optics", read_role="pong")
+        assert gas_calls == ["load_bridge_cell", "load_bridge_cell_aux"]
+        assert gas_binds == [
+            ("material_ping", 0),
+            ("material_pong", 1),
+            ("phase_ping", 2),
+            ("phase_pong", 3),
+            ("temp_ping", 4),
+            ("temp_pong", 5),
+            ("integrity_ping", 6),
+            ("integrity_pong", 7),
+            ("velocity_ping", 0),
+            ("velocity_pong", 1),
+            ("timer_ping", 2),
+            ("timer_pong", 3),
+        ]
+
+
 def test_cpu_material_gas_rule_consume_policy_rhs_consumes_triggering_gas() -> None:
     engine = WorldEngine(width=32, height=24, simulation_backend="cpu")
     engine.reaction_solver.gpu_pipeline.available = lambda world: False
@@ -41643,6 +45973,56 @@ def test_gpu_material_gas_rule_consume_policy_rhs_does_not_call_cpu_consume(monk
     assert engine.reaction_solver.last_runtime_backend == "gpu"
     assert np.isclose(float(engine.gas_concentration[poison_gas, gy, gx]), 0.6 - 0.6 * rate)
     assert np.isclose(float(engine.integrity[8, 8]), engine.rulebook.materials_by_name["gold_solid"].base_integrity)
+
+
+def test_material_gas_rhs_consume_lhs_candidate_masks_match_cpu_and_gpu() -> None:
+    def run_case(*, use_gpu: bool) -> tuple[float, float]:
+        engine = WorldEngine(width=32, height=24, gas_cell_size=4, simulation_backend="gpu" if use_gpu else "cpu")
+        if use_gpu and not engine.reaction_solver.gpu_pipeline.available(engine):
+            pytest.skip("GPU reaction pipeline is not available")
+        if not use_gpu:
+            engine.use_cpu_oracle_backend()
+            engine.reaction_solver.gpu_pipeline.available = lambda world: False
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        tag_mask = 1
+        engine.patch_material("gold_solid", gas_tag_mask=tag_mask)
+        engine.patch_material("iron_solid", gas_tag_mask=0)
+        engine.patch_gas("poison_gas", material_reaction_tag_mask=tag_mask)
+        engine.update_reaction_table(
+            [],
+            {
+                "material_material": [],
+                "material_gas": [
+                    PairReactionRule(lhs_material="iron_solid", rhs_gas="poison_gas", threshold=0.1, rate=0.25, consume_policy="rhs"),
+                    PairReactionRule(lhs_tag_mask=tag_mask, rhs_gas="poison_gas", rhs_tag_mask=tag_mask, threshold=0.1, rate=0.5, consume_policy="rhs"),
+                ],
+                "material_light": [],
+                "gas_gas": [],
+                "gas_light": [],
+                "self_rules": [],
+            },
+        )
+        engine.set_cell(6, 8, "gold_solid", mark_dirty=False)
+        engine.set_cell(18, 8, "iron_solid", mark_dirty=False)
+        poison_gas = engine.rulebook.gas_id("poison_gas")
+        gold_gy, gold_gx = engine.cell_to_gas(8, 6)
+        iron_gy, iron_gx = engine.cell_to_gas(8, 18)
+        engine.gas_concentration[poison_gas, gold_gy, gold_gx] = 0.8
+        engine.gas_concentration[poison_gas, iron_gy, iron_gx] = 0.8
+
+        engine.reaction_solver._run_material_gas(engine)
+
+        assert engine.reaction_solver.last_backend == ("gpu" if use_gpu else "cpu")
+        return (
+            float(engine.gas_concentration[poison_gas, gold_gy, gold_gx]),
+            float(engine.gas_concentration[poison_gas, iron_gy, iron_gx]),
+        )
+
+    cpu_result = run_case(use_gpu=False)
+    gpu_result = run_case(use_gpu=True)
+
+    assert np.allclose(gpu_result, cpu_result)
+    assert np.allclose(cpu_result, (0.4, 0.6))
 
 
 def test_gpu_material_gas_rule_consume_policy_lhs_reduces_triggering_material_integrity() -> None:
@@ -43194,6 +47574,69 @@ def test_gpu_material_material_rule_respects_tag_masks() -> None:
     assert np.isclose(float(engine.cell_temperature[8, 12]), before_root)
 
 
+def test_material_material_tag_lhs_candidate_and_rhs_consume_match_cpu_and_gpu() -> None:
+    def run_case(*, use_gpu: bool) -> tuple[float, float, float, float, float, float]:
+        engine = WorldEngine(width=32, height=24, simulation_backend="gpu" if use_gpu else "cpu")
+        if use_gpu and not engine.reaction_solver.gpu_pipeline.available(engine):
+            pytest.skip("GPU reaction pipeline is not available")
+        if not use_gpu:
+            engine.use_cpu_oracle_backend()
+            engine.reaction_solver.gpu_pipeline.available = lambda world: False
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        metal_mask = engine.rulebook.tag_bits["metal"]
+        action_index = len(engine.rulebook.reaction_actions)
+        engine.update_reaction_table(
+            [ReactionAction(ReactionType.MODIFY_TEMPERATURE, delta=6.0, duration=0)],
+            {
+                "material_material": [
+                    PairReactionRule(
+                        lhs_tag_mask=metal_mask,
+                        rhs_material="water_liquid",
+                        rate=2.0,
+                        consume_policy="both",
+                        result_action=action_index,
+                    )
+                ],
+                "material_gas": [],
+                "material_light": [],
+                "gas_gas": [],
+                "gas_light": [],
+                "self_rules": [],
+            },
+        )
+        engine.set_cell(8, 8, "gold_solid", mark_dirty=False)
+        engine.set_cell(9, 8, "water_liquid", mark_dirty=False)
+        engine.set_cell(12, 8, "root_solid", mark_dirty=False)
+        engine.set_cell(13, 8, "water_liquid", mark_dirty=False)
+        before_gold_temp = float(engine.cell_temperature[8, 8])
+        before_root_temp = float(engine.cell_temperature[8, 12])
+        before_lhs_integrity = float(engine.integrity[8, 8])
+        before_rhs_integrity = float(engine.integrity[8, 9])
+        before_untagged_rhs_integrity = float(engine.integrity[8, 13])
+
+        engine.reaction_solver._run_material_material(engine)
+
+        assert engine.reaction_solver.last_backend == ("gpu" if use_gpu else "cpu")
+        return (
+            float(engine.cell_temperature[8, 8]) - before_gold_temp,
+            float(engine.cell_temperature[8, 12]) - before_root_temp,
+            before_lhs_integrity - float(engine.integrity[8, 8]),
+            before_rhs_integrity - float(engine.integrity[8, 9]),
+            before_untagged_rhs_integrity - float(engine.integrity[8, 13]),
+            float(engine.integrity[8, 12]),
+        )
+
+    cpu_result = run_case(use_gpu=False)
+    gpu_result = run_case(use_gpu=True)
+
+    assert np.allclose(gpu_result, cpu_result)
+    assert cpu_result[0] > 0.0
+    assert cpu_result[1] == 0.0
+    assert cpu_result[2] > 0.0
+    assert cpu_result[3] > 0.0
+    assert cpu_result[4] == 0.0
+
+
 def test_gpu_material_material_rule_respects_phase_filter() -> None:
     engine = WorldEngine(width=32, height=24)
     engine.clear_cell_region(0, 0, engine.width, engine.height)
@@ -43641,8 +48084,23 @@ def test_world_step_applies_custom_gas_gas_reaction() -> None:
     assert after > before
 
 
-def test_formal_gpu_frame_skips_light_reaction_passes_after_optics_clears_zero_dose(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_formal_gpu_frame_light_reactions_use_zero_indirect_after_zero_dose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NoReadBuffer:
+        def __init__(self, inner: object) -> None:
+            self.inner = inner
+
+        def read(self, *args: object, **kwargs: object) -> bytes:
+            raise AssertionError("formal zero-dose light reaction guard must not read reaction emitter count")
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self.inner, name)
+
     engine = WorldEngine(width=32, height=24)
+    pipeline = engine.reaction_solver.gpu_pipeline
+    if not pipeline.available(engine) or not engine.optics_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU pipelines are not available")
     engine.clear_cell_region(0, 0, engine.width, engine.height)
     engine.gas_concentration.fill(0.0)
     engine.update_reaction_table(
@@ -43657,26 +48115,74 @@ def test_formal_gpu_frame_skips_light_reaction_passes_after_optics_clears_zero_d
         },
     )
 
-    calls: list[str] = []
-
-    def fail_material_light(world: WorldEngine, *, solve_cell_mask: np.ndarray | None = None) -> None:
-        calls.append("material_light")
-        return None
-
-    def fail_gas_light(world: WorldEngine, *, solve_gas_mask: np.ndarray | None = None) -> None:
-        calls.append("gas_light")
-        return None
-
-    monkeypatch.setattr(engine.reaction_solver.gpu_pipeline, "run_material_light", fail_material_light)
-    monkeypatch.setattr(engine.reaction_solver.gpu_pipeline, "run_gas_light", fail_gas_light)
-
     engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
-    engine.step()
+    engine.bridge.mark_gpu_authoritative(
+        "cell_core",
+        "material",
+        "gas_concentration",
+        "ambient_temperature",
+        "flow_velocity",
+        "cell_optical_dose",
+        "gas_optical_dose",
+        "active_meta",
+        "active_tile_ttl",
+        "active_chunk_mask",
+    )
+    zero_counts = np.zeros((16,), dtype=np.uint32)
+    engine.bridge.buffers["reaction_light_emitter_count"].write(zero_counts.tobytes())
+    engine.bridge.buffers["reaction_light_emitter_count"] = NoReadBuffer(
+        engine.bridge.buffers["reaction_light_emitter_count"],
+    )
+    engine.bridge.mark_gpu_authoritative("reaction_light_emitter", "reaction_light_emitter_count")
+
+    previous_frame_active = engine._world_simulation_frame_active
+    engine._world_simulation_frame_active = True
+    try:
+        engine.optics_solver.step(engine)
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        indirect_args_by_program: dict[str, list[list[int]]] = {"material_light": [], "gas_light": []}
+        for program_name in ("material_light", "gas_light"):
+            program = pipeline.programs[program_name]
+            original_run_indirect = program.run_indirect
+
+            def fail_direct_run(*args: object, _program_name: str = program_name, **kwargs: object) -> None:
+                raise AssertionError(f"{_program_name} must use light-dose guarded indirect dispatch")
+
+            def count_indirect(
+                indirect_buffer: object,
+                _program_name: str = program_name,
+                _original_run_indirect: object = original_run_indirect,
+            ) -> object:
+                assert indirect_buffer is pipeline.resources.light_dose_guarded_dispatch_args
+                indirect_args_by_program[_program_name].append(
+                    np.frombuffer(indirect_buffer.read(size=3 * 4), dtype=np.uint32).astype(int).tolist(),
+                )
+                return _original_run_indirect(indirect_buffer)
+
+            monkeypatch.setattr(program, "run", fail_direct_run)
+            monkeypatch.setattr(program, "run_indirect", count_indirect)
+
+        def fail_reaction_mask_ones(*args: object, **kwargs: object) -> np.ndarray:
+            raise AssertionError("formal guarded light reactions must not allocate CPU full active masks")
+
+        monkeypatch.setattr(np, "ones", fail_reaction_mask_ones)
+        assert pipeline.begin_formal_reaction_segment(engine, "after_optics") is True
+        try:
+            engine.reaction_solver._run_material_light(engine)
+            engine.reaction_solver._run_gas_light(engine)
+        finally:
+            pipeline.end_formal_reaction_segment(engine, "after_optics")
+    finally:
+        engine._world_simulation_frame_active = previous_frame_active
 
     cell_dose = _read_bridge_buffer_f32(engine, "cell_optical_dose", engine.cell_optical_dose.shape)
     gas_dose = _read_bridge_buffer_f32(engine, "gas_optical_dose", engine.gas_optical_dose.shape)
-    assert calls == []
-    assert engine._formal_gpu_frame_has_light_dose is False
+    assert indirect_args_by_program["material_light"]
+    assert indirect_args_by_program["gas_light"]
+    assert all(args == [0, 1, 1] for args in indirect_args_by_program["material_light"])
+    assert all(args == [0, 1, 1] for args in indirect_args_by_program["gas_light"])
     assert float(cell_dose.sum()) == 0.0
     assert float(gas_dose.sum()) == 0.0
 
@@ -43785,9 +48291,6 @@ def test_world_step_self_reaction_phosphor_variants_emit_matching_light_into_opt
             engine.reaction_solver.gpu_pipeline.available = lambda world: False
         engine.clear_cell_region(0, 0, engine.width, engine.height)
         engine.set_cell(8, 8, material_name, mark_dirty=False)
-        expected_light_id = engine.rulebook.light_id(expected_light)
-        dose_channel = int(engine.rulebook.lights_by_id[expected_light_id].dose_channel_id)
-
         if use_gpu:
             engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
             previous_frame_active = engine._world_simulation_frame_active
@@ -43807,8 +48310,10 @@ def test_world_step_self_reaction_phosphor_variants_emit_matching_light_into_opt
                 engine.optics_solver.step(engine)
             finally:
                 engine._world_simulation_frame_active = previous_frame_active
-            bridge_dose = np.frombuffer(engine.bridge.buffers["cell_optical_dose"].read(), dtype="f4").reshape(
-                engine.cell_optical_dose.shape
+            bridge_visible = _read_bridge_texture_f32(
+                engine,
+                "visible_illumination",
+                (engine.height, engine.width, 4),
             )
             bridge_records: list[dict[str, object]] = []
             if int(bridge_counts[0]) > 0:
@@ -43822,7 +48327,7 @@ def test_world_step_self_reaction_phosphor_variants_emit_matching_light_into_opt
                     }
                 )
             return (
-                float(bridge_dose[dose_channel].sum()),
+                float(bridge_visible[..., :3].sum()),
                 bridge_records,
                 int(engine.optics_solver.last_emitter_count),
                 int(bridge_counts[0]),
@@ -43831,7 +48336,7 @@ def test_world_step_self_reaction_phosphor_variants_emit_matching_light_into_opt
         engine.step()
 
         return (
-            float(engine.cell_optical_dose[dose_channel].sum()),
+            float(engine.visible_illumination.sum()),
             [dict(emitter) for emitter in engine.optics_solver.last_emitters],
             int(engine.optics_solver.last_emitter_count),
             int(engine.optics_solver.last_emitter_count),
@@ -43864,8 +48369,6 @@ def test_world_step_fire_powder_self_emission_feeds_optics_and_gas_in_cpu_and_gp
             engine.reaction_solver.gpu_pipeline.available = lambda world: False
         engine.clear_cell_region(0, 0, engine.width, engine.height)
         fire_gas_id = engine.rulebook.gas_id("fire_gas")
-        visible_light_id = engine.rulebook.light_id("visible_light")
-        dose_channel = int(engine.rulebook.lights_by_id[visible_light_id].dose_channel_id)
         if with_fire:
             engine.set_cell(8, 8, "fire_powder", mark_dirty=False)
             engine.cell_temperature[8, 8] = 120.0
@@ -43892,8 +48395,10 @@ def test_world_step_fire_powder_self_emission_feeds_optics_and_gas_in_cpu_and_gp
             bridge_gas = np.frombuffer(engine.bridge.buffers["gas_concentration"].read(), dtype="f4").reshape(
                 engine.gas_concentration.shape
             )
-            bridge_dose = np.frombuffer(engine.bridge.buffers["cell_optical_dose"].read(), dtype="f4").reshape(
-                engine.cell_optical_dose.shape
+            bridge_visible = _read_bridge_texture_f32(
+                engine,
+                "visible_illumination",
+                (engine.height, engine.width, 4),
             )
             bridge_records: list[dict[str, object]] = []
             if int(bridge_counts[0]) > 0:
@@ -43908,7 +48413,7 @@ def test_world_step_fire_powder_self_emission_feeds_optics_and_gas_in_cpu_and_gp
                 )
             return (
                 float(bridge_gas[fire_gas_id, gy, gx]),
-                float(bridge_dose[dose_channel].sum()),
+                float(bridge_visible[..., :3].sum()),
                 bridge_records,
                 int(engine.optics_solver.last_emitter_count),
                 int(bridge_counts[0]),
@@ -43917,7 +48422,7 @@ def test_world_step_fire_powder_self_emission_feeds_optics_and_gas_in_cpu_and_gp
         engine.step()
         return (
             float(engine.gas_concentration[fire_gas_id, gy, gx]),
-            float(engine.cell_optical_dose[dose_channel].sum()),
+            float(engine.visible_illumination.sum()),
             [dict(emitter) for emitter in engine.optics_solver.last_emitters],
             int(engine.optics_solver.last_emitter_count),
             int(engine.optics_solver.last_emitter_count),
@@ -44109,15 +48614,36 @@ def test_world_step_support_removal_creates_falling_island_in_cpu_and_gpu_paths(
 
         engine.clear_cell(18, 24)
         engine.step()
-        return engine.serialize_collapse_runtime()
+        return engine.serialize_collapse_runtime(allow_gpu_sync_readback=use_gpu)
 
     cpu_runtime = run_case(use_gpu=False)
     gpu_runtime = run_case(use_gpu=True)
-    cpu_payload = dict(cpu_runtime)
-    gpu_payload = dict(gpu_runtime)
+    snapshot_metadata_fields = {
+        "backend",
+        "gpu_authoritative",
+        "gpu_authoritative_resources",
+        "snapshot_source",
+        "snapshot_stale",
+        "gpu_authoritative_snapshot_stale",
+        "stale_resources",
+        "sync_readback_required",
+        "sync_readback_performed",
+    }
+    cpu_payload = {
+        key: value
+        for key, value in cpu_runtime.items()
+        if key not in snapshot_metadata_fields
+    }
+    gpu_payload = {
+        key: value
+        for key, value in gpu_runtime.items()
+        if key not in snapshot_metadata_fields
+    }
 
-    assert cpu_payload.pop("backend") == "cpu"
-    assert gpu_payload.pop("backend") == "gpu"
+    assert cpu_runtime["backend"] == "cpu"
+    assert gpu_runtime["backend"] == "gpu"
+    assert gpu_runtime["snapshot_source"] == "synchronous_gpu_readback"
+    assert gpu_runtime["sync_readback_performed"] is True
     assert cpu_payload == gpu_payload
     assert int(cpu_runtime["unsupported_cell_count"]) == 30
     assert int(cpu_runtime["collapsed_cell_count"]) == 30
@@ -44257,6 +48783,53 @@ def test_world_step_placeholder_segment_distributes_displaced_liquid_to_both_sid
     assert int(cpu_pending[1, 3]) == 0
     assert int(cpu_material[1, 1]) == water_id
     assert int(cpu_material[1, 4]) == water_id
+
+
+def test_world_step_placeholder_segment_redistributes_by_side_capacity_in_cpu_and_gpu_paths() -> None:
+    def run_case(*, use_gpu: bool) -> tuple[str, np.ndarray, np.ndarray]:
+        engine = WorldEngine(width=64, height=64)
+        if not use_gpu:
+            _disable_all_gpu_sim_pipelines(engine)
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        for x in range(20, 24):
+            engine.set_cell(x, 20, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+            engine.set_cell(x, 20, "placeholder_solid", mark_dirty=False)
+        engine.set_cell(17, 20, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(19, 19, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(26, 19, "raw_stone_solid", mark_dirty=False)
+        engine.active.mark_rect(16, 18, 28, 22)
+
+        engine.step()
+
+        if use_gpu:
+            core, cell = _readback_cell_window(engine, center_x=22, center_y=20, width=12, height=3)
+            return (
+                str(engine.liquid_solver.last_backend),
+                core["material_id"].copy(),
+                cell["placeholder_displaced_material"].copy(),
+            )
+
+        return (
+            str(engine.liquid_solver.last_backend),
+            engine.material_id[19:22, 16:28].copy(),
+            engine.placeholder_displaced_material[19:22, 16:28].copy(),
+        )
+
+    cpu_backend, cpu_material, cpu_pending = run_case(use_gpu=False)
+    gpu_backend, gpu_material, gpu_pending = run_case(use_gpu=True)
+    water_id = WorldEngine(width=4, height=4).rulebook.material_id("water_liquid")
+    placeholder_id = WorldEngine(width=4, height=4).rulebook.material_id("placeholder_solid")
+
+    assert cpu_backend == "cpu"
+    assert gpu_backend == "gpu"
+    assert np.array_equal(cpu_material, gpu_material)
+    assert np.array_equal(cpu_pending, gpu_pending)
+    assert [int(cpu_material[1, x]) for x in range(4, 8)] == [placeholder_id] * 4
+    assert int(np.count_nonzero(cpu_material[1, 0:4] == water_id)) == 1
+    assert int(np.count_nonzero(cpu_material[1, 8:12] == water_id)) == 3
+    assert [int(cpu_material[1, x]) for x in range(2, 4)] == [0, water_id]
+    assert [int(cpu_material[1, x]) for x in range(8, 12)] == [water_id, water_id, water_id, 0]
+    assert int(np.count_nonzero(cpu_pending[1, 4:8] == water_id)) == 0
 
 
 def test_world_step_queued_entity_placeholder_sync_displaces_overwritten_liquid_in_cpu_and_gpu_paths() -> None:
@@ -45558,6 +50131,10 @@ def test_gpu_realtime_budget_report_tracks_large_world_threshold() -> None:
     engine = WorldEngine(width=16, height=16, simulation_backend="cpu")
     engine.simulation_backend = "gpu"
     engine.gpu_realtime_budget_cell_threshold = 128
+    for row in range(engine.active.tile_height):
+        for col in range(engine.active.tile_width):
+            engine.active.active_tile_ttl[row][col] = 0
+    engine.active.active_tile_ttl[0][0] = engine.active.active_ttl_reset
 
     report = engine.simulation_backend_report()
 
@@ -45570,6 +50147,1258 @@ def test_gpu_realtime_budget_report_tracks_large_world_threshold() -> None:
 
     assert engine._gpu_realtime_budget_active() is False
     assert report["gpu_realtime_budget"]["active"] is False
+    assert report["gpu_realtime_budget"]["skipped_stages"] == []
+
+
+def test_gpu_realtime_budget_active_does_not_skip_solver_stages(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = WorldEngine(width=16, height=16, simulation_backend="cpu")
+    engine.simulation_backend = "gpu"
+    engine.gpu_realtime_budget_cell_threshold = 1
+    engine.active.mark_rect(0, 0, engine.width, engine.height)
+    engine.bridge.shadow_buffers["active_meta"] = np.zeros((1,), dtype=active_meta_dtype())
+    engine.bridge.shadow_buffers["active_meta"][0]["active_tile_count"] = 1
+    engine.bridge.mark_gpu_authoritative("active_tile_ttl")
+
+    calls: list[str] = []
+
+    monkeypatch.setattr(engine, "_needs_pre_simulation_bridge_sync", lambda frame_input=None: False)
+    monkeypatch.setattr(type(engine.bridge), "decay_active_scheduler", lambda self, world: True)
+    monkeypatch.setattr(engine.reaction_solver.gpu_pipeline, "clear_reaction_latches", lambda world: True)
+
+    def record_solver(name: str, backend: str = "gpu"):
+        def _step(*args, **kwargs):
+            calls.append(name)
+            solver = getattr(engine, f"{name}_solver")
+            if name == "reaction":
+                solver._note_runtime_backend(backend)
+            else:
+                solver.last_backend = backend
+
+        return _step
+
+    monkeypatch.setattr(engine.collapse_solver, "step", record_solver("collapse"))
+    monkeypatch.setattr(engine.gas_solver, "step", record_solver("gas"))
+    monkeypatch.setattr(engine.heat_solver, "step", record_solver("heat"))
+    monkeypatch.setattr(engine.motion_solver, "step", record_solver("motion"))
+    monkeypatch.setattr(engine.liquid_solver, "prepare_motion_flow_intent", lambda world: calls.append("liquid_pre_motion_intent"))
+    monkeypatch.setattr(engine.liquid_solver, "step", record_solver("liquid"))
+    monkeypatch.setattr(engine.optics_solver, "step", record_solver("optics"))
+    monkeypatch.setattr(engine.reaction_solver, "_advance_timed_slots", lambda world: calls.append("reaction_timed"))
+    monkeypatch.setattr(engine.reaction_solver, "_run_self_rules", lambda world: calls.append("reaction_self"))
+    monkeypatch.setattr(engine.reaction_solver, "_run_material_material", lambda world: calls.append("reaction_material_material"))
+    monkeypatch.setattr(engine.reaction_solver, "_run_material_gas", lambda world: calls.append("reaction_material_gas"))
+    monkeypatch.setattr(engine.reaction_solver, "_run_material_light", lambda world: calls.append("reaction_material_light"))
+    monkeypatch.setattr(engine.reaction_solver, "_run_gas_gas", lambda world: calls.append("reaction_gas_gas"))
+    monkeypatch.setattr(engine.reaction_solver, "_run_gas_light", lambda world: calls.append("reaction_gas_light"))
+
+    engine.step()
+    report = engine.simulation_backend_report()
+
+    assert engine._gpu_realtime_budget_active() is True
+    assert engine.reaction_solver.gpu_pipeline._reaction_state_segment("timed") == "before_motion"
+    assert engine.reaction_solver.gpu_pipeline._reaction_state_segment("self") == "before_motion"
+    assert engine.reaction_solver.gpu_pipeline._reaction_state_segment("material_material") == "after_optics"
+    assert engine.reaction_solver.gpu_pipeline._reaction_state_segment("material_gas") == "after_optics"
+    assert {"gas", "heat", "motion", "liquid", "optics"}.issubset(set(calls))
+    assert {"reaction_self", "reaction_material_gas", "reaction_material_light"}.issubset(set(calls))
+    assert calls.count("reaction_material_material") == 1
+    assert calls.count("reaction_material_gas") == 1
+    assert calls.index("reaction_timed") < calls.index("liquid_pre_motion_intent")
+    assert calls.index("reaction_self") < calls.index("liquid_pre_motion_intent")
+    assert calls.index("reaction_timed") < calls.index("motion")
+    assert calls.index("reaction_self") < calls.index("motion")
+    assert calls.index("optics") < calls.index("reaction_material_material")
+    assert calls.index("optics") < calls.index("reaction_material_gas")
+    assert calls.index("motion") < calls.index("reaction_material_material")
+    assert calls.index("motion") < calls.index("reaction_material_gas")
+    assert report["gpu_realtime_budget"]["skipped_stages"] == []
+    assert report["backends"]["gas"] == "gpu"
+    assert report["backends"]["heat"] == "gpu"
+    assert report["backends"]["liquid"] == "gpu"
+    assert report["backends"]["optics"] == "gpu"
+
+
+def test_gpu_realtime_budget_ignores_total_resolution_when_gpu_active_scheduler_is_authoritative() -> None:
+    engine = WorldEngine(width=64, height=64, simulation_backend="cpu")
+    engine.simulation_backend = "gpu"
+    engine.gpu_realtime_budget_cell_threshold = 1
+    engine.active.mark_rect(0, 0, 32, 32)
+
+    assert engine._gpu_realtime_budget_active() is True
+
+    engine.bridge.shadow_buffers["active_meta"] = np.zeros((1,), dtype=active_meta_dtype())
+    engine.bridge.mark_gpu_authoritative("active_tile_ttl")
+
+    assert engine._gpu_realtime_budget_active() is False
+
+
+def test_benchmark_profile_passes_json_result_contains_pass_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    prewarm_step_counts: list[int] = []
+
+    class FakeBridge:
+        def sync_world(self, engine, force_cpu_resource_upload: bool = False):
+            return None
+
+    class FakeEngine:
+        def __init__(self, width: int, height: int, gpu_context):
+            self.width = width
+            self.height = height
+            self.simulation_backend = "gpu"
+            self.bridge = FakeBridge()
+            self._gpu_cpu_dirty_resources: set[str] = set()
+            self.profile_passes_enabled = False
+            self.profile_passes_sync = False
+            self.step_count = 0
+            self.last_pass_profile = {"passes": [], "summary": {}, "skipped_stages": []}
+
+        def prewarm_formal_connected_collapse(self):
+            prewarm_step_counts.append(self.step_count)
+            return True
+
+        def step(self, dt: float):
+            self.step_count += 1
+            self.last_pass_profile = {
+                "passes": [
+                    {"name": "commands", "cpu_ms": 0.1, "gpu_ms": None},
+                    {"name": "motion", "cpu_ms": 0.2, "gpu_ms": None},
+                ],
+                "summary": {},
+                "skipped_stages": [],
+                "motion": {
+                    "passes": [{"name": "powder_generate", "cpu_ms": 0.3, "gpu_ms": None}],
+                    "summary": {},
+                },
+                "heat": {
+                    "passes": [{"name": "cell_heat", "cpu_ms": 0.5, "gpu_ms": None}],
+                    "summary": {},
+                },
+                "gas": {
+                    "passes": [{"name": "pressure_jacobi", "cpu_ms": 0.45, "gpu_ms": None}],
+                    "summary": {},
+                },
+                "collapse": {
+                    "passes": [
+                        {"name": "label_collect_components", "cpu_ms": 0.6, "gpu_ms": None},
+                        {"name": "dirty_tile_drain", "cpu_ms": 0.7, "gpu_ms": None},
+                        {"name": "tile_resource_prepare.ensure_programs", "cpu_ms": 0.8, "gpu_ms": None},
+                    ],
+                    "summary": {},
+                },
+                "optics": {
+                    "passes": [
+                        {"name": "optics_runtime_table_prep", "cpu_ms": 0.35, "gpu_ms": None},
+                        {"name": "optics_trace_emitters", "cpu_ms": 0.4, "gpu_ms": None},
+                        {"name": "optics_changed_mask_visible", "cpu_ms": 0.05, "gpu_ms": None},
+                        {"name": "optics_changed_mask_cell_dose", "cpu_ms": 0.06, "gpu_ms": None},
+                        {"name": "optics_changed_mask_gas_dose", "cpu_ms": 0.07, "gpu_ms": None},
+                    ],
+                    "summary": {},
+                },
+            }
+
+        def poll_all_readbacks(self):
+            return []
+
+        def simulation_backend_report(self):
+            return {
+                "gpu_realtime_budget": {"skipped_stages": []},
+                "strict_gpu_ready": True,
+                "non_gpu_backends": {},
+            }
+
+        def close(self):
+            return None
+
+    class FakeContext:
+        def finish(self):
+            return None
+
+    monkeypatch.setattr(benchmark_engine, "WorldEngine", FakeEngine)
+
+    result = benchmark_engine.run_scenario(
+        "fake",
+        lambda engine: None,
+        ctx=FakeContext(),
+        width=8,
+        height=8,
+        warmup=0,
+        frames=1,
+        dt=1.0 / 60.0,
+        readback=False,
+        profile_passes=True,
+    )
+
+    assert result["skipped_gpu_stages"] == []
+    assert prewarm_step_counts == [0]
+    assert result["pass_profiles"][0]["passes"][0]["name"] == "commands"
+    assert "collapse.label_collect_components" in result["pass_profile_summary"]
+    assert "collapse.dirty_tile_drain" in result["pass_profile_summary"]
+    assert "collapse.tile_resource_prepare.ensure_programs" in result["pass_profile_summary"]
+    assert "gas.pressure_jacobi" in result["pass_profile_summary"]
+    assert "heat.cell_heat" in result["pass_profile_summary"]
+    assert "motion.powder_generate" in result["pass_profile_summary"]
+    assert "optics.optics_runtime_table_prep" in result["pass_profile_summary"]
+    assert "optics.optics_trace_emitters" in result["pass_profile_summary"]
+    assert "optics.optics_changed_mask_visible" in result["pass_profile_summary"]
+    assert "optics.optics_changed_mask_cell_dose" in result["pass_profile_summary"]
+    assert "optics.optics_changed_mask_gas_dose" in result["pass_profile_summary"]
+
+
+def test_optics_child_profile_records_solver_and_gpu_pipeline_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = WorldEngine(width=8, height=8, simulation_backend="cpu")
+    try:
+        engine.profile_passes_enabled = True
+        engine.emitters.append(
+            {
+                "light_type": "visible_light",
+                "origin": (2, 2),
+                "direction": (0.0, 0.0),
+                "spread": 0.25,
+                "strength": 1.0,
+                "range_cells": 4,
+            }
+        )
+        pipeline = engine.optics_solver.gpu_pipeline
+
+        def fake_gpu_step(
+            world: WorldEngine,
+            emitters: list[dict[str, object]],
+            *,
+            solve_cell_mask: np.ndarray,
+            solve_gas_mask: np.ndarray,
+        ) -> None:
+            pipeline.last_pass_profile = {
+                "passes": [
+                    {"name": "optics_upload_inputs", "cpu_ms": 1.0, "gpu_ms": None},
+                    {"name": "optics_trace_emitters", "cpu_ms": 2.0, "gpu_ms": None},
+                ],
+                "summary": {},
+            }
+            pipeline.last_cpu_mirror_downloaded = False
+
+        monkeypatch.setattr(engine, "_gpu_pipeline_available", lambda pipeline_arg, name: True)
+        monkeypatch.setattr(pipeline, "step", fake_gpu_step)
+
+        engine.optics_solver.step(engine)
+
+        profile = engine.optics_solver.last_pass_profile
+        profile_names = {entry["name"] for entry in profile["passes"]}
+        assert {
+            "optics_runtime_table_prep",
+            "optics_emitter_collection",
+            "optics_solve_tile_mask",
+            "optics_changed_mask_updates",
+            "optics_changed_mask_visible",
+            "optics_changed_mask_cell_dose",
+            "optics_changed_mask_gas_dose",
+            "optics_runtime_totals",
+            "optics_upload_inputs",
+            "optics_trace_emitters",
+        }.issubset(profile_names)
+        assert "optics_gpu_dispatch" not in profile_names
+        assert all(not str(name).startswith("optics.optics") for name in profile_names)
+        assert profile["summary"]["optics_upload_inputs"]["count"] == 1
+        assert profile["summary"]["optics_trace_emitters"]["count"] == 1
+    finally:
+        engine.close()
+
+
+def test_formal_gpu_optics_changed_mask_profile_records_split_children() -> None:
+    engine = WorldEngine(width=8, height=8, gas_cell_size=4, simulation_backend="gpu")
+    if not engine.optics_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU optics pipeline is not available")
+    try:
+        engine.profile_passes_enabled = True
+        engine.emitters.append(
+            {
+                "light_type": "visible_light",
+                "origin": (2, 2),
+                "direction": (1.0, 0.0),
+                "spread": 0.0,
+                "strength": 1.0,
+                "range_cells": 4,
+            }
+        )
+        _seed_gpu_authoritative_active_tiles(engine, [(0, 0)])
+        engine.bridge.mark_gpu_authoritative("material")
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.optics_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        profile = engine.optics_solver.last_pass_profile
+        profile_names = {entry["name"] for entry in profile["passes"]}
+        assert {
+            "optics_changed_mask_updates",
+            "optics_changed_mask_visible",
+            "optics_changed_mask_cell_dose",
+            "optics_changed_mask_gas_dose",
+        }.issubset(profile_names)
+        assert engine.optics_solver.last_backend == "gpu"
+        assert engine.optics_solver.gpu_pipeline.last_cpu_mirror_downloaded is False
+        assert profile["summary"]["optics_changed_mask_visible"]["count"] == 1
+        assert profile["summary"]["optics_changed_mask_cell_dose"]["count"] == 1
+        assert profile["summary"]["optics_changed_mask_gas_dose"]["count"] == 1
+    finally:
+        engine.close()
+
+
+def test_gpu_direct_optics_changed_masks_copy_partial_solve_masks(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = WorldEngine(width=96, height=96, gas_cell_size=4)
+    try:
+        for tile_y in range(engine.active.tile_height):
+            for tile_x in range(engine.active.tile_width):
+                engine.active.active_tile_ttl[tile_y][tile_x] = 0
+        for chunk_y in range(engine.active.chunk_height):
+            for chunk_x in range(engine.active.chunk_width):
+                engine.active.active_chunk_mask[chunk_y][chunk_x] = False
+        engine.active.active_tile_ttl[0][0] = 1
+        engine.active.active_chunk_mask[0][0] = True
+
+        monkeypatch.setattr(engine, "_gpu_pipeline_available", lambda pipeline, name: True)
+        engine.optics_solver.gpu_pipeline.last_cpu_mirror_downloaded = False
+
+        engine.optics_solver.step(engine)
+
+        solver = engine.optics_solver
+        assert solver.last_backend == "gpu"
+        assert bool(np.any(solver.last_solve_cell_mask))
+        assert bool(np.any(solver.last_solve_gas_mask))
+        assert not bool(np.all(solver.last_solve_cell_mask))
+        assert not bool(np.all(solver.last_solve_gas_mask))
+        assert np.array_equal(solver.last_visible_changed_mask, solver.last_solve_cell_mask)
+        assert np.array_equal(solver.last_cell_dose_changed_mask, solver.last_solve_cell_mask)
+        assert np.array_equal(solver.last_gas_dose_changed_mask, solver.last_solve_gas_mask)
+        assert not bool(np.all(solver.last_visible_changed_mask))
+        assert not bool(np.all(solver.last_cell_dose_changed_mask))
+        assert not bool(np.all(solver.last_gas_dose_changed_mask))
+    finally:
+        engine.close()
+
+
+def test_optics_direct_changed_mask_copy_helper_uses_copyto_without_fill_true() -> None:
+    source = inspect.getsource(OpticsSolver._copy_direct_changed_masks)
+
+    assert ".fill(True)" not in source
+    assert "np.copyto(self.last_visible_changed_mask, solve_cell_mask)" in source
+    assert "np.copyto(self.last_cell_dose_changed_mask, solve_cell_mask)" in source
+    assert "np.copyto(self.last_gas_dose_changed_mask, solve_gas_mask)" in source
+
+
+def test_world_profile_stores_optics_solver_child_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = WorldEngine(width=8, height=8, simulation_backend="cpu")
+    try:
+        engine.profile_passes_enabled = True
+        solver_profile = {
+            "passes": [
+                {"name": "optics_runtime_table_prep", "cpu_ms": 0.1, "gpu_ms": None},
+                {"name": "optics_trace_emitters", "cpu_ms": 0.2, "gpu_ms": None},
+            ],
+            "summary": {},
+        }
+        engine.optics_solver.gpu_pipeline.last_pass_profile = {
+            "passes": [{"name": "stale_gpu_only", "cpu_ms": 9.0, "gpu_ms": None}],
+            "summary": {},
+        }
+
+        def fake_optics_step(world: WorldEngine) -> None:
+            engine.optics_solver.last_pass_profile = solver_profile
+            engine.optics_solver.last_backend = "cpu"
+            engine.optics_solver.last_runtime_backend = "cpu"
+
+        monkeypatch.setattr(engine.optics_solver, "step", fake_optics_step)
+
+        engine.step(1.0 / 60.0)
+
+        optics_profile = engine.last_pass_profile.get("optics")
+        assert optics_profile is solver_profile
+        profile_names = {entry["name"] for entry in optics_profile["passes"]}
+        assert "optics_runtime_table_prep" in profile_names
+        assert "optics_trace_emitters" in profile_names
+        assert "stale_gpu_only" not in profile_names
+    finally:
+        engine.close()
+
+
+def test_collapse_child_profile_records_outer_runtime_prepare_passes() -> None:
+    engine = WorldEngine(width=8, height=8, simulation_backend="cpu")
+    try:
+        engine.profile_passes_enabled = True
+
+        engine.step(1.0 / 60.0)
+
+        collapse_profile = engine.last_pass_profile.get("collapse")
+        assert isinstance(collapse_profile, dict)
+        profile_names = {entry["name"] for entry in collapse_profile["passes"]}
+        assert {
+            "dirty_tile_drain",
+            "solver_runtime_reset",
+            "solver_region_prepare",
+        }.issubset(profile_names)
+    finally:
+        engine.close()
+
+
+def test_collapse_child_profile_records_formal_frontier_and_tile_prepare_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=8, height=8, simulation_backend="cpu")
+    try:
+        pipeline = engine.collapse_solver.gpu_pipeline
+        engine.profile_passes_enabled = True
+        pipeline.reset_pass_profile()
+        engine.collapse_solver.reset_runtime_state(engine)
+
+        monkeypatch.setattr(
+            pipeline,
+            "expand_region_to_component_bbox",
+            lambda world, *region: (2, 3, 6, 7),
+        )
+        monkeypatch.setattr(pipeline, "clear_formal_deferred_region_requests", lambda world: None)
+        execute_calls: list[tuple[tuple[int, int, int, int], dict[str, object]]] = []
+
+        def record_formal_connected_execute(
+            world: WorldEngine,
+            region: tuple[int, int, int, int],
+            **kwargs: object,
+        ) -> int:
+            execute_calls.append((region, dict(kwargs)))
+            return 0
+
+        monkeypatch.setattr(pipeline, "execute_formal_connected_expansion", record_formal_connected_execute)
+
+        engine.collapse_solver._solve_formal_gpu_region(
+            engine,
+            1,
+            1,
+            2,
+            2,
+            formal_region_from_deferred=False,
+        )
+
+        assert execute_calls == [((0, 0, 8, 8), {"resource_region": (2, 3, 6, 7)})]
+
+        monkeypatch.setattr(
+            pipeline,
+            "_ensure_formal_connected_frontier_buffers_impl",
+            lambda world: ("frontier", "scratch"),
+        )
+        monkeypatch.setattr(
+            pipeline,
+            "_prepare_formal_connected_tile_resources_impl",
+            lambda world, region=None: (None, 0, 0, int(world.width), int(world.height)),
+        )
+
+        assert pipeline._ensure_formal_connected_frontier_buffers(engine) == ("frontier", "scratch")
+        assert pipeline._prepare_formal_connected_tile_resources(engine)[3:] == (engine.width, engine.height)
+
+        profile_names = {entry["name"] for entry in pipeline.last_pass_profile["passes"]}
+        assert {
+            "formal_region_prepare",
+            "connected_frontier_buffer_prepare",
+            "tile_resource_prepare",
+        }.issubset(profile_names)
+
+    finally:
+        engine.close()
+
+
+def test_collapse_child_profile_records_tile_resource_prepare_child_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=8, height=8, simulation_backend="cpu")
+    try:
+        pipeline = engine.collapse_solver.gpu_pipeline
+        fake_ctx = object()
+        fake_resources = object()
+        engine.bridge.ctx = fake_ctx
+        engine.profile_passes_enabled = True
+        pipeline.reset_pass_profile()
+
+        monkeypatch.setattr(pipeline, "_ensure_programs", lambda ctx: None)
+        monkeypatch.setattr(pipeline, "_ensure_resources", lambda ctx, width, height: fake_resources)
+        monkeypatch.setattr(pipeline, "_upload_region_state", lambda world, resources, x0, y0, width, height: None)
+        monkeypatch.setattr(
+            pipeline,
+            "_classification_material_params",
+            lambda world: (
+                np.asarray([0], dtype=np.int32),
+                np.asarray([0], dtype=np.int32),
+                np.asarray([0], dtype=np.int32),
+            ),
+        )
+        monkeypatch.setattr(pipeline, "_write_dynamic_buffer", lambda ctx, resources, name, data: None)
+
+        assert pipeline._prepare_formal_connected_tile_resources(engine) == (fake_resources, 0, 0, 8, 8)
+
+        profile_names = {entry["name"] for entry in pipeline.last_pass_profile["passes"]}
+        assert {
+            "tile_resource_prepare",
+            "tile_resource_prepare.ensure_programs",
+            "tile_resource_prepare.ensure_resources",
+            "tile_resource_prepare.upload_region_state",
+            "tile_resource_prepare.material_params",
+            "tile_resource_prepare.material_buffer_writes",
+        }.issubset(profile_names)
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_connected_tile_resource_prepare_uses_region_origin_and_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=16, height=12, simulation_backend="cpu")
+    try:
+        pipeline = engine.collapse_solver.gpu_pipeline
+        fake_ctx = object()
+        fake_resources = object()
+        calls: list[tuple[object, ...]] = []
+        engine.bridge.ctx = fake_ctx
+
+        monkeypatch.setattr(pipeline, "_ensure_programs", lambda ctx: calls.append(("programs", ctx)))
+        monkeypatch.setattr(
+            pipeline,
+            "_ensure_resources",
+            lambda ctx, width, height: calls.append(("resources", ctx, width, height)) or fake_resources,
+        )
+        monkeypatch.setattr(
+            pipeline,
+            "_upload_region_state",
+            lambda world, resources, x0, y0, width, height: calls.append(
+                ("upload", resources, x0, y0, width, height)
+            ),
+        )
+        monkeypatch.setattr(
+            pipeline,
+            "_classification_material_params",
+            lambda world: (
+                np.asarray([0], dtype=np.int32),
+                np.asarray([0], dtype=np.int32),
+                np.asarray([0], dtype=np.int32),
+            ),
+        )
+        monkeypatch.setattr(
+            pipeline,
+            "_write_dynamic_buffer",
+            lambda ctx, resources, name, data: calls.append(("material", name, int(data.size))),
+        )
+
+        assert pipeline._prepare_formal_connected_tile_resources(engine, (3, 4, 9, 11)) == (
+            fake_resources,
+            3,
+            4,
+            6,
+            7,
+        )
+
+        assert ("resources", fake_ctx, 6, 7) in calls
+        assert ("upload", fake_resources, 3, 4, 6, 7) in calls
+        assert ("resources", fake_ctx, 16, 12) not in calls
+        assert ("upload", fake_resources, 0, 0, 16, 12) not in calls
+    finally:
+        engine.close()
+
+
+def test_collapse_child_profile_records_label_collect_child_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = WorldEngine(width=8, height=8, simulation_backend="cpu")
+    try:
+        pipeline = engine.collapse_solver.gpu_pipeline
+        engine.bridge.ctx = object()
+        engine.profile_passes_enabled = True
+        pipeline.reset_pass_profile()
+        calls: list[tuple[str, object]] = []
+
+        def record_label(
+            world: WorldEngine,
+            component_texture: object,
+            width: int,
+            height: int,
+            *,
+            x0: int,
+            y0: int,
+            tile_mask_name: str | None = None,
+        ) -> tuple[object, int, int]:
+            calls.append(("label", (component_texture, width, height, x0, y0, tile_mask_name)))
+            return "label_texture", int(width), int(height)
+
+        def record_collect(
+            world: WorldEngine,
+            label_texture: object,
+            width: int,
+            height: int,
+            *,
+            empty_min: tuple[int, int] | None = None,
+            tile_mask_name: str | None = None,
+        ) -> int:
+            calls.append(("collect", (label_texture, width, height, empty_min, tile_mask_name)))
+            return 3
+
+        def record_summarize(
+            world: WorldEngine,
+            label_texture: object,
+            x0: int,
+            y0: int,
+            width: int,
+            height: int,
+            component_capacity: int,
+            *,
+            tile_mask_name: str | None = None,
+        ) -> None:
+            calls.append(("summarize", (label_texture, x0, y0, width, height, component_capacity, tile_mask_name)))
+
+        monkeypatch.setattr(pipeline, "_formal_gpu_frame", lambda world: True)
+        monkeypatch.setattr(pipeline, "_label_component_texture", record_label)
+        monkeypatch.setattr(pipeline, "_collect_component_labels_gpu", record_collect)
+        monkeypatch.setattr(pipeline, "_summarize_formal_component_metadata", record_summarize)
+        monkeypatch.setattr(pipeline, "_reserve_formal_component_island_ids", lambda world, capacity: 100)
+        monkeypatch.setattr(
+            pipeline,
+            "_materialize_compact_labeled_component_texture",
+            lambda *args, **kwargs: calls.append(("materialize", None)),
+        )
+        monkeypatch.setattr(
+            pipeline,
+            "_publish_compact_component_island_runtime",
+            lambda *args, **kwargs: calls.append(("publish_runtime", None)),
+        )
+
+        component_capacity = pipeline.materialize_component_texture_formal(
+            engine,
+            "component_texture",
+            6,
+            7,
+            2,
+            3,
+            tile_mask_name="connected_tile_mask",
+        )
+
+        assert component_capacity == 3
+        assert ("collect", ("label_texture", 6, 7, (8, 10), "connected_tile_mask")) in calls
+        assert ("summarize", ("label_texture", 2, 3, 6, 7, 3, "connected_tile_mask")) in calls
+        profile_names = {entry["name"] for entry in pipeline.last_pass_profile["passes"]}
+        assert {
+            "label_collect_components",
+            "label_collect_components.label",
+            "label_collect_components.collect_roots",
+            "label_collect_components.summarize_metadata",
+            "materialize",
+            "publish_runtime",
+        }.issubset(profile_names)
+        assert pipeline.last_pass_profile["summary"]["label_collect_components.label"]["count"] == 1
+        assert pipeline.last_pass_profile["summary"]["label_collect_components.collect_roots"]["count"] == 1
+        assert pipeline.last_pass_profile["summary"]["label_collect_components.summarize_metadata"]["count"] == 1
+    finally:
+        engine.close()
+
+
+def test_collapse_child_profile_records_materialize_child_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = WorldEngine(width=8, height=8, simulation_backend="cpu")
+    try:
+        pipeline = engine.collapse_solver.gpu_pipeline
+        engine.bridge.ctx = object()
+        engine.profile_passes_enabled = True
+        pipeline.reset_pass_profile()
+        calls: list[tuple[str, object]] = []
+
+        class FakeProgram:
+            def __getitem__(self, name: str) -> object:
+                return SimpleNamespace(value=None)
+
+            def run(self, group_x: int, group_y: int, group_z: int) -> None:
+                calls.append(("run", (int(group_x), int(group_y), int(group_z))))
+
+        class FakeBindable:
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+            def use(self, location: int = 0) -> None:
+                calls.append(("use", (self.name, int(location))))
+
+            def bind_to_image(self, location: int, *, read: bool = False, write: bool = False) -> None:
+                calls.append(("bind_to_image", (self.name, int(location), bool(read), bool(write))))
+
+            def bind_to_storage_buffer(self, *, binding: int) -> None:
+                calls.append(("bind_to_storage_buffer", (self.name, int(binding))))
+
+        fake_resources = SimpleNamespace(
+            material_tex=FakeBindable("material_tex"),
+            phase_tex=FakeBindable("phase_tex"),
+            cell_flags_tex=FakeBindable("cell_flags_tex"),
+            timer_tex=FakeBindable("timer_tex"),
+            integrity_tex=FakeBindable("integrity_tex"),
+            temp_tex=FakeBindable("temp_tex"),
+            island_id_tex=FakeBindable("island_id_tex"),
+            entity_id_tex=FakeBindable("entity_id_tex"),
+            displaced_tex=FakeBindable("displaced_tex"),
+            material_out_tex=FakeBindable("material_out_tex"),
+            phase_out_tex=FakeBindable("phase_out_tex"),
+            cell_flags_out_tex=FakeBindable("cell_flags_out_tex"),
+            timer_out_tex=FakeBindable("timer_out_tex"),
+            integrity_out_tex=FakeBindable("integrity_out_tex"),
+            temp_out_tex=FakeBindable("temp_out_tex"),
+            island_id_out_tex=FakeBindable("island_id_out_tex"),
+            entity_id_out_tex=FakeBindable("entity_id_out_tex"),
+            displaced_out_tex=FakeBindable("displaced_out_tex"),
+            material_collapse_generation=FakeBindable("material_collapse_generation"),
+            material_base_integrity=FakeBindable("material_base_integrity"),
+            material_spawn_temperature=FakeBindable("material_spawn_temperature"),
+            component_flags=FakeBindable("component_flags"),
+        )
+        pipeline.programs["materialize_compact_components"] = FakeProgram()
+        pipeline.programs["materialize_compact_components_aux"] = FakeProgram()
+
+        monkeypatch.setattr(pipeline, "_formal_gpu_frame", lambda world: True)
+        monkeypatch.setattr(
+            pipeline,
+            "_label_component_texture",
+            lambda world, component_texture, width, height, *, x0, y0, tile_mask_name=None: (
+                FakeBindable("label_texture"),
+                int(width),
+                int(height),
+            ),
+        )
+        monkeypatch.setattr(pipeline, "_collect_component_labels_gpu", lambda *args, **kwargs: 3)
+        monkeypatch.setattr(pipeline, "_summarize_formal_component_metadata", lambda *args, **kwargs: None)
+        monkeypatch.setattr(pipeline, "_reserve_formal_component_island_ids", lambda world, capacity: 100)
+        monkeypatch.setattr(pipeline, "_ensure_programs", lambda ctx: None)
+        monkeypatch.setattr(pipeline, "_ensure_resources", lambda ctx, width, height: fake_resources)
+        monkeypatch.setattr(
+            pipeline,
+            "_upload_region_state",
+            lambda world, resources, x0, y0, width, height: calls.append(
+                ("upload", (resources, int(x0), int(y0), int(width), int(height)))
+            ),
+        )
+        monkeypatch.setattr(
+            pipeline,
+            "_materialize_material_params",
+            lambda world: (
+                np.asarray([0], dtype=np.int32),
+                np.asarray([0], dtype=np.int32),
+                np.asarray([0], dtype=np.int32),
+            ),
+        )
+        monkeypatch.setattr(
+            pipeline,
+            "_write_dynamic_buffer",
+            lambda ctx, resources, name, data: calls.append(("write_dynamic", (str(name), int(data.size)))),
+        )
+        monkeypatch.setattr(pipeline, "_sync_compute_writes", lambda ctx: calls.append(("sync", ctx)))
+        monkeypatch.setattr(
+            pipeline,
+            "_publish_bridge_region_outputs",
+            lambda world, resources, x0, y0, width, height: calls.append(
+                ("publish_bridge_outputs", (resources, int(x0), int(y0), int(width), int(height)))
+            ),
+        )
+        monkeypatch.setattr(
+            pipeline,
+            "_publish_compact_component_island_runtime",
+            lambda *args, **kwargs: calls.append(("publish_runtime", None)),
+        )
+
+        assert pipeline.materialize_component_texture_formal(engine, "component_texture", 6, 7, 2, 3) == 3
+
+        profile_names = {entry["name"] for entry in pipeline.last_pass_profile["passes"]}
+        benchmark_summary = benchmark_engine.summarize_pass_profiles([{"collapse": pipeline.last_pass_profile}])
+        assert {
+            "materialize",
+            "materialize.main",
+            "materialize.aux",
+            "materialize.publish_bridge_outputs",
+        }.issubset(profile_names)
+        assert pipeline.last_pass_profile["summary"]["materialize"]["count"] == 1
+        assert pipeline.last_pass_profile["summary"]["materialize.main"]["count"] == 1
+        assert pipeline.last_pass_profile["summary"]["materialize.aux"]["count"] == 1
+        assert pipeline.last_pass_profile["summary"]["materialize.publish_bridge_outputs"]["count"] == 1
+        assert "collapse.materialize.main" in benchmark_summary
+        assert "collapse.materialize.aux" in benchmark_summary
+        assert "collapse.materialize.publish_bridge_outputs" in benchmark_summary
+    finally:
+        engine.close()
+
+
+def test_collapse_child_profile_records_support_jfa_child_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = WorldEngine(width=8, height=8, simulation_backend="cpu")
+    try:
+        pipeline = engine.collapse_solver.gpu_pipeline
+        fake_resources = SimpleNamespace(support_ping="support_ping", support_pong="support_pong")
+        engine.bridge.ctx = object()
+        engine.profile_passes_enabled = True
+        pipeline.reset_pass_profile()
+        calls: list[tuple[str, object]] = []
+        jfa_jumps = (4, 2, 1)
+
+        def record_pass(
+            world: WorldEngine,
+            resources: object,
+            current: object,
+            scratch: object,
+            width: int,
+            height: int,
+            tile_mask_name: str,
+            jump: int,
+        ) -> tuple[object, object]:
+            calls.append(("pass", (current, scratch, int(jump), tile_mask_name)))
+            return scratch, current
+
+        def fail_single_publish(*args: object, **kwargs: object) -> None:
+            raise AssertionError("connected support publish should use the dual mask helper")
+
+        def record_dual_publish(
+            world: WorldEngine,
+            resources: object,
+            supported_texture: object,
+            x0: int,
+            y0: int,
+            width: int,
+            height: int,
+            tile_mask_name: str,
+        ) -> None:
+            calls.append(
+                (
+                    "publish_dual",
+                    (supported_texture, int(x0), int(y0), int(width), int(height), tile_mask_name),
+                )
+            )
+
+        def record_axis_masks(
+            world: WorldEngine,
+            resources: object,
+            source_texture: object,
+            width: int,
+            height: int,
+            tile_mask_name: str,
+        ) -> None:
+            calls.append(("axis_masks", (source_texture, int(width), int(height), tile_mask_name)))
+
+        monkeypatch.setattr(pipeline, "_build_formal_connected_axis_masks", record_axis_masks)
+        monkeypatch.setattr(pipeline, "_formal_jfa_jumps", lambda width, height: jfa_jumps)
+        monkeypatch.setattr(pipeline, "_run_formal_connected_tile_support_pass", record_pass)
+        monkeypatch.setattr(pipeline, "_publish_bridge_region_mask", fail_single_publish)
+        monkeypatch.setattr(
+            pipeline,
+            "_publish_bridge_supported_unsupported_masks_connected_tiles",
+            record_dual_publish,
+        )
+        fake_resources.structural_tex = "structural_tex"
+
+        result = pipeline._solve_formal_connected_tile_support_textures(
+            engine,
+            fake_resources,
+            0,
+            0,
+            engine.width,
+            engine.height,
+            "connected_tile_mask",
+        )
+
+        expected_jumps = pipeline._formal_jfa_jumps(engine.width, engine.height)
+        expected_refine_passes = pipeline._formal_connected_tile_refine_pass_count(engine)
+        expected_result = "support_ping" if (len(expected_jumps) + expected_refine_passes) % 2 == 0 else "support_pong"
+        support_passes = [value for name, value in calls if name == "pass"]
+        assert result == expected_result
+        assert [jump for _, _, jump, _ in support_passes] == [*expected_jumps, *([1] * expected_refine_passes)]
+        assert ("publish_dual", (expected_result, 0, 0, engine.width, engine.height, "connected_tile_mask")) in calls
+
+        profile_names = {entry["name"] for entry in pipeline.last_pass_profile["passes"]}
+        benchmark_summary = benchmark_engine.summarize_pass_profiles([{"collapse": pipeline.last_pass_profile}])
+        assert {
+            "support_jfa.axis_masks",
+            "support_jfa.jfa",
+            "support_jfa.jfa.large",
+            "support_jfa.jfa.small",
+            "support_jfa.refine",
+            "support_jfa.publish",
+        }.issubset(profile_names)
+        assert "support_jfa.frontier" not in profile_names
+        assert "support_jfa.materialize" not in profile_names
+        assert not {"support_jfa.jfa.4", "support_jfa.jfa.2", "support_jfa.jfa.1"} & profile_names
+        assert pipeline.last_pass_profile["summary"]["support_jfa.jfa"]["count"] == 1
+        assert pipeline.last_pass_profile["summary"]["support_jfa.jfa.large"]["count"] == 1
+        assert pipeline.last_pass_profile["summary"]["support_jfa.jfa.small"]["count"] == 1
+        assert pipeline.last_pass_profile["summary"]["support_jfa.refine"]["count"] == 1
+        assert "collapse.support_jfa.jfa.large" in benchmark_summary
+        assert "collapse.support_jfa.jfa.small" in benchmark_summary
+    finally:
+        engine.close()
+
+
+def test_collapse_child_profile_records_label_jfa_grouped_child_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = WorldEngine(width=8, height=8, simulation_backend="cpu")
+    try:
+        pipeline = engine.collapse_solver.gpu_pipeline
+        calls: list[tuple[str, object]] = []
+        jfa_jumps = (4, 2, 1)
+
+        class FakeContext:
+            SHADER_IMAGE_ACCESS_BARRIER_BIT = 1
+            TEXTURE_FETCH_BARRIER_BIT = 2
+
+            def memory_barrier(self, barriers: int) -> None:
+                calls.append(("memory_barrier", int(barriers)))
+
+        class FakeProgram:
+            def __getitem__(self, name: str) -> object:
+                return SimpleNamespace(value=None)
+
+            def run(self, group_x: int, group_y: int, group_z: int) -> None:
+                calls.append(("texture_init", (int(group_x), int(group_y), int(group_z))))
+
+        class FakeTexture:
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+            def use(self, location: int = 0) -> None:
+                calls.append(("use", (self.name, int(location))))
+
+            def bind_to_image(self, location: int, *, read: bool = False, write: bool = False) -> None:
+                calls.append(("bind_to_image", (self.name, int(location), bool(read), bool(write))))
+
+        fake_resources = SimpleNamespace(
+            support_ping=FakeTexture("support_ping"),
+            support_pong=FakeTexture("support_pong"),
+        )
+        component_texture = FakeTexture("component_texture")
+        engine.bridge.ctx = FakeContext()
+        engine.profile_passes_enabled = True
+        pipeline.programs["component_label_init"] = FakeProgram()
+
+        def record_seed(
+            world: WorldEngine,
+            resources: object,
+            source_texture: object,
+            width: int,
+            height: int,
+            tile_mask_name: str,
+            frontier: tuple[str, str, str, str],
+        ) -> None:
+            calls.append(("seed", (source_texture, int(width), int(height), tile_mask_name, frontier)))
+
+        def record_materialize(
+            world: WorldEngine,
+            resources: object,
+            source_texture: object,
+            target_texture: object,
+            width: int,
+            height: int,
+            tile_mask_name: str,
+        ) -> None:
+            calls.append(("materialize", (source_texture, target_texture, int(width), int(height), tile_mask_name)))
+
+        def record_axis_masks(
+            world: WorldEngine,
+            resources: object,
+            source_texture: object,
+            width: int,
+            height: int,
+            tile_mask_name: str,
+        ) -> None:
+            calls.append(("axis_masks", (source_texture, int(width), int(height), tile_mask_name)))
+
+        def record_label_pass(
+            world: WorldEngine,
+            resources: object,
+            source_texture: object,
+            current: object,
+            scratch: object,
+            width: int,
+            height: int,
+            tile_mask_name: str,
+            jump: int,
+            *,
+            refine_local_labels: bool,
+        ) -> tuple[object, object]:
+            calls.append(("label_pass", (int(jump), bool(refine_local_labels), current, scratch, tile_mask_name)))
+            return scratch, current
+
+        def record_publish(
+            world: WorldEngine,
+            resources: object,
+            label_texture: object,
+            x0: int,
+            y0: int,
+            width: int,
+            height: int,
+            tile_mask_name: str,
+        ) -> None:
+            calls.append(("publish", (label_texture, int(x0), int(y0), int(width), int(height), tile_mask_name)))
+
+        monkeypatch.setattr(pipeline, "_formal_jfa_jumps", lambda width, height: jfa_jumps)
+        monkeypatch.setattr(pipeline, "_seed_formal_component_label_frontier", record_seed)
+        monkeypatch.setattr(pipeline, "_copy_formal_component_label_buffer_to_texture", record_materialize)
+        monkeypatch.setattr(pipeline, "_build_formal_connected_axis_masks", record_axis_masks)
+        monkeypatch.setattr(pipeline, "_run_formal_connected_component_label_pass", record_label_pass)
+        monkeypatch.setattr(pipeline, "_publish_bridge_region_labels_connected_tiles", record_publish)
+
+        def assert_grouped_label_profile() -> None:
+            expected_refine_passes = pipeline._formal_connected_tile_refine_pass_count(engine)
+            label_passes = [value for name, value in calls if name == "label_pass"]
+            assert [jump for jump, _, _, _, _ in label_passes] == [*jfa_jumps, *([1] * expected_refine_passes)]
+            assert [refine for _, refine, _, _, _ in label_passes] == [True] * len(label_passes)
+
+            profile_names = {entry["name"] for entry in pipeline.last_pass_profile["passes"]}
+            benchmark_summary = benchmark_engine.summarize_pass_profiles([{"collapse": pipeline.last_pass_profile}])
+            assert {
+                "label_jfa.axis_masks",
+                "label_jfa.jfa",
+                "label_jfa.jfa.large",
+                "label_jfa.jfa.small",
+                "label_jfa.refine",
+                "label_jfa.publish",
+            }.issubset(profile_names)
+            assert not {"label_jfa.jfa.4", "label_jfa.jfa.2", "label_jfa.jfa.1"} & profile_names
+            assert pipeline.last_pass_profile["summary"]["label_jfa.jfa"]["count"] == 1
+            assert pipeline.last_pass_profile["summary"]["label_jfa.jfa.large"]["count"] == 1
+            assert pipeline.last_pass_profile["summary"]["label_jfa.jfa.small"]["count"] == 1
+            assert "collapse.label_jfa.jfa.large" in benchmark_summary
+            assert "collapse.label_jfa.jfa.small" in benchmark_summary
+
+        pipeline.reset_pass_profile()
+        calls.clear()
+        pipeline._label_component_texture_connected_tiles_from_texture_init(
+            engine,
+            fake_resources,
+            component_texture,
+            engine.width,
+            engine.height,
+            x0=0,
+            y0=0,
+            tile_mask_name="connected_tile_mask",
+        )
+        assert_grouped_label_profile()
+        assert "label_jfa.texture_init" in {entry["name"] for entry in pipeline.last_pass_profile["passes"]}
+
+        pipeline.reset_pass_profile()
+        calls.clear()
+        pipeline._label_component_texture_connected_tiles(
+            engine,
+            fake_resources,
+            component_texture,
+            engine.width,
+            engine.height,
+            x0=0,
+            y0=0,
+            tile_mask_name="connected_tile_mask",
+        )
+        assert_grouped_label_profile()
+        profile_names = {entry["name"] for entry in pipeline.last_pass_profile["passes"]}
+        assert {"label_jfa.seed", "label_jfa.materialize"}.issubset(profile_names)
+    finally:
+        engine.close()
+
+
+def test_benchmark_profile_passes_sync_enables_gpu_attributed_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeBridge:
+        def __init__(self, ctx):
+            self.ctx = ctx
+
+        def sync_world(self, engine, force_cpu_resource_upload: bool = False):
+            return None
+
+    class FakeEngine:
+        def __init__(self, width: int, height: int, gpu_context):
+            self.width = width
+            self.height = height
+            self.simulation_backend = "gpu"
+            self.bridge = FakeBridge(gpu_context)
+            self._gpu_cpu_dirty_resources: set[str] = set()
+            self.profile_passes_enabled = False
+            self.profile_passes_sync = False
+            self.last_pass_profile = {"passes": [], "summary": {}, "skipped_stages": []}
+
+        def step(self, dt: float):
+            assert self.profile_passes_sync is True
+            self.last_pass_profile = {
+                "passes": [{"name": "gas", "cpu_ms": 0.1, "gpu_ms": 0.1}],
+                "summary": {},
+                "skipped_stages": [],
+            }
+
+        def poll_all_readbacks(self):
+            return []
+
+        def simulation_backend_report(self):
+            return {
+                "gpu_realtime_budget": {"skipped_stages": []},
+                "strict_gpu_ready": True,
+                "non_gpu_backends": {},
+            }
+
+        def close(self):
+            return None
+
+    class FakeContext:
+        def __init__(self):
+            self.finish_count = 0
+
+        def finish(self):
+            self.finish_count += 1
+
+    monkeypatch.setattr(benchmark_engine, "WorldEngine", FakeEngine)
+    ctx = FakeContext()
+
+    result = benchmark_engine.run_scenario(
+        "fake",
+        lambda engine: None,
+        ctx=ctx,
+        width=8,
+        height=8,
+        warmup=0,
+        frames=1,
+        dt=1.0 / 60.0,
+        readback=False,
+        profile_passes=True,
+        profile_passes_sync=True,
+    )
+
+    assert result["pass_profile_summary"]["gas"]["avg_gpu_ms"] == pytest.approx(0.1)
+
+
+def test_gpu_world_commands_do_not_force_pre_simulation_full_sync() -> None:
+    engine = WorldEngine(width=32, height=24)
+    try:
+        engine.queue_command("inject_material", x=4, y=5, material="gold_solid", radius=0)
+        engine._apply_commands()
+
+        assert engine.bridge_frame_commands
+        assert engine._needs_pre_simulation_bridge_sync(frame_input=None) is False
+    finally:
+        engine.close()
+
+
+def test_gpu_cpu_dirty_support_removal_pre_syncs_once_before_formal_collapse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=40, height=32)
+    try:
+        if not engine.collapse_solver.gpu_pipeline.available(engine):
+            pytest.skip("GPU collapse pipeline is not available")
+        engine.patch_material("log_solid", gravity_scale=0.0, wind_coupling=0.0, drag_scale=0.0)
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        for y in range(6, 32):
+            engine.set_cell(18, y, "log_solid", mark_dirty=False)
+        for x in range(12, 25):
+            engine.set_cell(x, 6, "log_solid", mark_dirty=False)
+        engine.clear_cell(18, 24)
+
+        required_inputs = {"cell_core", "island_id", "entity_id", "placeholder_displaced_material"}
+        assert required_inputs.issubset(engine._gpu_cpu_dirty_resources)
+        assert engine._needs_pre_simulation_bridge_sync(frame_input=None) is True
+
+        original_sync = engine._sync_pre_simulation_bridge_without_debug_upload
+        sync_dirty_resources: list[set[str]] = []
+
+        def record_pre_sync() -> None:
+            sync_dirty_resources.append(set(engine._gpu_cpu_dirty_resources))
+            original_sync()
+            assert required_inputs.issubset(engine.bridge.gpu_authoritative_resources)
+
+        pipeline = engine.collapse_solver.gpu_pipeline
+        original_prepare_tile_resources = pipeline._prepare_formal_connected_tile_resources
+        prepare_calls = 0
+
+        def assert_formal_tile_prepare_has_authoritative_inputs(
+            world: WorldEngine,
+            region: tuple[int, int, int, int] | None = None,
+        ) -> object:
+            nonlocal prepare_calls
+            prepare_calls += 1
+            assert required_inputs.issubset(world.bridge.gpu_authoritative_resources)
+            return original_prepare_tile_resources(world, region)
+
+        monkeypatch.setattr(engine, "_sync_pre_simulation_bridge_without_debug_upload", record_pre_sync)
+        monkeypatch.setattr(pipeline, "_prepare_formal_connected_tile_resources", assert_formal_tile_prepare_has_authoritative_inputs)
+
+        engine.step()
+        first_runtime = engine.serialize_collapse_runtime(allow_gpu_sync_readback=True)
+
+        assert first_runtime["backend"] == "gpu"
+        assert first_runtime["snapshot_source"] == "synchronous_gpu_readback"
+        assert first_runtime["sync_readback_performed"] is True
+        assert int(first_runtime["collapsed_cell_count"]) == 30
+        assert prepare_calls > 0
+        assert len(sync_dirty_resources) == 1
+        assert required_inputs.issubset(sync_dirty_resources[0])
+        assert engine._gpu_cpu_dirty_resources == set()
+        assert engine._needs_pre_simulation_bridge_sync(frame_input=None) is False
+
+        engine.step()
+
+        assert len(sync_dirty_resources) == 1
+    finally:
+        engine.close()
+
+
+def test_gpu_frame_input_pre_sync_disables_default_debug_texture_upload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=16, height=16, simulation_backend="cpu")
+    original_bridge = engine.bridge
+    sync_calls: list[dict[str, object]] = []
+
+    class _Bridge:
+        ctx = None
+        gpu_authoritative_resources = {"active_tile_ttl"}
+
+        def sync_world(self, world: WorldEngine, **kwargs: object) -> None:
+            sync_calls.append(dict(kwargs))
+            assert kwargs.get("upload_debug_texture") is False
+
+        def decay_active_scheduler(self, world: WorldEngine) -> bool:
+            return True
+
+    def no_op_solver_step(*args: object, **kwargs: object) -> None:
+        return None
+
+    try:
+        engine.simulation_backend = "gpu"
+        engine.bridge = _Bridge()  # type: ignore[assignment]
+        monkeypatch.setattr(engine.collapse_solver, "step", no_op_solver_step)
+        monkeypatch.setattr(engine.gas_solver, "step", no_op_solver_step)
+        monkeypatch.setattr(engine.heat_solver, "step", no_op_solver_step)
+        monkeypatch.setattr(engine.liquid_solver, "prepare_motion_flow_intent", no_op_solver_step)
+        monkeypatch.setattr(engine.motion_solver, "step", no_op_solver_step)
+        monkeypatch.setattr(engine.liquid_solver, "step", no_op_solver_step)
+        monkeypatch.setattr(engine.optics_solver, "step", no_op_solver_step)
+        monkeypatch.setattr(engine.reaction_solver, "_advance_timed_slots", no_op_solver_step)
+        monkeypatch.setattr(engine.reaction_solver, "_run_self_rules", no_op_solver_step)
+        monkeypatch.setattr(engine.reaction_solver, "_run_material_material", no_op_solver_step)
+        monkeypatch.setattr(engine.reaction_solver, "_run_material_gas", no_op_solver_step)
+        monkeypatch.setattr(engine.reaction_solver, "_run_material_light", no_op_solver_step)
+        monkeypatch.setattr(engine.reaction_solver, "_run_gas_gas", no_op_solver_step)
+        monkeypatch.setattr(engine.reaction_solver, "_run_gas_light", no_op_solver_step)
+        monkeypatch.setattr(engine.reaction_solver.gpu_pipeline, "clear_reaction_latches", lambda world: True)
+
+        engine._step_once(1.0 / 60.0, frame_input=WorldFrameInput(), capture_output=False)
+
+        assert sync_calls == [{"upload_debug_texture": False}]
+    finally:
+        engine.bridge = original_bridge
+        engine.close()
+
+
+def test_gpu_pre_simulation_bridge_sync_keeps_legacy_sync_world_compatibility() -> None:
+    engine = WorldEngine(width=16, height=16, simulation_backend="cpu")
+    original_bridge = engine.bridge
+    sync_calls: list[dict[str, object]] = []
+
+    class _Bridge:
+        def sync_world(self, world: WorldEngine, **kwargs: object) -> None:
+            if "upload_debug_texture" in kwargs:
+                raise TypeError("sync_world() got an unexpected keyword argument 'upload_debug_texture'")
+            sync_calls.append(dict(kwargs))
+
+    try:
+        engine.bridge = _Bridge()  # type: ignore[assignment]
+        engine._sync_pre_simulation_bridge_without_debug_upload()
+        assert sync_calls == [{}]
+    finally:
+        engine.bridge = original_bridge
+        engine.close()
 
 
 def test_gpu_world_step_requires_gpu_pipeline_instead_of_cpu_fallback() -> None:
@@ -45800,6 +51629,45 @@ def test_formal_gpu_solvers_require_gpu_active_scheduler_before_cpu_active_reads
         engine.reaction_solver._solve_masks(engine, seed_timer_cells=True)
 
 
+def test_formal_gpu_heat_runtime_uses_gpu_active_mask_sentinel(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = WorldEngine(width=64, height=64)
+    engine._world_simulation_frame_active = True
+    engine.bridge.mark_gpu_authoritative("active_tile_ttl")
+    pipeline = engine.heat_solver.gpu_pipeline
+    monkeypatch.setattr(pipeline, "available", lambda world: True)
+
+    def fail_cpu_active_read(*args: object, **kwargs: object) -> np.ndarray:
+        raise AssertionError("formal GPU heat must not expand CPU active masks")
+
+    monkeypatch.setattr(engine.heat_solver, "_solve_tile_mask", fail_cpu_active_read)
+    monkeypatch.setattr("oracle_game.sim.heat.tile_mask_to_cell_mask", fail_cpu_active_read)
+    monkeypatch.setattr("oracle_game.sim.heat.tile_mask_to_gas_mask", fail_cpu_active_read)
+
+    uploaded_masks: list[np.ndarray] = []
+
+    def fake_gpu_step(
+        world: WorldEngine,
+        dt: float,
+        *,
+        solve_tile_mask: np.ndarray,
+        ambient_iterations: int,
+    ) -> GPUHeatStageTargets:
+        uploaded_masks.append(solve_tile_mask.copy())
+        return GPUHeatStageTargets.empty_sentinel()
+
+    monkeypatch.setattr(pipeline, "step", fake_gpu_step)
+
+    engine.heat_solver.step(engine, 1.0 / 60.0)
+
+    assert uploaded_masks
+    assert uploaded_masks[0].shape == (engine.active.tile_height, engine.active.tile_width)
+    assert engine.heat_solver.last_solve_cell_mask.shape == (0, 0)
+    assert engine.heat_solver.last_solve_gas_mask.shape == (0, 0)
+    assert engine.heat_solver.last_public_phase_targets == []
+    assert engine.heat_solver.last_public_boil_targets == []
+    assert engine.heat_solver.last_public_condense_targets == []
+
+
 def test_formal_gpu_reaction_runtime_does_not_read_cpu_activity_mirrors() -> None:
     engine = WorldEngine(width=16, height=16)
     engine._world_simulation_frame_active = True
@@ -45921,6 +51789,496 @@ def test_formal_gpu_reaction_trigger_helpers_reject_cpu_readback() -> None:
         engine._world_simulation_frame_active = previous_frame_active
 
 
+def test_timed_zero_trigger_guard_source_is_bounded_to_timed_apply() -> None:
+    source = inspect.getsource(GPUReactionPipeline._ensure_programs)
+
+    def program_block(program_name: str, next_program_name: str) -> str:
+        start_marker = f'self.programs["{program_name}"] = ctx.compute_shader('
+        end_marker = f'self.programs["{next_program_name}"] = ctx.compute_shader('
+        start = source.index(start_marker)
+        end = source.index(end_marker, start + len(start_marker))
+        return source[start:end]
+
+    timed_apply = program_block("timed_apply", "clear_timed_candidate_worklist")
+    self_apply = program_block("self_apply", "scatter_local_action_outputs")
+
+    positive_action = timed_apply.index("if (action_index > 0)")
+    countdown_store = timed_apply.index("timer_value[slot_index] = float(max(0, timer_count - 1));", positive_action)
+    positive_action_body = timed_apply[positive_action:countdown_store]
+    trigger_apply = timed_apply.index("apply_trigger_vector(", countdown_store)
+    guard_start = timed_apply.rfind("if (has_trigger)", 0, trigger_apply)
+    guard_end = timed_apply.index("\n                }\n                store_cell_outputs(", trigger_apply)
+    store_outputs = timed_apply.index("store_cell_outputs(", guard_end)
+
+    assert "bool has_trigger = false;" in timed_apply
+    assert "has_trigger = true;" in positive_action_body
+    assert "triggers[slot_index] = float(action_index);" in positive_action_body
+    assert guard_start != -1
+    assert guard_start < trigger_apply < guard_end < store_outputs
+    assert "bool has_trigger = false;" not in self_apply
+    assert "has_trigger = true;" not in self_apply
+    assert "if (has_trigger)" not in self_apply
+    assert "apply_trigger_vector(" in self_apply
+
+
+def test_formal_gpu_reaction_timed_uses_coalesced_timed_apply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=16, height=16, gas_cell_size=4)
+    pipeline = engine.reaction_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU reaction pipeline is not available")
+    try:
+        engine.replace_reaction_table(
+            [ReactionAction(ReactionType.MODIFY_TEMPERATURE, delta=7.0, duration=0)],
+            {
+                "material_material": [],
+                "material_gas": [],
+                "material_light": [],
+                "gas_gas": [],
+                "gas_light": [],
+                "self_rules": [],
+            },
+        )
+        engine.patch_material("gold_solid", reaction_slots=(1, -1, -1, -1, -1, -1, -1, -1))
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(4, 4, "gold_solid", mark_dirty=False)
+        engine.set_cell(5, 4, "raw_stone_solid", mark_dirty=False)
+        engine.cell_temperature[4, 4] = 20.0
+        engine.cell_temperature[4, 5] = 11.0
+        engine.timer_pack[4, 4, 0] = 1
+        engine.active.mark_rect(0, 0, engine.width, engine.height)
+        engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "gas_concentration",
+            "ambient_temperature",
+            "flow_velocity",
+            "cell_optical_dose",
+            "gas_optical_dose",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+
+        timed_apply_calls: list[tuple[int, int, int]] = []
+        timed_apply_program = pipeline.programs["timed_apply"]
+        original_timed_apply_run = timed_apply_program.run
+        candidate_program = pipeline.programs["timed_apply_candidates"]
+        load_active_gas_program = pipeline.programs["load_active_gas"]
+        load_bridge_gas_program = pipeline.programs["load_bridge_gas"]
+        load_bridge_dose_program = pipeline.programs["load_bridge_dose"]
+
+        def count_timed_apply(group_x: int, group_y: int, group_z: int = 1) -> object:
+            timed_apply_calls.append((int(group_x), int(group_y), int(group_z)))
+            return original_timed_apply_run(group_x, group_y, group_z)
+
+        def fail_candidate_indirect(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal timed reaction must not run per-cell candidate indirect apply")
+
+        def fail_candidate_worklist(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal timed reaction must not prepare a per-cell candidate worklist")
+
+        def fail_load_active_gas(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal timed reaction must not load unused gas active mask")
+
+        def fail_load_bridge_gas(*args: object, **kwargs: object) -> None:
+            raise AssertionError("temperature-only timed reaction must not load bridge gas, ambient, or flow")
+
+        def fail_load_bridge_dose(*args: object, **kwargs: object) -> None:
+            raise AssertionError("temperature-only timed reaction must not load bridge optical dose")
+
+        def fail_sync_world(bridge: GPUBridge, world: WorldEngine, **kwargs: object) -> None:
+            if bridge is engine.bridge:
+                raise AssertionError("formal timed reaction must not sync CPU mirrors")
+
+        monkeypatch.setattr(timed_apply_program, "run", count_timed_apply)
+        monkeypatch.setattr(candidate_program, "run_indirect", fail_candidate_indirect)
+        monkeypatch.setattr(load_active_gas_program, "run", fail_load_active_gas)
+        monkeypatch.setattr(load_bridge_gas_program, "run", fail_load_bridge_gas)
+        monkeypatch.setattr(load_bridge_dose_program, "run", fail_load_bridge_dose)
+        monkeypatch.setattr(pipeline, "_prepare_timed_candidate_worklist", fail_candidate_worklist)
+        monkeypatch.setattr(GPUBridge, "sync_world", fail_sync_world)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            assert pipeline.begin_formal_reaction_segment(engine, "before_motion") is True
+            batch = pipeline.run_timed_actions(
+                engine,
+                solve_cell_mask=np.ones((engine.height, engine.width), dtype=np.bool_),
+            )
+            assert batch is FORMAL_GPU_EMPTY_DEFERRED_BATCH
+            assert pipeline.flush_formal_reaction_segment(engine, "before_motion") is True
+        finally:
+            pipeline.end_formal_reaction_segment(engine, "before_motion")
+            engine._world_simulation_frame_active = previous_frame_active
+
+        core = _bridge_cell_core(engine)
+        assert timed_apply_calls == [(2, 2, 1)]
+        assert pipeline.last_cpu_mirror_downloaded is False
+        assert int(core["timer_pack"][4, 4, 0]) == 0
+        assert np.isclose(float(core["cell_temperature"][4, 4]), 27.0)
+        assert np.isclose(float(core["cell_temperature"][4, 5]), 11.0)
+        assert int(core["cell_flags"][4, 4]) & int(CellFlag.REACTION_LATCHED)
+    finally:
+        engine.close()
+
+
+def test_formal_gpu_reaction_timed_zero_timer_coalesced_noop_preserves_bridge_cell_and_gas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=16, height=16, gas_cell_size=4)
+    pipeline = engine.reaction_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU reaction pipeline is not available")
+    try:
+        engine.replace_reaction_table(
+            [ReactionAction(ReactionType.MODIFY_GAS, gas_species="water_gas", speed=5.0, duration=0)],
+            {
+                "material_material": [],
+                "material_gas": [],
+                "material_light": [],
+                "gas_gas": [],
+                "gas_light": [],
+                "self_rules": [],
+            },
+        )
+        engine.patch_material("gold_solid", reaction_slots=(1, -1, -1, -1, -1, -1, -1, -1))
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(4, 4, "gold_solid", mark_dirty=False)
+        engine.cell_temperature[4, 4] = 23.0
+        water_gas = engine.rulebook.gas_id("water_gas")
+        gas_y, gas_x = engine.cell_to_gas(4, 4)
+        engine.gas_concentration[water_gas, gas_y, gas_x] = 0.25
+        engine.active.mark_rect(0, 0, engine.width, engine.height)
+        engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "gas_concentration",
+            "ambient_temperature",
+            "flow_velocity",
+            "cell_optical_dose",
+            "gas_optical_dose",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+
+        timed_apply_calls: list[tuple[int, int, int]] = []
+        load_bridge_gas_calls: list[tuple[int, int, int]] = []
+        timed_apply_program = pipeline.programs["timed_apply"]
+        original_timed_apply_run = timed_apply_program.run
+        candidate_program = pipeline.programs["timed_apply_candidates"]
+        load_bridge_gas_program = pipeline.programs["load_bridge_gas"]
+        original_load_bridge_gas_run = load_bridge_gas_program.run
+        load_bridge_dose_program = pipeline.programs["load_bridge_dose"]
+
+        def count_timed_apply(group_x: int, group_y: int, group_z: int = 1) -> object:
+            timed_apply_calls.append((int(group_x), int(group_y), int(group_z)))
+            return original_timed_apply_run(group_x, group_y, group_z)
+
+        def count_load_bridge_gas(group_x: int, group_y: int, group_z: int = 1) -> object:
+            load_bridge_gas_calls.append((int(group_x), int(group_y), int(group_z)))
+            return original_load_bridge_gas_run(group_x, group_y, group_z)
+
+        def fail_load_bridge_dose(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal timed modify-gas reaction must not load bridge optical dose")
+
+        def fail_candidate_indirect(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal timed zero-timer path must not run per-cell candidate indirect apply")
+
+        def fail_candidate_worklist(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal timed zero-timer path must not prepare a per-cell candidate worklist")
+
+        def fail_sync_world(bridge: GPUBridge, world: WorldEngine, **kwargs: object) -> None:
+            if bridge is engine.bridge:
+                raise AssertionError("formal timed zero-timer path must not sync CPU mirrors")
+
+        monkeypatch.setattr(timed_apply_program, "run", count_timed_apply)
+        monkeypatch.setattr(candidate_program, "run_indirect", fail_candidate_indirect)
+        monkeypatch.setattr(load_bridge_gas_program, "run", count_load_bridge_gas)
+        monkeypatch.setattr(load_bridge_dose_program, "run", fail_load_bridge_dose)
+        monkeypatch.setattr(pipeline, "_prepare_timed_candidate_worklist", fail_candidate_worklist)
+        monkeypatch.setattr(GPUBridge, "sync_world", fail_sync_world)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            assert pipeline.begin_formal_reaction_segment(engine, "before_motion") is True
+            batch = pipeline.run_timed_actions(
+                engine,
+                solve_cell_mask=np.ones((engine.height, engine.width), dtype=np.bool_),
+            )
+            assert batch is FORMAL_GPU_EMPTY_DEFERRED_BATCH
+            assert pipeline.flush_formal_reaction_segment(engine, "before_motion") is True
+        finally:
+            pipeline.end_formal_reaction_segment(engine, "before_motion")
+            engine._world_simulation_frame_active = previous_frame_active
+
+        core = _bridge_cell_core(engine)
+        gas = _bridge_gas_concentration(engine)
+        ambient = np.frombuffer(engine.bridge.textures["ambient_temperature"].read(), dtype="f4").reshape(
+            engine.ambient_temperature.shape
+        )
+        assert timed_apply_calls == [(2, 2, 1)]
+        assert load_bridge_gas_calls == [(1, 1, engine.gas_concentration.shape[0])]
+        assert pipeline.last_cpu_mirror_downloaded is False
+        assert np.isclose(float(core["cell_temperature"][4, 4]), 23.0)
+        assert int(core["timer_pack"][4, 4, 0]) == 0
+        assert not (int(core["cell_flags"][4, 4]) & int(CellFlag.REACTION_LATCHED))
+        assert np.isclose(float(gas[water_gas, gas_y, gas_x]), 0.25)
+        assert np.isclose(float(ambient[gas_y, gas_x]), float(engine.ambient_temperature[gas_y, gas_x]))
+    finally:
+        engine.close()
+
+
+def test_formal_gpu_reaction_timed_modify_gas_loads_and_publishes_gas_and_ambient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=16, height=16, gas_cell_size=4)
+    pipeline = engine.reaction_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU reaction pipeline is not available")
+    try:
+        engine.replace_reaction_table(
+            [ReactionAction(ReactionType.MODIFY_GAS, gas_species="water_gas", speed=5.0, duration=0)],
+            {
+                "material_material": [],
+                "material_gas": [],
+                "material_light": [],
+                "gas_gas": [],
+                "gas_light": [],
+                "self_rules": [],
+            },
+        )
+        engine.patch_material("gold_solid", reaction_slots=(1, -1, -1, -1, -1, -1, -1, -1))
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(4, 4, "gold_solid", mark_dirty=False)
+        engine.timer_pack[4, 4, 0] = 1
+        water_gas = engine.rulebook.gas_id("water_gas")
+        gas_y, gas_x = engine.cell_to_gas(4, 4)
+        engine.gas_concentration[water_gas, gas_y, gas_x] = 0.25
+        engine.ambient_temperature[gas_y, gas_x] = 41.0
+        engine.active.mark_rect(0, 0, engine.width, engine.height)
+        engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "gas_concentration",
+            "ambient_temperature",
+            "flow_velocity",
+            "cell_optical_dose",
+            "gas_optical_dose",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+
+        load_bridge_gas_calls: list[tuple[int, int, int]] = []
+        load_bridge_gas_program = pipeline.programs["load_bridge_gas"]
+        original_load_bridge_gas_run = load_bridge_gas_program.run
+        load_bridge_dose_program = pipeline.programs["load_bridge_dose"]
+
+        def count_load_bridge_gas(group_x: int, group_y: int, group_z: int = 1) -> object:
+            load_bridge_gas_calls.append((int(group_x), int(group_y), int(group_z)))
+            return original_load_bridge_gas_run(group_x, group_y, group_z)
+
+        def fail_load_bridge_dose(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal timed modify-gas reaction must not load bridge optical dose")
+
+        def fail_sync_world(bridge: GPUBridge, world: WorldEngine, **kwargs: object) -> None:
+            if bridge is engine.bridge:
+                raise AssertionError("formal timed modify-gas reaction must not sync CPU mirrors")
+
+        monkeypatch.setattr(load_bridge_gas_program, "run", count_load_bridge_gas)
+        monkeypatch.setattr(load_bridge_dose_program, "run", fail_load_bridge_dose)
+        monkeypatch.setattr(GPUBridge, "sync_world", fail_sync_world)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            assert pipeline.begin_formal_reaction_segment(engine, "before_motion") is True
+            batch = pipeline.run_timed_actions(
+                engine,
+                solve_cell_mask=np.ones((engine.height, engine.width), dtype=np.bool_),
+            )
+            assert batch is FORMAL_GPU_EMPTY_DEFERRED_BATCH
+            assert pipeline.flush_formal_reaction_segment(engine, "before_motion") is True
+        finally:
+            pipeline.end_formal_reaction_segment(engine, "before_motion")
+            engine._world_simulation_frame_active = previous_frame_active
+
+        gas = _bridge_gas_concentration(engine)
+        ambient = np.frombuffer(engine.bridge.textures["ambient_temperature"].read(), dtype="f4").reshape(
+            engine.ambient_temperature.shape
+        )
+        assert load_bridge_gas_calls == [(1, 1, engine.gas_concentration.shape[0])]
+        assert pipeline.last_cpu_mirror_downloaded is False
+        assert np.isclose(float(gas[water_gas, gas_y, gas_x]), 0.75)
+        assert np.isclose(float(ambient[gas_y, gas_x]), 41.0)
+    finally:
+        engine.close()
+
+
+def test_formal_gpu_reaction_direct_core_skips_scatter_and_consumes_local_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=16, height=16, gas_cell_size=4)
+    pipeline = engine.reaction_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU reaction pipeline is not available")
+
+    class ForbiddenScatterProgram:
+        def __getitem__(self, name: str) -> object:
+            raise AssertionError(f"formal direct-core reaction must not bind scatter uniform {name}")
+
+        def run(self, *args: object, **kwargs: object) -> None:
+            raise AssertionError("formal direct-core reaction must not run deferred/meta scatter shader")
+
+    try:
+        engine.replace_reaction_table(
+            [
+                ReactionAction(ReactionType.MODIFY_GAS, gas_species="water_gas", speed=10.0, duration=0),
+                ReactionAction(
+                    ReactionType.EMIT_MATERIAL,
+                    emit_material="sand_powder",
+                    direction=Direction.RIGHT,
+                    velocity=(2.0, 0.5),
+                    duration=0,
+                ),
+                ReactionAction(ReactionType.MODIFY_TEMPERATURE, delta=1.0, duration=0),
+            ],
+            {
+                "material_material": [],
+                "material_gas": [],
+                "material_light": [],
+                "gas_gas": [],
+                "gas_light": [],
+                "self_rules": [
+                    SelfReactionRule(
+                        material="sand_powder",
+                        trigger_slot_index=2,
+                        min_temperature=-1000.0,
+                        max_temperature=10000.0,
+                    )
+                ],
+            },
+        )
+        engine.patch_material("gold_solid", reaction_slots=(1, 2, -1, -1, -1, -1, -1, -1))
+        engine.patch_material("sand_powder", reaction_slots=(-1, -1, 3, -1, -1, -1, -1, -1))
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(4, 4, "gold_solid", mark_dirty=False)
+        engine.timer_pack[4, 4, 0] = 1
+        engine.timer_pack[4, 4, 1] = 1
+        engine.velocity[4, 4] = np.array([1.25, -0.5], dtype=np.float32)
+        engine.active.mark_rect(0, 0, engine.width, engine.height)
+        engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "gas_concentration",
+            "ambient_temperature",
+            "flow_velocity",
+            "cell_optical_dose",
+            "gas_optical_dose",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        for scatter_program_name in (
+            "scatter_local_action_outputs",
+            "scatter_local_action_deferred_meta_outputs",
+            "scatter_local_action_tail_outputs",
+        ):
+            pipeline.programs[scatter_program_name] = ForbiddenScatterProgram()
+
+        velocity_copy_calls = 0
+        material_side_effect_direct_flags: list[bool] = []
+        gas_side_effect_direct_flags: list[bool] = []
+        segment_accumulate_direct_flags: list[bool] = []
+        original_velocity_copy = pipeline._copy_current_velocity_to_next_role
+        original_material_side_effect = pipeline._run_cell_material_side_effect_pass
+        original_gas_side_effect = pipeline._run_cell_gas_side_effect_pass
+        original_accumulate = pipeline._accumulate_segment_cell_transient_state
+
+        def spy_velocity_copy(*args: object, **kwargs: object) -> object:
+            nonlocal velocity_copy_calls
+            velocity_copy_calls += 1
+            return original_velocity_copy(*args, **kwargs)
+
+        def spy_material_side_effect(*args: object, direct_core_outputs: bool = False, **kwargs: object) -> object:
+            material_side_effect_direct_flags.append(bool(direct_core_outputs))
+            return original_material_side_effect(*args, direct_core_outputs=direct_core_outputs, **kwargs)
+
+        def spy_gas_side_effect(*args: object, direct_core_outputs: bool = False, **kwargs: object) -> object:
+            gas_side_effect_direct_flags.append(bool(direct_core_outputs))
+            return original_gas_side_effect(*args, direct_core_outputs=direct_core_outputs, **kwargs)
+
+        def spy_accumulate(*args: object, direct_core_outputs: bool = False, **kwargs: object) -> object:
+            segment_accumulate_direct_flags.append(bool(direct_core_outputs))
+            return original_accumulate(*args, direct_core_outputs=direct_core_outputs, **kwargs)
+
+        monkeypatch.setattr(pipeline, "_copy_current_velocity_to_next_role", spy_velocity_copy)
+        monkeypatch.setattr(pipeline, "_run_cell_material_side_effect_pass", spy_material_side_effect)
+        monkeypatch.setattr(pipeline, "_run_cell_gas_side_effect_pass", spy_gas_side_effect)
+        monkeypatch.setattr(pipeline, "_accumulate_segment_cell_transient_state", spy_accumulate)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            assert pipeline.begin_formal_reaction_segment(engine, "before_motion") is True
+            timed_batch = pipeline.run_timed_actions(
+                engine,
+                solve_cell_mask=np.ones((engine.height, engine.width), dtype=np.bool_),
+            )
+            self_batch = pipeline.run_self_actions(
+                engine,
+                solve_cell_mask=np.ones((engine.height, engine.width), dtype=np.bool_),
+            )
+            assert timed_batch is FORMAL_GPU_EMPTY_DEFERRED_BATCH
+            assert self_batch is FORMAL_GPU_EMPTY_DEFERRED_BATCH
+            assert pipeline.flush_formal_reaction_segment(engine, "before_motion") is True
+        finally:
+            pipeline.end_formal_reaction_segment(engine, "before_motion")
+            engine._world_simulation_frame_active = previous_frame_active
+
+        core = _bridge_cell_core(engine)
+        gas = _bridge_gas_concentration(engine)
+        water_gas = engine.rulebook.gas_id("water_gas")
+        gas_y, gas_x = engine.cell_to_gas(4, 4)
+
+        assert velocity_copy_calls >= 2
+        assert material_side_effect_direct_flags == [True]
+        assert gas_side_effect_direct_flags == [True]
+        assert segment_accumulate_direct_flags and all(segment_accumulate_direct_flags)
+        assert int(core["material_id"][4, 5]) == engine.rulebook.material_id("sand_powder")
+        assert np.allclose(core["velocity"][4, 5], np.array([2.0, 0.5], dtype=np.float32), atol=1.0e-3)
+        assert np.allclose(core["velocity"][4, 4], np.array([1.25, -0.5], dtype=np.float32), atol=1.0e-3)
+        assert int(core["cell_flags"][4, 4]) & int(CellFlag.REACTION_LATCHED)
+        assert float(gas[water_gas, gas_y, gas_x]) > 0.5
+    finally:
+        engine.close()
+
+
 def test_formal_gpu_collapse_output_publish_requires_authoritative_cell_core(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -46038,7 +52396,12 @@ def test_gpu_falling_island_missing_reservation_requires_gpu_instead_of_cpu_fall
     monkeypatch.setattr(engine.motion_solver, "_resolve_island_dda_target", fail_cpu_dda)
 
     with pytest.raises(RuntimeError, match="falling-island reservation; CPU fallback is disabled"):
-        engine.motion_solver._plan_falling_island_reservations(engine, pending_components, use_gpu=True)
+        engine.motion_solver._plan_falling_island_reservations(
+            engine,
+            pending_components,
+            dt=1.0 / 60.0,
+            use_gpu=True,
+        )
 
 
 def test_gpu_falling_island_relabel_failure_requires_gpu_instead_of_cpu_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -46072,6 +52435,22 @@ def test_gpu_falling_island_relabel_failure_requires_gpu_instead_of_cpu_fallback
             skip_shed=True,
             use_gpu_components=True,
         )
+
+
+def test_gpu_component_metadata_fallback_does_not_synthesize_non_rectangular_bbox_coords() -> None:
+    engine = WorldEngine(width=8, height=8)
+    try:
+        rectangular = np.asarray([7, 1, 2, 3, 4, 4], dtype=np.int32)
+        entry = engine.motion_solver._component_entry_from_gpu_metadata(rectangular)
+        assert entry.coords.tolist() == [[2, 1], [2, 2], [3, 1], [3, 2]]
+        assert entry.bbox == (1, 2, 3, 4)
+        assert entry.cell_count == 4
+
+        non_rectangular = np.asarray([8, 1, 2, 3, 4, 3], dtype=np.int32)
+        with pytest.raises(RuntimeError, match="exact non-rectangular coords"):
+            engine.motion_solver._component_entry_from_gpu_metadata(non_rectangular)
+    finally:
+        engine.close()
 
 
 def test_world_engine_rejects_auto_simulation_backend() -> None:
@@ -46241,8 +52620,1797 @@ def test_gpu_collapse_formal_frame_publishes_bridge_state_without_cpu_mirror_dow
     assert int(unpacked["phase"][1, 1]) == int(Phase.FALLING_ISLAND)
     island_id = int(cell["island_id"][1, 1])
     assert island_id > 0
-    assert island_id in engine.islands
-    assert engine.islands[island_id].bbox == (12, 10, 13, 11)
+    runtime_count = np.frombuffer(engine.bridge.buffers["island_runtime_count"].read(size=4), dtype=np.int32, count=1)
+    runtime_records = _bridge_island_runtime_records(engine)
+    assert "island_runtime" in engine.bridge.gpu_authoritative_resources
+    assert int(runtime_count[0]) == 1
+    assert runtime_records.shape == (1,)
+    assert int(runtime_records[0]["island_id"]) == island_id
+    assert runtime_records[0]["buffer_bbox"].tolist() == [12, 10, 13, 11]
+
+
+def test_gpu_collapse_formal_materialize_does_not_read_component_buffers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NoReadComponentBuffer:
+        def __init__(self, wrapped: object, name: str) -> None:
+            self._wrapped = wrapped
+            self._name = name
+
+        def read(self, *args: object, **kwargs: object) -> bytes:
+            raise AssertionError(f"formal GPU collapse must not read {self._name}")
+
+        def write(self, *args: object, **kwargs: object) -> object:
+            return self._wrapped.write(*args, **kwargs)  # type: ignore[attr-defined]
+
+        def bind_to_storage_buffer(self, *args: object, **kwargs: object) -> object:
+            return self._wrapped.bind_to_storage_buffer(*args, **kwargs)  # type: ignore[attr-defined]
+
+        def orphan(self, *args: object, **kwargs: object) -> object:
+            return self._wrapped.orphan(*args, **kwargs)  # type: ignore[attr-defined]
+
+        def release(self, *args: object, **kwargs: object) -> object:
+            return self._wrapped.release(*args, **kwargs)  # type: ignore[attr-defined]
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._wrapped, name)
+
+    engine = WorldEngine(width=24, height=24)
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    engine.clear_cell_region(0, 0, engine.width, engine.height)
+    engine.set_cell(12, 10, "log_solid", mark_dirty=False)
+    engine.bridge.sync_world(engine)
+
+    original_ensure_resources = pipeline._ensure_resources
+
+    def ensure_no_component_readback(*args: object, **kwargs: object) -> object:
+        resources = original_ensure_resources(*args, **kwargs)
+        for name in ("component_labels", "component_count"):
+            current = getattr(resources, name)
+            if not isinstance(current, NoReadComponentBuffer):
+                setattr(resources, name, NoReadComponentBuffer(current, name))
+        return resources
+
+    monkeypatch.setattr(pipeline, "_ensure_resources", ensure_no_component_readback)
+
+    previous_frame_active = engine._world_simulation_frame_active
+    engine._world_simulation_frame_active = True
+    try:
+        engine.collapse_dirty_regions.append((11, 9, 14, 12))
+        engine.collapse_solver.step(engine)
+    finally:
+        engine._world_simulation_frame_active = previous_frame_active
+
+    assert engine.collapse_solver.last_backend == "gpu"
+    assert {"cell_core", "material", "island_id", "island_runtime", "collapse_component_label"}.issubset(
+        engine.bridge.gpu_authoritative_resources
+    )
+    unpacked, cell = _readback_cell_window(engine, center_x=12, center_y=10, width=3, height=3)
+    assert int(unpacked["phase"][1, 1]) == int(Phase.FALLING_ISLAND)
+    island_id = int(cell["island_id"][1, 1])
+    runtime_records = _bridge_island_runtime_records(engine)
+    assert runtime_records.shape == (1,)
+    assert int(runtime_records[0]["island_id"]) == island_id
+    assert runtime_records[0]["buffer_bbox"].tolist() == [12, 10, 13, 11]
+
+
+def test_gpu_collapse_formal_materialize_uses_compact_component_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=160, height=160)
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(80, 80, "log_solid", mark_dirty=False)
+        engine.bridge.sync_world(engine)
+        engine.collapse_dirty_regions.clear()
+        engine.collapse_deferred_regions.clear()
+        assert engine.bridge.ctx is not None
+        pipeline._ensure_programs(engine.bridge.ctx)
+
+        def fail_dense_run(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal collapse materialize/runtime must not use dense component slots")
+
+        for program_name in (
+            "materialize_dense_components",
+            "materialize_dense_components_aux",
+            "publish_dense_component_island_runtime",
+        ):
+            monkeypatch.setattr(pipeline.programs[program_name], "run", fail_dense_run)
+        monkeypatch.setattr(pipeline.programs["publish_compact_component_island_runtime"], "run", fail_dense_run)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.collapse_dirty_regions.append((79, 79, 82, 82))
+            engine.collapse_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        runtime_count = np.frombuffer(engine.bridge.buffers["island_runtime_count"].read(size=4), dtype=np.int32, count=1)
+        runtime_records = _bridge_island_runtime_records(engine)
+
+        assert engine.collapse_solver.last_backend == "gpu"
+        assert int(runtime_count[0]) == 1
+        assert runtime_records.shape == (1,)
+        assert runtime_records[0]["buffer_bbox"].tolist() == [80, 80, 81, 81]
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_dirty_region_stays_bounded_to_active_tiles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=160, height=160)
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(80, 80, "log_solid", mark_dirty=False)
+        engine.bridge.sync_world(engine)
+        engine.collapse_dirty_regions.clear()
+        engine.collapse_deferred_regions.clear()
+        classified_regions: list[tuple[int, int, int, int]] = []
+        original_classify_region_textures = pipeline.classify_region_textures
+
+        def record_classify_region_textures(
+            world: WorldEngine,
+            x0: int,
+            y0: int,
+            x1: int,
+            y1: int,
+            **kwargs: object,
+        ) -> object:
+            classified_regions.append((int(x0), int(y0), int(x1), int(y1)))
+            return original_classify_region_textures(world, x0, y0, x1, y1, **kwargs)
+
+        monkeypatch.setattr(pipeline, "classify_region_textures", record_classify_region_textures)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.collapse_dirty_regions.append((79, 79, 82, 82))
+            engine.collapse_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        solve_mask = engine.collapse_solver.last_solve_region_mask
+        ys, xs = np.nonzero(solve_mask)
+        assert xs.size > 0
+        assert ys.size > 0
+        assert not bool(np.all(solve_mask))
+        assert int(xs.min()) > 0
+        assert int(ys.min()) > 0
+        assert int(xs.max()) < engine.width - 1
+        assert int(ys.max()) < engine.height - 1
+        assert all(region != (0, 0, engine.width, engine.height) for region in classified_regions)
+
+        unpacked, cell = _readback_cell_window(engine, center_x=80, center_y=80, width=3, height=3)
+        assert int(unpacked["phase"][1, 1]) == int(Phase.FALLING_ISLAND)
+        assert int(cell["island_id"][1, 1]) > 0
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_dirty_bbox_expansion_does_not_readback_component_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=160, height=160)
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(80, 80, "log_solid", mark_dirty=False)
+        engine.bridge.sync_world(engine)
+        engine.collapse_dirty_regions.clear()
+        engine.collapse_deferred_regions.clear()
+
+        def fail_texture_summary(*args: object, **kwargs: object) -> np.ndarray:
+            raise AssertionError("formal dirty bbox expansion must not read component metadata")
+
+        def fail_array_summary(*args: object, **kwargs: object) -> np.ndarray:
+            raise AssertionError("formal dirty bbox expansion must not summarize masks through CPU arrays")
+
+        monkeypatch.setattr(pipeline, "summarize_labeled_component_texture", fail_texture_summary)
+        monkeypatch.setattr(pipeline, "summarize_labeled_components", fail_array_summary)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.collapse_dirty_regions.append((79, 79, 82, 82))
+            engine.collapse_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        solve_mask = engine.collapse_solver.last_solve_region_mask
+        ys, xs = np.nonzero(solve_mask)
+        assert xs.size > 0
+        assert ys.size > 0
+        assert not bool(np.all(solve_mask))
+        assert int(xs.min()) > 0
+        assert int(ys.min()) > 0
+        assert int(xs.max()) < engine.width - 1
+        assert int(ys.max()) < engine.height - 1
+
+        unpacked, cell = _readback_cell_window(engine, center_x=80, center_y=80, width=3, height=3)
+        assert engine.collapse_solver.last_backend == "gpu"
+        assert int(unpacked["phase"][1, 1]) == int(Phase.FALLING_ISLAND)
+        assert int(cell["island_id"][1, 1]) > 0
+        runtime_records = _bridge_island_runtime_records(engine)
+        assert runtime_records.shape == (1,)
+        assert runtime_records[0]["buffer_bbox"].tolist() == [80, 80, 81, 81]
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_multiple_dirty_regions_do_not_merge_into_large_bbox() -> None:
+    engine = WorldEngine(width=256, height=96)
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(40, 48, "log_solid", mark_dirty=False)
+        engine.set_cell(200, 48, "log_solid", mark_dirty=False)
+        engine.bridge.sync_world(engine)
+        engine.collapse_dirty_regions.clear()
+        engine.collapse_deferred_regions.clear()
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.collapse_dirty_regions.append((39, 47, 42, 50))
+            engine.collapse_dirty_regions.append((199, 47, 202, 50))
+            engine.collapse_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        solve_mask = engine.collapse_solver.last_solve_region_mask
+        assert engine.collapse_solver.last_solve_region_count == 2
+        assert bool(np.any(solve_mask[:, :96]))
+        assert bool(np.any(solve_mask[:, 160:]))
+        assert not bool(np.any(solve_mask[:, 112:144]))
+
+        left_unpacked, left_cell = _readback_cell_window(engine, center_x=40, center_y=48, width=3, height=3)
+        right_unpacked, right_cell = _readback_cell_window(engine, center_x=200, center_y=48, width=3, height=3)
+        assert int(left_unpacked["phase"][1, 1]) == int(Phase.FALLING_ISLAND)
+        assert int(right_unpacked["phase"][1, 1]) == int(Phase.FALLING_ISLAND)
+        assert int(left_cell["island_id"][1, 1]) > 0
+        assert int(right_cell["island_id"][1, 1]) > 0
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_dirty_boundary_does_not_support_hanging_component(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=160, height=160)
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        for x in range(32, 81):
+            engine.set_cell(x, 80, "log_solid", mark_dirty=False)
+        engine.bridge.sync_world(engine)
+        engine.collapse_dirty_regions.clear()
+        engine.collapse_deferred_regions.clear()
+        original_classify_region_textures = pipeline.classify_region_textures
+
+        def assert_region_boundary_is_not_support(
+            world: WorldEngine,
+            x0: int,
+            y0: int,
+            x1: int,
+            y1: int,
+            **kwargs: object,
+        ) -> object:
+            assert not bool(kwargs.get("treat_region_boundary_as_support", False))
+            return original_classify_region_textures(world, x0, y0, x1, y1, **kwargs)
+
+        monkeypatch.setattr(pipeline, "classify_region_textures", assert_region_boundary_is_not_support)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.collapse_dirty_regions.append((79, 79, 82, 82))
+            engine.collapse_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        core = _bridge_cell_core(engine)
+        bridge_island_id = np.frombuffer(
+            engine.bridge.buffers["island_id"].read(size=engine.width * engine.height * np.dtype(np.int32).itemsize),
+            dtype=np.int32,
+        ).reshape((engine.height, engine.width))
+        assert engine.collapse_solver.last_backend == "gpu"
+        assert not bool(np.all(engine.collapse_solver.last_solve_region_mask))
+        assert np.all(core["phase"][80, 32:81] == int(Phase.FALLING_ISLAND))
+        island_ids = set(int(value) for value in bridge_island_id[80, 32:81].tolist())
+        assert len(island_ids) == 1
+        assert next(iter(island_ids)) > 0
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_dirty_component_connected_to_external_anchor_does_not_fall() -> None:
+    engine = WorldEngine(width=160, height=160)
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(0, 80, "sandstone_solid", mark_dirty=False)
+        for x in range(1, 101):
+            engine.set_cell(x, 80, "log_solid", mark_dirty=False)
+        engine.bridge.sync_world(engine)
+        engine.collapse_dirty_regions.clear()
+        engine.collapse_deferred_regions.clear()
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.collapse_dirty_regions.append((99, 79, 102, 82))
+            engine.collapse_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        core = _bridge_cell_core(engine)
+        phases = core["phase"][80, 0:101]
+        solve_mask = engine.collapse_solver.last_solve_region_mask
+        ys, xs = np.nonzero(solve_mask)
+        assert engine.collapse_solver.last_backend == "gpu"
+        assert xs.size > 0
+        assert ys.size > 0
+        assert not bool(np.all(solve_mask))
+        assert int(xs.min()) > 0
+        assert int(xs.max()) == engine.width - 1
+        assert np.all(phases == int(Phase.STATIC_SOLID))
+        assert int(np.count_nonzero(phases == int(Phase.FALLING_ISLAND))) == 0
+        assert _bridge_island_runtime_records(engine).shape == (0,)
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_connected_executor_source_does_not_use_horizontal_search_band() -> None:
+    source = inspect.getsource(GPUCollapsePipeline.execute_formal_connected_expansion)
+    tile_source = inspect.getsource(GPUCollapsePipeline._solve_formal_connected_tile_textures)
+    assert "_formal_horizontal_search_region" not in source
+    assert "_execute_formal_connected_search_region" not in source
+    assert "_formal_connected_region_layers" not in source
+    assert "_formal_connected_candidate_regions" not in source
+    assert "_seed_formal_texture_region_tile_worklist" in tile_source
+    assert "_classify_formal_connected_tile_textures" in tile_source
+    assert "_solve_formal_connected_tile_support_textures" in tile_source
+    assert "eligibility_texture=resources.structural_tex" in tile_source
+    assert "_solve_formal_connected_tile_frontier" not in tile_source
+    assert "_solve_formal_connected_frontier_texture" not in tile_source
+    assert "_filter_formal_connected_eligibility" not in tile_source
+    assert "classify_region_textures" not in tile_source
+
+
+def test_gpu_collapse_formal_pending_dirty_tile_queue_dispatches_without_mask_readback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NoReadBuffer:
+        def __init__(self, wrapped: object) -> None:
+            self._wrapped = wrapped
+
+        def read(self, *args: object, **kwargs: object) -> bytes:
+            raise AssertionError("formal dirty tile queue dispatch must not read dirty tile mask")
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._wrapped, name)
+
+    engine = WorldEngine(width=32, height=32)
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        collapse_dirty.ensure_collapse_structure_dirty_tile_mask(engine, clear=True)
+        dirty_count, dirty_list, dirty_dispatch_args = collapse_dirty.ensure_collapse_structure_dirty_tile_queue(
+            engine,
+            clear=True,
+        )
+        dirty_count.write(np.asarray([1], dtype=np.uint32).tobytes())
+        dirty_list.write(np.asarray([0, 0], dtype=np.int32).tobytes())
+        dirty_dispatch_args.write(np.asarray([1, 1, 1], dtype=np.uint32).tobytes())
+        set_collapse_structure_dirty_tile_bounds(engine, (0, 0, 1, 1))
+        engine._gpu_collapse_structure_dirty_tiles_pending = True
+
+        raw_mask = engine.bridge.buffers[COLLAPSE_STRUCTURE_DIRTY_TILE_MASK_BUFFER]
+        engine.bridge.buffers[COLLAPSE_STRUCTURE_DIRTY_TILE_MASK_BUFFER] = NoReadBuffer(raw_mask)
+        calls: list[WorldEngine] = []
+
+        def record_dirty_queue_path(world: WorldEngine) -> int:
+            calls.append(world)
+            world._gpu_collapse_structure_dirty_tiles_pending = False
+            return 0
+
+        monkeypatch.setattr(pipeline, "execute_formal_connected_dirty_tile_queue", record_dirty_queue_path)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.collapse_dirty_regions.clear()
+            engine.collapse_deferred_regions.clear()
+            engine.collapse_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+            engine.bridge.buffers[COLLAPSE_STRUCTURE_DIRTY_TILE_MASK_BUFFER] = raw_mask
+
+        assert calls == [engine]
+        assert engine.collapse_solver.last_backend == "gpu"
+        assert engine.collapse_solver.last_dirty_region_count_before == 1
+        assert engine.collapse_solver.last_solve_region_count == 1
+        assert engine.collapse_dirty_regions == []
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_dirty_tile_queue_path_does_not_read_dirty_mask_buffer() -> None:
+    class NoReadBuffer:
+        def __init__(self, wrapped: object) -> None:
+            self._wrapped = wrapped
+
+        def read(self, *args: object, **kwargs: object) -> bytes:
+            raise AssertionError("formal dirty tile queue path must not read dirty tile mask")
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._wrapped, name)
+
+    engine = WorldEngine(width=32, height=32)
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(8, 8, "log_solid", mark_dirty=False)
+        engine.bridge.sync_world(engine)
+        engine.collapse_dirty_regions.clear()
+        engine.collapse_deferred_regions.clear()
+
+        collapse_dirty.ensure_collapse_structure_dirty_tile_mask(engine, clear=True)
+        dirty_count, dirty_list, dirty_dispatch_args = collapse_dirty.ensure_collapse_structure_dirty_tile_queue(
+            engine,
+            clear=True,
+        )
+        dirty_count.write(np.asarray([1], dtype=np.uint32).tobytes())
+        dirty_list.write(np.asarray([0, 0], dtype=np.int32).tobytes())
+        dirty_dispatch_args.write(np.asarray([1, 1, 1], dtype=np.uint32).tobytes())
+        set_collapse_structure_dirty_tile_bounds(engine, (0, 0, 1, 1))
+        engine._gpu_collapse_structure_dirty_tiles_pending = True
+
+        raw_mask = engine.bridge.buffers[COLLAPSE_STRUCTURE_DIRTY_TILE_MASK_BUFFER]
+        engine.bridge.buffers[COLLAPSE_STRUCTURE_DIRTY_TILE_MASK_BUFFER] = NoReadBuffer(raw_mask)
+        previous_frame_active = engine._world_simulation_frame_active
+        try:
+            engine._world_simulation_frame_active = True
+            engine.collapse_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+            engine.bridge.buffers[COLLAPSE_STRUCTURE_DIRTY_TILE_MASK_BUFFER] = raw_mask
+
+        unpacked, cell = _readback_cell_window(engine, center_x=8, center_y=8, width=3, height=3)
+        assert engine.collapse_solver.last_backend == "gpu"
+        assert engine.collapse_solver.last_dirty_region_count_before == 1
+        assert engine.collapse_solver.last_solve_region_count == 1
+        assert engine._gpu_collapse_structure_dirty_tiles_pending is False
+        assert int(unpacked["phase"][1, 1]) == int(Phase.FALLING_ISLAND)
+        assert int(cell["island_id"][1, 1]) > 0
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_dirty_tile_queue_prepares_without_region_upload_or_cpu_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pipeline = GPUCollapsePipeline()
+    fake_world = SimpleNamespace(
+        width=256,
+        height=160,
+        active=SimpleNamespace(tile_size=32, tile_width=8, tile_height=5),
+        profile_passes_enabled=False,
+    )
+    resources = SimpleNamespace(structural_tex="structural", support_ping="support", phase_out_tex="phase")
+    calls: list[tuple[object, ...]] = []
+    set_collapse_structure_dirty_tile_bounds(fake_world, (0, 0, 8, 5))
+
+    def fail_region_prepare(*args: object, **kwargs: object) -> None:
+        raise AssertionError("formal dirty queue must not prepare resources through region upload")
+
+    def prepare_without_upload(
+        world: object,
+        region: tuple[int, int, int, int] | None = None,
+    ) -> tuple[object, int, int, int, int]:
+        calls.append(("prepare_without_upload", region))
+        assert region == (0, 0, fake_world.width, fake_world.height)
+        x0, y0, x1, y1 = region
+        return resources, x0, y0, x1 - x0, y1 - y0
+
+    monkeypatch.setattr(pipeline, "_prepare_formal_connected_tile_resources", fail_region_prepare)
+    monkeypatch.setattr(pipeline, "_prepare_formal_connected_tile_resources_without_input_upload", prepare_without_upload)
+    monkeypatch.setattr(
+        pipeline,
+        "_seed_formal_texture_region_tile_worklist",
+        lambda world, width, height: calls.append(("tile_region_worklist", width, height)) or "tile_mask",
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_load_authoritative_bridge_connected_tile_inputs",
+        lambda world, prepared, x0, y0, width, height, tile_mask_name: calls.append(
+            ("connected_input_load", x0, y0, width, height, tile_mask_name)
+        ),
+    )
+    monkeypatch.setattr(pipeline, "_solve_formal_connected_dirty_tile_frontier", fail_region_prepare)
+    monkeypatch.setattr(
+        pipeline,
+        "_classify_formal_connected_tile_textures",
+        lambda world, prepared, tile_mask_name, x0, y0, width, height: calls.append(("classify", tile_mask_name)),
+    )
+    monkeypatch.setattr(pipeline, "_solve_formal_connected_dirty_cell_frontier_texture", fail_region_prepare)
+    monkeypatch.setattr(pipeline, "_filter_formal_connected_eligibility", fail_region_prepare)
+    monkeypatch.setattr(
+        pipeline,
+        "_publish_bridge_region_mask",
+        lambda *args, **kwargs: calls.append(("publish", args[3] if len(args) > 3 else None)),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_solve_formal_connected_tile_support_textures",
+        lambda world, prepared, x0, y0, width, height, tile_mask_name: calls.append(("support", tile_mask_name))
+        or "supported",
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "resolve_supported_outcome_textures",
+        lambda world, prepared, supported, x0, y0, width, height, *, eligibility_texture=None, tile_mask_name=None: calls.append(
+            ("resolve", tile_mask_name, eligibility_texture)
+        )
+        or (prepared, width, height),
+    )
+
+    assert pipeline._solve_formal_connected_dirty_tile_textures(fake_world) == (resources, 0, 0, 256, 160)
+    assert calls[:3] == [
+        ("prepare_without_upload", (0, 0, 256, 160)),
+        ("tile_region_worklist", 256, 160),
+        ("connected_input_load", 0, 0, 256, 160, "tile_mask"),
+    ]
+    assert ("resolve", "tile_mask", "structural") in calls
+
+    solve_source = inspect.getsource(GPUCollapsePipeline._solve_formal_connected_dirty_tile_textures)
+    shader_source = inspect.getsource(GPUCollapsePipeline._ensure_programs)
+    producer_source = inspect.getsource(collapse_dirty.mark_collapse_structure_dirty_tiles_from_bridge_cell_core)
+    assert "_prepare_formal_connected_tile_resources(" not in solve_source
+    assert "_prepare_formal_connected_tile_resources_without_input_upload" in solve_source
+    assert "_seed_formal_texture_region_tile_worklist" in solve_source
+    assert "_load_authoritative_bridge_connected_tile_inputs" in solve_source
+    assert "eligibility_texture=resources.structural_tex" in solve_source
+    assert "_solve_formal_connected_tile_frontier" not in solve_source
+    assert "_solve_formal_connected_dirty_tile_frontier" not in solve_source
+    assert "_solve_formal_connected_frontier_texture" not in solve_source
+    assert "_solve_formal_connected_dirty_cell_frontier_texture" not in solve_source
+    assert "_expand_formal_connected_tile_frontier" not in solve_source
+    assert "_expand_formal_connected_cell_frontier" not in solve_source
+    assert "_filter_formal_connected_eligibility" not in solve_source
+    assert "_formal_connected_dirty_tile_queue_resource_region" not in solve_source
+    assert "_upload_region_state" not in solve_source
+    assert "_load_authoritative_bridge_region_inputs" not in solve_source
+    assert ".read(" not in solve_source
+    assert "_active_source_tile_bounds" not in producer_source
+    assert "merge_collapse_structure_dirty_tile_bounds" not in producer_source
+    assert "ivec2 tile = dirty_tile - region_tile_origin" in shader_source
+
+
+def test_gpu_collapse_formal_dirty_connected_hot_passes_use_worklists_without_cpu_mirrors_or_bfs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NoReadBuffer:
+        def __init__(self, wrapped: object, name: str) -> None:
+            self._wrapped = wrapped
+            self._name = name
+
+        def read(self, *args: object, **kwargs: object) -> bytes:
+            raise AssertionError(f"formal dirty connected collapse must not read {self._name} on CPU")
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._wrapped, name)
+
+    engine = WorldEngine(width=96, height=64)
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(8, 8, "log_solid", mark_dirty=False)
+        engine.bridge.sync_world(engine)
+        engine.collapse_dirty_regions.clear()
+        engine.collapse_deferred_regions.clear()
+
+        collapse_dirty.ensure_collapse_structure_dirty_tile_mask(engine, clear=True)
+        dirty_count, dirty_list, dirty_dispatch_args = collapse_dirty.ensure_collapse_structure_dirty_tile_queue(
+            engine,
+            clear=True,
+        )
+        dirty_count.write(np.asarray([1], dtype=np.uint32).tobytes())
+        dirty_list.write(np.asarray([0, 0], dtype=np.int32).tobytes())
+        dirty_dispatch_args.write(np.asarray([1, 1, 1], dtype=np.uint32).tobytes())
+        set_collapse_structure_dirty_tile_bounds(engine, (0, 0, 1, 1))
+        engine._gpu_collapse_structure_dirty_tiles_pending = True
+
+        raw_dirty_mask = engine.bridge.buffers[COLLAPSE_STRUCTURE_DIRTY_TILE_MASK_BUFFER]
+        engine.bridge.buffers[COLLAPSE_STRUCTURE_DIRTY_TILE_MASK_BUFFER] = NoReadBuffer(
+            raw_dirty_mask,
+            COLLAPSE_STRUCTURE_DIRTY_TILE_MASK_BUFFER,
+        )
+
+        def fail_cpu_components(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal dirty connected collapse must not use CPU component BFS")
+
+        def fail_cpu_component_apply(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal dirty connected collapse must not use CPU component materialization")
+
+        monkeypatch.setattr(engine.collapse_solver, "_collapse_unsupported_components", fail_cpu_components)
+        monkeypatch.setattr(engine.collapse_solver, "_collapse_component", fail_cpu_component_apply)
+        _forbid_formal_cpu_connected_dispatch(monkeypatch, engine)
+
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        indirect_calls: list[str] = []
+        indirect_required_programs = (
+            "load_bridge_connected_tile_cell",
+            "load_bridge_connected_tile_cell_aux",
+            "load_bridge_connected_tile_pending",
+            "classify_formal_connected_tiles",
+            "build_formal_connected_axis_masks",
+            "propagate_formal_connected_tiles",
+            "resolve_outcomes_from_supported_connected_tiles",
+            "publish_bridge_region_pending_connected_tiles",
+            "publish_bridge_region_mask_connected_tiles",
+            "publish_bridge_supported_unsupported_masks_connected_tiles",
+            "seed_formal_component_label_frontier",
+            "copy_formal_component_label_buffer_to_texture",
+            "propagate_formal_connected_component_labels",
+            "publish_bridge_region_labels_connected_tiles",
+            "collect_component_labels_connected_tiles",
+            "summarize_compact_components_connected_tiles",
+            "materialize_compact_components_connected_tiles",
+            "materialize_compact_components_aux_connected_tiles",
+            "publish_bridge_region_cell_connected_tiles",
+        )
+        for program_name in indirect_required_programs:
+            program = pipeline.programs[program_name]
+            original_indirect = program.run_indirect
+
+            def fail_direct_run(*args: object, _program_name: str = program_name, **kwargs: object) -> None:
+                raise AssertionError(f"{_program_name} must use connected worklist indirect dispatch")
+
+            def count_indirect(
+                indirect_buffer: object,
+                *,
+                _program_name: str = program_name,
+                _original_indirect: object = original_indirect,
+            ) -> object:
+                indirect_calls.append(_program_name)
+                return _original_indirect(indirect_buffer)
+
+            monkeypatch.setattr(program, "run", fail_direct_run)
+            monkeypatch.setattr(program, "run_indirect", count_indirect)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        try:
+            engine._world_simulation_frame_active = True
+            engine.collapse_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+            engine.bridge.buffers[COLLAPSE_STRUCTURE_DIRTY_TILE_MASK_BUFFER] = raw_dirty_mask
+
+        connected_count = int(
+            np.frombuffer(
+                engine.bridge.buffers[FORMAL_CONNECTED_TILE_COUNT_BUFFER].read(size=4),
+                dtype=np.uint32,
+                count=1,
+            )[0]
+        )
+        connected_dispatch_args = np.frombuffer(
+            engine.bridge.buffers[FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER].read(size=12),
+            dtype=np.uint32,
+            count=3,
+        ).copy()
+        connected_tiles = np.frombuffer(
+            engine.bridge.buffers[FORMAL_CONNECTED_TILE_LIST_BUFFER].read(
+                size=max(1, connected_count) * 2 * np.dtype(np.int32).itemsize
+            ),
+            dtype=np.int32,
+            count=max(1, connected_count) * 2,
+        ).reshape((max(1, connected_count), 2))
+        unpacked, cell = _readback_cell_window(engine, center_x=8, center_y=8, width=3, height=3)
+
+        assert engine.collapse_solver.last_backend == "gpu"
+        assert engine._gpu_collapse_structure_dirty_tiles_pending is False
+        assert int(unpacked["phase"][1, 1]) == int(Phase.FALLING_ISLAND)
+        assert int(cell["island_id"][1, 1]) > 0
+        assert set(indirect_required_programs).issubset(set(indirect_calls))
+        assert connected_count >= 1
+        assert connected_dispatch_args.tolist()[1:] == [1, 1]
+        assert [0, 0] in connected_tiles[:connected_count].tolist()
+        assert {
+            FORMAL_CONNECTED_TILE_FRONTIER_BUFFER,
+            FORMAL_CONNECTED_TILE_LIST_BUFFER,
+            FORMAL_CONNECTED_TILE_COUNT_BUFFER,
+            FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER,
+        }.issubset(engine.bridge.gpu_authoritative_resources)
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_dirty_connected_frontier_sources_use_jump_schedule_not_diameter_flood() -> None:
+    solve_source = inspect.getsource(GPUCollapsePipeline._solve_formal_connected_dirty_tile_textures)
+    tile_source = inspect.getsource(GPUCollapsePipeline._solve_formal_connected_dirty_tile_frontier)
+    cell_source = inspect.getsource(GPUCollapsePipeline._solve_formal_connected_dirty_cell_frontier_texture)
+    tile_expand_source = inspect.getsource(GPUCollapsePipeline._expand_formal_connected_tile_frontier)
+    cell_expand_source = inspect.getsource(GPUCollapsePipeline._expand_formal_connected_cell_frontier)
+
+    for source in (solve_source, tile_source, cell_source):
+        assert "_formal_connected_expansion_pass_count" not in source
+        assert "for _ in range(self._formal_connected_expansion_pass_count(world))" not in source
+        assert ".run(tile_width, tile_height, 1)" not in source
+        assert ".read(" not in source
+
+    assert "_formal_connected_dirty_tile_jump_schedule" in tile_source
+    assert "_formal_connected_dirty_jump_schedule" in cell_source
+    assert "jump=jump" in tile_source
+    assert "jump=jump" in cell_source
+    assert "current_frontier=cell_frontier" in cell_source
+    assert "current_frontier=connected_tile_frontier" not in cell_source
+    assert "FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER" not in cell_source
+    assert "_accumulate_formal_connected_cell_frontier_tiles" not in cell_source
+    assert "_clear_formal_connected_cell_frontier_tiles" in cell_source
+    assert "cell_frontier, scratch_frontier = scratch_frontier, cell_frontier" in cell_source
+    assert "jump_generation=self._next_formal_connected_cell_frontier_generation()" in cell_source
+    assert 'program["jump"]' in tile_expand_source
+    assert 'program["jump"]' in cell_expand_source
+    assert 'program["jump_generation"]' in cell_expand_source
+    assert "run_indirect" in tile_expand_source
+    assert "run_indirect" in cell_expand_source
+
+
+def test_gpu_collapse_formal_connected_frontier_sources_use_jump_schedule_not_diameter_flood() -> None:
+    tile_source = inspect.getsource(GPUCollapsePipeline._solve_formal_connected_tile_frontier)
+    cell_source = inspect.getsource(GPUCollapsePipeline._solve_formal_connected_frontier_texture)
+    tile_expand_source = inspect.getsource(GPUCollapsePipeline._expand_formal_connected_tile_frontier)
+    cell_expand_source = inspect.getsource(GPUCollapsePipeline._expand_formal_connected_cell_frontier)
+    tile_schedule_source = inspect.getsource(GPUCollapsePipeline._formal_connected_tile_jump_schedule)
+    cell_schedule_source = inspect.getsource(GPUCollapsePipeline._formal_connected_cell_jump_schedule)
+    expansion_count_source = inspect.getsource(GPUCollapsePipeline._formal_connected_expansion_pass_count)
+    pipeline = GPUCollapsePipeline()
+    tiny_world = SimpleNamespace(active=SimpleNamespace(tile_width=2, tile_height=2))
+    huge_world = SimpleNamespace(active=SimpleNamespace(tile_width=4096, tile_height=2048))
+
+    for source in (tile_source, cell_source):
+        assert "_formal_connected_expansion_pass_count" not in source
+        assert "for _ in range(self._formal_connected_expansion_pass_count(world))" not in source
+        assert "tile_width + tile_height" not in source
+        assert "jump=1" not in source
+        assert "jump=jump" in source
+        assert ".read(" not in source
+
+    assert "_formal_connected_tile_jump_schedule" in tile_source
+    assert "_formal_connected_cell_jump_schedule" in cell_source
+    assert "current_frontier=connected_frontier" in tile_source
+    assert "current_frontier=cell_frontier" in cell_source
+    assert "current_frontier=connected_tile_frontier" not in cell_source
+    assert "FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER" not in cell_source
+    assert "_accumulate_formal_connected_cell_frontier_tiles" not in cell_source
+    assert "_clear_formal_connected_cell_frontier_tiles" in cell_source
+    assert "jump_generation=self._next_formal_connected_cell_frontier_generation()" in cell_source
+    assert "cell_frontier, scratch_frontier = scratch_frontier, cell_frontier" in cell_source
+    assert "current_frontier, scratch_frontier = scratch_frontier, current_frontier" not in tile_source
+    assert "run_indirect" in tile_expand_source
+    assert "run_indirect" in cell_expand_source
+    assert 'program["jump_generation"]' in cell_expand_source
+
+    for source in (tile_schedule_source, cell_schedule_source, expansion_count_source):
+        assert "tile_width + tile_height" not in source
+        assert "world.width + world.height" not in source
+
+    tiny_schedule = pipeline._formal_connected_tile_jump_schedule(tiny_world)
+    huge_schedule = pipeline._formal_connected_tile_jump_schedule(huge_world)
+    huge_diameter = int(huge_world.active.tile_width) + int(huge_world.active.tile_height)
+
+    assert tiny_schedule == pipeline._formal_connected_dirty_tile_jump_schedule(tiny_world)
+    assert huge_schedule == pipeline._formal_connected_dirty_tile_jump_schedule(huge_world)
+    assert len(huge_schedule) < huge_diameter
+    assert len(huge_schedule) < huge_diameter // 64
+
+
+def test_gpu_collapse_formal_dirty_connected_hot_path_does_not_call_expansion_pass_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=32, height=32)
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(8, 8, "log_solid", mark_dirty=False)
+        engine.bridge.sync_world(engine)
+        engine.collapse_dirty_regions.clear()
+        engine.collapse_deferred_regions.clear()
+
+        collapse_dirty.ensure_collapse_structure_dirty_tile_mask(engine, clear=True)
+        dirty_count, dirty_list, dirty_dispatch_args = collapse_dirty.ensure_collapse_structure_dirty_tile_queue(
+            engine,
+            clear=True,
+        )
+        dirty_count.write(np.asarray([1], dtype=np.uint32).tobytes())
+        dirty_list.write(np.asarray([0, 0], dtype=np.int32).tobytes())
+        dirty_dispatch_args.write(np.asarray([1, 1, 1], dtype=np.uint32).tobytes())
+        set_collapse_structure_dirty_tile_bounds(engine, (0, 0, 1, 1))
+        engine._gpu_collapse_structure_dirty_tiles_pending = True
+
+        def fail_expansion_pass_count(*args: object, **kwargs: object) -> int:
+            raise AssertionError("formal dirty connected hot path must not use tile-grid-diameter frontier flood")
+
+        monkeypatch.setattr(pipeline, "_formal_connected_expansion_pass_count", fail_expansion_pass_count)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        try:
+            engine._world_simulation_frame_active = True
+            engine.collapse_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        unpacked, cell = _readback_cell_window(engine, center_x=8, center_y=8, width=3, height=3)
+        assert engine.collapse_solver.last_backend == "gpu"
+        assert engine._gpu_collapse_structure_dirty_tiles_pending is False
+        assert int(unpacked["phase"][1, 1]) == int(Phase.FALLING_ISLAND)
+        assert int(cell["island_id"][1, 1]) > 0
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_connected_jump_frontier_materializes_long_cross_tile_l_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=160, height=128)
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        y = 40
+        x0 = 12
+        x1 = 132
+        turn_x = x1 - 1
+        y1 = 104
+        for x in range(x0, x1):
+            engine.set_cell(x, y, "log_solid", mark_dirty=False)
+        for vertical_y in range(y, y1):
+            engine.set_cell(turn_x, vertical_y, "log_solid", mark_dirty=False)
+        engine.bridge.sync_world(engine)
+        engine.collapse_dirty_regions.clear()
+        engine.collapse_deferred_regions.clear()
+        _forbid_formal_cpu_connected_dispatch(monkeypatch, engine)
+
+        def fail_expansion_pass_count(*args: object, **kwargs: object) -> int:
+            raise AssertionError("formal connected hot path must not use tile-grid-diameter frontier flood")
+
+        monkeypatch.setattr(pipeline, "_formal_connected_expansion_pass_count", fail_expansion_pass_count)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        try:
+            engine._world_simulation_frame_active = True
+            component_capacity = pipeline.execute_formal_connected_expansion(engine, (x0, y, x0 + 1, y + 1))
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        core = _bridge_cell_core(engine)
+        horizontal = core["phase"][y, x0:x1]
+        vertical = core["phase"][y:y1, turn_x]
+        runtime_records = _bridge_island_runtime_records(engine)
+
+        assert component_capacity >= runtime_records.shape[0]
+        assert np.all(horizontal == int(Phase.FALLING_ISLAND))
+        assert np.all(vertical == int(Phase.FALLING_ISLAND))
+        assert runtime_records.shape == (1,)
+        assert runtime_records[0]["buffer_bbox"].tolist() == [x0, y, x1, y1]
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_dirty_connected_jump_frontier_materializes_long_cross_tile_l_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=160, height=128)
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        y = 40
+        x0 = 12
+        x1 = 132
+        turn_x = x1 - 1
+        y1 = 104
+        for x in range(x0, x1):
+            engine.set_cell(x, y, "log_solid", mark_dirty=False)
+        for vertical_y in range(y, y1):
+            engine.set_cell(turn_x, vertical_y, "log_solid", mark_dirty=False)
+        engine.bridge.sync_world(engine)
+        engine.collapse_dirty_regions.clear()
+        engine.collapse_deferred_regions.clear()
+        _forbid_formal_cpu_connected_dispatch(monkeypatch, engine)
+
+        collapse_dirty.ensure_collapse_structure_dirty_tile_mask(engine, clear=True)
+        dirty_count, dirty_list, dirty_dispatch_args = collapse_dirty.ensure_collapse_structure_dirty_tile_queue(
+            engine,
+            clear=True,
+        )
+        tile_size = int(engine.active.tile_size)
+        dirty_tile = np.asarray([turn_x // tile_size, (y1 - 1) // tile_size], dtype=np.int32)
+        dirty_count.write(np.asarray([1], dtype=np.uint32).tobytes())
+        dirty_list.write(dirty_tile.tobytes())
+        dirty_dispatch_args.write(np.asarray([1, 1, 1], dtype=np.uint32).tobytes())
+        set_collapse_structure_dirty_tile_bounds(
+            engine,
+            (int(dirty_tile[0]), int(dirty_tile[1]), int(dirty_tile[0]) + 1, int(dirty_tile[1]) + 1),
+        )
+        engine._gpu_collapse_structure_dirty_tiles_pending = True
+
+        previous_frame_active = engine._world_simulation_frame_active
+        try:
+            engine._world_simulation_frame_active = True
+            engine.collapse_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        core = _bridge_cell_core(engine)
+        horizontal = core["phase"][y, x0:x1]
+        vertical = core["phase"][y:y1, turn_x]
+        runtime_records = _bridge_island_runtime_records(engine)
+
+        assert engine.collapse_solver.last_backend == "gpu"
+        assert engine._gpu_collapse_structure_dirty_tiles_pending is False
+        assert np.all(horizontal == int(Phase.FALLING_ISLAND))
+        assert np.all(vertical == int(Phase.FALLING_ISLAND))
+        assert runtime_records.shape == (1,)
+        assert runtime_records[0]["buffer_bbox"].tolist() == [x0, y, x1, y1]
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_connected_prewarm_does_not_upload_cpu_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pipeline = GPUCollapsePipeline()
+    calls: list[tuple[object, ...]] = []
+
+    class FakeContext:
+        def finish(self) -> None:
+            calls.append(("finish", self))
+
+    fake_ctx = FakeContext()
+    fake_world = SimpleNamespace(width=17, height=19, bridge=SimpleNamespace(ctx=fake_ctx))
+
+    monkeypatch.setattr(pipeline, "_ensure_programs", lambda ctx: calls.append(("programs", ctx)))
+    monkeypatch.setattr(
+        pipeline,
+        "_ensure_resources",
+        lambda ctx, width, height: calls.append(("resources", ctx, width, height)) or object(),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_ensure_formal_connected_frontier_buffers_impl",
+        lambda world: calls.append(("frontier", world)) or ("frontier", "scratch"),
+    )
+
+    def fail_upload(*args: object, **kwargs: object) -> None:
+        raise AssertionError("prewarm must not upload CPU world state")
+
+    monkeypatch.setattr(pipeline, "_upload_region_state", fail_upload)
+
+    pipeline.prewarm_formal_connected_resources(fake_world)
+
+    assert calls == [
+        ("programs", fake_ctx),
+        ("resources", fake_ctx, 17, 19),
+        ("frontier", fake_world),
+        ("finish", fake_ctx),
+    ]
+    source = inspect.getsource(GPUCollapsePipeline.prewarm_formal_connected_resources)
+    assert "_upload_region_state" not in source
+    assert ".read(" not in source
+
+
+def test_gpu_collapse_formal_connected_solve_reuses_prepared_classified_resources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pipeline = GPUCollapsePipeline()
+    fake_world = SimpleNamespace(profile_passes_enabled=False)
+    resources = SimpleNamespace(structural_tex="structural", support_ping="support")
+    calls: list[tuple[object, ...]] = []
+
+    def prepare(world: object, region: tuple[int, int, int, int] | None = None) -> tuple[object, int, int, int, int]:
+        calls.append(("prepare", world, region))
+        return resources, 4, 5, 8, 6
+
+    def classify(
+        world: object,
+        prepared: object,
+        tile_mask_name: str,
+        x0: int,
+        y0: int,
+        width: int,
+        height: int,
+    ) -> None:
+        calls.append(("classify", prepared, tile_mask_name, x0, y0, width, height))
+
+    def fail_frontier_path(*args: object, **kwargs: object) -> None:
+        raise AssertionError("formal connected solve must use region worklist + support JFA, not frontier expansion")
+
+    monkeypatch.setattr(pipeline, "_prepare_formal_connected_tile_resources", prepare)
+    monkeypatch.setattr(
+        pipeline,
+        "_seed_formal_texture_region_tile_worklist",
+        lambda world, width, height: calls.append(("tile_region_worklist", width, height)) or "tile_mask",
+    )
+    monkeypatch.setattr(pipeline, "_solve_formal_connected_tile_frontier", fail_frontier_path)
+    monkeypatch.setattr(pipeline, "_classify_formal_connected_tile_textures", classify)
+    monkeypatch.setattr(pipeline, "_solve_formal_connected_frontier_texture", fail_frontier_path)
+    monkeypatch.setattr(pipeline, "_filter_formal_connected_eligibility", fail_frontier_path)
+    monkeypatch.setattr(
+        pipeline,
+        "_publish_bridge_region_mask",
+        lambda world, prepared, texture, resource_name, x0, y0, width, height, **kwargs: calls.append(
+            ("publish", prepared, texture, resource_name)
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_solve_formal_connected_tile_support_textures",
+        lambda world, prepared, x0, y0, width, height, tile_mask_name: calls.append(
+            ("support", prepared, x0, y0, width, height, tile_mask_name)
+        )
+        or "supported",
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "resolve_supported_outcome_textures",
+        lambda world, prepared, supported, x0, y0, width, height, *, eligibility_texture=None, tile_mask_name=None: calls.append(
+            ("resolve", prepared, supported, x0, y0, width, height, eligibility_texture)
+        )
+        or (prepared, width, height),
+    )
+
+    assert pipeline._solve_formal_connected_tile_textures(fake_world, (5, 7, 8, 10), resource_region=(4, 5, 12, 11)) == (
+        resources,
+        4,
+        5,
+        8,
+        6,
+    )
+
+    assert [call[0] for call in calls].count("prepare") == 1
+    assert [call[0] for call in calls].count("classify") == 1
+    assert ("tile_region_worklist", 8, 6) in calls
+    assert ("classify", resources, "tile_mask", 4, 5, 8, 6) in calls
+    assert ("support", resources, 4, 5, 8, 6, "tile_mask") in calls
+    assert ("resolve", resources, "supported", 4, 5, 8, 6, "structural") in calls
+    source = inspect.getsource(GPUCollapsePipeline._solve_formal_connected_tile_textures)
+    assert source.count("_prepare_formal_connected_tile_resources(") == 1
+    assert source.count("_seed_formal_texture_region_tile_worklist(") == 1
+    assert source.count("_classify_formal_connected_tile_textures(") == 1
+    assert "eligibility_texture=resources.structural_tex" in source
+    assert "_solve_formal_connected_tile_frontier" not in source
+    assert "_solve_formal_connected_frontier_texture" not in source
+    assert "_solve_formal_connected_dirty_cell_frontier_texture" not in source
+    assert "_expand_formal_connected_tile_frontier" not in source
+    assert "_expand_formal_connected_cell_frontier" not in source
+    assert "_filter_formal_connected_eligibility" not in source
+
+
+def test_formal_connected_resource_region_bounds_edge_touch_without_full_world() -> None:
+    engine = WorldEngine(width=160, height=160)
+    try:
+        region = engine.collapse_solver._formal_connected_resource_region(engine, 64, 64, 160, 160)
+        full_world = (0, 0, engine.width, engine.height)
+
+        assert region != full_world
+        assert region[0] == 0
+        assert region[2] == engine.width
+        assert region[1] <= 20 < region[3]
+        assert region[1] > 0
+
+        corner_region = engine.collapse_solver._formal_connected_resource_region(engine, 0, 0, 64, 64)
+        assert corner_region != full_world
+
+        source = inspect.getsource(engine.collapse_solver._formal_connected_resource_region)
+        assert ".read(" not in source
+        assert "_expand_region_to_component" not in source
+        assert "deque" not in source
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_edge_anchor_survives_bounded_resource_without_cpu_bfs_or_readback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=160, height=160)
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(0, 120, "sandstone_solid", mark_dirty=False)
+        for x in range(1, engine.width):
+            engine.set_cell(x, 120, "log_solid", mark_dirty=False)
+        engine.bridge.sync_world(engine)
+        engine.collapse_dirty_regions.clear()
+        engine.collapse_deferred_regions.clear()
+        _forbid_formal_cpu_connected_dispatch(monkeypatch, engine)
+
+        resource_regions: list[tuple[int, int, int, int]] = []
+        original_execute = pipeline.execute_formal_connected_expansion
+
+        def record_execute_formal_connected_expansion(
+            world: WorldEngine,
+            seed_rect: tuple[int, int, int, int],
+            *,
+            resource_region: tuple[int, int, int, int] | None = None,
+        ) -> int:
+            assert resource_region is not None
+            resource_regions.append(tuple(int(value) for value in resource_region))
+            return original_execute(world, seed_rect, resource_region=resource_region)
+
+        def fail_cpu_expand(*args: object, **kwargs: object) -> tuple[int, int, int, int]:
+            raise AssertionError("formal edge collapse must not use CPU component expansion")
+
+        def fail_cpu_component_bfs(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal edge collapse must not use CPU component BFS")
+
+        def fail_texture_summary(*args: object, **kwargs: object) -> np.ndarray:
+            raise AssertionError("formal edge collapse must not read component metadata for CPU steering")
+
+        def fail_array_summary(*args: object, **kwargs: object) -> np.ndarray:
+            raise AssertionError("formal edge collapse must not summarize masks through CPU arrays")
+
+        monkeypatch.setattr(pipeline, "execute_formal_connected_expansion", record_execute_formal_connected_expansion)
+        monkeypatch.setattr(engine.collapse_solver, "_expand_region_to_component", fail_cpu_expand)
+        monkeypatch.setattr(engine.collapse_solver, "_expand_region_to_component_gpu", fail_cpu_expand)
+        monkeypatch.setattr(engine.collapse_solver, "_collapse_unsupported_components", fail_cpu_component_bfs)
+        monkeypatch.setattr(engine.collapse_solver, "_collapse_component", fail_cpu_component_bfs)
+        monkeypatch.setattr(pipeline, "summarize_labeled_component_texture", fail_texture_summary)
+        monkeypatch.setattr(pipeline, "summarize_labeled_components", fail_array_summary)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.collapse_dirty_regions.append((157, 119, 160, 122))
+            engine.collapse_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        core = _bridge_cell_core(engine)
+
+        assert engine.collapse_solver.last_backend == "gpu"
+        assert resource_regions
+        assert all(region != (0, 0, engine.width, engine.height) for region in resource_regions)
+        assert resource_regions[0][0] == 0
+        assert resource_regions[0][2] == engine.width
+        assert resource_regions[0][1] <= 120 < resource_regions[0][3]
+        assert np.all(core["phase"][120, 0 : engine.width] == int(Phase.STATIC_SOLID))
+        assert _bridge_island_runtime_records(engine).shape == (0,)
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_cell_frontier_source_uses_indirect_tile_list() -> None:
+    source = inspect.getsource(GPUCollapsePipeline._expand_formal_connected_cell_frontier)
+    assert "run_indirect" in source
+    assert "current_frontier" in source
+    assert ".run(tile_width, tile_height, 1)" not in source
+
+
+def test_gpu_collapse_formal_cell_frontier_loop_ping_pongs_cell_worklist_sources() -> None:
+    connected_source = inspect.getsource(GPUCollapsePipeline._solve_formal_connected_frontier_texture)
+    dirty_source = inspect.getsource(GPUCollapsePipeline._solve_formal_connected_dirty_cell_frontier_texture)
+    cell_expand_source = inspect.getsource(GPUCollapsePipeline._expand_formal_connected_cell_frontier)
+    accumulate_source = inspect.getsource(GPUCollapsePipeline._accumulate_formal_connected_cell_frontier_tiles)
+    ensure_programs_source = inspect.getsource(GPUCollapsePipeline._ensure_programs)
+    expand_shader_source = ensure_programs_source.split(
+        'self.programs["expand_formal_connected_cells_by_tile"] = ctx.compute_shader(',
+        1,
+    )[1].split(
+        'self.programs["copy_formal_connected_buffer_to_texture"] = ctx.compute_shader(',
+        1,
+    )[0]
+
+    for source in (connected_source, dirty_source):
+        assert "FORMAL_CONNECTED_CELL_FRONTIER_TILE_LIST_BUFFER" in source
+        assert "FORMAL_CONNECTED_CELL_FRONTIER_TILE_COUNT_BUFFER" in source
+        assert "FORMAL_CONNECTED_CELL_FRONTIER_TILE_DISPATCH_ARGS_BUFFER" in source
+        assert "current_frontier=cell_frontier" in source
+        assert "next_frontier=scratch_frontier" in source
+        assert "jump_generation=self._next_formal_connected_cell_frontier_generation()" in source
+        assert "_clear_formal_connected_cell_frontier_tiles" in source
+        assert "cell_frontier, scratch_frontier = scratch_frontier, cell_frontier" in source
+        assert "_accumulate_formal_connected_cell_frontier_tiles" not in source
+        assert "FORMAL_CONNECTED_TILE_LIST_BUFFER" not in source
+        assert "FORMAL_CONNECTED_TILE_COUNT_BUFFER" not in source
+        assert "FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER" not in source
+
+    assert 'program["jump_generation"]' in cell_expand_source
+    assert "bridge.buffers[current_count_name].bind_to_storage_buffer(binding=3)" in cell_expand_source
+    assert "bridge.buffers[current_list_name].bind_to_storage_buffer(binding=4)" in cell_expand_source
+    assert "bridge.buffers[next_flags_name].bind_to_storage_buffer(binding=5)" in cell_expand_source
+    assert "bridge.buffers[next_count_name].bind_to_storage_buffer(binding=6)" in cell_expand_source
+    assert "bridge.buffers[next_list_name].bind_to_storage_buffer(binding=7)" in cell_expand_source
+    assert "bridge.buffers[next_dispatch_args_name].bind_to_storage_buffer(binding=8)" in cell_expand_source
+    assert "run_indirect" in cell_expand_source
+    assert "uniform uint jump_generation" in expand_shader_source
+    assert "readonly buffer CurrentFrontierTileCount" in expand_shader_source
+    assert "readonly buffer CurrentFrontierTileList" in expand_shader_source
+    assert "buffer NextFrontierTileFlags" in expand_shader_source
+    assert "buffer NextFrontierTileCount" in expand_shader_source
+    assert "buffer NextFrontierTileList" in expand_shader_source
+    assert "buffer NextFrontierDispatchArgs" in expand_shader_source
+    assert "frontier_index >= current_frontier_tile_count[0]" in expand_shader_source
+    assert "current_frontier_tile_list[int(frontier_index)]" in expand_shader_source
+    assert "atomicExchange(next_frontier_tile_flags[tile_index], jump_generation)" in expand_shader_source
+    assert "atomicAdd(next_frontier_tile_count[0], 1u)" in expand_shader_source
+    assert "next_frontier_tile_list[int(slot)] = tile" in expand_shader_source
+    assert "atomicMax(next_frontier_dispatch_args[0], slot + 1u)" in expand_shader_source
+    assert "accumulated_frontier_tile_count" not in expand_shader_source
+    assert "accumulated_frontier_tile_list" not in expand_shader_source
+    assert "accumulated_frontier_tile_flags" not in expand_shader_source
+    assert "accumulated_frontier_dispatch_args" not in expand_shader_source
+    assert "source_frontier" in accumulate_source
+    assert "target_frontier" in accumulate_source
+    assert "run_indirect" in accumulate_source
+    assert "FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER" not in accumulate_source
+
+
+def test_gpu_collapse_formal_cell_frontier_loop_ping_pongs_current_and_next_for_clean_and_dirty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    primary_frontier = (
+        FORMAL_CONNECTED_CELL_FRONTIER_TILE_FLAGS_BUFFER,
+        FORMAL_CONNECTED_CELL_FRONTIER_TILE_LIST_BUFFER,
+        FORMAL_CONNECTED_CELL_FRONTIER_TILE_COUNT_BUFFER,
+        FORMAL_CONNECTED_CELL_FRONTIER_TILE_DISPATCH_ARGS_BUFFER,
+    )
+    scratch_frontier = (
+        FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_FLAGS_BUFFER,
+        FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_LIST_BUFFER,
+        FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_COUNT_BUFFER,
+        FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_DISPATCH_ARGS_BUFFER,
+    )
+    expected_loop_calls = [
+        ("clear", scratch_frontier),
+        ("expand", primary_frontier, scratch_frontier, 8, 1),
+        ("clear", primary_frontier),
+        ("expand", scratch_frontier, primary_frontier, 4, 2),
+        ("clear", scratch_frontier),
+        ("expand", primary_frontier, scratch_frontier, 1, 3),
+    ]
+
+    def run_clean_or_dirty(dirty: bool) -> list[tuple[object, ...]]:
+        pipeline = GPUCollapsePipeline()
+        fake_world = SimpleNamespace(profile_passes_enabled=False)
+        resources = SimpleNamespace(cell_flags_out_tex="out")
+        calls: list[tuple[object, ...]] = []
+
+        monkeypatch.setattr(
+            pipeline,
+            "_formal_connected_dirty_jump_schedule" if dirty else "_formal_connected_cell_jump_schedule",
+            lambda width, height: (8, 4, 1),
+        )
+        monkeypatch.setattr(
+            pipeline,
+            "_seed_formal_connected_cell_frontier_from_dirty_queue"
+            if dirty
+            else "_seed_formal_connected_cell_frontier",
+            lambda *args: calls.append(("seed",)),
+        )
+        monkeypatch.setattr(
+            pipeline,
+            "_clear_formal_connected_cell_frontier_tiles",
+            lambda world, frontier: calls.append(("clear", frontier)),
+        )
+
+        def expand(
+            world: object,
+            prepared_resources: object,
+            width: int,
+            height: int,
+            current_buffer_name: str,
+            scratch_buffer_name: str,
+            tile_mask_name: str,
+            *,
+            current_frontier: tuple[str, str, str, str],
+            next_frontier: tuple[str, str, str, str],
+            jump: int,
+            jump_generation: int,
+        ) -> None:
+            assert current_buffer_name == FORMAL_CONNECTED_FRONTIER_BUFFER
+            assert scratch_buffer_name == FORMAL_CONNECTED_FRONTIER_SCRATCH_BUFFER
+            calls.append(("expand", current_frontier, next_frontier, jump, jump_generation))
+
+        monkeypatch.setattr(pipeline, "_expand_formal_connected_cell_frontier", expand)
+        monkeypatch.setattr(
+            pipeline,
+            "_copy_formal_connected_buffer_to_texture",
+            lambda *args: calls.append(("copy",)),
+        )
+
+        if dirty:
+            pipeline._solve_formal_connected_dirty_cell_frontier_texture(
+                fake_world,
+                resources,
+                0,
+                0,
+                64,
+                64,
+                "tile_mask",
+            )
+        else:
+            pipeline._solve_formal_connected_frontier_texture(
+                fake_world,
+                resources,
+                (0, 0, 1, 1),
+                0,
+                0,
+                64,
+                64,
+                "tile_mask",
+            )
+        return [call for call in calls if call[0] in {"clear", "expand"}]
+
+    assert run_clean_or_dirty(False) == expected_loop_calls
+    assert run_clean_or_dirty(True) == expected_loop_calls
+
+
+def test_gpu_collapse_formal_cell_frontier_seeds_tile_list_and_profiles_indirect_expand() -> None:
+    engine = WorldEngine(width=96, height=64)
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        for x in range(0, 70):
+            engine.set_cell(x, 32, "log_solid", mark_dirty=False)
+        engine.bridge.sync_world(engine)
+        assert engine.bridge.ctx is not None
+        pipeline._ensure_programs(engine.bridge.ctx)
+        resources, x0, y0, width, height = pipeline._prepare_formal_connected_tile_resources(engine)
+        pipeline._ensure_formal_connected_frontier_buffers(engine)
+        seed_rect = (32, 32, 33, 33)
+        tile_mask_name = pipeline._solve_formal_connected_tile_frontier(engine, resources, seed_rect, x0, y0, width, height)
+        pipeline._classify_formal_connected_tile_textures(engine, resources, tile_mask_name, x0, y0, width, height)
+        pipeline._seed_formal_connected_cell_frontier(engine, resources, seed_rect, width, height, tile_mask_name)
+        first_dispatch_args = np.frombuffer(
+            engine.bridge.buffers[FORMAL_CONNECTED_CELL_FRONTIER_TILE_DISPATCH_ARGS_BUFFER].read(size=12),
+            dtype=np.uint32,
+            count=3,
+        ).copy()
+        first_frontier_tiles = np.frombuffer(
+            engine.bridge.buffers[FORMAL_CONNECTED_CELL_FRONTIER_TILE_LIST_BUFFER].read(
+                size=int(first_dispatch_args[0]) * 2 * np.dtype(np.int32).itemsize
+            ),
+            dtype=np.int32,
+            count=int(first_dispatch_args[0]) * 2,
+        ).reshape((int(first_dispatch_args[0]), 2))
+        engine.profile_passes_enabled = True
+        pipeline.reset_pass_profile()
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            pipeline._solve_formal_connected_frontier_texture(
+                engine,
+                resources,
+                seed_rect,
+                x0,
+                y0,
+                width,
+                height,
+                tile_mask_name,
+            )
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        profile_names = {entry["name"] for entry in pipeline.last_pass_profile["passes"]}
+
+        assert int(first_dispatch_args[0]) >= 2
+        assert first_dispatch_args.tolist()[1:] == [1, 1]
+        assert [0, 1] in first_frontier_tiles.tolist()
+        assert [1, 1] in first_frontier_tiles.tolist()
+        assert {
+            "cell_frontier_seed_list_build",
+            "cell_frontier_loop",
+            "cell_frontier_final_copy",
+        }.issubset(profile_names)
+        assert {
+            FORMAL_CONNECTED_FRONTIER_BUFFER,
+            FORMAL_CONNECTED_FRONTIER_SCRATCH_BUFFER,
+            FORMAL_CONNECTED_CELL_FRONTIER_TILE_FLAGS_BUFFER,
+            FORMAL_CONNECTED_CELL_FRONTIER_TILE_LIST_BUFFER,
+            FORMAL_CONNECTED_CELL_FRONTIER_TILE_COUNT_BUFFER,
+            FORMAL_CONNECTED_CELL_FRONTIER_TILE_DISPATCH_ARGS_BUFFER,
+            FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_FLAGS_BUFFER,
+            FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_LIST_BUFFER,
+            FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_COUNT_BUFFER,
+            FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_DISPATCH_ARGS_BUFFER,
+        }.issubset(engine.bridge.gpu_authoritative_resources)
+    finally:
+        if engine.bridge.ctx is not None:
+            engine.bridge.ctx.finish()
+        engine.close()
+
+
+def test_gpu_collapse_formal_external_anchor_long_beam_survives_gpu_frontier_expansion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=160, height=160)
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(0, 80, "sandstone_solid", mark_dirty=False)
+        for x in range(1, 130):
+            engine.set_cell(x, 80, "log_solid", mark_dirty=False)
+        engine.bridge.sync_world(engine)
+        engine.collapse_dirty_regions.clear()
+        engine.collapse_deferred_regions.clear()
+        _forbid_formal_cpu_connected_dispatch(monkeypatch, engine)
+
+        def fail_cpu_rect_drain(*args: object, **kwargs: object) -> list[tuple[int, int, int, int]]:
+            raise AssertionError("formal collapse must not drain GPU deferred rects to CPU control flow")
+
+        def fail_rect_enqueue(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal collapse must consume connected expansion through GPU frontier masks")
+
+        monkeypatch.setattr(pipeline, "drain_formal_deferred_region_requests", fail_cpu_rect_drain)
+        monkeypatch.setattr(pipeline, "enqueue_connected_internal_boundary_deferred_regions", fail_rect_enqueue)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.collapse_dirty_regions.append((127, 79, 130, 82))
+            engine.collapse_solver.step(engine)
+            assert engine.collapse_deferred_regions == []
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        core = _bridge_cell_core(engine)
+        solve_mask = engine.collapse_solver.last_solve_region_mask
+        assert engine.collapse_solver.last_backend == "gpu"
+        assert not bool(np.all(solve_mask))
+        assert not bool(solve_mask[0, 0])
+        assert np.all(core["phase"][80, 0:130] == int(Phase.STATIC_SOLID))
+        assert _bridge_island_runtime_records(engine).shape == (0,)
+        assert engine.collapse_deferred_regions == []
+        assert _bridge_collapse_deferred_region_requests(engine) == []
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_vertical_orthogonal_anchor_survives_gpu_connected_expansion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=160, height=160)
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(20, 20, "sandstone_solid", mark_dirty=False)
+        for y in range(21, 121):
+            engine.set_cell(20, y, "log_solid", mark_dirty=False)
+        for x in range(20, 130):
+            engine.set_cell(x, 120, "log_solid", mark_dirty=False)
+        engine.bridge.sync_world(engine)
+        engine.collapse_dirty_regions.clear()
+        engine.collapse_deferred_regions.clear()
+        _forbid_formal_cpu_connected_dispatch(monkeypatch, engine)
+
+        def fail_cpu_rect_drain(*args: object, **kwargs: object) -> list[tuple[int, int, int, int]]:
+            raise AssertionError("formal orthogonal anchor expansion must not drain GPU deferred rects to CPU control flow")
+
+        def fail_rect_enqueue(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal orthogonal anchor expansion must consume connected cells through GPU masks")
+
+        monkeypatch.setattr(pipeline, "drain_formal_deferred_region_requests", fail_cpu_rect_drain)
+        monkeypatch.setattr(pipeline, "enqueue_connected_internal_boundary_deferred_regions", fail_rect_enqueue)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.collapse_dirty_regions.append((127, 119, 130, 122))
+            engine.collapse_solver.step(engine)
+            assert engine.collapse_deferred_regions == []
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        core = _bridge_cell_core(engine)
+        connected_mask = np.zeros((engine.height, engine.width), dtype=np.bool_)
+        connected_mask[20:121, 20] = True
+        connected_mask[120, 20:130] = True
+
+        assert engine.collapse_solver.last_backend == "gpu"
+        assert not bool(np.all(engine.collapse_solver.last_solve_region_mask))
+        assert np.all(core["phase"][connected_mask] == int(Phase.STATIC_SOLID))
+        assert _bridge_island_runtime_records(engine).shape == (0,)
+        assert engine.collapse_deferred_regions == []
+        assert _bridge_collapse_deferred_region_requests(engine) == []
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_long_unsupported_beam_collapses_after_bounded_expansion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=160, height=160)
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        for x in range(0, 130):
+            engine.set_cell(x, 80, "log_solid", mark_dirty=False)
+        engine.bridge.sync_world(engine)
+        engine.collapse_dirty_regions.clear()
+        engine.collapse_deferred_regions.clear()
+        _forbid_formal_cpu_connected_dispatch(monkeypatch, engine)
+
+        def fail_texture_summary(*args: object, **kwargs: object) -> np.ndarray:
+            raise AssertionError("formal bounded collapse expansion must not read component texture metadata")
+
+        def fail_array_summary(*args: object, **kwargs: object) -> np.ndarray:
+            raise AssertionError("formal bounded collapse expansion must not summarize masks through CPU arrays")
+
+        monkeypatch.setattr(pipeline, "summarize_labeled_component_texture", fail_texture_summary)
+        monkeypatch.setattr(pipeline, "summarize_labeled_components", fail_array_summary)
+
+        def fail_cpu_rect_drain(*args: object, **kwargs: object) -> list[tuple[int, int, int, int]]:
+            raise AssertionError("formal collapse must not drain GPU deferred rects to CPU control flow")
+
+        def fail_rect_enqueue(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal collapse must consume connected expansion through GPU frontier masks")
+
+        monkeypatch.setattr(pipeline, "drain_formal_deferred_region_requests", fail_cpu_rect_drain)
+        monkeypatch.setattr(pipeline, "enqueue_connected_internal_boundary_deferred_regions", fail_rect_enqueue)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.collapse_dirty_regions.append((127, 79, 130, 82))
+            engine.collapse_solver.step(engine)
+            assert engine.collapse_deferred_regions == []
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        core = _bridge_cell_core(engine)
+        bridge_island_id = np.frombuffer(
+            engine.bridge.buffers["island_id"].read(size=engine.width * engine.height * np.dtype(np.int32).itemsize),
+            dtype=np.int32,
+        ).reshape((engine.height, engine.width))
+        solve_mask = engine.collapse_solver.last_solve_region_mask
+        island_ids = set(int(value) for value in bridge_island_id[80, 0:130].tolist())
+        runtime_records = _bridge_island_runtime_records(engine)
+
+        assert engine.collapse_solver.last_backend == "gpu"
+        assert not bool(np.all(solve_mask))
+        assert not bool(solve_mask[0, 0])
+        assert np.all(core["phase"][80, 0:130] == int(Phase.FALLING_ISLAND))
+        assert len(island_ids) == 1
+        assert next(iter(island_ids)) > 0
+        assert runtime_records.shape == (1,)
+        assert int(runtime_records[0]["island_id"]) == next(iter(island_ids))
+        assert runtime_records[0]["buffer_bbox"].tolist() == [0, 80, 130, 81]
+        assert engine.collapse_deferred_regions == []
+        assert _bridge_collapse_deferred_region_requests(engine) == []
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_l_shape_continues_bounded_expansion_from_gpu_frontier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NoReadResource:
+        def __init__(self, wrapped: object, name: str) -> None:
+            self._wrapped = wrapped
+            self._name = name
+
+        def read(self, *args: object, **kwargs: object) -> bytes:
+            raise AssertionError(f"formal L-shape collapse expansion must not read {self._name}")
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._wrapped, name)
+
+    engine = WorldEngine(width=160, height=160)
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        for y in range(20, 81):
+            engine.set_cell(20, y, "log_solid", mark_dirty=False)
+        for x in range(20, 130):
+            engine.set_cell(x, 80, "log_solid", mark_dirty=False)
+        engine.bridge.sync_world(engine)
+        engine.collapse_dirty_regions.clear()
+        engine.collapse_deferred_regions.clear()
+        _forbid_formal_cpu_connected_dispatch(monkeypatch, engine)
+
+        def fail_texture_summary(*args: object, **kwargs: object) -> np.ndarray:
+            raise AssertionError("formal L-shape expansion must not read component texture metadata")
+
+        def fail_array_summary(*args: object, **kwargs: object) -> np.ndarray:
+            raise AssertionError("formal L-shape expansion must not summarize masks through CPU arrays")
+
+        monkeypatch.setattr(pipeline, "summarize_labeled_component_texture", fail_texture_summary)
+        monkeypatch.setattr(pipeline, "summarize_labeled_components", fail_array_summary)
+
+        def fail_region_flag_readback_api(*args: object, **kwargs: object) -> int:
+            raise AssertionError("formal L-shape expansion must not read region flags for CPU control flow")
+
+        monkeypatch.setattr(pipeline, "detect_connected_internal_boundary_flags", fail_region_flag_readback_api)
+
+        def fail_cpu_rect_drain(*args: object, **kwargs: object) -> list[tuple[int, int, int, int]]:
+            raise AssertionError("formal L-shape expansion must not drain GPU deferred rects to CPU control flow")
+
+        def fail_rect_enqueue(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal L-shape expansion must consume GPU frontier masks instead of rect queue")
+
+        monkeypatch.setattr(pipeline, "drain_formal_deferred_region_requests", fail_cpu_rect_drain)
+        monkeypatch.setattr(pipeline, "enqueue_connected_internal_boundary_deferred_regions", fail_rect_enqueue)
+
+        original_ensure_resources = pipeline._ensure_resources
+        wrapped_names = (
+            "structural_tex",
+            "support_ping",
+            "support_pong",
+            "material_out_tex",
+            "phase_out_tex",
+            "temp_out_tex",
+            "integrity_out_tex",
+            "cell_flags_out_tex",
+            "region_flags",
+        )
+
+        def ensure_no_mask_or_flag_readback(*args: object, **kwargs: object) -> object:
+            resources = original_ensure_resources(*args, **kwargs)
+            for name in wrapped_names:
+                current = getattr(resources, name)
+                if not isinstance(current, NoReadResource):
+                    setattr(resources, name, NoReadResource(current, name))
+            return resources
+
+        monkeypatch.setattr(pipeline, "_ensure_resources", ensure_no_mask_or_flag_readback)
+
+        classified_regions: list[tuple[int, int, int, int]] = []
+        original_classify_region_textures = pipeline.classify_region_textures
+
+        def record_classify_region_textures(
+            world: WorldEngine,
+            x0: int,
+            y0: int,
+            x1: int,
+            y1: int,
+            **kwargs: object,
+        ) -> object:
+            classified_regions.append((int(x0), int(y0), int(x1), int(y1)))
+            return original_classify_region_textures(world, x0, y0, x1, y1, **kwargs)
+
+        monkeypatch.setattr(pipeline, "classify_region_textures", record_classify_region_textures)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.collapse_dirty_regions.append((127, 79, 130, 82))
+            engine.collapse_solver.step(engine)
+            assert engine.collapse_deferred_regions == []
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        core = _bridge_cell_core(engine)
+        bridge_island_id = np.frombuffer(
+            engine.bridge.buffers["island_id"].read(size=engine.width * engine.height * np.dtype(np.int32).itemsize),
+            dtype=np.int32,
+        ).reshape((engine.height, engine.width))
+        l_mask = np.zeros((engine.height, engine.width), dtype=np.bool_)
+        l_mask[20:81, 20] = True
+        l_mask[80, 20:130] = True
+        island_ids = set(int(value) for value in bridge_island_id[l_mask].tolist())
+        runtime_records = _bridge_island_runtime_records(engine)
+
+        assert engine.collapse_solver.last_backend == "gpu"
+        assert engine.collapse_deferred_regions == []
+        assert _bridge_collapse_deferred_region_requests(engine) == []
+        assert all(region != (0, 0, engine.width, engine.height) for region in classified_regions)
+        assert np.all(core["phase"][l_mask] == int(Phase.FALLING_ISLAND))
+        assert len(island_ids) == 1
+        assert next(iter(island_ids)) > 0
+        assert runtime_records.shape == (1,)
+        assert int(runtime_records[0]["island_id"]) == next(iter(island_ids))
+        assert runtime_records[0]["buffer_bbox"].tolist() == [20, 20, 130, 81]
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_dirty_connectivity_does_not_read_mask_textures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NoReadTexture:
+        def __init__(self, wrapped: object, name: str) -> None:
+            self._wrapped = wrapped
+            self._name = name
+
+        def read(self, *args: object, **kwargs: object) -> bytes:
+            raise AssertionError(f"formal GPU collapse must not read {self._name} mask texture")
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._wrapped, name)
+
+    engine = WorldEngine(width=96, height=96)
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(48, 48, "log_solid", mark_dirty=False)
+        engine.bridge.sync_world(engine)
+
+        original_ensure_resources = pipeline._ensure_resources
+        wrapped_names = (
+            "structural_tex",
+            "support_ping",
+            "support_pong",
+            "material_out_tex",
+            "phase_out_tex",
+            "temp_out_tex",
+            "integrity_out_tex",
+            "cell_flags_out_tex",
+        )
+
+        def ensure_no_mask_texture_readback(*args: object, **kwargs: object) -> object:
+            resources = original_ensure_resources(*args, **kwargs)
+            for name in wrapped_names:
+                current = getattr(resources, name)
+                if not isinstance(current, NoReadTexture):
+                    setattr(resources, name, NoReadTexture(current, name))
+            return resources
+
+        monkeypatch.setattr(pipeline, "_ensure_resources", ensure_no_mask_texture_readback)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.collapse_dirty_regions.append((47, 47, 50, 50))
+            engine.collapse_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        core = _bridge_cell_core(engine)
+        bridge_island_id = np.frombuffer(
+            engine.bridge.buffers["island_id"].read(size=engine.width * engine.height * np.dtype(np.int32).itemsize),
+            dtype=np.int32,
+        ).reshape((engine.height, engine.width))
+        assert engine.collapse_solver.last_backend == "gpu"
+        assert int(core["phase"][48, 48]) == int(Phase.FALLING_ISLAND)
+        assert int(bridge_island_id[48, 48]) > 0
+    finally:
+        engine.close()
 
 
 def test_gpu_collapse_formal_region_upload_uses_bridge_authoritative_inputs_without_cpu_mirror() -> None:
@@ -46353,7 +54521,8 @@ def test_gpu_collapse_formal_frame_chains_resolve_textures_without_array_resolve
     assert int(unpacked["phase"][1, 1]) == int(Phase.FALLING_ISLAND)
     island_id = int(cell["island_id"][1, 1])
     assert island_id > 0
-    assert island_id in engine.islands
+    runtime_records = _bridge_island_runtime_records(engine)
+    assert int(runtime_records[0]["island_id"]) == island_id
 
 
 def test_gpu_collapse_formal_frame_chains_region_classify_and_solve_textures_without_array_apis(
@@ -46607,7 +54776,102 @@ def test_gpu_collapse_formal_frame_publishes_delayed_pending_to_bridge_without_c
         engine._world_simulation_frame_active = previous_frame_active
 
 
-def test_gpu_collapse_formal_solve_region_uses_fixed_gpu_iterations_without_change_flag_read(
+def test_gpu_collapse_runtime_and_debug_default_do_not_sync_read_authoritative_buffers() -> None:
+    engine = WorldEngine(width=16, height=16, simulation_backend="gpu")
+    if not engine.collapse_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    engine.bridge.sync_world(engine)
+
+    class NoReadBuffer:
+        def __init__(self, wrapped: object, name: str) -> None:
+            self._wrapped = wrapped
+            self._name = name
+
+        def read(self, *args: object, **kwargs: object) -> bytes:
+            raise AssertionError(f"default collapse runtime snapshot must not read {self._name}")
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._wrapped, name)
+
+    protected_resources = (
+        "collapse_structural_mask",
+        "collapse_support_seed_mask",
+        "collapse_supported_mask",
+        "collapse_unsupported_mask",
+        "collapse_delayed_pending_mask",
+        "collapse_immune_unsupported_mask",
+        "collapse_collapsed_cell_mask",
+        "collapse_component_label",
+        "island_id",
+        "island_runtime",
+        "island_runtime_count",
+    )
+    originals = {
+        name: engine.bridge.buffers[name]
+        for name in protected_resources
+        if name in engine.bridge.buffers
+    }
+    for name, buffer in originals.items():
+        engine.bridge.buffers[name] = NoReadBuffer(buffer, name)
+    engine.bridge.mark_gpu_authoritative(*originals)
+    try:
+        runtime = engine.serialize_collapse_runtime()
+        frame = engine.debug_frame(DebugView.COLLAPSE)
+    finally:
+        engine.bridge.buffers.update(originals)
+
+    assert runtime["gpu_authoritative"] is True
+    assert runtime["snapshot_stale"] is True
+    assert runtime["gpu_authoritative_snapshot_stale"] is True
+    assert runtime["sync_readback_required"] is True
+    assert runtime["sync_readback_performed"] is False
+    assert runtime["snapshot_source"] == "cpu_shadow"
+    assert frame.shape == (engine.height, engine.width, 3)
+
+
+def test_gpu_collapse_formal_delayed_step_requeues_without_component_readback() -> None:
+    engine = WorldEngine(width=160, height=160)
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        engine.patch_material("log_solid", collapse_behavior="delayed")
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(80, 80, "log_solid", mark_dirty=False)
+        engine.bridge.sync_world(engine)
+        engine.collapse_dirty_regions.clear()
+        engine.collapse_deferred_regions.clear()
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.collapse_dirty_regions.append((79, 79, 82, 82))
+            engine.collapse_solver.step(engine)
+            assert len(engine.collapse_deferred_regions) == 1
+            deferred_x0, deferred_y0, deferred_x1, deferred_y1 = engine.collapse_deferred_regions[0]
+            assert (deferred_x0, deferred_y0, deferred_x1, deferred_y1) != (0, 0, engine.width, engine.height)
+            assert deferred_x0 <= 80 < deferred_x1
+            assert deferred_y0 <= 80 < deferred_y1
+            unpacked, _cell = _readback_cell_window(engine, center_x=80, center_y=80, width=3, height=3)
+            assert int(unpacked["phase"][1, 1]) == int(Phase.STATIC_SOLID)
+
+            engine.collapse_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        assert engine.collapse_deferred_regions == []
+        unpacked, cell = _readback_cell_window(engine, center_x=80, center_y=80, width=3, height=3)
+        assert int(unpacked["phase"][1, 1]) == int(Phase.FALLING_ISLAND)
+        island_id = int(cell["island_id"][1, 1])
+        runtime_records = _bridge_island_runtime_records(engine)
+        assert runtime_records.shape == (1,)
+        assert int(runtime_records[0]["island_id"]) == island_id
+        assert runtime_records[0]["buffer_bbox"].tolist() == [80, 80, 81, 81]
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_solve_region_uses_deterministic_gpu_iterations_without_change_flag_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     engine = WorldEngine(width=8, height=8)
@@ -46639,6 +54903,988 @@ def test_gpu_collapse_formal_solve_region_uses_fixed_gpu_iterations_without_chan
 
     assert bool(unsupported[0, 0]) is True
     assert not np.any(unsupported[:, 2])
+
+
+def _gpu_collapse_program_sources() -> dict[str, str]:
+    class CaptureContext:
+        def compute_shader(self, source: str) -> str:
+            return source
+
+    pipeline = GPUCollapsePipeline()
+    pipeline._ensure_programs(CaptureContext())
+    return dict(pipeline.programs)
+
+
+def test_gpu_collapse_formal_connected_support_uses_texture_jfa_hot_path() -> None:
+    solve_source = inspect.getsource(GPUCollapsePipeline._solve_formal_connected_tile_support_textures)
+    pass_source = inspect.getsource(GPUCollapsePipeline._run_formal_connected_tile_support_pass)
+    refine_source = inspect.getsource(GPUCollapsePipeline._run_formal_connected_tile_support_refine_passes)
+    mask_source = inspect.getsource(GPUCollapsePipeline._build_formal_connected_axis_masks)
+    resource_source = inspect.getsource(GPUCollapsePipeline._ensure_resources)
+    release_source = inspect.getsource(GPUCollapsePipeline.release)
+    hot_path_source = solve_source + pass_source + refine_source + mask_source
+
+    assert "_formal_support_unit_pass_count" not in solve_source
+    assert "_formal_connected_expansion_pass_count" not in solve_source
+    assert "_formal_jfa_jumps" in solve_source
+    assert "_run_formal_connected_tile_support_pass" in solve_source
+    assert "_run_formal_connected_tile_support_refine_passes" in solve_source
+    assert "_build_formal_connected_axis_masks" in solve_source
+    assert "resources.structural_tex" in solve_source
+    assert "_seed_formal_connected_tile_support_frontier" not in solve_source
+    assert "_expand_formal_connected_tile_support_frontier" not in solve_source
+    assert "_formal_connected_tile_support_frontier_pass_count" not in solve_source
+    assert "run_indirect" in pass_source
+    assert "run_indirect" in mask_source
+    assert "FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER" in mask_source
+    assert "source_texture.use(location=0)" in mask_source
+    assert "resources.connected_tile_row_masks.bind_to_storage_buffer(binding=3)" in pass_source
+    assert "resources.connected_tile_column_masks.bind_to_storage_buffer(binding=4)" in pass_source
+    assert "connected_tile_row_masks" in resource_source
+    assert "connected_tile_column_masks" in resource_source
+    assert "connected_tile_row_masks" in release_source
+    assert "connected_tile_column_masks" in release_source
+    assert ".run(tile_width, tile_height, 1)" not in solve_source
+    assert ".run(tile_width, tile_height, 1)" not in pass_source
+    assert "_formal_connected_tile_refine_pass_count" in refine_source
+    assert "support_jfa.seed" not in solve_source
+    assert "support_jfa.frontier" not in solve_source
+    assert "support_jfa.materialize" not in solve_source
+    assert "support_jfa.axis_masks" in solve_source
+    assert "support_jfa.jfa" in solve_source
+    assert "support_jfa.refine" in solve_source
+    assert "support_jfa.publish" in solve_source
+    for forbidden in (".read(", "ctx.finish", "sync_world(", "queue_readback", "poll_readback"):
+        assert forbidden not in hot_path_source
+
+
+def test_gpu_collapse_formal_connected_support_publish_fuses_supported_and_unsupported_masks() -> None:
+    solve_source = inspect.getsource(GPUCollapsePipeline._solve_formal_connected_tile_support_textures)
+    helper_source = inspect.getsource(GPUCollapsePipeline._publish_bridge_supported_unsupported_masks_connected_tiles)
+    program_source = inspect.getsource(GPUCollapsePipeline._ensure_programs)
+    shader_source = program_source.split(
+        'self.programs["publish_bridge_supported_unsupported_masks_connected_tiles"] = ctx.compute_shader(',
+        1,
+    )[1].split('self.programs["publish_bridge_region_labels"] = ctx.compute_shader(', 1)[0]
+
+    assert "_publish_bridge_supported_unsupported_masks_connected_tiles" in solve_source
+    assert "_publish_bridge_region_mask(" not in solve_source
+    assert "supported_texture.use(location=0)" in helper_source
+    assert "resources.structural_tex.use(location=1)" in helper_source
+    assert 'bridge.buffers["collapse_supported_mask"].bind_to_storage_buffer(binding=0)' in helper_source
+    assert 'bridge.buffers["collapse_unsupported_mask"].bind_to_storage_buffer(binding=1)' in helper_source
+    assert "bridge.buffers[tile_mask_name].bind_to_storage_buffer(binding=2)" in helper_source
+    assert "bridge.buffers[FORMAL_CONNECTED_TILE_COUNT_BUFFER].bind_to_storage_buffer(binding=3)" in helper_source
+    assert "bridge.buffers[FORMAL_CONNECTED_TILE_LIST_BUFFER].bind_to_storage_buffer(binding=4)" in helper_source
+    assert "program.run_indirect(bridge.buffers[FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER])" in helper_source
+    assert helper_source.count("_sync_compute_writes") == 1
+    assert 'bridge.mark_gpu_authoritative("collapse_supported_mask", "collapse_unsupported_mask")' in helper_source
+    assert "layout(binding=0) uniform sampler2D supported_tex;" in shader_source
+    assert "layout(binding=1) uniform sampler2D structural_tex;" in shader_source
+    assert "layout(std430, binding=0) writeonly buffer BridgeSupportedMaskBuffer" in shader_source
+    assert "layout(std430, binding=1) writeonly buffer BridgeUnsupportedMaskBuffer" in shader_source
+    assert "layout(std430, binding=2) readonly buffer ConnectedTileMask" in shader_source
+    assert "layout(std430, binding=3) readonly buffer ConnectedTileCount" in shader_source
+    assert "layout(std430, binding=4) readonly buffer ConnectedTileList" in shader_source
+    assert "work_index >= connected_tile_count[0]" in shader_source
+    assert "connected_tiles[tile_index] == 0" in shader_source
+    assert "local_cell.x >= region_size.x" in shader_source
+    assert "world_cell.x >= cell_grid_size.x" in shader_source
+    assert "int cell_index = world_cell.y * cell_grid_size.x + world_cell.x;" in shader_source
+    assert "bool supported = texelFetch(supported_tex, local_cell, 0).x > 0.5;" in shader_source
+    assert "bool unsupported = texelFetch(structural_tex, local_cell, 0).x > 0.5 && !supported;" in shader_source
+    assert "bridge_supported_mask[cell_index] = supported ? 1 : 0;" in shader_source
+    assert "bridge_unsupported_mask[cell_index] = unsupported ? 1 : 0;" in shader_source
+
+
+def test_gpu_collapse_formal_connected_jump_closure_uses_workgroup_uniform_change_guard() -> None:
+    source = inspect.getsource(GPUCollapsePipeline._ensure_programs)
+
+    def shader_block(program_name: str, next_program_name: str) -> str:
+        start = f'self.programs["{program_name}"] = ctx.compute_shader('
+        end = f'self.programs["{next_program_name}"] = ctx.compute_shader('
+        assert start in source
+        assert end in source
+        return source.split(start, 1)[1].split(end, 1)[0]
+
+    axis_mask_shader = shader_block("build_formal_connected_axis_masks", "propagate_formal_connected_tiles")
+    assert "layout(binding=0) uniform sampler2D source_tex;" in axis_mask_shader
+    assert "connected_tile_count" in axis_mask_shader
+    assert "connected_tile_list" in axis_mask_shader
+    assert "connected_tile_row_masks" in axis_mask_shader
+    assert "connected_tile_column_masks" in axis_mask_shader
+    assert "atomicOr(connected_tile_row_masks" in axis_mask_shader
+    assert "atomicOr(connected_tile_column_masks" in axis_mask_shader
+
+    cases = (
+        (
+            shader_block("expand_formal_connected_cells_by_tile", "copy_formal_connected_buffer_to_texture"),
+            "solve_connected_cells",
+            "int jump_value = s_connected",
+            "if (!connected_sample(sample_cell)) {{",
+            "if (connected_line_clear(sample_cell, cell)) {{",
+            "previous_jump_value == 0 && jump_value != 0",
+            "if (s_jump_changed != 0u) {{",
+            "connected_line_clear",
+            "emit_next_frontier_tile",
+        ),
+        (
+            shader_block("propagate_formal_connected_tiles", "propagate_formal_connected_component_labels"),
+            "solve_supported_cells",
+            "int jump_value = previously_supported ? 1 : 0;",
+            "if (!support_sample(sample_cell)) {{",
+            "if (line_clear(tile, sample_cell, cell)) {{",
+            "previous_jump_value == 0 && jump_value != 0",
+            "if (s_jump_changed != 0u) {{",
+            "line_clear",
+            "main",
+        ),
+        (
+            shader_block("propagate_formal_connected_component_labels", "component_label_propagate"),
+            "solve_label_cells",
+            "int jump_label = s_label",
+            "int candidate = label_sample(sample_cell);",
+            "if (label_line_clear(tile, sample_cell, cell)) {{",
+            "jump_label < previous_jump_label",
+            "if (refine_local_labels && s_jump_changed != 0u) {{",
+            "label_line_clear",
+            "solve_label_cells",
+        ),
+    )
+
+    for (
+        shader_source,
+        solver_name,
+        jump_value_statement,
+        sample_statement,
+        line_clear_statement,
+        change_condition,
+        guard_statement,
+        line_clear_name,
+        next_function_name,
+    ) in cases:
+        solver_call = f"{solver_name}(local_cell, cell, local_valid);"
+        first_call_index = shader_source.index(solver_call)
+        second_call_index = shader_source.index(solver_call, first_call_index + len(solver_call))
+        jump_guard_index = shader_source.index("if (jump > 1) {{")
+        clear_index = shader_source.index("s_jump_changed = 0u;")
+        jump_value_index = shader_source.index(jump_value_statement)
+        same_tile_skip_index = shader_source.index("if (sample_in_current_tile(tile, sample_cell)) {{", jump_value_index)
+        sample_index = shader_source.index(sample_statement, same_tile_skip_index)
+        line_clear_index = shader_source.index(line_clear_statement, sample_index)
+        atomic_index = shader_source.index("atomicOr(s_jump_changed, 1u);")
+        guard_index = shader_source.index(guard_statement)
+        guard_body = shader_source[guard_index:].split("}}", 1)[0]
+        line_clear_source = shader_source.split(f"bool {line_clear_name}(", 1)[1].split(
+            f"void {next_function_name}",
+            1,
+        )[0]
+
+        assert shader_source.count(solver_call) == 2
+        assert "shared uint s_jump_changed;" in shader_source
+        assert "if (jump > 1)" in shader_source
+        assert "jump <= 1" not in shader_source
+        assert "bool sample_in_current_tile" in shader_source
+        assert change_condition in shader_source
+        assert first_call_index < jump_guard_index < clear_index < jump_value_index
+        assert jump_value_index < same_tile_skip_index < sample_index < line_clear_index < atomic_index
+        assert atomic_index < guard_index < second_call_index
+        assert solver_call in guard_body
+        assert "mix(vec2" not in line_clear_source
+        assert "round(mix" not in line_clear_source
+        if solver_name == "solve_connected_cells":
+            solver_source = shader_source.split("void solve_connected_cells(", 1)[1].split(
+                "bool sample_in_current_tile",
+                1,
+            )[0]
+            assert "axis_step" in line_clear_source
+            assert "start_cell + axis_step * step_index" in line_clear_source
+            assert "shared int s_structural[{FORMAL_CONNECTED_TILE_LOCAL_SIZE}][{FORMAL_CONNECTED_TILE_LOCAL_SIZE}]" in shader_source
+            assert "shared int s_connected[{FORMAL_CONNECTED_TILE_LOCAL_SIZE}][{FORMAL_CONNECTED_TILE_LOCAL_SIZE}]" in shader_source
+            assert "shared int s_next[{FORMAL_CONNECTED_TILE_LOCAL_SIZE}][{FORMAL_CONNECTED_TILE_LOCAL_SIZE}]" in shader_source
+            assert "s_structural_rows" not in shader_source
+            assert "s_connected_rows" not in shader_source
+            assert "s_next_connected_rows" not in shader_source
+            assert "horizontal_closure" not in shader_source
+            assert "int max_steps = max(1, tile_size * tile_size);" in solver_source
+            assert "for (int step = 0; step < {FORMAL_CONNECTED_TILE_LOCAL_SIZE * FORMAL_CONNECTED_TILE_LOCAL_SIZE}; ++step)" in solver_source
+            assert "s_step_changed = 0u;" in solver_source
+            assert "s_connected[local_cell.y][local_cell.x - 1]" in solver_source
+            assert "s_connected[local_cell.y][local_cell.x + 1]" in solver_source
+            assert "s_connected[local_cell.y - 1][local_cell.x]" in solver_source
+            assert "s_connected[local_cell.y + 1][local_cell.x]" in solver_source
+            assert "bool connected_sample(ivec2 sample_cell) {{" in shader_source
+            assert "return structural_connected(sample_cell) && current_connected_global(sample_cell);" in shader_source
+            for offset in ("ivec2(-1, 0)", "ivec2(1, 0)", "ivec2(0, -1)", "ivec2(0, 1)"):
+                assert f"touches_connected = touches_connected || connected_sample(cell + {offset});" in solver_source
+            assert "touches_connected = touches_connected || current_connected_global(cell + ivec2" not in solver_source
+            boundary_source = shader_source.split("bool boundary_connected = structural && (", 1)[1].split(");", 1)[0]
+            for offset in ("ivec2(-1, 0)", "ivec2(1, 0)", "ivec2(0, -1)", "ivec2(0, 1)"):
+                assert f"connected_sample(cell + {offset})" in boundary_source
+            assert "current_connected_global(cell + ivec2" not in boundary_source
+        elif solver_name == "solve_supported_cells":
+            solver_source = shader_source.split("void solve_supported_cells(", 1)[1].split(
+                "bool sample_in_current_tile",
+                1,
+            )[0]
+            assert "shared int s_structural[{FORMAL_CONNECTED_TILE_LOCAL_SIZE}][{FORMAL_CONNECTED_TILE_LOCAL_SIZE}]" in shader_source
+            assert "shared int s_supported[{FORMAL_CONNECTED_TILE_LOCAL_SIZE}][{FORMAL_CONNECTED_TILE_LOCAL_SIZE}]" in shader_source
+            assert "shared int s_next[{FORMAL_CONNECTED_TILE_LOCAL_SIZE}][{FORMAL_CONNECTED_TILE_LOCAL_SIZE}]" in shader_source
+            assert "s_structural_rows" not in shader_source
+            assert "s_supported_rows" not in shader_source
+            assert "s_next_supported_rows" not in shader_source
+            assert "row_bit" not in shader_source
+            assert "supported_row_bit" not in shader_source
+            assert "horizontal_closure" not in shader_source
+            assert "vertical_closure" not in shader_source
+            assert "close_supported_columns" not in shader_source
+            assert "solve_supported_cells_exact_fallback" not in shader_source
+            assert "int max_steps = max(1, tile_size * tile_size);" in solver_source
+            assert "for (int step = 0; step < {FORMAL_CONNECTED_TILE_LOCAL_SIZE * FORMAL_CONNECTED_TILE_LOCAL_SIZE}; ++step)" in solver_source
+            assert "s_step_changed = 0u;" in solver_source
+            assert "s_supported[local_cell.y][local_cell.x - 1]" in solver_source
+            assert "s_supported[local_cell.y][local_cell.x + 1]" in solver_source
+            assert "s_supported[local_cell.y - 1][local_cell.x]" in solver_source
+            assert "s_supported[local_cell.y + 1][local_cell.x]" in solver_source
+            assert "s_next[local_cell.y][local_cell.x] = next_value;" in solver_source
+            assert "s_supported[local_cell.y][local_cell.x] = s_next[local_cell.y][local_cell.x];" in solver_source
+            assert "bool support_global(ivec2 cell) {{" in shader_source
+            assert (
+                "return structural_connected(cell) && texelFetch(support_in_tex, cell, 0).x > 0.5;" in shader_source
+            )
+            assert "bool structural = local_valid && texelFetch(structural_tex, cell, 0).x > 0.5;" in shader_source
+            assert "bool structural = local_valid && structural_connected(cell);" not in shader_source
+            assert "axis_step" not in line_clear_source
+            assert "for (int step_index = 1; step_index < steps; ++step_index)" not in line_clear_source
+            assert "bool row_masks_line_clear" in shader_source
+            assert "bool column_masks_line_clear" in shader_source
+            assert "bool row_mask_segment_clear" in shader_source
+            assert "bool column_mask_segment_clear" in shader_source
+            assert "connected_tile_row_masks" in shader_source
+            assert "connected_tile_column_masks" in shader_source
+            assert "return row_masks_line_clear(start_cell.y, x0, x1);" in line_clear_source
+            assert "return column_masks_line_clear(start_cell.x, y0, y1);" in line_clear_source
+            for offset in ("ivec2(-1, 0)", "ivec2(1, 0)", "ivec2(0, -1)", "ivec2(0, 1)"):
+                assert f"touches_supported = touches_supported || support_global(cell + {offset});" in solver_source
+            boundary_source = shader_source.split("bool boundary_supported = structural && (", 1)[1].split(");", 1)[0]
+            for offset in ("ivec2(-1, 0)", "ivec2(1, 0)", "ivec2(0, -1)", "ivec2(0, 1)"):
+                assert f"support_global(cell + {offset})" in boundary_source
+            assert "bool previously_supported = s_supported[local_cell.y][local_cell.x] != 0;" in shader_source
+            assert "s_supported[local_cell.y][local_cell.x] = 1;" in shader_source
+            assert "bool final_supported = s_supported[local_cell.y][local_cell.x] != 0;" in shader_source
+        elif solver_name == "solve_label_cells":
+            assert "if (!component_connected(cell)) {{" in shader_source
+            assert "return int(texelFetch(label_in_tex, cell, 0).x + 0.5);" in shader_source
+            assert "bool component = local_valid && texelFetch(component_mask_tex, cell, 0).x > 0.5;" in shader_source
+            assert "bool component = local_valid && component_connected(cell);" not in shader_source
+            assert "axis_step" not in line_clear_source
+            assert "for (int step_index = 1; step_index < steps; ++step_index)" not in line_clear_source
+            assert "bool row_masks_line_clear" in shader_source
+            assert "bool column_masks_line_clear" in shader_source
+            assert "bool row_mask_segment_clear" in shader_source
+            assert "bool column_mask_segment_clear" in shader_source
+            assert "connected_tile_row_masks" in shader_source
+            assert "connected_tile_column_masks" in shader_source
+            assert "return row_masks_line_clear(start_cell.y, x0, x1);" in line_clear_source
+            assert "return column_masks_line_clear(start_cell.x, y0, y1);" in line_clear_source
+            assert "int candidate = label_global(cell + ivec2(-1, 0));" in shader_source
+            assert "int candidate = label_global(cell + ivec2(1, 0));" in shader_source
+            assert "int candidate = label_global(cell + ivec2(0, -1));" in shader_source
+            assert "int candidate = label_global(cell + ivec2(0, 1));" in shader_source
+
+    connected_frontier_source = inspect.getsource(GPUCollapsePipeline._solve_formal_connected_frontier_texture)
+    dirty_frontier_source = inspect.getsource(GPUCollapsePipeline._solve_formal_connected_dirty_cell_frontier_texture)
+    support_source = inspect.getsource(GPUCollapsePipeline._solve_formal_connected_tile_support_textures)
+    assert "_formal_connected_cell_jump_schedule" in connected_frontier_source
+    assert "_formal_connected_dirty_jump_schedule" in dirty_frontier_source
+    assert "_formal_jfa_jumps" in support_source
+    assert "_run_formal_connected_tile_support_pass" in support_source
+    assert "_build_formal_connected_axis_masks" in support_source
+    assert "_expand_formal_connected_tile_support_frontier" not in support_source
+
+
+def test_gpu_collapse_formal_connected_refine_count_is_bounded_not_tile_grid_diameter() -> None:
+    pipeline = GPUCollapsePipeline()
+    tiny_world = SimpleNamespace(active=SimpleNamespace(tile_width=1, tile_height=1))
+    huge_world = SimpleNamespace(active=SimpleNamespace(tile_width=4096, tile_height=2048))
+    source = inspect.getsource(GPUCollapsePipeline._formal_connected_tile_refine_pass_count)
+
+    assert pipeline._formal_connected_tile_refine_pass_count(tiny_world) == FORMAL_CONNECTED_TILE_REFINE_PASS_COUNT
+    assert pipeline._formal_connected_tile_refine_pass_count(huge_world) == FORMAL_CONNECTED_TILE_REFINE_PASS_COUNT
+    assert FORMAL_CONNECTED_TILE_REFINE_PASS_COUNT <= 4
+    assert "tile_width" not in source
+    assert "tile_height" not in source
+    assert "tile_width + tile_height" not in source
+
+
+def test_gpu_collapse_formal_support_and_label_refine_counts_are_bounded_not_region_diameter() -> None:
+    pipeline = GPUCollapsePipeline()
+    tiny_region = (1, 1)
+    huge_region = (4096, 2048)
+    huge_diameter = sum(huge_region)
+    support_count_source = inspect.getsource(GPUCollapsePipeline._formal_support_unit_pass_count)
+    label_count_source = inspect.getsource(GPUCollapsePipeline._formal_label_unit_pass_count)
+    support_refine_source = inspect.getsource(GPUCollapsePipeline._run_formal_support_refine_passes)
+    label_refine_source = inspect.getsource(GPUCollapsePipeline._run_formal_label_refine_passes)
+
+    tiny_support_count = pipeline._formal_support_unit_pass_count(*tiny_region)
+    huge_support_count = pipeline._formal_support_unit_pass_count(*huge_region)
+    tiny_label_count = pipeline._formal_label_unit_pass_count(*tiny_region)
+    huge_label_count = pipeline._formal_label_unit_pass_count(*huge_region)
+
+    assert tiny_support_count == huge_support_count == 2
+    assert tiny_label_count == huge_label_count == 2
+    assert huge_support_count < huge_diameter
+    assert huge_label_count < huge_diameter
+    assert "width + height" not in support_count_source
+    assert "width + height" not in label_count_source
+    assert "int(width) + int(height)" not in support_count_source
+    assert "int(width) + int(height)" not in label_count_source
+    assert "_formal_support_unit_pass_count(width, height)" in support_refine_source
+    assert "_formal_label_unit_pass_count(width, height)" in label_refine_source
+    assert "for _ in range(unit_pass_count)" in support_refine_source
+    assert "for _ in range(unit_pass_count)" in label_refine_source
+
+
+def test_gpu_collapse_formal_support_reaches_long_orthogonal_chain_without_change_flag_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=8, height=8)
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+
+    original_run_pass = pipeline._run_pass
+
+    def fail_change_flag_read(*args: object, **kwargs: object) -> tuple[object, object, bool]:
+        if bool(kwargs.get("read_changed", True)):
+            raise AssertionError("formal GPU collapse support solve must not read per-pass change flags")
+        return original_run_pass(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "_run_pass", fail_change_flag_read)
+
+    structural = np.zeros((9, 9), dtype=np.bool_)
+    structural[8, 1:8] = True
+    structural[1:9, 7] = True
+    support_seed = np.zeros_like(structural)
+    support_seed[8, 1] = True
+
+    previous_frame_active = engine._world_simulation_frame_active
+    engine._world_simulation_frame_active = True
+    try:
+        unsupported = pipeline.solve_region(engine, structural, support_seed)
+    finally:
+        engine._world_simulation_frame_active = previous_frame_active
+
+    supported = structural & ~unsupported
+    assert np.all(supported[8, 1:8])
+    assert np.all(supported[1:9, 7])
+    assert not np.any(unsupported[structural])
+
+
+def _single_tile_snake_mask(tile_size: int = 32) -> np.ndarray:
+    mask = np.zeros((tile_size, tile_size), dtype=np.bool_)
+    for lane, y in enumerate(range(0, tile_size, 2)):
+        mask[y, :] = True
+        if y + 1 < tile_size:
+            mask[y + 1, tile_size - 1 if lane % 2 == 0 else 0] = True
+    return mask
+
+
+def _orthogonal_reachable_mask(structural: np.ndarray, seeds: np.ndarray) -> np.ndarray:
+    reachable = np.zeros_like(structural, dtype=np.bool_)
+    queue = [tuple(cell) for cell in np.argwhere(structural & seeds)]
+    for y, x in queue:
+        reachable[y, x] = True
+    cursor = 0
+    while cursor < len(queue):
+        y, x = queue[cursor]
+        cursor += 1
+        for ny, nx in ((y - 1, x), (y + 1, x), (y, x - 1), (y, x + 1)):
+            if (
+                ny < 0
+                or nx < 0
+                or ny >= structural.shape[0]
+                or nx >= structural.shape[1]
+                or reachable[ny, nx]
+                or not structural[ny, nx]
+            ):
+                continue
+            reachable[ny, nx] = True
+            queue.append((ny, nx))
+    return reachable
+
+
+def _formal_orthogonal_connectivity_fixture() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    structural = np.zeros((32, 64), dtype=np.bool_)
+    structural[4, 2:32] = True
+    structural[4:18, 31] = True
+    structural[17, 31:55] = True
+    structural[4:21, 2] = True
+    structural[20, 2:15] = True
+    structural[20, 16:30] = True
+    structural[21:23, 10] = True
+    structural[23, 11] = True
+
+    seeds = np.zeros_like(structural)
+    seeds[4, 2] = True
+    expected = _orthogonal_reachable_mask(structural, seeds)
+    assert bool(expected[17, 32])
+    assert bool(expected[20, 14])
+    assert not bool(expected[20, 16])
+    assert not bool(expected[23, 11])
+    return structural, seeds, expected
+
+
+def _seed_connected_tile_worklist(engine: WorldEngine, tiles: list[tuple[int, int]]) -> str:
+    pipeline = engine.collapse_solver.gpu_pipeline
+    pipeline._ensure_formal_connected_frontier_buffers(engine)
+    bridge = engine.bridge
+    tile_count = max(1, int(engine.active.tile_width) * int(engine.active.tile_height))
+    tile_mask = np.zeros(tile_count, dtype=np.int32)
+    tile_array = np.asarray(tiles, dtype=np.int32)
+    for tile_x, tile_y in tile_array.tolist():
+        tile_index = int(tile_y) * int(engine.active.tile_width) + int(tile_x)
+        tile_mask[tile_index] = 1
+    bridge.buffers[FORMAL_CONNECTED_TILE_FRONTIER_BUFFER].write(tile_mask.tobytes())
+    bridge.buffers[FORMAL_CONNECTED_TILE_LIST_BUFFER].write(tile_array.tobytes())
+    bridge.buffers[FORMAL_CONNECTED_TILE_COUNT_BUFFER].write(np.asarray([len(tiles)], dtype=np.uint32).tobytes())
+    bridge.buffers[FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER].write(np.asarray([len(tiles), 1, 1], dtype=np.uint32).tobytes())
+    bridge.mark_gpu_authoritative(
+        FORMAL_CONNECTED_TILE_FRONTIER_BUFFER,
+        FORMAL_CONNECTED_TILE_LIST_BUFFER,
+        FORMAL_CONNECTED_TILE_COUNT_BUFFER,
+        FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER,
+    )
+    return FORMAL_CONNECTED_TILE_FRONTIER_BUFFER
+
+
+def _seed_single_connected_tile_worklist(engine: WorldEngine) -> str:
+    return _seed_connected_tile_worklist(engine, [(0, 0)])
+
+
+def test_gpu_collapse_formal_cell_frontier_boundary_ignores_stale_neighbor_outside_connected_tile_mask() -> None:
+    engine = WorldEngine(width=64, height=32, simulation_backend="gpu")
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        resources = pipeline._ensure_resources(ctx, engine.width, engine.height)
+        pipeline._ensure_formal_connected_frontier_buffers(engine)
+
+        tile_size = int(engine.active.tile_size)
+        if int(engine.active.tile_width) < 2 or tile_size >= int(engine.width):
+            pytest.skip("stale-neighbor regression requires two horizontal active tiles")
+
+        bridge = engine.bridge
+        stale_x = tile_size - 1
+        boundary_x = tile_size
+        sample_y = min(4, int(engine.height) - 1)
+        structural = np.zeros((engine.height, engine.width), dtype=np.float32)
+        structural[sample_y, stale_x] = 1.0
+        structural[sample_y, boundary_x] = 1.0
+        resources.structural_tex.write(structural.tobytes())
+
+        connected = np.zeros(engine.width * engine.height, dtype=np.int32)
+        connected[sample_y * engine.width + stale_x] = 1
+        bridge.buffers[FORMAL_CONNECTED_FRONTIER_BUFFER].write(connected.tobytes())
+        bridge.buffers[FORMAL_CONNECTED_FRONTIER_SCRATCH_BUFFER].write(
+            np.zeros_like(connected).tobytes()
+        )
+
+        tile_count = int(engine.active.tile_width) * int(engine.active.tile_height)
+        connected_tiles = np.zeros(tile_count, dtype=np.int32)
+        connected_tiles[1] = 1
+        bridge.buffers[FORMAL_CONNECTED_TILE_FRONTIER_BUFFER].write(connected_tiles.tobytes())
+
+        current_frontier = (
+            FORMAL_CONNECTED_CELL_FRONTIER_TILE_FLAGS_BUFFER,
+            FORMAL_CONNECTED_CELL_FRONTIER_TILE_LIST_BUFFER,
+            FORMAL_CONNECTED_CELL_FRONTIER_TILE_COUNT_BUFFER,
+            FORMAL_CONNECTED_CELL_FRONTIER_TILE_DISPATCH_ARGS_BUFFER,
+        )
+        scratch_frontier = (
+            FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_FLAGS_BUFFER,
+            FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_LIST_BUFFER,
+            FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_COUNT_BUFFER,
+            FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_DISPATCH_ARGS_BUFFER,
+        )
+        bridge.buffers[FORMAL_CONNECTED_CELL_FRONTIER_TILE_LIST_BUFFER].write(
+            np.asarray([[1, 0]], dtype=np.int32).tobytes()
+        )
+        bridge.buffers[FORMAL_CONNECTED_CELL_FRONTIER_TILE_COUNT_BUFFER].write(
+            np.asarray([1], dtype=np.uint32).tobytes()
+        )
+        bridge.buffers[FORMAL_CONNECTED_CELL_FRONTIER_TILE_DISPATCH_ARGS_BUFFER].write(
+            np.asarray([1, 1, 1], dtype=np.uint32).tobytes()
+        )
+        bridge.buffers[FORMAL_CONNECTED_CELL_FRONTIER_TILE_FLAGS_BUFFER].write(
+            np.zeros(tile_count, dtype=np.uint32).tobytes()
+        )
+        bridge.buffers[FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_FLAGS_BUFFER].write(
+            np.zeros(tile_count, dtype=np.uint32).tobytes()
+        )
+        bridge.mark_gpu_authoritative(
+            FORMAL_CONNECTED_FRONTIER_BUFFER,
+            FORMAL_CONNECTED_FRONTIER_SCRATCH_BUFFER,
+            FORMAL_CONNECTED_TILE_FRONTIER_BUFFER,
+            FORMAL_CONNECTED_CELL_FRONTIER_TILE_FLAGS_BUFFER,
+            FORMAL_CONNECTED_CELL_FRONTIER_TILE_LIST_BUFFER,
+            FORMAL_CONNECTED_CELL_FRONTIER_TILE_COUNT_BUFFER,
+            FORMAL_CONNECTED_CELL_FRONTIER_TILE_DISPATCH_ARGS_BUFFER,
+            FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_FLAGS_BUFFER,
+        )
+
+        pipeline._expand_formal_connected_cell_frontier(
+            engine,
+            resources,
+            engine.width,
+            engine.height,
+            FORMAL_CONNECTED_FRONTIER_BUFFER,
+            FORMAL_CONNECTED_FRONTIER_SCRATCH_BUFFER,
+            FORMAL_CONNECTED_TILE_FRONTIER_BUFFER,
+            current_frontier=current_frontier,
+            next_frontier=scratch_frontier,
+            jump=1,
+            jump_generation=1,
+        )
+
+        connected_after = np.frombuffer(
+            bridge.buffers[FORMAL_CONNECTED_FRONTIER_BUFFER].read(size=connected.nbytes),
+            dtype=np.int32,
+        ).reshape((engine.height, engine.width))
+        assert int(connected_after[sample_y, stale_x]) == 1
+        assert int(connected_after[sample_y, boundary_x]) == 0
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_cell_frontier_orthogonal_connectivity_matches_maze_gap_diagonal_and_tile_boundary() -> None:
+    engine = WorldEngine(width=64, height=32, simulation_backend="gpu")
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        resources = pipeline._ensure_resources(ctx, engine.width, engine.height)
+        structural, seeds, expected = _formal_orthogonal_connectivity_fixture()
+        resources.structural_tex.write(structural.astype("f4", copy=False).tobytes())
+        tile_mask_name = _seed_connected_tile_worklist(engine, [(0, 0), (1, 0)])
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            connected_texture = pipeline._solve_formal_connected_frontier_texture(
+                engine,
+                resources,
+                (2, 4, 3, 5),
+                0,
+                0,
+                engine.width,
+                engine.height,
+                tile_mask_name,
+            )
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        connected = np.frombuffer(connected_texture.read(), dtype="f4").reshape(structural.shape) > 0.5
+        assert bool(seeds[4, 2])
+        assert np.array_equal(connected, expected)
+        assert bool(connected[17, 32])
+        assert bool(connected[20, 14])
+        assert not bool(connected[20, 16])
+        assert not bool(connected[23, 11])
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_support_orthogonal_connectivity_matches_maze_gap_diagonal_and_tile_boundary() -> None:
+    engine = WorldEngine(width=64, height=32, simulation_backend="gpu")
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        resources = pipeline._ensure_resources(ctx, engine.width, engine.height)
+        structural, support_seed, expected = _formal_orthogonal_connectivity_fixture()
+        resources.structural_tex.write(structural.astype("f4", copy=False).tobytes())
+        resources.support_ping.write(support_seed.astype("f4", copy=False).tobytes())
+        tile_mask_name = _seed_connected_tile_worklist(engine, [(0, 0), (1, 0)])
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            supported_texture = pipeline._solve_formal_connected_tile_support_textures(
+                engine,
+                resources,
+                0,
+                0,
+                engine.width,
+                engine.height,
+                tile_mask_name,
+            )
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        supported = np.frombuffer(supported_texture.read(), dtype="f4").reshape(structural.shape) > 0.5
+        assert np.array_equal(supported, expected)
+        assert bool(supported[17, 32])
+        assert bool(supported[20, 14])
+        assert not bool(supported[20, 16])
+        assert not bool(supported[23, 11])
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_connected_support_tile_early_exit_preserves_snake_corridor() -> None:
+    engine = WorldEngine(width=32, height=32, simulation_backend="gpu")
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        resources = pipeline._ensure_resources(ctx, engine.width, engine.height)
+        snake = _single_tile_snake_mask()
+        support_seed = np.zeros_like(snake)
+        support_seed[0, 0] = True
+        resources.structural_tex.write(snake.astype("f4", copy=False).tobytes())
+        resources.support_ping.write(support_seed.astype("f4", copy=False).tobytes())
+        tile_mask_name = _seed_single_connected_tile_worklist(engine)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            supported_texture = pipeline._solve_formal_connected_tile_support_textures(
+                engine,
+                resources,
+                0,
+                0,
+                engine.width,
+                engine.height,
+                tile_mask_name,
+            )
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        supported = np.frombuffer(supported_texture.read(), dtype="f4").reshape(snake.shape) > 0.5
+        assert np.all(supported[snake])
+        assert not np.any(supported[~snake])
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_connected_support_dual_publish_clears_stale_bridge_masks_between_solves() -> None:
+    engine = WorldEngine(width=32, height=32, simulation_backend="gpu")
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        resources = pipeline._ensure_resources(ctx, engine.width, engine.height)
+        tile_mask_name = _seed_single_connected_tile_worklist(engine)
+
+        first_structural = np.zeros((engine.height, engine.width), dtype=np.bool_)
+        first_structural[4, 4] = True
+        first_structural[20, 20] = True
+        first_support_seed = np.zeros_like(first_structural)
+        first_support_seed[4, 4] = True
+        resources.structural_tex.write(first_structural.astype("f4", copy=False).tobytes())
+        resources.support_ping.write(first_support_seed.astype("f4", copy=False).tobytes())
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            pipeline._solve_formal_connected_tile_support_textures(
+                engine,
+                resources,
+                0,
+                0,
+                engine.width,
+                engine.height,
+                tile_mask_name,
+            )
+            first_supported = np.frombuffer(
+                engine.bridge.buffers["collapse_supported_mask"].read(),
+                dtype=np.int32,
+            ).reshape((engine.height, engine.width))
+            first_unsupported = np.frombuffer(
+                engine.bridge.buffers["collapse_unsupported_mask"].read(),
+                dtype=np.int32,
+            ).reshape((engine.height, engine.width))
+            assert int(first_supported[4, 4]) == 1
+            assert int(first_unsupported[20, 20]) == 1
+
+            resources.structural_tex.write(np.zeros_like(first_structural, dtype=np.float32).tobytes())
+            resources.support_ping.write(np.zeros_like(first_structural, dtype=np.float32).tobytes())
+            pipeline._solve_formal_connected_tile_support_textures(
+                engine,
+                resources,
+                0,
+                0,
+                engine.width,
+                engine.height,
+                tile_mask_name,
+            )
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        second_supported = np.frombuffer(
+            engine.bridge.buffers["collapse_supported_mask"].read(),
+            dtype=np.int32,
+        ).reshape((engine.height, engine.width))
+        second_unsupported = np.frombuffer(
+            engine.bridge.buffers["collapse_unsupported_mask"].read(),
+            dtype=np.int32,
+        ).reshape((engine.height, engine.width))
+        assert int(second_supported[4, 4]) == 0
+        assert int(second_unsupported[20, 20]) == 0
+        assert {
+            "collapse_supported_mask",
+            "collapse_unsupported_mask",
+        }.issubset(engine.bridge.gpu_authoritative_resources)
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_connected_label_tile_early_exit_preserves_snake_corridor() -> None:
+    engine = WorldEngine(width=32, height=32, simulation_backend="gpu")
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        resources = pipeline._ensure_resources(ctx, engine.width, engine.height)
+        snake = _single_tile_snake_mask()
+        resources.structural_tex.write(snake.astype("f4", copy=False).tobytes())
+        tile_mask_name = _seed_single_connected_tile_worklist(engine)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            label_texture, _, _ = pipeline._label_component_texture(
+                engine,
+                resources.structural_tex,
+                engine.width,
+                engine.height,
+                x0=0,
+                y0=0,
+                tile_mask_name=tile_mask_name,
+            )
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        labels = np.rint(np.frombuffer(label_texture.read(), dtype="f4").reshape(snake.shape)).astype(np.int32)
+        snake_labels = labels[snake]
+        assert np.all(snake_labels > 0)
+        assert set(int(value) for value in snake_labels.tolist()) == {1}
+        assert not np.any(labels[~snake])
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_connected_label_ignores_stale_neighbor_outside_connected_tile_mask(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=64, height=32, simulation_backend="gpu")
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        resources = pipeline._ensure_resources(ctx, engine.width, engine.height)
+        tile_size = int(engine.active.tile_size)
+        if int(engine.active.tile_width) < 2 or tile_size >= int(engine.width):
+            pytest.skip("stale-label regression requires two horizontal active tiles")
+
+        tile_mask_name = _seed_connected_tile_worklist(engine, [(1, 0)])
+        stale_x = tile_size - 1
+        boundary_x = tile_size
+        sample_y = min(4, int(engine.height) - 1)
+        component = np.zeros((engine.height, engine.width), dtype=np.float32)
+        component[sample_y, stale_x] = 1.0
+        component[sample_y, boundary_x] = 1.0
+        resources.structural_tex.write(component.tobytes())
+
+        stale_labels = np.zeros(engine.width * engine.height, dtype=np.int32)
+        stale_labels[sample_y * engine.width + stale_x] = 1
+        engine.bridge.buffers[FORMAL_CONNECTED_FRONTIER_BUFFER].write(stale_labels.tobytes())
+
+        def fail_frontier_expand(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal connected labels must use JFA, not frontier expansion")
+
+        label_passes: list[tuple[int, bool]] = []
+        original_label_pass = pipeline._run_formal_connected_component_label_pass
+
+        def record_label_pass(*args: object, **kwargs: object) -> tuple[object, object]:
+            label_passes.append((int(args[8]), bool(kwargs["refine_local_labels"])))
+            return original_label_pass(*args, **kwargs)
+
+        monkeypatch.setattr(pipeline, "_expand_formal_component_label_frontier", fail_frontier_expand)
+        monkeypatch.setattr(pipeline, "_run_formal_connected_component_label_pass", record_label_pass)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            label_texture, _, _ = pipeline._label_component_texture(
+                engine,
+                resources.structural_tex,
+                engine.width,
+                engine.height,
+                x0=0,
+                y0=0,
+                tile_mask_name=tile_mask_name,
+            )
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        labels = np.rint(np.frombuffer(label_texture.read(), dtype="f4").reshape(component.shape)).astype(np.int32)
+        expected_boundary_label = sample_y * engine.width + boundary_x + 1
+        assert int(labels[sample_y, boundary_x]) == expected_boundary_label
+        assert any(jump > 1 for jump, _ in label_passes)
+        assert all(refine_local_labels for _, refine_local_labels in label_passes)
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_connected_jfa_preserves_cross_tile_snake_support_and_label() -> None:
+    engine = WorldEngine(width=64, height=32, simulation_backend="gpu")
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        resources = pipeline._ensure_resources(ctx, engine.width, engine.height)
+        snake = np.concatenate((_single_tile_snake_mask(), _single_tile_snake_mask()), axis=1)
+        support_seed = np.zeros_like(snake)
+        support_seed[0, 0] = True
+        resources.structural_tex.write(snake.astype("f4", copy=False).tobytes())
+        resources.support_ping.write(support_seed.astype("f4", copy=False).tobytes())
+        tile_mask_name = _seed_connected_tile_worklist(engine, [(0, 0), (1, 0)])
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            supported_texture = pipeline._solve_formal_connected_tile_support_textures(
+                engine,
+                resources,
+                0,
+                0,
+                engine.width,
+                engine.height,
+                tile_mask_name,
+            )
+            label_texture, _, _ = pipeline._label_component_texture(
+                engine,
+                resources.structural_tex,
+                engine.width,
+                engine.height,
+                x0=0,
+                y0=0,
+                tile_mask_name=tile_mask_name,
+            )
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        supported = np.frombuffer(supported_texture.read(), dtype="f4").reshape(snake.shape) > 0.5
+        labels = np.rint(np.frombuffer(label_texture.read(), dtype="f4").reshape(snake.shape)).astype(np.int32)
+        snake_labels = labels[snake]
+        assert np.all(supported[snake])
+        assert not np.any(supported[~snake])
+        assert np.all(snake_labels > 0)
+        assert set(int(value) for value in snake_labels.tolist()) == {1}
+        assert not np.any(labels[~snake])
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_connected_jfa_axis_masks_stop_long_cross_tile_gap_support_and_label() -> None:
+    engine = WorldEngine(width=96, height=32, simulation_backend="gpu")
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        resources = pipeline._ensure_resources(ctx, engine.width, engine.height)
+        tile_size = int(engine.active.tile_size)
+        if int(engine.active.tile_width) < 3 or tile_size > 32:
+            pytest.skip("axis-mask gap regression requires three connected GPU tiles")
+
+        row = min(11, engine.height - 1)
+        start_x = 2
+        end_x = min(engine.width - 3, tile_size * 3 - 3)
+        gap_x = tile_size + tile_size // 2
+        assert start_x < gap_x < end_x
+
+        structural = np.zeros((engine.height, engine.width), dtype=np.bool_)
+        structural[row, start_x : end_x + 1] = True
+        structural[row, gap_x] = False
+        support_seed = np.zeros_like(structural)
+        support_seed[row, start_x] = True
+        resources.structural_tex.write(structural.astype("f4", copy=False).tobytes())
+        resources.support_ping.write(support_seed.astype("f4", copy=False).tobytes())
+        tile_mask_name = _seed_connected_tile_worklist(engine, [(0, 0), (1, 0), (2, 0)])
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            supported_texture = pipeline._solve_formal_connected_tile_support_textures(
+                engine,
+                resources,
+                0,
+                0,
+                engine.width,
+                engine.height,
+                tile_mask_name,
+            )
+            supported = np.frombuffer(supported_texture.read(), dtype="f4").reshape(structural.shape) > 0.5
+            label_texture, _, _ = pipeline._label_component_texture(
+                engine,
+                resources.structural_tex,
+                engine.width,
+                engine.height,
+                x0=0,
+                y0=0,
+                tile_mask_name=tile_mask_name,
+            )
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        labels = np.rint(np.frombuffer(label_texture.read(), dtype="f4").reshape(structural.shape)).astype(np.int32)
+        left_supported = supported[row, start_x:gap_x]
+        right_supported = supported[row, gap_x + 1 : end_x + 1]
+        left_labels = labels[row, start_x:gap_x]
+        right_labels = labels[row, gap_x + 1 : end_x + 1]
+
+        assert np.all(left_supported)
+        assert not bool(supported[row, gap_x])
+        assert not np.any(right_supported)
+        assert int(labels[row, gap_x]) == 0
+        assert np.all(left_labels > 0)
+        assert np.all(right_labels > 0)
+        assert len(set(int(value) for value in left_labels.tolist())) == 1
+        assert len(set(int(value) for value in right_labels.tolist())) == 1
+        assert int(left_labels[0]) != int(right_labels[0])
+    finally:
+        engine.close()
 
 
 def test_gpu_collapse_formal_frame_publishes_runtime_masks_to_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -46705,7 +55951,7 @@ def test_gpu_collapse_formal_frame_publishes_runtime_masks_to_bridge(monkeypatch
     assert int(preserved_unsupported[1, 1]) == 1
 
 
-def test_gpu_collapse_formal_label_component_mask_uses_fixed_gpu_iterations_without_change_flag_read(
+def test_gpu_collapse_formal_label_component_mask_uses_deterministic_gpu_iterations_without_change_flag_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class NoReadChangeFlag:
@@ -46770,6 +56016,288 @@ def test_gpu_collapse_formal_label_component_mask_uses_fixed_gpu_iterations_with
     assert int(bridge_collapsed[2, 3]) == 1
     assert int(bridge_collapsed[7, 7]) == 0
     assert {"collapse_component_label", "collapse_collapsed_cell_mask"}.issubset(engine.bridge.gpu_authoritative_resources)
+
+
+def test_gpu_collapse_formal_connected_label_materialize_uses_tile_jfa_not_unit_full_grid() -> None:
+    materialize_source = inspect.getsource(GPUCollapsePipeline.materialize_component_texture_formal)
+    label_source = inspect.getsource(GPUCollapsePipeline._label_component_texture_connected_tiles)
+    label_seed_source = inspect.getsource(GPUCollapsePipeline._seed_formal_component_label_frontier)
+    label_pass_source = inspect.getsource(GPUCollapsePipeline._run_formal_connected_component_label_pass)
+    label_refine_source = inspect.getsource(GPUCollapsePipeline._run_formal_connected_component_label_refine_passes)
+    label_copy_source = inspect.getsource(GPUCollapsePipeline._copy_formal_component_label_buffer_to_texture)
+    mask_source = inspect.getsource(GPUCollapsePipeline._build_formal_connected_axis_masks)
+    collect_source = inspect.getsource(GPUCollapsePipeline._collect_component_labels_gpu)
+    legacy_collect_source = inspect.getsource(GPUCollapsePipeline.collect_component_labels)
+    prepare_source = inspect.getsource(GPUCollapsePipeline._prepare_formal_component_list_and_metadata)
+    work_buffer_source = inspect.getsource(GPUCollapsePipeline._ensure_component_work_buffers)
+    shader_source = inspect.getsource(GPUCollapsePipeline._ensure_programs)
+    materialize_pass_source = inspect.getsource(GPUCollapsePipeline._materialize_compact_labeled_component_texture)
+
+    def shader_block(program_name: str, next_program_name: str) -> str:
+        start = f'self.programs["{program_name}"] = ctx.compute_shader('
+        end = f'self.programs["{next_program_name}"] = ctx.compute_shader('
+        assert start in shader_source
+        assert end in shader_source
+        return shader_source.split(start, 1)[1].split(end, 1)[0]
+
+    collect_shader = shader_block("collect_component_labels", "clear_component_label_flags_connected_tiles")
+    connected_collect_shader = shader_block("collect_component_labels_connected_tiles", "build_component_dispatch_args")
+    seed_label_shader = shader_block("seed_formal_component_label_frontier", "expand_formal_component_label_frontier")
+    connected_label_shader = shader_block("propagate_formal_connected_component_labels", "component_label_propagate")
+
+    assert "tile_mask_name=tile_mask_name" in materialize_source
+    assert "_formal_label_unit_pass_count" not in label_source
+    assert "_formal_connected_expansion_pass_count" not in label_source
+    assert "_formal_jfa_jumps" in label_source
+    assert "_run_formal_connected_component_label_pass" in label_source
+    assert "_run_formal_connected_component_label_refine_passes" in label_source
+    assert "_build_formal_connected_axis_masks" in label_source
+    assert "component_texture" in label_source
+    assert "_expand_formal_component_label_frontier" not in label_source
+    assert "_formal_connected_component_label_frontier_pass_count" not in label_source
+    assert "current_frontier, next_frontier = next_frontier, current_frontier" not in label_source
+    assert "label_frontier." not in label_source
+    assert "label_jfa.seed" in label_source
+    assert "label_jfa.materialize" in label_source
+    assert "label_jfa.axis_masks" in label_source
+    assert "label_jfa.jfa" in label_source
+    assert "label_jfa.refine" in label_source
+    assert "label_jfa.publish" in label_source
+    assert "_run_formal_label_refine_passes" not in label_source
+    assert "refine_local_labels=True" in label_source
+    assert "refine_local_labels=False" not in label_source
+    assert "_formal_connected_tile_refine_pass_count" in label_refine_source
+    assert "_run_formal_connected_component_label_pass" in label_refine_source
+    assert "1," in label_refine_source
+    assert 'program["refine_local_labels"].value = bool(refine_local_labels)' in label_pass_source
+    assert "resources.connected_tile_row_masks.bind_to_storage_buffer(binding=3)" in label_pass_source
+    assert "resources.connected_tile_column_masks.bind_to_storage_buffer(binding=4)" in label_pass_source
+    assert "run_indirect" in mask_source
+    assert "FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER" in mask_source
+    assert "source_texture.use(location=0)" in mask_source
+    assert "uniform bool refine_local_labels;" in connected_label_shader
+    assert "if (refine_local_labels) {{" in connected_label_shader
+    assert "if (refine_local_labels && s_jump_changed != 0u) {{" in connected_label_shader
+    assert "connected_tile_row_masks" in connected_label_shader
+    assert "connected_tile_column_masks" in connected_label_shader
+    assert "for (int step_index = 1; step_index < steps; ++step_index)" not in connected_label_shader
+    assert "run_indirect" in label_seed_source
+    assert "run_indirect" in label_pass_source
+    assert "run_indirect" in label_copy_source
+    assert "component_labels_by_cell" in seed_label_shader
+    assert "tile_connected_mask(tile)" in seed_label_shader
+    assert "collect_component_labels_connected_tiles" in collect_source
+    assert "_clear_component_label_flags_connected_tiles" not in collect_source
+    assert "component_flags.write(np.zeros(component_capacity" not in collect_source
+    assert "component_flags.write(np.zeros(cell_count" not in legacy_collect_source
+    assert "component_flags.clear" not in work_buffer_source
+    assert "component_flags.orphan" not in work_buffer_source
+    assert "flag_generation" not in collect_source
+    assert "flag_generation" not in legacy_collect_source
+    assert "uniform uint flag_generation;" not in collect_shader
+    assert "uniform uint flag_generation;" not in connected_collect_shader
+    assert "atomicExchange(component_flags" not in collect_shader
+    assert "atomicExchange(component_flags" not in connected_collect_shader
+    assert "int cell_index = cell.y * region_size.x + cell.x;" in collect_shader
+    assert "int cell_index = cell.y * cell_grid_size.x + cell.x;" in connected_collect_shader
+    assert "label != cell_index + 1" in collect_shader
+    assert "label != cell_index + 1" in connected_collect_shader
+    assert "component_flags[uint(label - 1)] = output_index + 1u;" in collect_shader
+    assert "component_flags[uint(label - 1)] = output_index + 1u;" in connected_collect_shader
+    assert "component_metadata[base + 0] = empty_min.x;" in collect_shader
+    assert "component_metadata[base + 0] = empty_min.x;" in connected_collect_shader
+    assert 'program["empty_min"].value' in collect_source
+    assert 'program["empty_min"].value' in legacy_collect_source
+    assert "index_compact_component_labels" not in prepare_source
+    assert "_build_component_dispatch_args(world, component_capacity)" not in prepare_source
+    assert "summarize_compact_components_connected_tiles" in prepare_source
+    assert "materialize_compact_components_connected_tiles" in materialize_pass_source
+    assert "_publish_bridge_region_outputs_connected_tiles" in materialize_pass_source
+
+
+def test_gpu_collapse_formal_connected_label_component_collect_skips_tile_flag_clear(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NoClearFlagBuffer:
+        def __init__(self, wrapped: object) -> None:
+            self._wrapped = wrapped
+
+        def clear(self, *args: object, **kwargs: object) -> None:
+            raise AssertionError("formal connected component collect must not clear compact label flags")
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._wrapped, name)
+
+    engine = WorldEngine(width=32, height=32, simulation_backend="gpu")
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(8, 8, "log_solid", mark_dirty=False)
+        engine.bridge.sync_world(engine)
+        engine.collapse_dirty_regions.clear()
+        engine.collapse_deferred_regions.clear()
+
+        def fail_flag_clear(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal connected component collect must not clear label flags per collect")
+
+        monkeypatch.setattr(pipeline, "_clear_component_label_flags_connected_tiles", fail_flag_clear)
+        original_ensure_resources = pipeline._ensure_resources
+
+        def ensure_no_component_flag_clear(*args: object, **kwargs: object) -> object:
+            resources = original_ensure_resources(*args, **kwargs)
+            if not isinstance(resources.component_flags, NoClearFlagBuffer):
+                resources.component_flags = NoClearFlagBuffer(resources.component_flags)
+            return resources
+
+        monkeypatch.setattr(pipeline, "_ensure_resources", ensure_no_component_flag_clear)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        try:
+            engine._world_simulation_frame_active = True
+            component_capacity = pipeline.execute_formal_connected_expansion(engine, (8, 8, 9, 9))
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        unpacked, cell = _readback_cell_window(engine, center_x=8, center_y=8, width=3, height=3)
+        assert component_capacity >= 1
+        assert int(unpacked["phase"][1, 1]) == int(Phase.FALLING_ISLAND)
+        assert int(cell["island_id"][1, 1]) > 0
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_component_collect_stale_compact_flags_do_not_pollute_consecutive_materialize() -> None:
+    engine = WorldEngine(width=8, height=8, simulation_backend="gpu")
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        for x, y in ((0, 0), (2, 0)):
+            engine.set_cell(x, y, "log_solid", mark_dirty=False)
+        engine.bridge.sync_world(engine)
+
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        resources = pipeline._ensure_resources(ctx, engine.width, engine.height)
+
+        first_mask = np.zeros((engine.height, engine.width), dtype=np.float32)
+        first_mask[0, 0] = 1.0
+        first_mask[0, 2] = 1.0
+
+        previous_frame_active = engine._world_simulation_frame_active
+        try:
+            engine._world_simulation_frame_active = True
+            resources.structural_tex.write(first_mask.tobytes())
+            pipeline.materialize_component_texture_formal(
+                engine,
+                resources.structural_tex,
+                engine.width,
+                engine.height,
+                0,
+                0,
+            )
+            ctx.finish()
+            compact_indices = np.frombuffer(
+                resources.component_flags.read(size=engine.width * engine.height * np.dtype(np.uint32).itemsize),
+                dtype=np.uint32,
+            ).copy()
+            first_label_indices = np.asarray([0, 2], dtype=np.int64)
+            first_compact_slots = compact_indices[first_label_indices]
+            assert sorted(int(value) for value in first_compact_slots.tolist()) == [1, 2]
+
+            second_mask = np.zeros_like(first_mask)
+            stale_label_index = int(first_label_indices[np.flatnonzero(first_compact_slots == 2)[0]])
+            second_mask.flat[stale_label_index] = 1.0
+            resources.structural_tex.write(second_mask.tobytes())
+            pipeline.materialize_component_texture_formal(
+                engine,
+                resources.structural_tex,
+                engine.width,
+                engine.height,
+                0,
+                0,
+            )
+            ctx.finish()
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        component_count = int(np.frombuffer(resources.component_count.read(size=4), dtype=np.uint32, count=1)[0])
+        second_compact_indices = np.frombuffer(
+            resources.component_flags.read(size=engine.width * engine.height * np.dtype(np.uint32).itemsize),
+            dtype=np.uint32,
+        ).copy()
+        metadata = np.frombuffer(
+            resources.component_metadata.read(size=5 * np.dtype(np.int32).itemsize),
+            dtype=np.int32,
+            count=5,
+        ).copy()
+        stale_x = stale_label_index % engine.width
+        stale_y = stale_label_index // engine.width
+        assert component_count == 1
+        assert int(second_compact_indices[stale_label_index]) == 1
+        assert metadata.tolist() == [stale_x, stale_y, stale_x + 1, stale_y + 1, 1]
+        assert not hasattr(pipeline, "_component_label_flag_generation")
+    finally:
+        engine.close()
+
+
+def test_gpu_collapse_formal_label_connects_long_orthogonal_component_without_change_flag_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NoReadChangeFlag:
+        def __init__(self, wrapped: object) -> None:
+            self._wrapped = wrapped
+
+        def write(self, *args: object, **kwargs: object) -> object:
+            return self._wrapped.write(*args, **kwargs)  # type: ignore[attr-defined]
+
+        def bind_to_storage_buffer(self, *args: object, **kwargs: object) -> object:
+            return self._wrapped.bind_to_storage_buffer(*args, **kwargs)  # type: ignore[attr-defined]
+
+        def read(self, *args: object, **kwargs: object) -> bytes:
+            raise AssertionError("formal GPU collapse component labeling must not read per-pass change flags")
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._wrapped, name)
+
+    engine = WorldEngine(width=8, height=8)
+    pipeline = engine.collapse_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU collapse pipeline is not available")
+
+    original_ensure_resources = pipeline._ensure_resources
+
+    def ensure_no_read_change_flag(*args: object, **kwargs: object) -> object:
+        resources = original_ensure_resources(*args, **kwargs)
+        if not isinstance(resources.change_flag, NoReadChangeFlag):
+            resources.change_flag = NoReadChangeFlag(resources.change_flag)
+        return resources
+
+    monkeypatch.setattr(pipeline, "_ensure_resources", ensure_no_read_change_flag)
+
+    component_mask = np.zeros((9, 9), dtype=np.bool_)
+    component_mask[8, 1:8] = True
+    component_mask[1:9, 7] = True
+    component_mask[0, 0] = True
+
+    previous_frame_active = engine._world_simulation_frame_active
+    engine._world_simulation_frame_active = True
+    try:
+        labels = pipeline.label_component_mask(engine, component_mask, x0=0, y0=0)
+    finally:
+        engine._world_simulation_frame_active = previous_frame_active
+
+    isolated_label = int(labels[0, 0])
+    chain_labels = [int(labels[y, x]) for y in range(1, 9) for x in range(1, 9) if component_mask[y, x]]
+    chain_label_set = set(chain_labels)
+    assert isolated_label > 0
+    assert isolated_label not in chain_label_set
+    assert all(label > 0 for label in chain_labels)
+    assert len(chain_label_set) == 1
 
 
 def test_gpu_collapse_solver_queues_deferred_region_without_cpu_mask_scan(
@@ -47048,7 +56576,7 @@ def test_falling_island_sheds_low_cohesion_edge_cells_into_powder_while_still_fa
     engine.islands[5] = FallingIslandRecord(
         island_id=5,
         bbox=(10, 6, 13, 7),
-        velocity_xy=(0.0, 0.0),
+        velocity_xy=(0.0, 59.1),
     )
 
     engine.motion_solver.step(engine, 1.0 / 60.0)
@@ -47072,7 +56600,7 @@ def test_gpu_motion_solver_falling_island_shedding_does_not_call_cpu_shed(
     engine.islands[15] = FallingIslandRecord(
         island_id=15,
         bbox=(10, 6, 13, 7),
-        velocity_xy=(0.0, 0.0),
+        velocity_xy=(0.0, 59.1),
     )
 
     def fail_cpu_shed(*args: object, **kwargs: object) -> np.ndarray:
@@ -47099,7 +56627,7 @@ def test_falling_island_sheds_metal_edge_cells_into_metal_powder_phase() -> None
     engine.islands[6] = FallingIslandRecord(
         island_id=6,
         bbox=(10, 6, 13, 7),
-        velocity_xy=(0.0, 0.0),
+        velocity_xy=(0.0, 59.1),
     )
 
     engine.motion_solver.step(engine, 1.0 / 60.0)
@@ -47121,7 +56649,7 @@ def test_falling_island_sheds_frozen_water_edge_cells_into_water_powder_phase() 
     engine.islands[7] = FallingIslandRecord(
         island_id=7,
         bbox=(10, 6, 13, 7),
-        velocity_xy=(0.0, 0.0),
+        velocity_xy=(0.0, 59.1),
     )
 
     engine.motion_solver.step(engine, 1.0 / 60.0)
@@ -47148,7 +56676,7 @@ def test_falling_island_sheds_frozen_hazardous_liquid_edge_cells_into_powder_pha
         engine.islands[island_id] = FallingIslandRecord(
             island_id=island_id,
             bbox=(10, 6, 13, 7),
-            velocity_xy=(0.0, 0.0),
+            velocity_xy=(0.0, 59.1),
         )
 
         engine.motion_solver.step(engine, 1.0 / 60.0)
@@ -47178,7 +56706,7 @@ def test_cpu_motion_solver_uses_cached_falling_island_break_kind() -> None:
     engine.islands[5] = FallingIslandRecord(
         island_id=5,
         bbox=(10, 6, 13, 7),
-        velocity_xy=(0.0, 0.0),
+        velocity_xy=(0.0, 59.1),
     )
 
     engine.motion_solver.step(engine, 1.0 / 60.0)
@@ -47206,7 +56734,7 @@ def test_cpu_motion_solver_uses_shadow_falling_island_break_and_powder_generatio
     engine.islands[5] = FallingIslandRecord(
         island_id=5,
         bbox=(10, 6, 13, 7),
-        velocity_xy=(0.0, 0.0),
+        velocity_xy=(0.0, 59.1),
     )
 
     engine.motion_solver.step(engine, 1.0 / 60.0)
@@ -47241,7 +56769,7 @@ def test_cpu_motion_solver_uses_shadow_default_phase_and_placeholder_flag_not_li
     engine.islands[6] = FallingIslandRecord(
         island_id=6,
         bbox=(11, 6, 12, 7),
-        velocity_xy=(0.0, 0.0),
+        velocity_xy=(0.0, 59.1),
     )
 
     engine.motion_solver.step(engine, 1.0 / 60.0)
@@ -47270,7 +56798,7 @@ def test_gpu_motion_solver_falling_island_settle_materialization_does_not_call_c
     engine.islands[16] = FallingIslandRecord(
         island_id=16,
         bbox=(11, 6, 12, 7),
-        velocity_xy=(0.0, 0.0),
+        velocity_xy=(0.0, 59.1),
     )
 
     def fail_cpu_set_cell(*args: object, **kwargs: object) -> None:
@@ -47297,7 +56825,7 @@ def test_stable_falling_island_break_kind_preserves_low_cohesion_edge_cells() ->
     engine.islands[5] = FallingIslandRecord(
         island_id=5,
         bbox=(10, 6, 13, 7),
-        velocity_xy=(0.0, 0.0),
+        velocity_xy=(0.0, 59.1),
     )
 
     engine.motion_solver.step(engine, 1.0 / 60.0)
@@ -47322,7 +56850,7 @@ def test_motion_solver_splits_disconnected_falling_island_components_into_separa
     engine.islands[9] = FallingIslandRecord(
         island_id=9,
         bbox=(8, 6, 14, 8),
-        velocity_xy=(0.0, 0.0),
+        velocity_xy=(0.0, 59.1),
     )
 
     engine.motion_solver.step(engine, 1.0 / 60.0)
@@ -47350,7 +56878,7 @@ def test_gpu_motion_solver_falling_island_split_does_not_call_cpu_component_bfs(
     engine.islands[9] = FallingIslandRecord(
         island_id=9,
         bbox=(8, 6, 14, 8),
-        velocity_xy=(0.0, 0.0),
+        velocity_xy=(0.0, 59.1),
     )
 
     def fail_cpu_component_bfs(*args: object, **kwargs: object) -> None:
@@ -47379,7 +56907,7 @@ def test_gpu_motion_solver_falling_island_split_relabels_cells_on_gpu(
     engine.islands[9] = FallingIslandRecord(
         island_id=9,
         bbox=(8, 6, 14, 8),
-        velocity_xy=(0.0, 0.0),
+        velocity_xy=(0.0, 59.1),
     )
 
     def fail_cpu_split_relabel(*args: object, **kwargs: object) -> None:
@@ -47456,7 +56984,7 @@ def test_gpu_motion_falling_island_split_uses_label_texture_without_cpu_label_re
     engine.islands[9] = FallingIslandRecord(
         island_id=9,
         bbox=(8, 6, 14, 8),
-        velocity_xy=(0.0, 0.0),
+        velocity_xy=(0.0, 59.1),
     )
 
     def fail_cpu_label_readback(*args: object, **kwargs: object) -> tuple[np.ndarray, np.ndarray]:
@@ -47470,7 +56998,7 @@ def test_gpu_motion_falling_island_split_uses_label_texture_without_cpu_label_re
     assert len(engine.islands) == 2
 
 
-def test_gpu_motion_formal_falling_island_split_uses_bridge_authoritative_island_ids() -> None:
+def test_gpu_motion_formal_falling_island_split_seeds_bridge_runtime() -> None:
     engine = WorldEngine(width=32, height=24)
     if not engine.motion_solver.gpu_pipeline.available(engine):
         pytest.skip("GPU motion pipeline is not available")
@@ -47483,7 +57011,7 @@ def test_gpu_motion_formal_falling_island_split_uses_bridge_authoritative_island
     engine.islands[9] = FallingIslandRecord(
         island_id=9,
         bbox=(8, 6, 14, 8),
-        velocity_xy=(0.0, 0.0),
+        velocity_xy=(0.0, 59.1),
     )
     engine.bridge.sync_world(engine)
     engine.bridge.mark_gpu_authoritative("island_id")
@@ -47500,13 +57028,20 @@ def test_gpu_motion_formal_falling_island_split_uses_bridge_authoritative_island
         engine.bridge.buffers["island_id"].read(size=engine.width * engine.height * 4),
         dtype=np.int32,
     ).reshape((engine.height, engine.width))
+    runtime_records = _bridge_island_runtime_records(engine)
     assert engine.motion_solver.last_backend == "gpu"
     assert engine.motion_solver.gpu_pipeline.last_cpu_mirror_downloaded is False
-    assert "island_id" in engine.bridge.gpu_authoritative_resources
+    assert {"island_id", "island_runtime"}.issubset(engine.bridge.gpu_authoritative_resources)
     assert np.count_nonzero(engine.island_id) == 0
-    assert len(engine.islands) == 2
+    assert engine.islands == {}
+    assert np.all(bridge_island_id[6, 8:10] == 0)
+    assert np.all(bridge_island_id[6, 12:14] == 0)
     assert np.all(bridge_island_id[7:9, 8:10] == 9)
-    assert np.count_nonzero(bridge_island_id[7:9, 12:14] > 0) == 4
+    assert np.all(bridge_island_id[7:9, 12:14] == 9)
+    assert np.all(bridge_island_id[7:9, 10:12] == 0)
+    assert runtime_records.shape == (1,)
+    assert int(runtime_records[0]["island_id"]) == 9
+    assert runtime_records[0]["buffer_bbox"].tolist() == [8, 7, 14, 9]
 
 
 def test_gpu_motion_solver_falling_island_components_do_not_call_cpu_coord_scan(
@@ -47522,7 +57057,7 @@ def test_gpu_motion_solver_falling_island_components_do_not_call_cpu_coord_scan(
     engine.islands[19] = FallingIslandRecord(
         island_id=19,
         bbox=(8, 6, 14, 8),
-        velocity_xy=(0.0, 0.0),
+        velocity_xy=(0.0, 59.1),
     )
 
     def fail_cpu_coord_scan(*args: object, **kwargs: object) -> np.ndarray:
@@ -47555,7 +57090,7 @@ def test_motion_solver_ignores_stale_non_falling_cells_with_matching_island_id()
         engine.islands[9] = FallingIslandRecord(
             island_id=9,
             bbox=(8, 6, 10, 8),
-            velocity_xy=(0.0, 0.0),
+            velocity_xy=(0.0, 59.1),
         )
 
         engine.motion_solver.step(engine, 1.0 / 60.0)
@@ -47576,7 +57111,7 @@ def test_motion_solver_powder_dda_moves_to_furthest_legal_cell_before_obstacle()
     engine.clear_cell_region(0, 0, engine.width, engine.height)
     engine.set_cell(5, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
     engine.set_cell(8, 8, "raw_stone_solid", mark_dirty=False)
-    engine.velocity[8, 5] = np.array([4.0, 0.0], dtype=np.float32)
+    engine.velocity[8, 5] = np.array([120.0, 0.0], dtype=np.float32)
 
     engine.motion_solver.step(engine, 1.0 / 60.0)
 
@@ -47590,7 +57125,7 @@ def test_gpu_motion_solver_powder_dda_moves_to_furthest_legal_cell_before_obstac
     engine.clear_cell_region(0, 0, engine.width, engine.height)
     engine.set_cell(5, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
     engine.set_cell(8, 8, "raw_stone_solid", mark_dirty=False)
-    engine.velocity[8, 5] = np.array([4.0, 0.0], dtype=np.float32)
+    engine.velocity[8, 5] = np.array([120.0, 0.0], dtype=np.float32)
 
     engine.motion_solver.step(engine, 1.0 / 60.0)
 
@@ -47598,6 +57133,37 @@ def test_gpu_motion_solver_powder_dda_moves_to_furthest_legal_cell_before_obstac
     assert int(engine.material_id[8, 7]) == engine.rulebook.material_id("sand_powder")
     assert int(engine.material_id[8, 6]) == 0
     assert int(engine.material_id[8, 8]) == engine.rulebook.material_id("raw_stone_solid")
+
+
+def test_powder_dda_scales_velocity_by_dt_in_cpu_and_gpu_paths() -> None:
+    def run_case(*, use_cpu: bool, dt: float) -> tuple[int, int, int]:
+        engine = WorldEngine(width=24, height=24, simulation_backend="cpu" if use_cpu else "gpu")
+        if use_cpu:
+            engine.motion_solver.gpu_pipeline.available = lambda world: False
+        engine.patch_material("sand_powder", gravity_scale=0.0, wind_coupling=0.0, drag_scale=0.0)
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        sand_id = engine.rulebook.material_id("sand_powder")
+        engine.set_cell(5, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
+        engine.set_cell(8, 8, "raw_stone_solid", mark_dirty=False)
+        for x in (4, 5, 6):
+            engine.set_cell(x, 9, "raw_stone_solid", mark_dirty=False)
+        engine.velocity[8, 5] = np.array([4.0, 0.0], dtype=np.float32)
+
+        engine.motion_solver.step(engine, dt)
+
+        return (
+            int(engine.material_id[8, 5]),
+            int(engine.material_id[8, 7]),
+            sand_id,
+        )
+
+    for use_cpu in (True, False):
+        slow_source, slow_target, sand_id = run_case(use_cpu=use_cpu, dt=1.0 / 60.0)
+        fast_source, fast_target, _ = run_case(use_cpu=use_cpu, dt=0.5)
+        assert slow_source == sand_id
+        assert slow_target == 0
+        assert fast_source == 0
+        assert fast_target == sand_id
 
 
 def test_powder_dda_uses_cpu_bresenham_path_for_steep_diagonals_in_cpu_and_gpu_paths() -> None:
@@ -47610,7 +57176,7 @@ def test_powder_dda_uses_cpu_bresenham_path_for_steep_diagonals_in_cpu_and_gpu_p
         engine.clear_cell_region(0, 0, engine.width, engine.height)
         engine.set_cell(14, 17, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
         engine.set_cell(14, 16, "raw_stone_solid", mark_dirty=False)
-        engine.velocity[17, 14] = np.array([-1.0, -2.0], dtype=np.float32)
+        engine.velocity[17, 14] = np.array([-60.0, -120.0], dtype=np.float32)
 
         engine.motion_solver.step(engine, 1.0 / 60.0)
 
@@ -47654,7 +57220,7 @@ def test_powder_friction_damps_tangential_velocity_when_supported_contact_blocks
     engine.set_cell(7, 9, "raw_stone_solid", mark_dirty=False)
     engine.set_cell(8, 9, "raw_stone_solid", mark_dirty=False)
     engine.set_cell(9, 9, "raw_stone_solid", mark_dirty=False)
-    engine.velocity[8, 8] = np.array([0.4, 0.9], dtype=np.float32)
+    engine.velocity[8, 8] = np.array([24.0, 54.0], dtype=np.float32)
 
     engine.motion_solver.step(engine, 1.0 / 60.0)
 
@@ -47671,13 +57237,13 @@ def test_powder_elasticity_bounces_vertical_velocity_when_supported_contact_bloc
     engine.set_cell(7, 9, "raw_stone_solid", mark_dirty=False)
     engine.set_cell(8, 9, "raw_stone_solid", mark_dirty=False)
     engine.set_cell(9, 9, "raw_stone_solid", mark_dirty=False)
-    engine.velocity[8, 8] = np.array([0.0, 1.0], dtype=np.float32)
+    engine.velocity[8, 8] = np.array([0.0, 60.0], dtype=np.float32)
 
     engine.motion_solver.step(engine, 1.0 / 60.0)
 
     assert int(engine.material_id[8, 8]) == engine.rulebook.material_id("sand_powder")
     assert np.isclose(float(engine.velocity[8, 8, 0]), 0.0)
-    assert np.isclose(float(engine.velocity[8, 8, 1]), -0.7, atol=1.0e-5)
+    assert np.isclose(float(engine.velocity[8, 8, 1]), -30.2, atol=1.0e-5)
 
 
 def test_falling_island_partial_collision_uses_material_elasticity_and_friction() -> None:
@@ -47693,7 +57259,7 @@ def test_falling_island_partial_collision_uses_material_elasticity_and_friction(
     engine.islands[12] = FallingIslandRecord(
         island_id=12,
         bbox=(5, 6, 7, 8),
-        velocity_xy=(2.0, -0.49),
+        velocity_xy=(120.0, -0.49),
         subcell_offset=(0.0, 0.0),
     )
 
@@ -47701,7 +57267,7 @@ def test_falling_island_partial_collision_uses_material_elasticity_and_friction(
 
     assert np.all(engine.island_id[6:8, 6:8] == 12)
     assert engine.islands[12].bbox == (6, 6, 8, 8)
-    assert np.allclose(engine.islands[12].velocity_xy, (-0.5, 0.205), atol=1.0e-5)
+    assert np.allclose(engine.islands[12].velocity_xy, (-30.0, 0.205), atol=1.0e-5)
 
 
 def test_gpu_motion_solver_falling_island_partial_collision_does_not_call_cpu_contact_response(
@@ -47719,7 +57285,7 @@ def test_gpu_motion_solver_falling_island_partial_collision_does_not_call_cpu_co
     engine.islands[12] = FallingIslandRecord(
         island_id=12,
         bbox=(5, 6, 7, 8),
-        velocity_xy=(2.0, -0.49),
+        velocity_xy=(120.0, -0.49),
         subcell_offset=(0.0, 0.0),
     )
 
@@ -47733,7 +57299,7 @@ def test_gpu_motion_solver_falling_island_partial_collision_does_not_call_cpu_co
     assert engine.motion_solver.last_backend == "gpu"
     assert np.all(engine.island_id[6:8, 6:8] == 12)
     assert engine.islands[12].bbox == (6, 6, 8, 8)
-    assert np.allclose(engine.islands[12].velocity_xy, (-0.5, 0.205), atol=1.0e-5)
+    assert np.allclose(engine.islands[12].velocity_xy, (-30.0, 0.205), atol=1.0e-5)
 
 
 def test_gpu_motion_solver_only_updates_active_tile_neighborhoods_for_powders() -> None:
@@ -47808,7 +57374,7 @@ def test_gpu_motion_pipeline_powder_targets_read_bridge_typed_tables_not_live_ru
     engine.set_cell(5, 9, "raw_stone_solid", mark_dirty=False)
     engine.set_cell(4, 9, "raw_stone_solid", mark_dirty=False)
     engine.set_cell(6, 9, "raw_stone_solid", mark_dirty=False)
-    engine.velocity[8, 5] = np.array([4.0, 0.0], dtype=np.float32)
+    engine.velocity[8, 5] = np.array([120.0, 0.0], dtype=np.float32)
     mutated = replace(engine.rulebook.materials_by_id[sand_id], max_dda_step=0)
     engine.rulebook.materials_by_id[sand_id] = mutated
     engine.rulebook.materials_by_name["sand_powder"] = mutated
@@ -47834,7 +57400,7 @@ def test_cpu_motion_solver_uses_cached_max_dda_step() -> None:
     engine.set_cell(5, 9, "raw_stone_solid", mark_dirty=False)
     engine.set_cell(4, 9, "raw_stone_solid", mark_dirty=False)
     engine.set_cell(6, 9, "raw_stone_solid", mark_dirty=False)
-    engine.velocity[8, 5] = np.array([4.0, 0.0], dtype=np.float32)
+    engine.velocity[8, 5] = np.array([120.0, 0.0], dtype=np.float32)
     engine.rulebook.materials_by_id[sand_id] = replace(engine.rulebook.materials_by_id[sand_id], max_dda_step=0)
     engine.rulebook.materials_by_name["sand_powder"] = engine.rulebook.materials_by_id[sand_id]
 
@@ -47857,7 +57423,7 @@ def test_cpu_motion_solver_uses_shadow_powder_metadata_not_live_arrays() -> None
     engine.set_cell(5, 9, "raw_stone_solid", mark_dirty=False)
     engine.set_cell(4, 9, "raw_stone_solid", mark_dirty=False)
     engine.set_cell(6, 9, "raw_stone_solid", mark_dirty=False)
-    engine.velocity[8, 5] = np.array([4.0, 0.0], dtype=np.float32)
+    engine.velocity[8, 5] = np.array([120.0, 0.0], dtype=np.float32)
     engine.material_max_dda_step[sand_id] = 0
     engine.material_powder_solver_kind[sand_id] = np.int32(2)
     engine.material_gravity[sand_id] = -1.0
@@ -47880,7 +57446,7 @@ def test_gpu_motion_pipeline_compacts_powder_dda_targets_into_reservation_buffer
     sand_id = engine.rulebook.material_id("sand_powder")
     engine.set_cell(5, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
     engine.set_cell(8, 8, "raw_stone_solid", mark_dirty=False)
-    engine.velocity[8, 5] = np.array([4.0, 0.0], dtype=np.float32)
+    engine.velocity[8, 5] = np.array([120.0, 0.0], dtype=np.float32)
 
     engine.motion_solver.step(engine, 1.0 / 60.0)
 
@@ -47905,14 +57471,452 @@ def test_gpu_motion_pipeline_compacts_powder_dda_targets_into_reservation_buffer
     assert int(engine.material_id[8, 7]) == sand_id
 
 
+def test_gpu_liquid_flow_intent_feeds_motion_dda_reservation_path() -> None:
+    engine = WorldEngine(width=24, height=24)
+    if not engine.liquid_solver.gpu_pipeline.available(engine) or not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid/motion pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.patch_material(
+            "water_liquid",
+            liquid_solver_kind="columnar",
+            gravity_scale=0.0,
+            wind_coupling=0.0,
+            drag_scale=0.0,
+        )
+        water_id = engine.rulebook.material_id("water_liquid")
+        stone_id = engine.rulebook.material_id("raw_stone_solid")
+        engine.set_cell(5, 8, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.set_cell(5, 9, "raw_stone_solid", mark_dirty=False)
+        engine.velocity[8, 5] = np.array([1.0, 0.0], dtype=np.float32)
+        engine.active.mark_rect(0, 0, engine.width, engine.height)
+        engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+        solve_tile_mask = np.zeros((engine.active.tile_height, engine.active.tile_width), dtype=np.bool_)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.liquid_solver.gpu_pipeline.prepare_motion_flow_intent(engine, solve_tile_mask=solve_tile_mask)
+            core_before_motion = _bridge_cell_core(engine)
+            liquid_intent = np.frombuffer(
+                engine.bridge.textures["liquid_flow_intent"].read(),
+                dtype="f4",
+            ).reshape((engine.height, engine.width, 2))
+
+            assert "liquid_flow_intent" in engine.bridge.gpu_authoritative_resources
+            assert int(core_before_motion["material_id"][8, 5]) == water_id
+            assert np.allclose(core_before_motion["velocity"][8, 5], np.array([1.0, 0.0], dtype=np.float32))
+            assert np.allclose(liquid_intent[8, 5], np.array([1.0, 0.0], dtype=np.float32))
+
+            engine.motion_solver.gpu_pipeline.resolve_and_apply_powders(engine, 1.0, solve_tile_mask=solve_tile_mask)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        resources = engine.motion_solver.gpu_pipeline.resources
+        assert resources is not None
+        reservation_count = int(np.frombuffer(resources.powder_reservation_count.read(size=4), dtype=np.int32, count=1)[0])
+        assert reservation_count > 0
+        reservations = np.frombuffer(
+            resources.powder_reservations.read(size=reservation_count * powder_reservation_dtype().itemsize),
+            dtype=powder_reservation_dtype(),
+            count=reservation_count,
+        )
+
+        core_after_motion = _bridge_cell_core(engine)
+        assert engine.motion_solver.gpu_pipeline.last_cpu_mirror_downloaded is False
+        assert reservation_count == 1
+        assert int(reservations[0]["material_id"]) == water_id
+        assert reservations[0]["source_xy"].tolist() == [5, 8]
+        assert reservations[0]["desired_target_xy"].tolist() == [7, 8]
+        assert reservations[0]["reserved_target_xy"].tolist() == [7, 8]
+        assert reservations[0]["resolved_target_xy"].tolist() == [7, 8]
+        assert np.allclose(reservations[0]["velocity_xy"], np.array([1.0, 0.0], dtype=np.float32))
+        assert int(reservations[0]["resolve_state"]) == POWDER_RESOLVE_DDA
+        assert int(core_after_motion["material_id"][8, 5]) == 0
+        assert int(core_after_motion["material_id"][8, 7]) == water_id
+        assert int(core_after_motion["phase"][8, 7]) == int(Phase.LIQUID)
+        assert np.allclose(core_after_motion["velocity"][8, 7], np.array([1.0, 0.0], dtype=np.float32))
+        assert int(core_after_motion["material_id"][9, 5]) == stone_id
+    finally:
+        engine.close()
+
+
+def test_gpu_liquid_motion_dda_respects_material_max_step() -> None:
+    engine = WorldEngine(width=24, height=24)
+    if not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU motion pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.patch_material("water_liquid", max_dda_step=1, gravity_scale=0.0, wind_coupling=0.0, drag_scale=0.0)
+        water_id = engine.rulebook.material_id("water_liquid")
+        engine.set_cell(5, 8, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.velocity[8, 5] = np.array([120.0, 0.0], dtype=np.float32)
+        engine.active.mark_rect(0, 0, engine.width, engine.height)
+        solve_tile_mask = engine.motion_solver._solve_tile_mask(engine)
+
+        engine.motion_solver.gpu_pipeline.resolve_and_apply_powders(engine, 1.0 / 60.0, solve_tile_mask=solve_tile_mask)
+
+        resources = engine.motion_solver.gpu_pipeline.resources
+        assert resources is not None
+        reservation_count = int(np.frombuffer(resources.powder_reservation_count.read(size=4), dtype=np.int32, count=1)[0])
+        assert reservation_count > 0
+        reservations = np.frombuffer(
+            resources.powder_reservations.read(size=reservation_count * powder_reservation_dtype().itemsize),
+            dtype=powder_reservation_dtype(),
+            count=reservation_count,
+        )
+
+        assert reservation_count == 1
+        assert int(reservations[0]["material_id"]) == water_id
+        assert reservations[0]["desired_target_xy"].tolist() == [6, 8]
+        assert reservations[0]["reserved_target_xy"].tolist() == [6, 8]
+        assert reservations[0]["resolved_target_xy"].tolist() == [6, 8]
+        assert int(engine.material_id[8, 5]) == 0
+        assert int(engine.material_id[8, 6]) == water_id
+        assert int(engine.material_id[8, 7]) == 0
+    finally:
+        engine.close()
+
+
+def test_world_step_gpu_liquid_pre_motion_flow_intent_feeds_motion_dda_same_frame() -> None:
+    class NoReadBuffer:
+        def __init__(self, buffer: object) -> None:
+            self._buffer = buffer
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._buffer, name)
+
+        def read(self, *args: object, **kwargs: object) -> bytes:
+            raise AssertionError("formal GPU liquid pre-motion intent must not read active_tile_ttl on CPU")
+
+    engine = WorldEngine(width=24, height=24)
+    if not engine.liquid_solver.gpu_pipeline.available(engine) or not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid/motion pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.patch_material(
+            "water_liquid",
+            liquid_solver_kind="columnar",
+            gravity_scale=0.0,
+            wind_coupling=0.0,
+            drag_scale=0.0,
+        )
+        water_id = engine.rulebook.material_id("water_liquid")
+        stone_id = engine.rulebook.material_id("raw_stone_solid")
+        engine.set_cell(5, 8, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.set_cell(5, 9, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(7, 9, "raw_stone_solid", mark_dirty=False)
+        engine.velocity[8, 5] = np.array([1.0, 0.0], dtype=np.float32)
+        engine.active.mark_rect(0, 0, engine.width, engine.height)
+        engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+        engine.bridge.buffers["active_tile_ttl"] = NoReadBuffer(engine.bridge.buffers["active_tile_ttl"])
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.liquid_solver.prepare_motion_flow_intent(engine)
+            assert "liquid_flow_intent" in engine.bridge.gpu_authoritative_resources
+            engine.motion_solver.step(engine, 1.0)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        resources = engine.motion_solver.gpu_pipeline.resources
+        assert resources is not None
+        reservation_count = int(np.frombuffer(resources.powder_reservation_count.read(size=4), dtype=np.int32, count=1)[0])
+        assert reservation_count > 0
+        reservations = np.frombuffer(
+            resources.powder_reservations.read(size=reservation_count * powder_reservation_dtype().itemsize),
+            dtype=powder_reservation_dtype(),
+            count=reservation_count,
+        )
+        core = _bridge_cell_core(engine)
+
+        assert engine.motion_solver.last_backend == "gpu"
+        assert engine.liquid_solver.gpu_pipeline.last_cpu_mirror_downloaded is False
+        assert reservation_count == 1
+        assert reservations[0]["source_xy"].tolist() == [5, 8]
+        assert reservations[0]["desired_target_xy"].tolist() == [7, 8]
+        assert reservations[0]["reserved_target_xy"].tolist() == [7, 8]
+        assert reservations[0]["resolved_target_xy"].tolist() == [7, 8]
+        assert int(reservations[0]["resolve_state"]) == POWDER_RESOLVE_DDA
+        assert np.allclose(reservations[0]["velocity_xy"], np.array([1.0, 0.0], dtype=np.float32))
+        assert int(core["material_id"][8, 5]) == 0
+        assert int(core["material_id"][8, 7]) == water_id
+        assert int(core["phase"][8, 7]) == int(Phase.LIQUID)
+        assert np.allclose(core["velocity"][8, 7], np.array([1.0, 0.0], dtype=np.float32))
+        assert int(core["material_id"][9, 5]) == stone_id
+        assert int(core["material_id"][9, 7]) == stone_id
+    finally:
+        engine.close()
+
+
+def test_gpu_liquid_flow_intent_blocks_placeholder_side_target() -> None:
+    engine = WorldEngine(width=24, height=24)
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.patch_material("water_liquid", liquid_solver_kind="columnar")
+        engine.set_cell(5, 8, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.set_cell(5, 9, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(7, 8, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(6, 9, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(6, 8, "placeholder_solid", mark_dirty=False)
+        engine.velocity[8, 5] = np.array([1.0, 0.0], dtype=np.float32)
+        engine.active.mark_rect(0, 0, engine.width, engine.height)
+
+        solve_tile_mask = engine.liquid_solver._build_solve_tile_mask(engine, list(engine.active.iter_active_tiles()))
+        engine.liquid_solver.gpu_pipeline.step(
+            engine,
+            solve_tile_mask=solve_tile_mask,
+            post_tile_mask=solve_tile_mask,
+        )
+        resources = engine.liquid_solver.gpu_pipeline.resources
+        assert resources is not None
+        liquid_intent = np.frombuffer(resources.liquid_flow_intent.read(), dtype="f4").reshape(
+            (engine.height, engine.width, 2)
+        )
+
+        assert int(engine.material_id[8, 5]) == engine.rulebook.material_id("water_liquid")
+        assert int(engine.material_id[8, 6]) == engine.rulebook.material_id("placeholder_solid")
+        assert np.allclose(engine.velocity[8, 5], np.array([1.0, 0.0], dtype=np.float32))
+        assert np.allclose(liquid_intent[8, 5], np.array([-3.0, 0.0], dtype=np.float32))
+    finally:
+        engine.close()
+
+
+def test_gpu_liquid_flow_intent_and_motion_dda_block_falling_island_phase_target() -> None:
+    engine = WorldEngine(width=24, height=24)
+    if not engine.liquid_solver.gpu_pipeline.available(engine) or not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid/motion pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.patch_material("water_liquid", liquid_solver_kind="columnar")
+        water_id = engine.rulebook.material_id("water_liquid")
+        engine.set_cell(5, 8, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.set_cell(5, 9, "raw_stone_solid", mark_dirty=False)
+        engine.phase[8, 6] = int(Phase.FALLING_ISLAND)
+        engine.set_cell(6, 9, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(7, 8, "raw_stone_solid", mark_dirty=False)
+        engine.velocity[8, 5] = np.array([1.0, 0.0], dtype=np.float32)
+        engine.active.mark_rect(0, 0, engine.width, engine.height)
+        engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+        solve_tile_mask = np.zeros((engine.active.tile_height, engine.active.tile_width), dtype=np.bool_)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.liquid_solver.gpu_pipeline.prepare_motion_flow_intent(engine, solve_tile_mask=solve_tile_mask)
+            core_before_motion = _bridge_cell_core(engine)
+            liquid_intent = np.frombuffer(
+                engine.bridge.textures["liquid_flow_intent"].read(),
+                dtype="f4",
+            ).reshape((engine.height, engine.width, 2))
+
+            assert np.allclose(core_before_motion["velocity"][8, 5], np.array([1.0, 0.0], dtype=np.float32))
+            assert np.allclose(liquid_intent[8, 5], np.array([-3.0, 0.0], dtype=np.float32))
+
+            engine.motion_solver.gpu_pipeline.resolve_and_apply_powders(engine, 1.0, solve_tile_mask=solve_tile_mask)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        resources = engine.motion_solver.gpu_pipeline.resources
+        assert resources is not None
+        reservation_count = int(np.frombuffer(resources.powder_reservation_count.read(size=4), dtype=np.int32, count=1)[0])
+        reservations = np.frombuffer(
+            resources.powder_reservations.read(size=reservation_count * powder_reservation_dtype().itemsize),
+            dtype=powder_reservation_dtype(),
+            count=reservation_count,
+        )
+        core_after_motion = _bridge_cell_core(engine)
+
+        assert reservation_count == 1
+        assert reservations[0]["source_xy"].tolist() == [5, 8]
+        assert reservations[0]["desired_target_xy"].tolist() == [3, 8]
+        assert np.allclose(reservations[0]["velocity_xy"], np.array([1.0, 0.0], dtype=np.float32))
+        assert int(core_after_motion["material_id"][8, 5]) == 0
+        assert int(core_after_motion["material_id"][8, 3]) == water_id
+        assert int(core_after_motion["phase"][8, 3]) == int(Phase.LIQUID)
+        assert int(core_after_motion["phase"][8, 6]) == int(Phase.FALLING_ISLAND)
+    finally:
+        engine.close()
+
+
+def test_gpu_motion_powder_generation_records_raw_intent_before_resolve() -> None:
+    engine = WorldEngine(width=24, height=24)
+    if not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU motion pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        sand_id = engine.rulebook.material_id("sand_powder")
+        engine.set_cell(5, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
+        engine.set_cell(7, 8, "raw_stone_solid", mark_dirty=False)
+        engine.velocity[8, 5] = np.array([120.0, 0.0], dtype=np.float32)
+        engine.active.mark_rect(0, 0, engine.width, engine.height)
+
+        pipeline = engine.motion_solver.gpu_pipeline
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        resources = pipeline._ensure_resources(engine)
+        solve_tile_mask = engine.motion_solver._solve_tile_mask(engine)
+        pipeline._upload_inputs(engine, resources, solve_tile_mask)
+        group_x = (engine.width + 7) // 8
+        group_y = (engine.height + 7) // 8
+        pipeline._load_authoritative_bridge_inputs(engine, resources, group_x, group_y)
+        dt = 1.0 / 60.0
+        pipeline._run_powder_targets(engine, resources, group_x, group_y, dt)
+        pipeline._ensure_dynamic_buffer_capacity(
+            ctx,
+            resources,
+            "powder_reservations",
+            engine.width * engine.height * powder_reservation_dtype().itemsize,
+        )
+        resources.powder_reservation_count.write(np.array([0], dtype=np.int32).tobytes())
+
+        pipeline._run_generate_powder_reservations(engine, resources, dt)
+
+        generated_count = int(np.frombuffer(resources.powder_reservation_count.read(size=4), dtype=np.int32, count=1)[0])
+        generated = np.frombuffer(
+            resources.powder_reservations.read(size=generated_count * powder_reservation_dtype().itemsize),
+            dtype=powder_reservation_dtype(),
+            count=generated_count,
+        )
+        assert generated_count == 1
+        assert generated[0]["source_xy"].tolist() == [5, 8]
+        assert generated[0]["desired_target_xy"].tolist() == [7, 8]
+        assert generated[0]["reserved_target_xy"].tolist() == [6, 8]
+        assert generated[0]["resolved_target_xy"].tolist() == [5, 8]
+        assert int(generated[0]["resolve_state"]) == POWDER_RESOLVE_BLOCKED
+
+        clear_winners = pipeline.programs["clear_powder_target_winners"]
+        clear_winners["cell_count"].value = engine.width * engine.height
+        resources.powder_target_winner.bind_to_storage_buffer(binding=0)
+        clear_winners.run((engine.width * engine.height + 7) // 8, 1, 1)
+        ctx.memory_barrier(ctx.SHADER_STORAGE_BARRIER_BIT)
+
+        index_winners = pipeline.programs["index_powder_target_winners"]
+        index_winners["cell_grid_size"].value = (engine.width, engine.height)
+        index_winners["tile_grid_size"].value = (engine.active.tile_width, engine.active.tile_height)
+        index_winners["tile_size"].value = engine.active.tile_size
+        index_winners["phase_powder"].value = int(Phase.POWDER)
+        index_winners["phase_liquid"].value = int(Phase.LIQUID)
+        index_winners["phase_falling_island"].value = int(Phase.FALLING_ISLAND)
+        resources.powder_reservations.bind_to_storage_buffer(binding=0)
+        resources.powder_reservation_count.bind_to_storage_buffer(binding=1)
+        resources.powder_target_winner.bind_to_storage_buffer(binding=2)
+        resources.material_tex.use(location=0)
+        resources.phase_tex.use(location=1)
+        resources.active_tile_tex.use(location=3)
+        resources.entity_id_tex.use(location=5)
+        resources.displaced_tex.use(location=6)
+        index_winners.run((engine.width * engine.height + 7) // 8, 1, 1)
+        ctx.memory_barrier(ctx.SHADER_STORAGE_BARRIER_BIT | ctx.TEXTURE_FETCH_BARRIER_BIT)
+
+        resolve = pipeline.programs["resolve_powder_reservations"]
+        resolve["cell_grid_size"].value = (engine.width, engine.height)
+        resolve["tile_grid_size"].value = (engine.active.tile_width, engine.active.tile_height)
+        resolve["tile_size"].value = engine.active.tile_size
+        resolve["phase_powder"].value = int(Phase.POWDER)
+        resolve["phase_liquid"].value = int(Phase.LIQUID)
+        resolve["phase_falling_island"].value = int(Phase.FALLING_ISLAND)
+        resources.powder_reservations.bind_to_storage_buffer(binding=0)
+        resources.powder_reservation_count.bind_to_storage_buffer(binding=1)
+        resources.material_params.bind_to_storage_buffer(binding=2)
+        resources.material_contact_params.bind_to_storage_buffer(binding=3)
+        resources.powder_target_winner.bind_to_storage_buffer(binding=4)
+        resources.material_tex.use(location=0)
+        resources.phase_tex.use(location=1)
+        resources.active_tile_tex.use(location=3)
+        resources.entity_id_tex.use(location=5)
+        resources.displaced_tex.use(location=6)
+        resolve.run((engine.width * engine.height + 7) // 8, 1, 1)
+        ctx.memory_barrier(ctx.SHADER_STORAGE_BARRIER_BIT | ctx.TEXTURE_FETCH_BARRIER_BIT)
+
+        resolved = np.frombuffer(
+            resources.powder_reservations.read(size=generated_count * powder_reservation_dtype().itemsize),
+            dtype=powder_reservation_dtype(),
+            count=generated_count,
+        )
+        assert resolved[0]["desired_target_xy"].tolist() == [7, 8]
+        assert resolved[0]["reserved_target_xy"].tolist() == [6, 8]
+        assert resolved[0]["resolved_target_xy"].tolist() == [6, 8]
+        assert int(resolved[0]["resolve_state"]) == POWDER_RESOLVE_DDA
+    finally:
+        engine.close()
+
+
+def test_gpu_motion_powder_dda_blocks_phase_entity_and_displaced_targets() -> None:
+    engine = WorldEngine(width=24, height=24)
+    if not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU motion pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        sand_id = engine.rulebook.material_id("sand_powder")
+        engine.set_cell(5, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
+        engine.phase[8, 7] = int(Phase.FALLING_ISLAND)
+        engine.set_cell(5, 12, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
+        engine.entity_id[12, 7] = 99
+        engine.set_cell(5, 16, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
+        engine.placeholder_displaced_material[16, 7] = sand_id
+        engine.velocity[8, 5] = np.array([120.0, 0.0], dtype=np.float32)
+        engine.velocity[12, 5] = np.array([120.0, 0.0], dtype=np.float32)
+        engine.velocity[16, 5] = np.array([120.0, 0.0], dtype=np.float32)
+        engine.active.mark_rect(0, 0, engine.width, engine.height)
+
+        solve_tile_mask = engine.motion_solver._solve_tile_mask(engine)
+        engine.motion_solver.gpu_pipeline.resolve_and_apply_powders(engine, 1.0 / 60.0, solve_tile_mask=solve_tile_mask)
+
+        resources = engine.motion_solver.gpu_pipeline.resources
+        assert resources is not None
+        reservation_count = int(np.frombuffer(resources.powder_reservation_count.read(size=4), dtype=np.int32, count=1)[0])
+        reservations = np.frombuffer(
+            resources.powder_reservations.read(size=reservation_count * powder_reservation_dtype().itemsize),
+            dtype=powder_reservation_dtype(),
+            count=reservation_count,
+        )
+        by_source = {tuple(record["source_xy"].tolist()): record for record in reservations}
+        assert by_source[(5, 8)]["reserved_target_xy"].tolist() == [6, 8]
+        assert by_source[(5, 12)]["reserved_target_xy"].tolist() == [6, 12]
+        assert by_source[(5, 16)]["reserved_target_xy"].tolist() == [6, 16]
+        assert int(engine.material_id[8, 6]) == sand_id
+        assert int(engine.material_id[12, 6]) == sand_id
+        assert int(engine.material_id[16, 6]) == sand_id
+        assert int(engine.phase[8, 7]) == int(Phase.FALLING_ISLAND)
+        assert int(engine.entity_id[12, 7]) == 99
+        assert int(engine.placeholder_displaced_material[16, 7]) == sand_id
+    finally:
+        engine.close()
+
+
 def test_gpu_motion_pipeline_powder_resolve_arbitrates_conflicting_reservations_before_apply() -> None:
     engine = WorldEngine(width=24, height=24)
     engine.clear_cell_region(0, 0, engine.width, engine.height)
     sand_id = engine.rulebook.material_id("sand_powder")
     engine.set_cell(4, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
     engine.set_cell(6, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
-    engine.velocity[8, 4] = np.array([1.0, 0.0], dtype=np.float32)
-    engine.velocity[8, 6] = np.array([-1.0, 0.0], dtype=np.float32)
+    engine.velocity[8, 4] = np.array([60.0, 0.0], dtype=np.float32)
+    engine.velocity[8, 6] = np.array([-60.0, 0.0], dtype=np.float32)
 
     engine.motion_solver.step(engine, 1.0 / 60.0)
 
@@ -47938,6 +57942,51 @@ def test_gpu_motion_pipeline_powder_resolve_arbitrates_conflicting_reservations_
     assert int(engine.material_id[8, 6]) == 0
 
 
+def test_gpu_motion_powder_apply_does_not_clear_losing_fallback_source() -> None:
+    engine = WorldEngine(width=16, height=16)
+    if not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU motion pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        sand_id = engine.rulebook.material_id("sand_powder")
+        engine.set_cell(4, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
+        engine.set_cell(6, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
+
+        reservations = np.zeros((2,), dtype=powder_reservation_dtype())
+        reservations[0]["source_xy"] = np.asarray((4, 8), dtype=np.int32)
+        reservations[0]["desired_target_xy"] = np.asarray((4, 9), dtype=np.int32)
+        reservations[0]["reserved_target_xy"] = np.asarray((4, 8), dtype=np.int32)
+        reservations[0]["resolved_target_xy"] = np.asarray((5, 9), dtype=np.int32)
+        reservations[0]["material_id"] = sand_id
+        reservations[0]["resolve_state"] = POWDER_RESOLVE_FALLBACK
+        reservations[1]["source_xy"] = np.asarray((6, 8), dtype=np.int32)
+        reservations[1]["desired_target_xy"] = np.asarray((6, 9), dtype=np.int32)
+        reservations[1]["reserved_target_xy"] = np.asarray((6, 8), dtype=np.int32)
+        reservations[1]["resolved_target_xy"] = np.asarray((5, 9), dtype=np.int32)
+        reservations[1]["material_id"] = sand_id
+        reservations[1]["resolve_state"] = POWDER_RESOLVE_FALLBACK
+
+        pipeline = engine.motion_solver.gpu_pipeline
+        assert pipeline.apply_powder_reservations(engine, reservations)
+        resources = pipeline.resources
+        assert resources is not None
+        resolved = np.frombuffer(
+            resources.powder_reservations.read(size=2 * powder_reservation_dtype().itemsize),
+            dtype=powder_reservation_dtype(),
+            count=2,
+        )
+
+        assert int(engine.material_id[9, 5]) == sand_id
+        assert int(engine.material_id[8, 4]) == 0
+        assert int(engine.material_id[8, 6]) == sand_id
+        assert resolved[0]["resolved_target_xy"].tolist() == [5, 9]
+        assert int(resolved[0]["resolve_state"]) == POWDER_RESOLVE_FALLBACK
+        assert resolved[1]["resolved_target_xy"].tolist() == [6, 8]
+        assert int(resolved[1]["resolve_state"]) == POWDER_RESOLVE_BLOCKED
+    finally:
+        engine.close()
+
+
 def test_gpu_motion_formal_frame_publishes_bridge_state_without_cpu_mirror_download(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -47949,9 +57998,11 @@ def test_gpu_motion_formal_frame_publishes_bridge_state_without_cpu_mirror_downl
     stone_id = engine.rulebook.material_id("raw_stone_solid")
     engine.set_cell(5, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
     engine.set_cell(8, 8, "raw_stone_solid", mark_dirty=False)
-    engine.velocity[8, 5] = np.array([4.0, 0.0], dtype=np.float32)
+    engine.velocity[8, 5] = np.array([120.0, 0.0], dtype=np.float32)
+    _prepare_gpu_authoritative_active_tile(engine)
     engine.bridge.sync_world(engine)
-    engine.bridge.mark_gpu_authoritative("cell_core", "material")
+    engine.bridge.mark_gpu_authoritative("cell_core", "material", "active_meta", "active_tile_ttl", "active_chunk_mask")
+    assert engine.bridge.mark_active_rects(engine, [(4, 7, 9, 10)])
     engine.material_id[8, 5] = 0
     engine.phase[8, 5] = 0
     engine.velocity[8, 5] = np.zeros((2,), dtype=np.float32)
@@ -47984,12 +58035,1640 @@ def test_gpu_motion_formal_frame_publishes_bridge_state_without_cpu_mirror_downl
         dtype=np.int32,
         count=1,
     )
-    assert int(bridge_powder_count[0]) == 0
+    assert int(bridge_powder_count[0]) > 0
 
     unpacked, _cell = _readback_cell_window(engine, center_x=12, center_y=12, width=24, height=24)
     assert int(unpacked["material_id"][8, 5]) == 0
     assert int(unpacked["material_id"][8, 7]) == sand_id
     assert int(unpacked["material_id"][8, 8]) == stone_id
+
+
+def test_gpu_motion_formal_powder_uses_bridge_reservation_buffer_for_conflicts() -> None:
+    engine = WorldEngine(width=24, height=24)
+    if not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU motion pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        sand_id = engine.rulebook.material_id("sand_powder")
+        engine.set_cell(4, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
+        engine.set_cell(6, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
+        engine.velocity[8, 4] = np.array([60.0, 0.0], dtype=np.float32)
+        engine.velocity[8, 6] = np.array([-60.0, 0.0], dtype=np.float32)
+        _prepare_gpu_authoritative_active_tile(engine)
+        engine.bridge.sync_world(engine)
+        engine.bridge.mark_gpu_authoritative("cell_core", "material", "active_meta", "active_tile_ttl", "active_chunk_mask")
+        assert engine.bridge.mark_active_rects(engine, [(3, 7, 8, 10)])
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.motion_solver.step(engine, 1.0 / 60.0)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        bridge_powder_count = np.frombuffer(
+            engine.bridge.buffers["powder_reservation_count"].read(size=4),
+            dtype=np.int32,
+            count=1,
+        )
+        reservation_count = int(bridge_powder_count[0])
+        reservations = np.frombuffer(
+            engine.bridge.buffers["powder_reservation"].read(size=reservation_count * powder_reservation_dtype().itemsize),
+            dtype=powder_reservation_dtype(),
+            count=reservation_count,
+        )
+        reservations_by_source = {tuple(record["source_xy"].tolist()): record for record in reservations}
+        unpacked, _cell = _readback_cell_window(engine, center_x=12, center_y=12, width=24, height=24)
+
+        assert engine.motion_solver.last_backend == "gpu"
+        assert "powder_reservation" in engine.bridge.gpu_authoritative_resources
+        assert reservation_count == 2
+        assert reservations_by_source[(4, 8)]["reserved_target_xy"].tolist() == [5, 8]
+        assert reservations_by_source[(6, 8)]["reserved_target_xy"].tolist() == [5, 8]
+        assert int(unpacked["material_id"][8, 5]) == sand_id
+        assert int(unpacked["material_id"][8, 4]) == 0
+        assert int(unpacked["material_id"][8, 6]) == 0
+        assert int(unpacked["material_id"][9, 6]) == sand_id
+    finally:
+        engine.close()
+
+
+def test_gpu_motion_formal_powder_blocks_crossing_path_intents_without_readback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=24, height=24)
+    if not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU motion pipeline is not available")
+    try:
+        engine.patch_material("sand_powder", gravity_scale=0.0, wind_coupling=0.0, drag_scale=0.0, max_dda_step=4)
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        sand_id = engine.rulebook.material_id("sand_powder")
+        engine.velocity.fill(0.0)
+        engine.set_cell(4, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
+        engine.set_cell(6, 10, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
+        engine.velocity[8, 4] = np.array([240.0, 0.0], dtype=np.float32)
+        engine.velocity[10, 6] = np.array([0.0, -240.0], dtype=np.float32)
+        _prepare_gpu_authoritative_active_tile(engine)
+        engine.bridge.sync_world(engine)
+        engine.bridge.mark_gpu_authoritative("cell_core", "material", "active_meta", "active_tile_ttl", "active_chunk_mask")
+        assert engine.bridge.mark_active_rects(engine, [(3, 5, 9, 11)])
+
+        def fail_download(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal crossing-path powder motion must not download full grid state")
+
+        def fail_read_reservations(*args: object, **kwargs: object) -> np.ndarray:
+            raise AssertionError("formal crossing-path powder motion must not read reservations back to CPU")
+
+        monkeypatch.setattr(engine.motion_solver.gpu_pipeline, "_download_velocity_output", fail_download)
+        monkeypatch.setattr(engine.motion_solver.gpu_pipeline, "_download_powder_apply_state", fail_download)
+        monkeypatch.setattr(engine.motion_solver.gpu_pipeline, "_read_powder_reservations", fail_read_reservations)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.motion_solver.step(engine, 1.0 / 60.0)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        bridge_powder_count = np.frombuffer(
+            engine.bridge.buffers["powder_reservation_count"].read(size=4),
+            dtype=np.int32,
+            count=1,
+        )
+        reservation_count = int(bridge_powder_count[0])
+        reservations = np.frombuffer(
+            engine.bridge.buffers["powder_reservation"].read(size=reservation_count * powder_reservation_dtype().itemsize),
+            dtype=powder_reservation_dtype(),
+            count=reservation_count,
+        )
+        reservations_by_source = {tuple(record["source_xy"].tolist()): record for record in reservations}
+        unpacked, _cell = _readback_cell_window(engine, center_x=12, center_y=12, width=24, height=24)
+
+        assert engine.motion_solver.last_backend == "gpu"
+        assert engine.motion_solver.gpu_pipeline.last_cpu_mirror_downloaded is False
+        assert "powder_reservation" in engine.bridge.gpu_authoritative_resources
+        assert reservation_count == 2
+        assert reservations_by_source[(4, 8)]["reserved_target_xy"].tolist() == [8, 8]
+        assert reservations_by_source[(4, 8)]["resolved_target_xy"].tolist() == [5, 8]
+        assert reservations_by_source[(6, 10)]["reserved_target_xy"].tolist() == [6, 6]
+        assert reservations_by_source[(6, 10)]["resolved_target_xy"].tolist() == [6, 6]
+        assert int(unpacked["material_id"][8, 5]) == sand_id
+        assert int(unpacked["material_id"][6, 6]) == sand_id
+        assert int(unpacked["material_id"][8, 8]) == 0
+    finally:
+        engine.close()
+
+
+def test_gpu_motion_formal_frame_refreshes_ttl_for_changed_powder_tiles_only() -> None:
+    engine = WorldEngine(width=96, height=64)
+    if not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU motion pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        sand_id = engine.rulebook.material_id("sand_powder")
+        engine.set_cell(30, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
+        engine.velocity[8, 30] = np.array([120.0, 0.0], dtype=np.float32)
+        engine.bridge.clear_gpu_authoritative("active_meta", "active_tile_ttl", "active_chunk_mask")
+        for tile_y in range(engine.active.tile_height):
+            for tile_x in range(engine.active.tile_width):
+                engine.active.active_tile_ttl[tile_y][tile_x] = 0
+        engine.active.active_tile_ttl[0][0] = 1
+        engine.active.active_chunk_mask[0][0] = True
+        engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "ambient_temperature",
+            "flow_velocity",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.motion_solver.step(engine, 1.0 / 60.0)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        ttl_before_decay = _read_gpu_active_tile_ttl(engine)
+        assert ttl_before_decay[0, 0] == engine.active.active_ttl_reset
+        assert ttl_before_decay[0, 1] == engine.active.active_ttl_reset
+        assert ttl_before_decay[0, 2] == 0
+        unpacked, _cell = _readback_cell_window(engine, center_x=48, center_y=32, width=96, height=64)
+        assert int(unpacked["material_id"][8, 30]) == 0
+        assert int(unpacked["material_id"][8, 32]) == sand_id
+        assert sand_id > 0
+    finally:
+        engine.close()
+
+
+def test_gpu_motion_formal_active_mask_does_not_solve_neighbor_powder_tile() -> None:
+    engine = WorldEngine(width=96, height=64)
+    if not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU motion pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        sand_id = engine.rulebook.material_id("sand_powder")
+        engine.set_cell(40, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
+        engine.velocity[8, 40] = np.array([120.0, 0.0], dtype=np.float32)
+        engine.bridge.clear_gpu_authoritative("active_meta", "active_tile_ttl", "active_chunk_mask")
+        for tile_y in range(engine.active.tile_height):
+            for tile_x in range(engine.active.tile_width):
+                engine.active.active_tile_ttl[tile_y][tile_x] = 0
+        engine.active.active_tile_ttl[0][0] = 1
+        engine.active.active_chunk_mask[0][0] = True
+        engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "ambient_temperature",
+            "flow_velocity",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.motion_solver.step(engine, 1.0 / 60.0)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        bridge_powder_count = np.frombuffer(
+            engine.bridge.buffers["powder_reservation_count"].read(size=4),
+            dtype=np.int32,
+            count=1,
+        )
+        unpacked, _cell = _readback_cell_window(engine, center_x=48, center_y=32, width=96, height=64)
+        ttl = _read_gpu_active_tile_ttl(engine)
+        assert int(bridge_powder_count[0]) == 0
+        assert int(unpacked["material_id"][8, 40]) == sand_id
+        assert int(unpacked["material_id"][8, 42]) == 0
+        assert int(ttl[0, 1]) == 0
+        assert int(ttl[0, 2]) == 0
+    finally:
+        engine.close()
+
+
+def test_gpu_motion_formal_active_tile_compaction_uses_active_chunk_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=320, height=64, gas_cell_size=4)
+    if not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU motion pipeline is not available")
+    try:
+        _seed_gpu_authoritative_active_tiles(engine, [(1, 0)])
+        pipeline = engine.motion_solver.gpu_pipeline
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        resources = pipeline._ensure_resources(engine)
+        noisy_active_tex = np.zeros((engine.active.tile_height, engine.active.tile_width), dtype=np.float32)
+        noisy_active_tex[0, 8] = 1.0
+        resources.active_tile_tex.write(noisy_active_tex.tobytes())
+
+        def fail_full_grid_compact(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal GPU motion active tile compaction must not scan the full tile grid")
+
+        sparse_calls: list[object] = []
+        full_program = pipeline.programs["compact_active_tiles"]
+        sparse_program = pipeline.programs["compact_active_tiles_from_chunks"]
+        original_sparse_indirect = sparse_program.run_indirect
+
+        def fail_sparse_direct(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal GPU motion active tile compaction must dispatch from active chunk args")
+
+        def count_sparse_indirect(indirect_buffer: object) -> object:
+            sparse_calls.append(indirect_buffer)
+            return original_sparse_indirect(indirect_buffer)
+
+        monkeypatch.setattr(full_program, "run", fail_full_grid_compact)
+        monkeypatch.setattr(sparse_program, "run", fail_sparse_direct)
+        monkeypatch.setattr(sparse_program, "run_indirect", count_sparse_indirect)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            pipeline._compact_active_tiles(engine, resources)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        active_count = int(np.frombuffer(resources.active_tile_count.read(size=4), dtype=np.uint32, count=1)[0])
+        active_tiles = np.frombuffer(
+            resources.active_tile_list.read(size=active_count * 2 * np.dtype(np.int32).itemsize),
+            dtype=np.int32,
+            count=active_count * 2,
+        ).reshape((active_count, 2))
+        dispatch_args = np.frombuffer(resources.active_tile_dispatch_args.read(size=12), dtype=np.uint32, count=3)
+
+        assert len(sparse_calls) == 1
+        assert active_count == 1
+        assert active_tiles.tolist() == [[1, 0]]
+        assert dispatch_args.tolist() == [pipeline._active_tile_workgroups_per_tile(engine), 1, 1]
+    finally:
+        engine.close()
+
+
+def test_gpu_motion_integrate_velocity_publishes_bridge_by_active_tile_indirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=96, height=64, gas_cell_size=4)
+    if not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU motion pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(40, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
+        _seed_gpu_authoritative_active_tiles(engine, [(1, 0)])
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "ambient_temperature",
+            "flow_velocity",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+
+        pipeline = engine.motion_solver.gpu_pipeline
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        resources = pipeline._ensure_resources(engine)
+        velocity_word_program = pipeline.programs["publish_bridge_velocity_word"]
+        publish_program = pipeline.programs["publish_bridge_cell"]
+        original_velocity_word_indirect = velocity_word_program.run_indirect
+        indirect_calls: list[object] = []
+
+        def fail_velocity_word_direct(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal integrate velocity bridge word publish must use active tile indirect dispatch")
+
+        def fail_direct_publish(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal integrate velocity bridge publish must not use full direct bridge publish")
+
+        def fail_full_publish_indirect(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal integrate velocity bridge publish must not use full bridge publish fallback")
+
+        def count_velocity_word_indirect(indirect_buffer: object) -> object:
+            indirect_calls.append(indirect_buffer)
+            return original_velocity_word_indirect(indirect_buffer)
+
+        monkeypatch.setattr(velocity_word_program, "run", fail_velocity_word_direct)
+        monkeypatch.setattr(velocity_word_program, "run_indirect", count_velocity_word_indirect)
+        monkeypatch.setattr(publish_program, "run", fail_direct_publish)
+        monkeypatch.setattr(publish_program, "run_indirect", fail_full_publish_indirect)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            pipeline.integrate_velocity(
+                engine,
+                1.0 / 60.0,
+                solve_tile_mask=np.zeros((engine.active.tile_height, engine.active.tile_width), dtype=np.bool_),
+            )
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        assert len(indirect_calls) == 1
+        assert indirect_calls[0] is resources.active_tile_dispatch_args
+    finally:
+        engine.close()
+
+
+def test_gpu_motion_integrate_bridge_loader_uses_minimal_authoritative_inputs() -> None:
+    programs_source = inspect.getsource(GPUMotionPipeline._ensure_programs)
+    integrate_source = inspect.getsource(GPUMotionPipeline.integrate_velocity)
+    loader_source = inspect.getsource(GPUMotionPipeline._load_authoritative_integrate_inputs)
+    shader_source = programs_source.split(
+        'self.programs["load_bridge_integrate_inputs"] = ctx.compute_shader(',
+        1,
+    )[1].split('self.programs["load_bridge_cell_aux"] = ctx.compute_shader(', 1)[0]
+
+    assert "_load_authoritative_integrate_inputs" in integrate_source
+    assert "_load_authoritative_bridge_inputs" not in integrate_source
+    assert 'self.programs["load_bridge_integrate_inputs"]' in loader_source
+    assert 'self.programs["load_bridge_cell"]' not in loader_source
+    assert 'self.programs["load_bridge_cell_aux"]' not in loader_source
+    assert 'self.programs["load_bridge_gas"]' in loader_source
+    assert 'program["copy_flow_velocity"].value = True' in loader_source
+    assert 'program["copy_ambient"].value = False' in loader_source
+    assert "self._compact_active_tiles(world, resources)" in loader_source
+    assert 'self._run_active_tile_indirect(program, resources, "motion integrate bridge input load")' in loader_source
+    assert 'bridge.buffers["cell_core"].bind_to_storage_buffer(binding=0)' in loader_source
+    assert "resources.material_tex.bind_to_image(0, read=False, write=True)" in loader_source
+    assert "resources.velocity_tex.bind_to_image(1, read=False, write=True)" in loader_source
+    assert "resources.flow_tex.bind_to_image(2, read=False, write=True)" in loader_source
+
+    assert "layout(std430, binding=0) readonly buffer BridgeCellCoreBuffer" in shader_source
+    assert "layout(r32f, binding=0) writeonly uniform image2D material_img;" in shader_source
+    assert "layout(rg32f, binding=1) writeonly uniform image2D velocity_img;" in shader_source
+    assert "imageStore(material_img" in shader_source
+    assert "imageStore(velocity_img" in shader_source
+    for forbidden in (
+        "phase_img",
+        "flags_img",
+        "temp_img",
+        "timer_img",
+        "integrity_img",
+        "unpack_timer",
+        "BridgeIslandBuffer",
+        "BridgeEntityBuffer",
+        "BridgeDisplacedBuffer",
+    ):
+        assert forbidden not in shader_source
+
+
+def test_gpu_motion_integrate_velocity_fast_bridge_publish_preserves_non_velocity_cell_core(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=64, height=32, gas_cell_size=4)
+    if not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU motion pipeline is not available")
+    try:
+        engine.patch_material("sand_powder", gravity_scale=1.0, wind_coupling=0.0, drag_scale=0.0)
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        active_x, active_y = 8, 8
+        inactive_x, inactive_y = 40, 8
+        for offset, (x, y) in enumerate(((active_x, active_y), (inactive_x, inactive_y))):
+            engine.set_cell(x, y, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
+            engine.cell_flags[y, x] = np.uint8(int(CellFlag.PHASE_LOCKED | CellFlag.REACTION_LATCHED))
+            engine.cell_temperature[y, x] = np.float32(123.5 + offset)
+            engine.timer_pack[y, x] = np.array([1 + offset, 2 + offset, 3 + offset, 4 + offset], dtype=np.uint8)
+            engine.integrity[y, x] = np.float32(77.0 + offset)
+        engine.velocity[active_y, active_x] = np.array([0.0, 0.0], dtype=np.float32)
+        engine.velocity[inactive_y, inactive_x] = np.array([1.25, -0.5], dtype=np.float32)
+        _seed_gpu_authoritative_active_tiles(engine, [(0, 0)])
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "ambient_temperature",
+            "flow_velocity",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+        before = _bridge_cell_core(engine)
+        before_island_id = np.frombuffer(
+            engine.bridge.buffers["island_id"].read(size=engine.width * engine.height * np.dtype(np.int32).itemsize),
+            dtype=np.int32,
+        ).copy()
+        before_entity_id = np.frombuffer(
+            engine.bridge.buffers["entity_id"].read(size=engine.width * engine.height * np.dtype(np.int32).itemsize),
+            dtype=np.int32,
+        ).copy()
+        before_displaced = np.frombuffer(
+            engine.bridge.buffers["placeholder_displaced_material"].read(
+                size=engine.width * engine.height * np.dtype(np.int32).itemsize
+            ),
+            dtype=np.int32,
+        ).copy()
+
+        pipeline = engine.motion_solver.gpu_pipeline
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        publish_program = pipeline.programs["publish_bridge_cell"]
+
+        def fail_full_publish(*args: object, **kwargs: object) -> None:
+            raise AssertionError("integrate velocity fast path must not republish full bridge cell state")
+
+        monkeypatch.setattr(publish_program, "run", fail_full_publish)
+        monkeypatch.setattr(publish_program, "run_indirect", fail_full_publish)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            pipeline.integrate_velocity(
+                engine,
+                1.0 / 60.0,
+                solve_tile_mask=np.zeros((engine.active.tile_height, engine.active.tile_width), dtype=np.bool_),
+            )
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        after = _bridge_cell_core(engine)
+        after_island_id = np.frombuffer(
+            engine.bridge.buffers["island_id"].read(size=engine.width * engine.height * np.dtype(np.int32).itemsize),
+            dtype=np.int32,
+        )
+        after_entity_id = np.frombuffer(
+            engine.bridge.buffers["entity_id"].read(size=engine.width * engine.height * np.dtype(np.int32).itemsize),
+            dtype=np.int32,
+        )
+        after_displaced = np.frombuffer(
+            engine.bridge.buffers["placeholder_displaced_material"].read(
+                size=engine.width * engine.height * np.dtype(np.int32).itemsize
+            ),
+            dtype=np.int32,
+        )
+        for key in ("material_id", "phase", "cell_flags", "cell_temperature", "timer_pack", "integrity"):
+            assert np.array_equal(after[key], before[key])
+        assert np.array_equal(after_island_id, before_island_id)
+        assert np.array_equal(after_entity_id, before_entity_id)
+        assert np.array_equal(after_displaced, before_displaced)
+        assert after["velocity"][active_y, active_x, 1] > before["velocity"][active_y, active_x, 1] + 0.35
+        assert np.allclose(after["velocity"][inactive_y, inactive_x], before["velocity"][inactive_y, inactive_x])
+        assert {
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+        }.issubset(engine.bridge.gpu_authoritative_resources)
+    finally:
+        engine.close()
+
+
+def test_gpu_liquid_formal_active_tile_compaction_uses_active_chunk_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=320, height=64, gas_cell_size=4)
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    try:
+        _seed_gpu_authoritative_active_tiles(engine, [(1, 0)])
+        pipeline = engine.liquid_solver.gpu_pipeline
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        resources = pipeline._ensure_resources(engine)
+        noisy_active_tex = np.zeros((engine.active.tile_height, engine.active.tile_width), dtype=np.float32)
+        noisy_active_tex[0, 8] = 1.0
+        resources.active_tile_tex.write(noisy_active_tex.tobytes())
+
+        def fail_full_grid_compact(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal GPU liquid active tile compaction must not scan the full tile grid")
+
+        sparse_calls: list[object] = []
+        full_program = pipeline.programs["compact_active_tiles"]
+        sparse_program = pipeline.programs["compact_active_tiles_from_chunks"]
+        original_sparse_indirect = sparse_program.run_indirect
+
+        def fail_sparse_direct(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal GPU liquid active tile compaction must dispatch from active chunk args")
+
+        def count_sparse_indirect(indirect_buffer: object) -> object:
+            sparse_calls.append(indirect_buffer)
+            return original_sparse_indirect(indirect_buffer)
+
+        monkeypatch.setattr(full_program, "run", fail_full_grid_compact)
+        monkeypatch.setattr(sparse_program, "run", fail_sparse_direct)
+        monkeypatch.setattr(sparse_program, "run_indirect", count_sparse_indirect)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            pipeline._compact_active_tiles(engine, resources, workgroups_per_tile=1)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        active_count = int(np.frombuffer(resources.active_tile_count.read(size=4), dtype=np.uint32, count=1)[0])
+        active_tiles = np.frombuffer(
+            resources.active_tile_list.read(size=active_count * 2 * np.dtype(np.int32).itemsize),
+            dtype=np.int32,
+            count=active_count * 2,
+        ).reshape((active_count, 2))
+        dispatch_args = np.frombuffer(resources.active_tile_dispatch_args.read(size=12), dtype=np.uint32, count=3)
+
+        assert len(sparse_calls) == 1
+        assert active_count == 1
+        assert active_tiles.tolist() == [[1, 0]]
+        assert dispatch_args.tolist() == [1, 1, 1]
+    finally:
+        engine.close()
+
+
+def test_gpu_liquid_formal_bridge_input_loads_use_active_tile_indirect_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=96, height=64, gas_cell_size=4)
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(40, 8, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        _seed_gpu_authoritative_active_tiles(engine, [(1, 0)])
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+
+        pipeline = engine.liquid_solver.gpu_pipeline
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        resources = pipeline._ensure_resources(engine)
+        indirect_calls: list[str] = []
+        dispatch_args: dict[str, list[int]] = {}
+        engine.profile_passes_enabled = True
+        load_programs = (
+            "load_bridge_cell",
+            "load_bridge_cell_out",
+            "load_bridge_cell_aux",
+        )
+        expected_benchmark_keys = {
+            "liquid.liquid_load_bridge_inputs.active_tile_compact",
+            "liquid.liquid_load_bridge_inputs.load_cell_in",
+            "liquid.liquid_load_bridge_inputs.load_cell_out",
+            "liquid.liquid_load_bridge_inputs.load_aux",
+            "liquid.liquid_load_bridge_inputs.sync",
+        }
+
+        for program_name in load_programs:
+            program = pipeline.programs[program_name]
+            original_indirect = program.run_indirect
+
+            def fail_direct_run(*args: object, _program_name: str = program_name, **kwargs: object) -> None:
+                raise AssertionError(f"formal GPU liquid {_program_name} must not use full-grid run")
+
+            def count_indirect(
+                indirect_buffer: object,
+                *,
+                _program_name: str = program_name,
+                _original_indirect: object = original_indirect,
+            ) -> object:
+                indirect_calls.append(_program_name)
+                assert indirect_buffer is resources.active_tile_dispatch_args
+                dispatch_args[_program_name] = np.frombuffer(
+                    resources.active_tile_dispatch_args.read(size=12),
+                    dtype=np.uint32,
+                    count=3,
+                ).tolist()
+                return _original_indirect(indirect_buffer)
+
+            monkeypatch.setattr(program, "run", fail_direct_run)
+            monkeypatch.setattr(program, "run_indirect", count_indirect)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.liquid_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        assert set(indirect_calls) == set(load_programs)
+        assert all(
+            args == [pipeline._active_tile_workgroups_per_tile(engine), 1, 1]
+            for args in dispatch_args.values()
+        )
+        expected_profile_names = {key.removeprefix("liquid.") for key in expected_benchmark_keys}
+        profile_names = {entry["name"] for entry in pipeline.last_pass_profile["passes"]}
+        profile_summary = pipeline.last_pass_profile["summary"]
+        benchmark_summary = benchmark_engine.summarize_pass_profiles([{"liquid": pipeline.last_pass_profile}])
+
+        assert expected_profile_names.issubset(profile_names)
+        for profile_name in expected_profile_names:
+            assert profile_summary[profile_name]["count"] == 1
+        assert expected_benchmark_keys.issubset(benchmark_summary)
+    finally:
+        engine.close()
+
+
+def test_gpu_liquid_formal_tail_passes_use_indirect_active_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=96, height=64, gas_cell_size=4)
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(40, 8, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        _seed_gpu_authoritative_active_tiles(engine, [(1, 0)])
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+
+        pipeline = engine.liquid_solver.gpu_pipeline
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        resources = pipeline._ensure_resources(engine)
+        indirect_calls: list[str] = []
+        seam_dispatch_args: dict[str, list[int]] = {}
+        seam_programs = {"seam_x", "seam_y"}
+        direct_forbidden_programs = (
+            "seam_x",
+            "seam_y",
+            "copy_core_state",
+            "copy_with_pending",
+            "cleanup_runtime",
+            "publish_bridge_cell",
+        )
+
+        for program_name in direct_forbidden_programs:
+            program = pipeline.programs[program_name]
+            original_indirect = program.run_indirect
+
+            def fail_direct_run(*args: object, _program_name: str = program_name, **kwargs: object) -> None:
+                raise AssertionError(f"formal GPU liquid {_program_name} must not use full-grid run")
+
+            def count_indirect(
+                indirect_buffer: object,
+                *,
+                _program_name: str = program_name,
+                _original_indirect: object = original_indirect,
+            ) -> object:
+                indirect_calls.append(_program_name)
+                if _program_name in seam_programs:
+                    assert indirect_buffer is resources.affected_tile_dispatch_args
+                    seam_dispatch_args[_program_name] = np.frombuffer(
+                        resources.affected_tile_dispatch_args.read(size=12),
+                        dtype=np.uint32,
+                        count=3,
+                    ).tolist()
+                else:
+                    assert indirect_buffer is resources.active_tile_dispatch_args
+                return _original_indirect(indirect_buffer)
+
+            monkeypatch.setattr(program, "run", fail_direct_run)
+            monkeypatch.setattr(program, "run_indirect", count_indirect)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.liquid_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        assert {"seam_x", "seam_y", "cleanup_runtime", "publish_bridge_cell"}.issubset(indirect_calls)
+        assert indirect_calls.count("copy_core_state") == 2
+        assert indirect_calls.count("copy_with_pending") == 1
+        assert seam_dispatch_args["seam_x"] == [pipeline._seam_workgroups_per_boundary("x") * 2, 1, 1]
+        assert seam_dispatch_args["seam_y"] == [pipeline._seam_workgroups_per_boundary("y"), 1, 1]
+    finally:
+        engine.close()
+
+
+def test_gpu_liquid_formal_horizontal_seam_run_continues_across_tile_and_stops_at_blockers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=96, height=64, gas_cell_size=4)
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        placeholder_id = engine.rulebook.material_id("placeholder_solid")
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        blocker_rows = {
+            "static": 8,
+            "falling": 10,
+            "entity": 12,
+            "placeholder": 14,
+            "displaced": 16,
+        }
+        for blocker_kind, y in blocker_rows.items():
+            for x in range(28, 32):
+                engine.set_cell(x, y, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+                engine.set_cell(x, y + 1, "raw_stone_solid", mark_dirty=False)
+            engine.set_cell(27, y, "raw_stone_solid", mark_dirty=False)
+            if blocker_kind == "static":
+                engine.set_cell(34, y, "raw_stone_solid", mark_dirty=False)
+            elif blocker_kind == "falling":
+                engine.phase[y, 34] = int(Phase.FALLING_ISLAND)
+            elif blocker_kind == "entity":
+                engine.entity_id[y, 34] = 41
+            elif blocker_kind == "placeholder":
+                engine.set_cell(34, y, "placeholder_solid", mark_dirty=False)
+            elif blocker_kind == "displaced":
+                engine.placeholder_displaced_material[y, 34] = water_id
+
+        for x in range(32, 36):
+            engine.set_cell(x, 20, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+            engine.set_cell(x, 21, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(29, 20, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(36, 20, "raw_stone_solid", mark_dirty=False)
+
+        _seed_gpu_authoritative_active_tiles(engine, [(0, 0), (1, 0)])
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+
+        pipeline = engine.liquid_solver.gpu_pipeline
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        resources = pipeline._ensure_resources(engine)
+        indirect_calls: list[str] = []
+        for program_name in ("seam_x", "seam_y"):
+            program = pipeline.programs[program_name]
+            original_indirect = program.run_indirect
+
+            def fail_direct_run(*args: object, _program_name: str = program_name, **kwargs: object) -> None:
+                raise AssertionError(f"formal GPU liquid {_program_name} must use boundary indirect dispatch")
+
+            def count_indirect(
+                indirect_buffer: object,
+                *,
+                _program_name: str = program_name,
+                _original_indirect: object = original_indirect,
+            ) -> object:
+                indirect_calls.append(_program_name)
+                assert indirect_buffer is resources.affected_tile_dispatch_args
+                return _original_indirect(indirect_buffer)
+
+            monkeypatch.setattr(program, "run", fail_direct_run)
+            monkeypatch.setattr(program, "run_indirect", count_indirect)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.liquid_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        core = _bridge_cell_core(engine)
+        entity_ids = np.frombuffer(
+            engine.bridge.buffers["entity_id"].read(size=engine.entity_id.nbytes),
+            dtype=np.int32,
+        ).reshape(engine.entity_id.shape)
+        displaced_material = np.frombuffer(
+            engine.bridge.buffers["placeholder_displaced_material"].read(
+                size=engine.placeholder_displaced_material.nbytes
+            ),
+            dtype=np.int32,
+        ).reshape(engine.placeholder_displaced_material.shape)
+        for blocker_kind, y in blocker_rows.items():
+            assert [int(core["material_id"][y, x]) for x in range(28, 34)] == [
+                water_id,
+                water_id,
+                0,
+                0,
+                water_id,
+                water_id,
+            ]
+            assert int(core["material_id"][y, 35]) == 0
+            if blocker_kind == "static":
+                assert int(core["material_id"][y, 34]) not in (0, water_id)
+            elif blocker_kind == "falling":
+                assert int(core["material_id"][y, 34]) == 0
+                assert int(core["phase"][y, 34]) == int(Phase.FALLING_ISLAND)
+            elif blocker_kind == "entity":
+                assert int(core["material_id"][y, 34]) == 0
+                assert int(entity_ids[y, 34]) == 41
+            elif blocker_kind == "placeholder":
+                assert int(core["material_id"][y, 34]) == placeholder_id
+            elif blocker_kind == "displaced":
+                assert int(core["material_id"][y, 34]) == 0
+                assert int(displaced_material[y, 34]) == water_id
+
+        assert [int(core["material_id"][20, x]) for x in range(30, 36)] == [
+            water_id,
+            water_id,
+            0,
+            0,
+            water_id,
+            water_id,
+        ]
+        assert {"seam_x", "seam_y"}.issubset(indirect_calls)
+    finally:
+        engine.close()
+
+
+def test_gpu_liquid_formal_seam_prefetch_reads_inactive_neighbor_bridge_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=96, height=64, gas_cell_size=4)
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        stone_id = engine.rulebook.material_id("raw_stone_solid")
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(29, 8, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(30, 8, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.set_cell(31, 8, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.set_cell(30, 9, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(31, 9, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(32, 8, "raw_stone_solid", mark_dirty=False)
+        _seed_gpu_authoritative_active_tiles(engine, [(0, 0)])
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+
+        pipeline = engine.liquid_solver.gpu_pipeline
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        resources = pipeline._ensure_resources(engine)
+        prefetch_program = pipeline.programs["prefetch_seam_boundary_bridge_inputs"]
+        original_indirect = prefetch_program.run_indirect
+        prefetch_dispatch_args: list[list[int]] = []
+
+        def fail_direct_run(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal GPU liquid seam prefetch must not use full-grid run")
+
+        def count_indirect(indirect_buffer: object) -> object:
+            assert indirect_buffer is resources.affected_tile_dispatch_args
+            prefetch_dispatch_args.append(
+                np.frombuffer(resources.affected_tile_dispatch_args.read(size=12), dtype=np.uint32, count=3).tolist()
+            )
+            return original_indirect(indirect_buffer)
+
+        monkeypatch.setattr(prefetch_program, "run", fail_direct_run)
+        monkeypatch.setattr(prefetch_program, "run_indirect", count_indirect)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.liquid_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        core = _bridge_cell_core(engine)
+        assert prefetch_dispatch_args
+        assert int(core["material_id"][8, 30]) == water_id
+        assert int(core["material_id"][8, 31]) == water_id
+        assert int(core["material_id"][8, 32]) == stone_id
+        assert int(core["material_id"][8, 33]) == 0
+    finally:
+        engine.close()
+
+
+def test_gpu_liquid_formal_vertical_seam_moves_shifted_run_into_lower_empty_segment() -> None:
+    engine = WorldEngine(width=64, height=96, gas_cell_size=4)
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        for x in range(12, 18):
+            engine.set_cell(x, 31, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.set_cell(9, 32, "raw_stone_solid", mark_dirty=False)
+        engine.phase[32, 15] = int(Phase.FALLING_ISLAND)
+        _seed_gpu_authoritative_active_tiles(engine, [(0, 0), (0, 1)])
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.liquid_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        core = _bridge_cell_core(engine)
+        assert [int(core["material_id"][31, x]) for x in range(12, 18)] == [
+            0,
+            0,
+            0,
+            0,
+            0,
+            water_id,
+        ]
+        assert [int(core["material_id"][32, x]) for x in range(10, 15)] == [water_id] * 5
+        assert int(core["material_id"][32, 15]) == 0
+        assert int(core["phase"][32, 15]) == int(Phase.FALLING_ISLAND)
+        assert [int(core["material_id"][32, x]) for x in range(16, 19)] == [0, 0, 0]
+    finally:
+        engine.close()
+
+
+def test_gpu_liquid_formal_tile_solve_vertical_downfill_respects_blocker_occupancy() -> None:
+    engine = WorldEngine(width=64, height=64, gas_cell_size=4)
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        placeholder_id = engine.rulebook.material_id("placeholder_solid")
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        blocker_columns = {
+            "entity": 10,
+            "displaced": 14,
+            "placeholder": 18,
+        }
+        source_y = 8
+        target_y = 9
+        for x in blocker_columns.values():
+            engine.set_cell(x - 1, source_y, "raw_stone_solid", mark_dirty=False)
+            engine.set_cell(x, source_y, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+            engine.set_cell(x + 1, source_y, "raw_stone_solid", mark_dirty=False)
+
+        engine.entity_id[target_y, blocker_columns["entity"]] = 41
+        engine.placeholder_displaced_material[target_y, blocker_columns["displaced"]] = water_id
+        engine.set_cell(blocker_columns["placeholder"], target_y, "placeholder_solid", mark_dirty=False)
+        _seed_gpu_authoritative_active_tiles(engine, [(0, 0)])
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.liquid_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        core = _bridge_cell_core(engine)
+        entity_ids = _bridge_entity_id(engine)
+        displaced_material = _bridge_buffer_i32(
+            engine,
+            "placeholder_displaced_material",
+            engine.placeholder_displaced_material.shape,
+        )
+        assert int(core["material_id"][target_y, blocker_columns["entity"]]) == 0
+        assert int(core["material_id"][target_y, blocker_columns["displaced"]]) == 0
+        assert int(core["material_id"][target_y, blocker_columns["placeholder"]]) == placeholder_id
+        assert int(entity_ids[target_y, blocker_columns["entity"]]) == 41
+        assert int(displaced_material[target_y, blocker_columns["displaced"]]) == water_id
+        assert [int(core["material_id"][source_y, x]) for x in blocker_columns.values()] == [water_id] * 3
+    finally:
+        engine.close()
+
+
+def test_gpu_liquid_formal_placeholder_displacement_uses_dirty_affected_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=96, height=64, gas_cell_size=4)
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(40, 20, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.set_cell(40, 20, "placeholder_solid", mark_dirty=False)
+        engine.bridge_frame_placeholder_dirty_rects.append((40, 20, 41, 21))
+        _seed_gpu_authoritative_active_tiles(engine, [(1, 0)])
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+
+        pipeline = engine.liquid_solver.gpu_pipeline
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        resources = pipeline._ensure_resources(engine)
+        program = pipeline.programs["placeholder_displace"]
+        original_indirect = program.run_indirect
+        indirect_dispatch_args: list[list[int]] = []
+        affected_tile_sets: list[set[tuple[int, int]]] = []
+
+        def fail_direct_run(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal GPU liquid placeholder displacement must not use full-grid run")
+
+        def count_indirect(indirect_buffer: object) -> object:
+            assert indirect_buffer is resources.affected_tile_dispatch_args
+            affected_count = int(
+                np.frombuffer(resources.affected_tile_count.read(size=4), dtype=np.uint32, count=1)[0]
+            )
+            affected_tiles = np.frombuffer(
+                resources.affected_tile_list.read(size=affected_count * 2 * np.dtype(np.int32).itemsize),
+                dtype=np.int32,
+                count=affected_count * 2,
+            ).reshape((affected_count, 2))
+            affected_tile_sets.append({tuple(tile.tolist()) for tile in affected_tiles})
+            indirect_dispatch_args.append(
+                np.frombuffer(resources.affected_tile_dispatch_args.read(size=12), dtype=np.uint32, count=3).tolist()
+            )
+            return original_indirect(indirect_buffer)
+
+        monkeypatch.setattr(program, "run", fail_direct_run)
+        monkeypatch.setattr(program, "run_indirect", count_indirect)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.liquid_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        assert affected_tile_sets == [
+            {(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)}
+        ]
+        assert indirect_dispatch_args == [[pipeline._active_tile_workgroups_per_tile(engine) * 6, 1, 1]]
+    finally:
+        engine.close()
+
+
+def test_gpu_liquid_formal_placeholder_pending_emit_failure_requeues_no_dirty_next_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=96, height=64, gas_cell_size=4)
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        placeholder_id = engine.rulebook.material_id("placeholder_solid")
+        stone_id = engine.rulebook.material_id("raw_stone_solid")
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        source_x = 40
+        source_y = 20
+        for blocker_x, blocker_y in ((39, 20), (41, 20), (39, 19), (41, 19)):
+            engine.set_cell(blocker_x, blocker_y, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(source_x, source_y, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.set_cell(source_x, source_y, "placeholder_solid", mark_dirty=False)
+        engine.bridge_frame_placeholder_dirty_rects.append((source_x, source_y, source_x + 1, source_y + 1))
+        _seed_gpu_authoritative_active_tiles(engine, [(1, 0)])
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+
+        pipeline = engine.liquid_solver.gpu_pipeline
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        resources = pipeline._ensure_resources(engine)
+        program = pipeline.programs["placeholder_displace"]
+        original_indirect = program.run_indirect
+        indirect_dispatch_args: list[list[int]] = []
+        affected_tile_sets: list[set[tuple[int, int]]] = []
+
+        def fail_direct_run(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal GPU liquid placeholder displacement must not use full-grid run")
+
+        def count_indirect(indirect_buffer: object) -> object:
+            assert indirect_buffer is resources.affected_tile_dispatch_args
+            affected_count = int(
+                np.frombuffer(resources.affected_tile_count.read(size=4), dtype=np.uint32, count=1)[0]
+            )
+            affected_tiles = np.frombuffer(
+                resources.affected_tile_list.read(size=affected_count * 2 * np.dtype(np.int32).itemsize),
+                dtype=np.int32,
+                count=affected_count * 2,
+            ).reshape((affected_count, 2))
+            affected_tile_sets.append({tuple(tile.tolist()) for tile in affected_tiles})
+            indirect_dispatch_args.append(
+                np.frombuffer(resources.affected_tile_dispatch_args.read(size=12), dtype=np.uint32, count=3).tolist()
+            )
+            return original_indirect(indirect_buffer)
+
+        monkeypatch.setattr(program, "run", fail_direct_run)
+        monkeypatch.setattr(program, "run_indirect", count_indirect)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.liquid_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        expected_tiles = {(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)}
+        assert affected_tile_sets == [expected_tiles]
+        assert indirect_dispatch_args == [[pipeline._active_tile_workgroups_per_tile(engine) * 6, 1, 1]]
+
+        core, cell = _readback_cell_window(engine, center_x=source_x, center_y=source_y, width=5, height=3)
+        assert int(core["material_id"][1, 2]) == placeholder_id
+        assert int(cell["placeholder_displaced_material"][1, 2]) == water_id
+        for local_x, local_y in ((1, 1), (3, 1), (1, 0), (3, 0)):
+            assert int(core["material_id"][local_y, local_x]) == stone_id
+
+        active_tile_ttl = np.frombuffer(
+            engine.bridge.buffers["active_tile_ttl"].read(
+                size=engine.active.tile_width * engine.active.tile_height * np.dtype(np.int32).itemsize
+            ),
+            dtype=np.int32,
+        ).reshape((engine.active.tile_height, engine.active.tile_width))
+        assert int(active_tile_ttl[0, 1]) == int(engine.active.active_ttl_reset)
+
+        engine.bridge_frame_placeholder_dirty_rects.clear()
+        affected_tile_sets.clear()
+        indirect_dispatch_args.clear()
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.liquid_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        assert engine.bridge_frame_placeholder_dirty_rects == []
+        assert affected_tile_sets == [expected_tiles]
+        assert indirect_dispatch_args == [[pipeline._active_tile_workgroups_per_tile(engine) * 6, 1, 1]]
+        core, cell = _readback_cell_window(engine, center_x=source_x, center_y=source_y, width=5, height=3)
+        assert int(core["material_id"][1, 2]) == placeholder_id
+        assert int(cell["placeholder_displaced_material"][1, 2]) == water_id
+    finally:
+        engine.close()
+
+
+def test_gpu_liquid_pre_motion_formal_intent_publish_uses_active_indirect_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=96, height=64, gas_cell_size=4)
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(40, 8, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        _seed_gpu_authoritative_active_tiles(engine, [(1, 0)])
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+
+        pipeline = engine.liquid_solver.gpu_pipeline
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        resources = pipeline._ensure_resources(engine)
+        flow_load_program = pipeline.programs["load_bridge_flow_intent_inputs"]
+        original_flow_load_indirect = flow_load_program.run_indirect
+        flow_intent_program = pipeline.programs["liquid_flow_intent"]
+        original_flow_intent_indirect = flow_intent_program.run_indirect
+        flow_load_calls: list[str] = []
+        flow_load_dispatch_args: list[int] = []
+        indirect_calls: list[str] = []
+        dispatch_args: list[int] = []
+
+        def fail_flow_load_direct_run(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal GPU liquid flow-intent input load must not use full-grid run")
+
+        def count_flow_load_indirect(indirect_buffer: object) -> object:
+            flow_load_calls.append("load_bridge_flow_intent_inputs")
+            assert indirect_buffer is resources.active_tile_dispatch_args
+            flow_load_dispatch_args[:] = np.frombuffer(
+                resources.active_tile_dispatch_args.read(size=12),
+                dtype=np.uint32,
+                count=3,
+            ).tolist()
+            return original_flow_load_indirect(indirect_buffer)
+
+        def fail_flow_intent_direct_run(*args: object, **kwargs: object) -> None:
+            raise AssertionError("formal GPU liquid flow intent must not use full-grid run")
+
+        def count_flow_intent_indirect(indirect_buffer: object) -> object:
+            indirect_calls.append("liquid_flow_intent")
+            assert indirect_buffer is resources.active_tile_dispatch_args
+            dispatch_args[:] = np.frombuffer(
+                resources.active_tile_dispatch_args.read(size=12),
+                dtype=np.uint32,
+                count=3,
+            ).tolist()
+            return original_flow_intent_indirect(indirect_buffer)
+
+        def fail_full_bridge_loader(*args: object, **kwargs: object) -> None:
+            raise AssertionError("pre-motion liquid intent must use the specialized bridge input loader")
+
+        monkeypatch.setattr(flow_load_program, "run", fail_flow_load_direct_run)
+        monkeypatch.setattr(flow_load_program, "run_indirect", count_flow_load_indirect)
+        monkeypatch.setattr(flow_intent_program, "run", fail_flow_intent_direct_run)
+        monkeypatch.setattr(flow_intent_program, "run_indirect", count_flow_intent_indirect)
+        for full_loader_name in (
+            "load_bridge_cell",
+            "load_bridge_cell_out",
+            "load_bridge_cell_aux",
+        ):
+            monkeypatch.setattr(pipeline.programs[full_loader_name], "run", fail_full_bridge_loader)
+            monkeypatch.setattr(pipeline.programs[full_loader_name], "run_indirect", fail_full_bridge_loader)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            pipeline.prepare_motion_flow_intent(
+                engine,
+                solve_tile_mask=np.zeros((engine.active.tile_height, engine.active.tile_width), dtype=np.bool_),
+            )
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        core = _bridge_cell_core(engine)
+        liquid_intent = np.frombuffer(
+            engine.bridge.textures["liquid_flow_intent"].read(),
+            dtype="f4",
+        ).reshape((engine.height, engine.width, 2))
+
+        assert flow_load_calls == ["load_bridge_flow_intent_inputs"]
+        assert flow_load_dispatch_args == [pipeline._active_tile_workgroups_per_tile(engine), 1, 1]
+        assert indirect_calls == ["liquid_flow_intent"]
+        assert dispatch_args == [pipeline._active_tile_workgroups_per_tile(engine), 1, 1]
+        assert "liquid_flow_intent" in engine.bridge.gpu_authoritative_resources
+        assert np.allclose(core["velocity"][8, 40], np.array([0.0, 0.0], dtype=np.float32))
+        assert np.isclose(liquid_intent[8, 40, 1], 2.0)
+    finally:
+        engine.close()
+
+
+def test_gpu_motion_active_tile_indirect_dispatch_limits_powder_source_generation() -> None:
+    engine = WorldEngine(width=96, height=64, gas_cell_size=4)
+    if not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU motion pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        sand_id = engine.rulebook.material_id("sand_powder")
+        water_id = engine.rulebook.material_id("water_liquid")
+        engine.set_cell(10, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
+        engine.set_cell(40, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
+        engine.set_cell(44, 16, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.velocity[8, 10] = np.array([120.0, 0.0], dtype=np.float32)
+        engine.velocity[8, 40] = np.array([120.0, 0.0], dtype=np.float32)
+        engine.velocity[16, 44] = np.array([120.0, 0.0], dtype=np.float32)
+        engine.bridge.clear_gpu_authoritative("active_meta", "active_tile_ttl", "active_chunk_mask")
+        for tile_y in range(engine.active.tile_height):
+            for tile_x in range(engine.active.tile_width):
+                engine.active.active_tile_ttl[tile_y][tile_x] = 0
+        for chunk_y in range(engine.active.chunk_height):
+            for chunk_x in range(engine.active.chunk_width):
+                engine.active.active_chunk_mask[chunk_y][chunk_x] = False
+        engine.active.active_tile_ttl[0][1] = 1
+        engine.active.active_chunk_mask[0][0] = True
+        engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "ambient_temperature",
+            "flow_velocity",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+        engine.profile_passes_enabled = True
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.motion_solver.step(engine, 1.0 / 60.0)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        resources = engine.motion_solver.gpu_pipeline.resources
+        assert resources is not None
+        active_count = np.frombuffer(resources.active_tile_count.read(size=4), dtype=np.uint32, count=1)
+        dispatch_args = np.frombuffer(resources.active_tile_dispatch_args.read(size=12), dtype=np.uint32, count=3)
+        active_list_head = np.frombuffer(resources.active_tile_list.read(size=8), dtype=np.int32, count=2)
+        reservation_count = int(
+            np.frombuffer(engine.bridge.buffers["powder_reservation_count"].read(size=4), dtype=np.int32, count=1)[0]
+        )
+        reservations = np.frombuffer(
+            engine.bridge.buffers["powder_reservation"].read(size=reservation_count * powder_reservation_dtype().itemsize),
+            dtype=powder_reservation_dtype(),
+            count=reservation_count,
+        )
+        profile_names = {
+            f"motion.{entry['name']}"
+            for entry in engine.motion_solver.gpu_pipeline.last_pass_profile["passes"]
+        }
+        sources = {tuple(record["source_xy"].tolist()) for record in reservations}
+        unpacked, _cell = _readback_cell_window(engine, center_x=48, center_y=32, width=96, height=64)
+
+        assert {
+            "motion.integrate_upload_inputs",
+            "motion.integrate_load_bridge_inputs",
+            "motion.powder_upload_inputs",
+            "motion.powder_load_bridge_inputs",
+            "motion.powder_buffer_prepare",
+        }.issubset(profile_names)
+        assert int(active_count[0]) == 1
+        assert dispatch_args.tolist() == [16, 1, 1]
+        assert active_list_head.tolist() == [1, 0]
+        assert sources == {(40, 8), (44, 16)}
+        assert int(unpacked["material_id"][8, 10]) == sand_id
+        assert int(unpacked["material_id"][8, 12]) == 0
+        assert int(unpacked["material_id"][8, 40]) == 0
+        assert int(unpacked["material_id"][8, 42]) == sand_id
+        assert int(unpacked["material_id"][16, 44]) == 0
+        assert int(unpacked["material_id"][16, 46]) == water_id
+        assert int(unpacked["phase"][16, 46]) == int(Phase.LIQUID)
+    finally:
+        engine.close()
+
+
+def test_gpu_motion_reservation_index_resolve_and_publish_use_count_indirect_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = WorldEngine(width=96, height=64, gas_cell_size=4)
+    if not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU motion pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(40, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
+        engine.velocity[8, 40] = np.array([120.0, 0.0], dtype=np.float32)
+        engine.bridge.clear_gpu_authoritative("active_meta", "active_tile_ttl", "active_chunk_mask")
+        for tile_y in range(engine.active.tile_height):
+            for tile_x in range(engine.active.tile_width):
+                engine.active.active_tile_ttl[tile_y][tile_x] = 0
+        for chunk_y in range(engine.active.chunk_height):
+            for chunk_x in range(engine.active.chunk_width):
+                engine.active.active_chunk_mask[chunk_y][chunk_x] = False
+        engine.active.active_tile_ttl[0][1] = 1
+        engine.active.active_chunk_mask[0][0] = True
+        engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "ambient_temperature",
+            "flow_velocity",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+
+        pipeline = engine.motion_solver.gpu_pipeline
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        indirect_calls: list[str] = []
+        direct_only_programs = (
+            "clear_powder_target_winners_for_reservations",
+            "index_powder_target_winners",
+            "resolve_powder_reservations",
+            "clear_powder_apply_index_for_reservations",
+            "index_powder_apply_winners",
+            "fill_powder_apply_index",
+            "publish_powder_reservations",
+        )
+        for program_name in direct_only_programs:
+            program = pipeline.programs[program_name]
+            original_indirect = program.run_indirect
+
+            def fail_direct_run(*args: object, _program_name: str = program_name, **kwargs: object) -> None:
+                raise AssertionError(f"{_program_name} must use reservation-count indirect dispatch")
+
+            def count_indirect(
+                indirect_buffer: object,
+                *,
+                _program_name: str = program_name,
+                _original_indirect: object = original_indirect,
+            ) -> object:
+                indirect_calls.append(_program_name)
+                return _original_indirect(indirect_buffer)
+
+            monkeypatch.setattr(program, "run", fail_direct_run)
+            monkeypatch.setattr(program, "run_indirect", count_indirect)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.motion_solver.step(engine, 1.0 / 60.0)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        assert set(indirect_calls) == set(direct_only_programs)
+        dispatch_args = np.frombuffer(
+            pipeline.resources.powder_reservation_dispatch_args.read(size=12),
+            dtype=np.uint32,
+            count=3,
+        )
+        reservation_count = int(
+            np.frombuffer(engine.bridge.buffers["powder_reservation_count"].read(size=4), dtype=np.int32, count=1)[0]
+        )
+        assert reservation_count == 1
+        assert dispatch_args.tolist() == [1, 1, 1]
+    finally:
+        engine.close()
+
+
+def test_gpu_motion_formal_powder_apply_uses_affected_tile_indirect_for_cross_tile_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=96, height=64, gas_cell_size=4)
+    if not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU motion pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        sand_id = engine.rulebook.material_id("sand_powder")
+        engine.set_cell(31, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
+        engine.velocity[8, 31] = np.array([120.0, 0.0], dtype=np.float32)
+        engine.bridge.clear_gpu_authoritative("active_meta", "active_tile_ttl", "active_chunk_mask")
+        for tile_y in range(engine.active.tile_height):
+            for tile_x in range(engine.active.tile_width):
+                engine.active.active_tile_ttl[tile_y][tile_x] = 0
+        for chunk_y in range(engine.active.chunk_height):
+            for chunk_x in range(engine.active.chunk_width):
+                engine.active.active_chunk_mask[chunk_y][chunk_x] = False
+        engine.active.active_tile_ttl[0][0] = 1
+        engine.active.active_chunk_mask[0][0] = True
+        engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "ambient_temperature",
+            "flow_velocity",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+
+        pipeline = engine.motion_solver.gpu_pipeline
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        indirect_calls: list[str] = []
+        direct_only_programs = (
+            "build_powder_apply_dispatch",
+            "apply_powder_reservations",
+            "apply_powder_reservation_aux",
+            "publish_bridge_cell",
+        )
+        for program_name in direct_only_programs:
+            program = pipeline.programs[program_name]
+            original_indirect = program.run_indirect
+
+            def fail_direct_run(*args: object, _program_name: str = program_name, **kwargs: object) -> None:
+                raise AssertionError(f"{_program_name} must use affected-tile indirect dispatch")
+
+            def count_indirect(
+                indirect_buffer: object,
+                *,
+                _program_name: str = program_name,
+                _original_indirect: object = original_indirect,
+            ) -> object:
+                indirect_calls.append(_program_name)
+                return _original_indirect(indirect_buffer)
+
+            monkeypatch.setattr(program, "run", fail_direct_run)
+            monkeypatch.setattr(program, "run_indirect", count_indirect)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            pipeline.resolve_and_apply_powders(
+                engine,
+                1.0 / 60.0,
+                solve_tile_mask=np.zeros((engine.active.tile_height, engine.active.tile_width), dtype=np.bool_),
+            )
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        resources = pipeline.resources
+        assert resources is not None
+        affected_count = int(np.frombuffer(resources.active_tile_count.read(size=4), dtype=np.uint32, count=1)[0])
+        affected_tiles = np.frombuffer(
+            resources.active_tile_list.read(size=affected_count * 2 * np.dtype(np.int32).itemsize),
+            dtype=np.int32,
+            count=affected_count * 2,
+        ).reshape((affected_count, 2))
+        core = _bridge_cell_core(engine)
+
+        assert set(indirect_calls) == set(direct_only_programs)
+        assert {tuple(tile.tolist()) for tile in affected_tiles} == {(0, 0), (1, 0)}
+        assert int(core["material_id"][8, 31]) == 0
+        assert int(core["material_id"][8, 33]) == sand_id
+    finally:
+        engine.close()
+
+
+def test_gpu_motion_formal_powder_active_refresh_does_not_read_active_meta() -> None:
+    class NoReadBuffer:
+        def __init__(self, buffer: object) -> None:
+            self._buffer = buffer
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._buffer, name)
+
+        def read(self, *args: object, **kwargs: object) -> bytes:
+            raise AssertionError("formal GPU powder active refresh must not read active_meta on CPU")
+
+    engine = WorldEngine(width=96, height=64)
+    if not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU motion pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(30, 8, "sand_powder", phase=Phase.POWDER, mark_dirty=False)
+        engine.velocity[8, 30] = np.array([120.0, 0.0], dtype=np.float32)
+        engine.bridge.clear_gpu_authoritative("active_meta", "active_tile_ttl", "active_chunk_mask")
+        for tile_y in range(engine.active.tile_height):
+            for tile_x in range(engine.active.tile_width):
+                engine.active.active_tile_ttl[tile_y][tile_x] = 0
+        engine.active.active_tile_ttl[0][0] = 1
+        engine.active.active_chunk_mask[0][0] = True
+        engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "ambient_temperature",
+            "flow_velocity",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+        engine.bridge.buffers["active_meta"] = NoReadBuffer(engine.bridge.buffers["active_meta"])
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.motion_solver.step(engine, 1.0 / 60.0)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        assert {"active_meta", "active_tile_ttl", "active_chunk_mask"}.issubset(engine.bridge.gpu_authoritative_resources)
+        ttl_before_decay = _read_gpu_active_tile_ttl(engine)
+        assert ttl_before_decay[0, 0] == engine.active.active_ttl_reset
+        assert ttl_before_decay[0, 1] == engine.active.active_ttl_reset
+    finally:
+        engine.close()
 
 
 def test_suspended_powder_does_not_use_granular_fallback_when_dda_is_blocked() -> None:
@@ -48051,7 +59730,7 @@ def test_motion_solver_falling_island_dda_moves_to_furthest_legal_shift_before_o
     engine.islands[12] = FallingIslandRecord(
         island_id=12,
         bbox=(5, 6, 7, 8),
-        velocity_xy=(2.6, -0.9),
+        velocity_xy=(156.0, -0.9),
         subcell_offset=(0.0, 0.0),
     )
 
@@ -48075,7 +59754,7 @@ def test_gpu_motion_solver_falling_island_uses_sparse_runtime_velocity_not_cell_
     engine.islands[17] = FallingIslandRecord(
         island_id=17,
         bbox=(8, 8, 10, 10),
-        velocity_xy=(2.0, -0.49),
+        velocity_xy=(120.0, -0.49),
         subcell_offset=(0.0, 0.0),
     )
 
@@ -48101,13 +59780,13 @@ def test_gpu_motion_pipeline_batches_multiple_island_shift_queries_and_uploads_r
     engine.islands[31] = FallingIslandRecord(
         island_id=31,
         bbox=(4, 8, 6, 10),
-        velocity_xy=(2.0, -0.49),
+        velocity_xy=(120.0, -0.49),
         subcell_offset=(0.0, 0.0),
     )
     engine.islands[32] = FallingIslandRecord(
         island_id=32,
         bbox=(12, 8, 14, 10),
-        velocity_xy=(3.0, -0.49),
+        velocity_xy=(180.0, -0.49),
         subcell_offset=(0.25, -0.25),
     )
 
@@ -48133,14 +59812,14 @@ def test_gpu_motion_pipeline_batches_multiple_island_shift_queries_and_uploads_r
     assert int(reservation_count[0]) == 2
     assert island_ids.tolist() == [31, 32]
     assert island_bboxes.tolist() == [[4, 8, 6, 10], [12, 8, 14, 10]]
-    assert np.allclose(island_motion[0], np.array([2.0, 0.41, 0.0, 0.41], dtype=np.float32))
-    assert np.allclose(island_motion[1], np.array([3.0, 0.41, 0.25, 0.16], dtype=np.float32))
+    assert np.allclose(island_motion[0], np.array([120.0, 0.41, 0.0, 0.41 / 60.0], dtype=np.float32))
+    assert np.allclose(island_motion[1], np.array([180.0, 0.41, 0.25, -0.25 + 0.41 / 60.0], dtype=np.float32))
     assert reservations["island_id"].tolist() == [31, 32]
     assert reservations["buffer_bbox"].tolist() == [[4, 8, 6, 10], [12, 8, 14, 10]]
-    assert np.allclose(reservations[0]["velocity_xy"], np.array([2.0, 0.41], dtype=np.float32))
-    assert np.allclose(reservations[1]["velocity_xy"], np.array([3.0, 0.41], dtype=np.float32))
-    assert np.allclose(reservations[0]["subcell_offset"], np.array([0.0, 0.41], dtype=np.float32))
-    assert np.allclose(reservations[1]["subcell_offset"], np.array([0.25, 0.16], dtype=np.float32))
+    assert np.allclose(reservations[0]["velocity_xy"], np.array([120.0, 0.41], dtype=np.float32))
+    assert np.allclose(reservations[1]["velocity_xy"], np.array([180.0, 0.41], dtype=np.float32))
+    assert np.allclose(reservations[0]["subcell_offset"], np.array([0.0, 0.41 / 60.0], dtype=np.float32))
+    assert np.allclose(reservations[1]["subcell_offset"], np.array([0.25, -0.25 + 0.41 / 60.0], dtype=np.float32))
     assert reservations["target_shift"].tolist() == [[2, 0], [3, 0]]
     assert reservations["reserved_shift"].tolist() == [[2, 0], [3, 0]]
     assert reservations["resolved_shift"].tolist() == [[2, 0], [3, 0]]
@@ -48160,7 +59839,7 @@ def test_gpu_motion_falling_island_shift_planning_uses_bridge_authoritative_obst
     engine.islands[51] = FallingIslandRecord(
         island_id=51,
         bbox=(8, 8, 10, 10),
-        velocity_xy=(2.0, 0.0),
+        velocity_xy=(120.0, 0.0),
         subcell_offset=(0.0, 0.0),
     )
     engine.bridge.sync_world(engine)
@@ -48174,8 +59853,9 @@ def test_gpu_motion_falling_island_shift_planning_uses_bridge_authoritative_obst
     try:
         reservations = engine.motion_solver.gpu_pipeline.plan_falling_island_reservations(
             engine,
+            1.0 / 60.0,
             island_ids=[51],
-            motion_overrides={51: ((2.0, 0.0), (0.0, 0.0))},
+            motion_overrides={51: ((120.0, 0.0), (0.0, 0.0))},
         )
     finally:
         engine._world_simulation_frame_active = previous_frame_active
@@ -48202,7 +59882,7 @@ def test_gpu_motion_pipeline_uploaded_falling_island_plan_packs_reservations_wit
     engine.islands[51] = FallingIslandRecord(
         island_id=51,
         bbox=(8, 8, 10, 10),
-        velocity_xy=(2.0, 0.0),
+        velocity_xy=(120.0, 0.0),
         subcell_offset=(0.0, 0.0),
     )
 
@@ -48214,8 +59894,9 @@ def test_gpu_motion_pipeline_uploaded_falling_island_plan_packs_reservations_wit
 
     reservation_count = pipeline.plan_uploaded_falling_island_reservations(
         engine,
+        1.0 / 60.0,
         island_ids=[51],
-        motion_overrides={51: ((2.0, 0.0), (0.0, 0.0))},
+        motion_overrides={51: ((120.0, 0.0), (0.0, 0.0))},
     )
 
     resources = pipeline.resources
@@ -48231,7 +59912,7 @@ def test_gpu_motion_pipeline_uploaded_falling_island_plan_packs_reservations_wit
     assert int(count_buffer[0]) == 1
     assert int(reservations[0]["island_id"]) == 51
     assert reservations[0]["buffer_bbox"].tolist() == [8, 8, 10, 10]
-    assert np.allclose(reservations[0]["velocity_xy"], np.array([2.0, 0.0], dtype=np.float32))
+    assert np.allclose(reservations[0]["velocity_xy"], np.array([120.0, 0.0], dtype=np.float32))
     assert reservations[0]["target_shift"].tolist() == [2, 0]
     assert reservations[0]["reserved_shift"].tolist() == [2, 0]
     assert reservations[0]["resolved_shift"].tolist() == [2, 0]
@@ -48252,7 +59933,7 @@ def test_gpu_motion_pipeline_bridge_runtime_plan_does_not_pack_cpu_islands(
     engine.islands[91] = FallingIslandRecord(
         island_id=91,
         bbox=(8, 8, 10, 10),
-        velocity_xy=(2.0, -0.49),
+        velocity_xy=(120.0, -0.49),
         subcell_offset=(0.0, 0.0),
     )
     engine.bridge.sync_world(engine)
@@ -48272,6 +59953,7 @@ def test_gpu_motion_pipeline_bridge_runtime_plan_does_not_pack_cpu_islands(
     try:
         reservation_count = engine.motion_solver.gpu_pipeline.plan_uploaded_falling_island_reservations_from_bridge_runtime(
             engine,
+            1.0 / 60.0,
             runtime_capacity=1,
         )
     finally:
@@ -48296,6 +59978,347 @@ def test_gpu_motion_pipeline_bridge_runtime_plan_does_not_pack_cpu_islands(
     assert int(reservations[0]["resolve_state"]) == ISLAND_RESOLVE_DIRECT
 
 
+def test_gpu_motion_bridge_runtime_plan_uses_runtime_count_buffer_not_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=32, height=24)
+    if not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU motion pipeline is not available")
+    engine.patch_material("log_solid", gravity_scale=0.0, wind_coupling=0.0, drag_scale=0.0)
+    engine.clear_cell_region(0, 0, engine.width, engine.height)
+    for x, y in [(8, 8), (9, 8), (8, 9), (9, 9)]:
+        engine.set_cell(x, y, "log_solid", phase=Phase.FALLING_ISLAND, mark_dirty=False)
+        engine.island_id[y, x] = 91
+    engine.bridge.sync_world(engine)
+    engine.bridge.mark_gpu_authoritative("cell_core", "island_id", "island_runtime")
+
+    runtime = np.zeros((3,), dtype=island_runtime_dtype())
+    runtime[0]["island_id"] = 91
+    runtime[0]["buffer_bbox"] = np.asarray([8, 8, 10, 10], dtype=np.int32)
+    runtime[0]["world_bbox"] = np.asarray([8, 8, 10, 10], dtype=np.int32)
+    runtime[0]["velocity_xy"] = np.asarray([120.0, -0.49], dtype=np.float32)
+    runtime[1]["island_id"] = 999
+    runtime[1]["buffer_bbox"] = np.asarray([20, 8, 22, 10], dtype=np.int32)
+    runtime[1]["world_bbox"] = np.asarray([20, 8, 22, 10], dtype=np.int32)
+    runtime[1]["velocity_xy"] = np.asarray([120.0, -0.49], dtype=np.float32)
+    runtime[2]["island_id"] = 1000
+    runtime[2]["buffer_bbox"] = np.asarray([24, 8, 26, 10], dtype=np.int32)
+    runtime[2]["world_bbox"] = np.asarray([24, 8, 26, 10], dtype=np.int32)
+    runtime[2]["velocity_xy"] = np.asarray([120.0, -0.49], dtype=np.float32)
+    if engine.bridge.buffers["island_runtime"].size < runtime.nbytes:
+        engine.bridge.buffers["island_runtime"].release()
+        engine.bridge.buffers["island_runtime"] = engine.bridge.ctx.buffer(reserve=runtime.nbytes, dynamic=True)
+    engine.bridge.buffers["island_runtime"].write(runtime.tobytes())
+    engine.bridge.buffers["island_runtime_count"].write(np.array([2], dtype=np.int32).tobytes())
+
+    pipeline = engine.motion_solver.gpu_pipeline
+    pipeline._ensure_programs(engine.bridge.ctx)
+    engine.profile_passes_enabled = True
+    pipeline.reset_pass_profile()
+    fused_program = pipeline.programs["plan_bridge_runtime_falling_island_reservations"]
+    original_fused_run_indirect = fused_program.run_indirect
+    fused_dispatches = 0
+
+    def fail_direct_runtime_run(*args: object, **kwargs: object) -> None:
+        raise AssertionError("formal bridge-runtime planning must use runtime-count indirect dispatch")
+
+    def fail_staged_runtime_run(*args: object, **kwargs: object) -> None:
+        raise AssertionError("formal bridge-runtime planning must not use staged unpack/shift/pack shaders")
+
+    def count_fused_dispatch(indirect_buffer: object) -> object:
+        nonlocal fused_dispatches
+        fused_dispatches += 1
+        return original_fused_run_indirect(indirect_buffer)
+
+    monkeypatch.setattr(fused_program, "run", fail_direct_runtime_run)
+    monkeypatch.setattr(fused_program, "run_indirect", count_fused_dispatch)
+    for program_name in ("unpack_bridge_island_runtime", "island_shifts", "pack_falling_island_reservations"):
+        monkeypatch.setattr(pipeline.programs[program_name], "run", fail_staged_runtime_run)
+        monkeypatch.setattr(pipeline.programs[program_name], "run_indirect", fail_staged_runtime_run)
+
+    previous_frame_active = engine._world_simulation_frame_active
+    engine._world_simulation_frame_active = True
+    try:
+        reservation_capacity = pipeline.plan_uploaded_falling_island_reservations_from_bridge_runtime(
+            engine,
+            1.0 / 60.0,
+            runtime_capacity=3,
+        )
+    finally:
+        engine._world_simulation_frame_active = previous_frame_active
+
+    resources = pipeline.resources
+    assert resources is not None
+    reservation_count = np.frombuffer(resources.island_reservation_count.read(size=4), dtype=np.int32, count=1)
+    reservations = np.frombuffer(
+        resources.island_reservations.read(size=int(reservation_count[0]) * falling_island_reservation_dtype().itemsize),
+        dtype=falling_island_reservation_dtype(),
+        count=int(reservation_count[0]),
+    )
+
+    assert int(reservation_capacity) == 3
+    assert fused_dispatches == 1
+    assert int(reservation_count[0]) == 2
+    assert reservations["island_id"].tolist() == [91, 0]
+    assert reservations[0]["buffer_bbox"].tolist() == [8, 8, 10, 10]
+    assert reservations[1]["buffer_bbox"].tolist() == [20, 8, 22, 10]
+    assert reservations[1]["velocity_xy"].tolist() == [0.0, 0.0]
+    assert reservations[1]["target_shift"].tolist() == [0, 0]
+    assert reservations[1]["resolved_shift"].tolist() == [0, 0]
+    assert int(reservations[1]["resolve_state"]) == ISLAND_RESOLVE_DIRECT
+    profile_passes = {entry["name"] for entry in pipeline.last_pass_profile["passes"]}
+    assert "island_shift_planning" in profile_passes
+    assert "island_runtime_unpack" not in profile_passes
+    assert "island_reservation_packing" not in profile_passes
+
+
+def test_gpu_motion_bridge_runtime_plan_does_not_create_capacity_sized_cpu_zero_arrays(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=64, height=32)
+    if not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU motion pipeline is not available")
+    try:
+        engine.patch_material("log_solid", gravity_scale=0.0, wind_coupling=0.0, drag_scale=0.0)
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        for x, y in [(8, 8), (9, 8), (8, 9), (9, 9)]:
+            engine.set_cell(x, y, "log_solid", phase=Phase.FALLING_ISLAND, mark_dirty=False)
+            engine.island_id[y, x] = 91
+        engine.bridge.sync_world(engine)
+        engine.bridge.mark_gpu_authoritative("cell_core", "island_id", "island_runtime")
+
+        runtime = np.zeros((1,), dtype=island_runtime_dtype())
+        runtime[0]["island_id"] = 91
+        runtime[0]["buffer_bbox"] = np.asarray([8, 8, 10, 10], dtype=np.int32)
+        runtime[0]["world_bbox"] = np.asarray([8, 8, 10, 10], dtype=np.int32)
+        runtime[0]["velocity_xy"] = np.asarray([120.0, -0.49], dtype=np.float32)
+        if engine.bridge.buffers["island_runtime"].size < runtime.nbytes:
+            engine.bridge.buffers["island_runtime"].release()
+            engine.bridge.buffers["island_runtime"] = engine.bridge.ctx.buffer(reserve=runtime.nbytes, dynamic=True)
+        engine.bridge.buffers["island_runtime"].write(runtime.tobytes())
+        engine.bridge.buffers["island_runtime_count"].write(np.array([1], dtype=np.int32).tobytes())
+
+        runtime_capacity = int(engine.width * engine.height)
+        original_zeros = np.zeros
+
+        def guarded_zeros(shape: object, *args: object, **kwargs: object) -> np.ndarray:
+            normalized_shape = (int(shape),) if np.isscalar(shape) else tuple(int(value) for value in shape)
+            if normalized_shape in {(runtime_capacity,), (runtime_capacity, 4)}:
+                raise AssertionError("bridge-runtime planning must not allocate capacity-sized CPU zero arrays")
+            return original_zeros(shape, *args, **kwargs)
+
+        monkeypatch.setattr(sys.modules["oracle_game.sim.gpu_motion"].np, "zeros", guarded_zeros)
+
+        pipeline = engine.motion_solver.gpu_pipeline
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            reservation_capacity = pipeline.plan_uploaded_falling_island_reservations_from_bridge_runtime(
+                engine,
+                1.0 / 60.0,
+                runtime_capacity=runtime_capacity,
+            )
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        resources = pipeline.resources
+        assert resources is not None
+        reservation_count = np.frombuffer(resources.island_reservation_count.read(size=4), dtype=np.int32, count=1)
+        assert int(reservation_capacity) == runtime_capacity
+        assert int(reservation_count[0]) == 1
+    finally:
+        engine.close()
+
+
+class _SpyMotionDynamicBuffer:
+    def __init__(self, size: int) -> None:
+        self.size = int(size)
+        self.dynamic = True
+        self.orphan_calls: list[int] = []
+        self.release_calls = 0
+
+    def orphan(self, size: int) -> None:
+        self.orphan_calls.append(int(size))
+
+    def release(self) -> None:
+        self.release_calls += 1
+
+
+class _SpyMotionContext:
+    def __init__(self) -> None:
+        self.allocations: list[_SpyMotionDynamicBuffer] = []
+
+    def buffer(self, *, reserve: int, dynamic: bool) -> _SpyMotionDynamicBuffer:
+        buffer = _SpyMotionDynamicBuffer(int(reserve))
+        buffer.dynamic = bool(dynamic)
+        self.allocations.append(buffer)
+        return buffer
+
+
+def test_gpu_motion_bridge_runtime_plan_capacity_reuses_same_size_dynamic_buffers() -> None:
+    pipeline = GPUMotionPipeline()
+    ctx = _SpyMotionContext()
+    runtime_capacity = 3
+    int_itemsize = np.dtype(np.int32).itemsize
+    float_itemsize = np.dtype(np.float32).itemsize
+    reservation_bytes = falling_island_reservation_dtype().itemsize
+    required_sizes = {
+        "island_ids": runtime_capacity * int_itemsize,
+        "island_bboxes": runtime_capacity * 4 * int_itemsize,
+        "island_motion": runtime_capacity * 4 * float_itemsize,
+        "island_shift_results": runtime_capacity * 4 * int_itemsize,
+        "island_reservations": runtime_capacity * reservation_bytes,
+    }
+    resources = SimpleNamespace(
+        **{name: _SpyMotionDynamicBuffer(size) for name, size in required_sizes.items()},
+    )
+    original_buffers = {name: getattr(resources, name) for name in required_sizes}
+
+    pipeline._ensure_bridge_runtime_planning_capacity(ctx, resources, runtime_capacity)
+    pipeline._ensure_bridge_runtime_planning_capacity(ctx, resources, runtime_capacity)
+
+    assert ctx.allocations == []
+    for name, buffer in original_buffers.items():
+        assert getattr(resources, name) is buffer
+        assert buffer.orphan_calls == []
+        assert buffer.release_calls == 0
+
+    undersized = _SpyMotionDynamicBuffer(required_sizes["island_ids"] - 1)
+    resources.island_ids = undersized
+
+    pipeline._ensure_bridge_runtime_planning_capacity(ctx, resources, runtime_capacity)
+
+    assert undersized.orphan_calls == []
+    assert undersized.release_calls == 1
+    assert len(ctx.allocations) == 1
+    assert resources.island_ids is ctx.allocations[0]
+    assert resources.island_ids.size == required_sizes["island_ids"]
+    assert resources.island_ids.dynamic is True
+
+
+def test_gpu_motion_falling_island_index_clear_capacity_reuses_same_size_dynamic_buffers() -> None:
+    pipeline = GPUMotionPipeline()
+    ctx = _SpyMotionContext()
+    world = SimpleNamespace(width=16, height=8, bridge=SimpleNamespace(ctx=ctx))
+    required = world.width * world.height * np.dtype(np.int32).itemsize
+    index_buffer_names = (
+        "island_apply_incoming",
+        "island_apply_outgoing",
+        "island_materialization_index",
+        "island_reservation_source_index",
+    )
+    resources = SimpleNamespace(
+        **{name: _SpyMotionDynamicBuffer(required) for name in index_buffer_names},
+    )
+    original_buffers = {name: getattr(resources, name) for name in index_buffer_names}
+
+    pipeline._ensure_falling_island_index_capacity(world, resources)
+    pipeline._ensure_falling_island_index_capacity(world, resources)
+
+    assert ctx.allocations == []
+    for name, buffer in original_buffers.items():
+        assert getattr(resources, name) is buffer
+        assert buffer.orphan_calls == []
+        assert buffer.release_calls == 0
+
+    undersized = _SpyMotionDynamicBuffer(required - 1)
+    resources.island_apply_outgoing = undersized
+
+    pipeline._ensure_falling_island_index_capacity(world, resources)
+
+    assert undersized.orphan_calls == []
+    assert undersized.release_calls == 1
+    assert len(ctx.allocations) == 1
+    assert resources.island_apply_outgoing is ctx.allocations[0]
+    assert resources.island_apply_outgoing.size == required
+    assert resources.island_apply_outgoing.dynamic is True
+
+
+def test_gpu_motion_formal_bridge_runtime_zero_count_does_not_publish_stale_apply_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=32, height=24)
+    if not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU motion pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        water_id = engine.rulebook.material_id("water_liquid")
+        stone_id = engine.rulebook.material_id("raw_stone_solid")
+        engine.set_cell(5, 8, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.set_cell(5, 9, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(7, 9, "raw_stone_solid", mark_dirty=False)
+        _seed_gpu_authoritative_active_tiles(engine, [(0, 0)])
+        engine.bridge.buffers["island_runtime_count"].write(np.array([0], dtype=np.int32).tobytes())
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "ambient_temperature",
+            "flow_velocity",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+            "island_runtime",
+        )
+        pipeline = engine.motion_solver.gpu_pipeline
+        pipeline.last_published_island_runtime_capacity = 1
+        resources = pipeline._ensure_resources(engine)
+        zero_scalar = np.zeros((engine.height, engine.width), dtype=np.float32).tobytes()
+        zero_vec2 = np.zeros((engine.height, engine.width, 2), dtype=np.float32).tobytes()
+        zero_vec4 = np.zeros((engine.height, engine.width, 4), dtype=np.float32).tobytes()
+        for texture in (
+            resources.material_out_tex,
+            resources.phase_out_tex,
+            resources.cell_flags_out_tex,
+            resources.temp_out_tex,
+            resources.integrity_out_tex,
+            resources.island_id_out_tex,
+            resources.entity_id_out_tex,
+            resources.displaced_out_tex,
+        ):
+            texture.write(zero_scalar)
+        resources.velocity_out_tex.write(zero_vec2)
+        resources.timer_out_tex.write(zero_vec4)
+        engine.islands.clear()
+        engine.material_id.fill(0)
+        engine.phase.fill(0)
+        engine.island_id.fill(0)
+
+        def fail_cpu_runtime_pack(*args: object, **kwargs: object) -> np.ndarray:
+            raise AssertionError("formal zero-count bridge runtime must not pack CPU world.islands")
+
+        def fail_cpu_components(*args: object, **kwargs: object) -> list[tuple[int, np.ndarray]]:
+            raise AssertionError("formal zero-count bridge runtime must not resolve components on CPU")
+
+        monkeypatch.setattr(sys.modules["oracle_game.sim.gpu_motion"], "pack_island_runtime_upload", fail_cpu_runtime_pack)
+        monkeypatch.setattr(engine.motion_solver, "_resolve_falling_island_components", fail_cpu_components)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            used_gpu = engine.motion_solver._move_falling_islands(engine, dt=1.0 / 60.0, use_gpu=True)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        core = _bridge_cell_core(engine)
+        runtime_count = np.frombuffer(engine.bridge.buffers["island_runtime_count"].read(size=4), dtype=np.int32, count=1)
+        reservation_count = np.frombuffer(resources.island_reservation_count.read(size=4), dtype=np.int32, count=1)
+
+        assert used_gpu is True
+        assert int(runtime_count[0]) == 0
+        assert int(reservation_count[0]) == 0
+        assert pipeline.last_cpu_cell_state_upload_skipped is True
+        assert pipeline.last_cpu_island_id_upload_skipped is True
+        assert int(core["material_id"][8, 5]) == water_id
+        assert int(core["phase"][8, 5]) == int(Phase.LIQUID)
+        assert int(core["material_id"][9, 5]) == stone_id
+        assert int(core["material_id"][9, 7]) == stone_id
+    finally:
+        engine.close()
+
+
 def test_gpu_motion_formal_falling_island_move_uses_bridge_runtime_without_cpu_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -48311,7 +60334,7 @@ def test_gpu_motion_formal_falling_island_move_uses_bridge_runtime_without_cpu_m
     engine.islands[92] = FallingIslandRecord(
         island_id=92,
         bbox=(8, 8, 10, 10),
-        velocity_xy=(2.0, -0.49),
+        velocity_xy=(120.0, -0.49),
         subcell_offset=(0.0, 0.0),
     )
     engine.bridge.sync_world(engine)
@@ -48338,7 +60361,7 @@ def test_gpu_motion_formal_falling_island_move_uses_bridge_runtime_without_cpu_m
     previous_frame_active = engine._world_simulation_frame_active
     engine._world_simulation_frame_active = True
     try:
-        used_gpu = engine.motion_solver._move_falling_islands(engine, use_gpu=True)
+        used_gpu = engine.motion_solver._move_falling_islands(engine, dt=1.0 / 60.0, use_gpu=True)
     finally:
         engine._world_simulation_frame_active = previous_frame_active
 
@@ -48369,7 +60392,8 @@ def test_gpu_motion_formal_falling_island_move_uses_bridge_runtime_without_cpu_m
     assert int(runtime_records[0]["island_id"]) == 92
     assert runtime_records[0]["buffer_bbox"].tolist() == [10, 8, 12, 10]
     assert runtime_records[0]["world_bbox"].tolist() == [10, 8, 12, 10]
-    assert np.allclose(runtime_records[0]["velocity_xy"], np.array([1.96, 0.41], dtype=np.float32), atol=1.0e-5)
+    assert np.allclose(runtime_records[0]["velocity_xy"], np.array([117.6, 0.41], dtype=np.float32), atol=1.0e-5)
+    engine.close()
 
 
 def test_gpu_motion_formal_falling_island_first_frame_seeds_runtime_without_cpu_simulation(
@@ -48387,7 +60411,7 @@ def test_gpu_motion_formal_falling_island_first_frame_seeds_runtime_without_cpu_
     engine.islands[93] = FallingIslandRecord(
         island_id=93,
         bbox=(8, 8, 10, 10),
-        velocity_xy=(2.0, -0.49),
+        velocity_xy=(120.0, -0.49),
         subcell_offset=(0.0, 0.0),
     )
     engine.bridge.sync_world(engine)
@@ -48408,7 +60432,7 @@ def test_gpu_motion_formal_falling_island_first_frame_seeds_runtime_without_cpu_
     previous_frame_active = engine._world_simulation_frame_active
     engine._world_simulation_frame_active = True
     try:
-        used_gpu = engine.motion_solver._move_falling_islands(engine, use_gpu=True)
+        used_gpu = engine.motion_solver._move_falling_islands(engine, dt=1.0 / 60.0, use_gpu=True)
     finally:
         engine._world_simulation_frame_active = previous_frame_active
 
@@ -48438,7 +60462,863 @@ def test_gpu_motion_formal_falling_island_first_frame_seeds_runtime_without_cpu_
     assert int(runtime_count[0]) == 1
     assert int(runtime_records[0]["island_id"]) == 93
     assert runtime_records[0]["buffer_bbox"].tolist() == [10, 8, 12, 10]
-    assert np.allclose(runtime_records[0]["velocity_xy"], np.array([1.96, 0.41], dtype=np.float32), atol=1.0e-5)
+    assert np.allclose(runtime_records[0]["velocity_xy"], np.array([117.6, 0.41], dtype=np.float32), atol=1.0e-5)
+    engine.close()
+
+
+def test_gpu_motion_falling_island_apply_and_materialization_shaders_are_indexed() -> None:
+    source = inspect.getsource(GPUMotionPipeline._ensure_programs)
+
+    def shader_block(start: str, end: str | None = None) -> str:
+        start_index = source.index(start)
+        end_index = len(source) if end is None else source.index(end, start_index)
+        return source[start_index:end_index]
+
+    apply_main = shader_block(
+        'self.programs["apply_falling_island_reservations"]',
+        'self.programs["apply_falling_island_reservation_aux"]',
+    )
+    apply_aux = shader_block(
+        'self.programs["apply_falling_island_reservation_aux"]',
+        'self.programs["apply_falling_island_materialization"]',
+    )
+    materialization_main = shader_block(
+        'self.programs["apply_falling_island_materialization"]',
+        'self.programs["apply_falling_island_materialization_aux"]',
+    )
+    materialization_aux = shader_block(
+        'self.programs["apply_falling_island_materialization_aux"]',
+    )
+
+    assert 'self.programs["fill_falling_island_apply_index"]' in source
+    assert 'self.programs["fill_falling_island_materialization_index"]' in source
+    for block in (apply_main, apply_aux):
+        assert "incoming_reservation_index(ivec2 cell, out ivec2 source_cell)" not in block
+        assert "outgoing_reservation_index(ivec2 cell)" not in block
+        assert "for (int index = 0; index < count; ++index)" not in block
+        assert "indexed_apply_incoming" in block
+        assert "indexed_apply_outgoing" in block
+    for block in (materialization_main, materialization_aux):
+        assert "settle_reservation_index" not in block
+        assert "for (int index = 0; index < count; ++index)" not in block
+        assert "indexed_materialization_reservation" in block
+
+
+def test_gpu_motion_falling_island_resolve_uses_source_cell_index() -> None:
+    source = inspect.getsource(GPUMotionPipeline._ensure_programs)
+    resolve_start = source.index('self.programs["resolve_falling_island_reservations"]')
+    resolve_end = source.index('self.programs["generate_powder_reservations"]', resolve_start)
+    resolve_block = source[resolve_start:resolve_end]
+
+    assert 'self.programs["fill_falling_island_reservation_source_index"]' in source
+    assert "reservation_index_for_island" not in resolve_block
+    assert "reservation_source_index_for_cell" in resolve_block
+    assert "reservation_source_index[]" in resolve_block
+    assert "for (int index = 0; index < count; ++index)" not in resolve_block
+
+
+def test_gpu_motion_falling_island_index_clear_is_split_by_usage() -> None:
+    source = inspect.getsource(GPUMotionPipeline._ensure_programs)
+    clear_start = source.index('self.programs["clear_falling_island_index"]')
+    clear_end = source.index('self.programs["fill_falling_island_apply_index"]', clear_start)
+    clear_block = source[clear_start:clear_end]
+
+    assert "uniform int clear_flags" in clear_block
+    assert "FALLING_ISLAND_INDEX_CLEAR_APPLY_INCOMING" in clear_block
+    assert "FALLING_ISLAND_INDEX_CLEAR_APPLY_OUTGOING" in clear_block
+    assert "FALLING_ISLAND_INDEX_CLEAR_MATERIALIZATION" in clear_block
+    assert "FALLING_ISLAND_INDEX_CLEAR_SOURCE" in clear_block
+    assert "clear_flags=FALLING_ISLAND_INDEX_CLEAR_SOURCE" in inspect.getsource(
+        GPUMotionPipeline._dispatch_index_falling_island_reservation_sources,
+    )
+    assert "clear_flags=FALLING_ISLAND_INDEX_CLEAR_APPLY" in inspect.getsource(
+        GPUMotionPipeline._dispatch_index_falling_island_apply,
+    )
+    assert "clear_flags=FALLING_ISLAND_INDEX_CLEAR_MATERIALIZATION" in inspect.getsource(
+        GPUMotionPipeline._dispatch_index_falling_island_materialization,
+    )
+
+
+def test_gpu_motion_formal_falling_island_index_clear_uses_reservation_domain() -> None:
+    clear_method = inspect.getsource(GPUMotionPipeline._clear_falling_island_index)
+
+    assert 'self.programs["clear_falling_island_index_for_reservations"]' in clear_method
+    assert 'self.programs["clear_falling_island_index_for_active_tiles"]' not in clear_method
+    assert "_run_island_reservation_indirect" in clear_method
+    assert "reservation_capacity=reservation_count" in clear_method
+    assert "invocations_per_group=1" in clear_method
+    for method in (
+        GPUMotionPipeline._dispatch_index_falling_island_reservation_sources,
+        GPUMotionPipeline._dispatch_index_falling_island_apply,
+        GPUMotionPipeline._dispatch_index_falling_island_materialization,
+    ):
+        assert "reservation_count=int(reservation_count)" in inspect.getsource(method)
+
+
+def test_gpu_motion_falling_island_reservation_domain_clear_covers_index_read_domains() -> None:
+    source = inspect.getsource(GPUMotionPipeline._ensure_programs)
+    clear_start = source.index('self.programs["clear_falling_island_index_for_reservations"]')
+    clear_end = source.index('self.programs["fill_falling_island_apply_index"]', clear_start)
+    clear_block = source[clear_start:clear_end]
+    resolve_start = source.index('self.programs["resolve_falling_island_reservations"]')
+    resolve_end = source.index('self.programs["generate_powder_reservations"]', resolve_start)
+    resolve_block = source[resolve_start:resolve_end]
+
+    assert "clear_bbox(source_bbox, {FALLING_ISLAND_INDEX_CLEAR_SOURCE})" in clear_block
+    assert "clear_bbox(source_bbox, {FALLING_ISLAND_INDEX_CLEAR_APPLY_OUTGOING})" in clear_block
+    assert "reservation.resolved_dx" in clear_block
+    assert "{FALLING_ISLAND_INDEX_CLEAR_APPLY_INCOMING}" in clear_block
+    assert "settling_reservation(reservation)" in clear_block
+    assert "clear_bbox(source_bbox, {FALLING_ISLAND_INDEX_CLEAR_MATERIALIZATION})" in clear_block
+    assert "source_matches(reservations[index], cell)" in resolve_block
+
+
+def test_gpu_motion_falling_island_pack_and_publish_are_not_capacity_overdispatched() -> None:
+    source = inspect.getsource(GPUMotionPipeline._ensure_programs)
+    fused_start = source.index('self.programs["plan_bridge_runtime_falling_island_reservations"]')
+    fused_end = source.index('self.programs["pack_falling_island_reservations"]', fused_start)
+    fused_block = source[fused_start:fused_end]
+    pack_start = source.index('self.programs["pack_falling_island_reservations"]')
+    pack_end = source.index('self.programs["publish_falling_island_runtime"]', pack_start)
+    pack_block = source[pack_start:pack_end]
+    bridge_runtime_plan = inspect.getsource(GPUMotionPipeline.plan_uploaded_falling_island_reservations_from_bridge_runtime)
+    formal_start = bridge_runtime_plan.index("if formal_frame:")
+    formal_end = bridge_runtime_plan.index('with self._profile_pass(world, "island_runtime_unpack")', formal_start)
+    formal_block = bridge_runtime_plan[formal_start:formal_end]
+    staged_block = bridge_runtime_plan[formal_end:]
+    uploaded_plan = inspect.getsource(GPUMotionPipeline.plan_uploaded_falling_island_reservations)
+    publish_method = inspect.getsource(GPUMotionPipeline.publish_bridge_falling_island_reservations)
+
+    assert "layout(local_size_x={LOCAL_SIZE}" in fused_block
+    assert "layout(std430, binding=0) readonly buffer BridgeIslandRuntimeWords" in fused_block
+    assert "layout(std430, binding=3) readonly buffer BridgeIslandRuntimeCount" in fused_block
+    assert "reservation_count = count" in fused_block
+    assert "int base = gid * {ISLAND_RUNTIME_DTYPE.itemsize // 4}" in fused_block
+    assert "runtime_words[base + 9]" in fused_block
+    assert "intBitsToFloat(runtime_words[base + 10]) + 0.9" in fused_block
+    assert "write_reservation(gid, island_id, island_bbox, updated_motion" in fused_block
+    assert "atomicAdd" not in fused_block
+    assert "layout(local_size_x={ISLAND_RESERVATION_LINEAR_LOCAL_SIZE}" in pack_block
+    assert "layout(std430, binding=4) buffer IslandReservationWords" in pack_block
+    assert "ivec4 reservation_words[]" in pack_block
+    assert "int word_base = gid * 4" in pack_block
+    assert "floatBitsToInt(motion.x)" in pack_block
+    assert "reservations[gid].velocity_x" not in pack_block
+    assert "reservations[gid].resolve_state" not in pack_block
+    assert 'self.programs["plan_bridge_runtime_falling_island_reservations"]' in formal_block
+    assert 'self.programs["pack_falling_island_reservations"]' not in formal_block
+    assert '"island_reservation_packing"' not in formal_block
+    assert "_run_island_runtime_indirect" in formal_block
+    assert "before_run=before_plan_run" in formal_block
+    assert "_ensure_bridge_runtime_reservation_capacity" in formal_block
+    assert "invocations_per_group=ISLAND_RESERVATION_LINEAR_LOCAL_SIZE" in staged_block
+    assert "pack_group_x = (runtime.shape[0] + ISLAND_RESERVATION_LINEAR_LOCAL_SIZE - 1)" in uploaded_plan
+    assert "elif not self._formal_gpu_frame(world):" in publish_method
+
+
+def test_gpu_motion_formal_falling_island_apply_uses_affected_tile_indirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=96, height=64, gas_cell_size=4)
+    if not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU motion pipeline is not available")
+    try:
+        engine.patch_material("log_solid", gravity_scale=0.0, wind_coupling=0.0, drag_scale=0.0)
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        log_id = engine.rulebook.material_id("log_solid")
+        for x, y in [(31, 8), (32, 8), (31, 9), (32, 9)]:
+            engine.set_cell(x, y, "log_solid", phase=Phase.FALLING_ISLAND, mark_dirty=False)
+            engine.island_id[y, x] = 94
+        engine.islands[94] = FallingIslandRecord(
+            island_id=94,
+            bbox=(31, 8, 33, 10),
+            velocity_xy=(120.0, -0.49),
+            subcell_offset=(0.0, 0.0),
+        )
+        _seed_gpu_authoritative_active_tiles(engine, [(0, 0)])
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "ambient_temperature",
+            "flow_velocity",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+            "island_runtime",
+        )
+        engine.motion_solver.gpu_pipeline.last_published_island_runtime_capacity = 1
+        engine.islands.clear()
+        engine.material_id.fill(0)
+        engine.phase.fill(0)
+        engine.island_id.fill(0)
+
+        pipeline = engine.motion_solver.gpu_pipeline
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        indirect_calls: list[str] = []
+        direct_full_grid_programs = (
+            "apply_falling_island_materialization",
+            "apply_falling_island_materialization_aux",
+            "apply_falling_island_reservations",
+            "apply_falling_island_reservation_aux",
+            "publish_bridge_cell",
+        )
+        for program_name in direct_full_grid_programs:
+            program = pipeline.programs[program_name]
+            original_indirect = program.run_indirect
+
+            def fail_direct_run(*args: object, _program_name: str = program_name, **kwargs: object) -> None:
+                raise AssertionError(f"{_program_name} must use affected-tile indirect dispatch")
+
+            def count_indirect(
+                indirect_buffer: object,
+                *,
+                _program_name: str = program_name,
+                _original_indirect: object = original_indirect,
+            ) -> object:
+                indirect_calls.append(_program_name)
+                return _original_indirect(indirect_buffer)
+
+            monkeypatch.setattr(program, "run", fail_direct_run)
+            monkeypatch.setattr(program, "run_indirect", count_indirect)
+
+        build_program = pipeline.programs["build_falling_island_apply_dispatch"]
+        original_build_indirect = build_program.run_indirect
+        build_groups: list[tuple[int, int, int]] = []
+
+        def fail_direct_build(*args: object, **kwargs: object) -> None:
+            raise AssertionError("falling island affected-tile dispatch build must use reservation-count indirect")
+
+        def count_bounded_build(indirect_buffer: object) -> object:
+            args = np.frombuffer(resources.island_runtime_dispatch_args.read(size=12), dtype=np.uint32, count=3)
+            build_groups.append((int(args[0]), int(args[1]), int(args[2])))
+            return original_build_indirect(indirect_buffer)
+
+        resources = pipeline._ensure_resources(engine)
+        monkeypatch.setattr(build_program, "run", fail_direct_build)
+        monkeypatch.setattr(build_program, "run_indirect", count_bounded_build)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            used_gpu = engine.motion_solver._move_falling_islands(engine, dt=1.0 / 60.0, use_gpu=True)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        resources = pipeline.resources
+        assert resources is not None
+        affected_count = int(np.frombuffer(resources.active_tile_count.read(size=4), dtype=np.uint32, count=1)[0])
+        affected_tiles = np.frombuffer(
+            resources.active_tile_list.read(size=affected_count * 2 * np.dtype(np.int32).itemsize),
+            dtype=np.int32,
+            count=affected_count * 2,
+        ).reshape((affected_count, 2))
+        core = _bridge_cell_core(engine)
+
+        assert used_gpu is True
+        assert set(indirect_calls) == set(direct_full_grid_programs)
+        assert build_groups == [(1, 1, 1), (1, 1, 1), (1, 1, 1)]
+        assert {tuple(tile.tolist()) for tile in affected_tiles} == {(0, 0), (1, 0)}
+        assert int(core["material_id"][8, 31]) == 0
+        assert int(core["material_id"][8, 33]) == log_id
+        assert np.all(core["material_id"][8:10, 33:35] == log_id)
+        assert engine.islands == {}
+    finally:
+        engine.close()
+
+
+def test_gpu_motion_formal_falling_island_move_refreshes_changed_tiles_without_cpu_active_readback() -> None:
+    class NoReadBuffer:
+        def __init__(self, buffer: object, name: str) -> None:
+            self._buffer = buffer
+            self._name = name
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._buffer, name)
+
+        def read(self, *args: object, **kwargs: object) -> bytes:
+            raise AssertionError(f"formal GPU falling-island move must not read {self._name} on CPU")
+
+    engine = WorldEngine(width=96, height=64, gas_cell_size=4)
+    try:
+        if not engine.motion_solver.gpu_pipeline.available(engine):
+            pytest.skip("GPU motion pipeline is not available")
+        engine.patch_material("log_solid", gravity_scale=0.0, wind_coupling=0.0, drag_scale=0.0)
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        log_id = engine.rulebook.material_id("log_solid")
+        for x, y in [(30, 8), (31, 8), (30, 9), (31, 9)]:
+            engine.set_cell(x, y, "log_solid", phase=Phase.FALLING_ISLAND, mark_dirty=False)
+            engine.island_id[y, x] = 96
+        engine.islands[96] = FallingIslandRecord(
+            island_id=96,
+            bbox=(30, 8, 32, 10),
+            velocity_xy=(120.0, -0.49),
+            subcell_offset=(0.0, 0.0),
+        )
+        _seed_gpu_authoritative_active_tiles(engine, [(0, 0)])
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "ambient_temperature",
+            "flow_velocity",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+        raw_active_ttl = engine.bridge.buffers["active_tile_ttl"]
+        raw_active_meta = engine.bridge.buffers["active_meta"]
+        engine.bridge.buffers["active_tile_ttl"] = NoReadBuffer(raw_active_ttl, "active_tile_ttl")
+        engine.bridge.buffers["active_meta"] = NoReadBuffer(raw_active_meta, "active_meta")
+        previous_frame_active = engine._world_simulation_frame_active
+        try:
+            engine._world_simulation_frame_active = True
+            used_gpu = engine.motion_solver._move_falling_islands(engine, dt=1.0 / 60.0, use_gpu=True)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+            engine.bridge.buffers["active_tile_ttl"] = raw_active_ttl
+            engine.bridge.buffers["active_meta"] = raw_active_meta
+
+        expected_ttl = np.zeros((engine.active.tile_height, engine.active.tile_width), dtype=np.int32)
+        expected_ttl[0, 0] = engine.active.active_ttl_reset
+        expected_ttl[0, 1] = engine.active.active_ttl_reset
+        core = _bridge_cell_core(engine)
+        assert used_gpu is True
+        assert {"active_meta", "active_tile_ttl", "active_chunk_mask"}.issubset(
+            engine.bridge.gpu_authoritative_resources
+        )
+        assert np.array_equal(_read_gpu_active_tile_ttl(engine), expected_ttl)
+        assert int(core["material_id"][8, 30]) == 0
+        assert int(core["material_id"][8, 32]) == log_id
+        assert np.all(core["material_id"][8:10, 32:34] == log_id)
+    finally:
+        engine.close()
+
+
+def test_gpu_motion_formal_falling_island_materialization_refreshes_changed_tiles_without_cpu_active_readback() -> None:
+    class NoReadBuffer:
+        def __init__(self, buffer: object, name: str) -> None:
+            self._buffer = buffer
+            self._name = name
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._buffer, name)
+
+        def read(self, *args: object, **kwargs: object) -> bytes:
+            raise AssertionError(f"formal GPU falling-island materialization must not read {self._name} on CPU")
+
+    engine = WorldEngine(width=96, height=64, gas_cell_size=4)
+    try:
+        if not engine.motion_solver.gpu_pipeline.available(engine):
+            pytest.skip("GPU motion pipeline is not available")
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(30, 8, "log_solid", phase=Phase.FALLING_ISLAND, mark_dirty=False)
+        engine.island_id[8, 30] = 97
+        _seed_gpu_authoritative_active_tiles(engine, [(0, 0)])
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "ambient_temperature",
+            "flow_velocity",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+        reservations = np.zeros((1,), dtype=falling_island_reservation_dtype())
+        reservations[0]["island_id"] = 97
+        reservations[0]["buffer_bbox"] = np.asarray((30, 8, 31, 9), dtype=np.int32)
+        reservations[0]["velocity_xy"] = np.asarray((0.0, 0.41), dtype=np.float32)
+        reservations[0]["target_shift"] = np.asarray((0, 1), dtype=np.int32)
+        reservations[0]["reserved_shift"] = np.asarray((0, 0), dtype=np.int32)
+        reservations[0]["resolved_shift"] = np.asarray((0, 0), dtype=np.int32)
+        reservations[0]["resolve_state"] = ISLAND_RESOLVE_BLOCKED
+        pipeline = engine.motion_solver.gpu_pipeline
+        pipeline.upload_falling_island_reservations(engine, reservations)
+
+        raw_active_ttl = engine.bridge.buffers["active_tile_ttl"]
+        raw_active_meta = engine.bridge.buffers["active_meta"]
+        engine.bridge.buffers["active_tile_ttl"] = NoReadBuffer(raw_active_ttl, "active_tile_ttl")
+        engine.bridge.buffers["active_meta"] = NoReadBuffer(raw_active_meta, "active_meta")
+        previous_frame_active = engine._world_simulation_frame_active
+        try:
+            engine._world_simulation_frame_active = True
+            used_gpu = pipeline.apply_uploaded_falling_island_settlements(engine, 1)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+            engine.bridge.buffers["active_tile_ttl"] = raw_active_ttl
+            engine.bridge.buffers["active_meta"] = raw_active_meta
+
+        expected_ttl = np.zeros((engine.active.tile_height, engine.active.tile_width), dtype=np.int32)
+        expected_ttl[0, 0] = engine.active.active_ttl_reset
+        core = _bridge_cell_core(engine)
+        assert used_gpu is True
+        assert {"active_meta", "active_tile_ttl", "active_chunk_mask"}.issubset(
+            engine.bridge.gpu_authoritative_resources
+        )
+        assert np.array_equal(_read_gpu_active_tile_ttl(engine), expected_ttl)
+        assert int(core["material_id"][8, 30]) == engine.rulebook.material_id("soil_powder")
+        assert int(core["phase"][8, 30]) == int(Phase.POWDER)
+    finally:
+        engine.close()
+
+
+def test_gpu_motion_formal_falling_island_materialization_candidate_publish_skips_non_candidate_tile() -> None:
+    engine = WorldEngine(width=96, height=64, gas_cell_size=4)
+    if not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU motion pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        gold_id = engine.rulebook.material_id("gold_solid")
+        sand_id = engine.rulebook.material_id("sand_powder")
+        engine.set_cell(8, 8, "log_solid", phase=Phase.FALLING_ISLAND, mark_dirty=False)
+        engine.island_id[8, 8] = 110
+        engine.set_cell(40, 8, "gold_solid", mark_dirty=False)
+        _seed_gpu_authoritative_active_tiles(engine, [(0, 0), (1, 0)])
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "ambient_temperature",
+            "flow_velocity",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+
+        pipeline = engine.motion_solver.gpu_pipeline
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        resources = pipeline._ensure_resources(engine)
+        resources.material_out_tex.write(np.full((engine.height, engine.width), sand_id, dtype="f4").tobytes())
+        resources.phase_out_tex.write(np.full((engine.height, engine.width), Phase.POWDER, dtype="f4").tobytes())
+        resources.cell_flags_out_tex.write(np.zeros((engine.height, engine.width), dtype="f4").tobytes())
+        resources.velocity_out_tex.write(np.zeros((engine.height, engine.width, 2), dtype="f4").tobytes())
+        resources.temp_out_tex.write(np.full((engine.height, engine.width), 20.0, dtype="f4").tobytes())
+        resources.timer_out_tex.write(np.zeros((engine.height, engine.width, 4), dtype="f4").tobytes())
+        resources.integrity_out_tex.write(np.ones((engine.height, engine.width), dtype="f4").tobytes())
+        resources.island_id_out_tex.write(np.full((engine.height, engine.width), 707.0, dtype="f4").tobytes())
+        resources.entity_id_out_tex.write(np.zeros((engine.height, engine.width), dtype="f4").tobytes())
+        resources.displaced_out_tex.write(np.zeros((engine.height, engine.width), dtype="f4").tobytes())
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            pipeline._dispatch_apply_falling_island_materialization(engine, resources, reservation_count=0, mode=0)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        candidate_count = int(
+            np.frombuffer(
+                resources.island_materialization_candidate_tile_count.read(size=4),
+                dtype=np.uint32,
+                count=1,
+            )[0]
+        )
+        candidate_tiles = np.frombuffer(
+            resources.island_materialization_candidate_tile_list.read(
+                size=candidate_count * 2 * np.dtype(np.int32).itemsize
+            ),
+            dtype=np.int32,
+            count=candidate_count * 2,
+        ).reshape((candidate_count, 2))
+        core = _bridge_cell_core(engine)
+
+        assert candidate_tiles.tolist() == [[0, 0]]
+        assert int(core["material_id"][8, 40]) == gold_id
+        assert int(core["phase"][8, 40]) == int(Phase.STATIC_SOLID)
+    finally:
+        engine.close()
+
+
+def test_gpu_motion_formal_falling_island_materialization_candidate_includes_stale_island_id_tile() -> None:
+    engine = WorldEngine(width=96, height=64, gas_cell_size=4)
+    if not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU motion pipeline is not available")
+    try:
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.island_id[8, 40] = 711
+        _seed_gpu_authoritative_active_tiles(engine, [(1, 0)])
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "ambient_temperature",
+            "flow_velocity",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+
+        pipeline = engine.motion_solver.gpu_pipeline
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            used_gpu = pipeline.shed_falling_island_fragments(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        resources = pipeline.resources
+        assert resources is not None
+        candidate_count = int(
+            np.frombuffer(
+                resources.island_materialization_candidate_tile_count.read(size=4),
+                dtype=np.uint32,
+                count=1,
+            )[0]
+        )
+        candidate_tiles = np.frombuffer(
+            resources.island_materialization_candidate_tile_list.read(
+                size=candidate_count * 2 * np.dtype(np.int32).itemsize
+            ),
+            dtype=np.int32,
+            count=candidate_count * 2,
+        ).reshape((candidate_count, 2))
+        bridge_island_id = np.frombuffer(
+            engine.bridge.buffers["island_id"].read(size=engine.width * engine.height * np.dtype(np.int32).itemsize),
+            dtype=np.int32,
+        ).reshape((engine.height, engine.width))
+
+        assert used_gpu is True
+        assert candidate_tiles.tolist() == [[1, 0]]
+        assert int(bridge_island_id[8, 40]) == 0
+        assert int(_read_gpu_active_tile_ttl(engine)[0, 1]) == engine.active.active_ttl_reset
+    finally:
+        engine.close()
+
+
+def test_gpu_motion_formal_uploaded_falling_island_apply_runs_in_flight_materialization_without_cpu_components(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=96, height=64, gas_cell_size=4)
+    try:
+        if not engine.motion_solver.gpu_pipeline.available(engine):
+            pytest.skip("GPU motion pipeline is not available")
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        log_id = engine.rulebook.material_id("log_solid")
+        soil_id = engine.rulebook.material_id("soil_powder")
+        for x in range(30, 33):
+            engine.set_cell(x, 8, "log_solid", phase=Phase.FALLING_ISLAND, mark_dirty=False)
+            engine.island_id[8, x] = 98
+        engine.islands[98] = FallingIslandRecord(
+            island_id=98,
+            bbox=(30, 8, 33, 9),
+            velocity_xy=(240.0, 0.41),
+            subcell_offset=(0.0, 0.0),
+        )
+        _seed_gpu_authoritative_active_tiles(engine, [(0, 0)])
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "ambient_temperature",
+            "flow_velocity",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+        engine.material_id.fill(0)
+        engine.phase.fill(0)
+        engine.island_id.fill(0)
+
+        reservations = np.zeros((1,), dtype=falling_island_reservation_dtype())
+        reservations[0]["island_id"] = 98
+        reservations[0]["buffer_bbox"] = np.asarray((30, 8, 33, 9), dtype=np.int32)
+        reservations[0]["velocity_xy"] = np.asarray((240.0, 0.41), dtype=np.float32)
+        reservations[0]["target_shift"] = np.asarray((4, 0), dtype=np.int32)
+        reservations[0]["reserved_shift"] = np.asarray((4, 0), dtype=np.int32)
+        reservations[0]["resolved_shift"] = np.asarray((4, 0), dtype=np.int32)
+        reservations[0]["resolve_state"] = ISLAND_RESOLVE_DIRECT
+
+        pipeline = engine.motion_solver.gpu_pipeline
+        ctx = engine.bridge.ctx
+        assert ctx is not None
+        pipeline._ensure_programs(ctx)
+        pipeline.upload_falling_island_reservations(engine, reservations)
+
+        def fail_cpu_components(*args: object, **kwargs: object) -> list[tuple[int, np.ndarray]]:
+            raise AssertionError("formal uploaded falling-island apply must not resolve components on CPU")
+
+        def fail_cpu_component_bfs(*args: object, **kwargs: object) -> list[np.ndarray]:
+            raise AssertionError("formal uploaded falling-island apply must not call CPU component BFS")
+
+        def fail_component_readback(*args: object, **kwargs: object) -> tuple[np.ndarray, np.ndarray]:
+            raise AssertionError("formal uploaded falling-island apply must not read component metadata")
+
+        def fail_reservation_readback(*args: object, **kwargs: object) -> np.ndarray:
+            raise AssertionError("formal uploaded falling-island apply must not read reservations back to CPU")
+
+        monkeypatch.setattr(engine.motion_solver, "_resolve_falling_island_components", fail_cpu_components)
+        monkeypatch.setattr(engine.motion_solver, "_connected_island_components", fail_cpu_component_bfs)
+        monkeypatch.setattr(pipeline, "label_falling_island_component_metadata", fail_component_readback)
+        monkeypatch.setattr(pipeline, "_read_falling_island_reservations", fail_reservation_readback)
+
+        materialization_indirect_calls: list[str] = []
+        for program_name in ("apply_falling_island_materialization", "apply_falling_island_materialization_aux"):
+            program = pipeline.programs[program_name]
+            original_indirect = program.run_indirect
+
+            def count_indirect(
+                indirect_buffer: object,
+                *,
+                _program_name: str = program_name,
+                _original_indirect: object = original_indirect,
+            ) -> object:
+                materialization_indirect_calls.append(_program_name)
+                return _original_indirect(indirect_buffer)
+
+            monkeypatch.setattr(program, "run_indirect", count_indirect)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            used_gpu = pipeline.apply_uploaded_falling_island_reservations(engine, 1)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        core = _bridge_cell_core(engine)
+        bridge_island_id = np.frombuffer(
+            engine.bridge.buffers["island_id"].read(size=engine.width * engine.height * np.dtype(np.int32).itemsize),
+            dtype=np.int32,
+        ).reshape((engine.height, engine.width))
+
+        assert used_gpu is True
+        assert materialization_indirect_calls == [
+            "apply_falling_island_materialization",
+            "apply_falling_island_materialization_aux",
+        ]
+        assert pipeline.last_cpu_cell_state_upload_skipped is True
+        assert pipeline.last_cpu_island_id_upload_skipped is True
+        assert int(core["material_id"][8, 34]) == soil_id
+        assert int(core["phase"][8, 34]) == int(Phase.POWDER)
+        assert int(core["material_id"][8, 35]) == log_id
+        assert int(core["phase"][8, 35]) == int(Phase.FALLING_ISLAND)
+        assert int(core["material_id"][8, 36]) == soil_id
+        assert int(core["phase"][8, 36]) == int(Phase.POWDER)
+        assert bridge_island_id[8, 34:37].tolist() == [0, 98, 0]
+        assert {"cell_core", "island_id", "active_meta", "active_tile_ttl", "active_chunk_mask"}.issubset(
+            engine.bridge.gpu_authoritative_resources
+        )
+        assert int(_read_gpu_active_tile_ttl(engine)[0, 1]) == engine.active.active_ttl_reset
+    finally:
+        engine.close()
+
+
+def test_gpu_motion_formal_falling_island_large_bbox_seeds_runtime_without_component_readback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=64, height=64, gas_cell_size=4)
+    if not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU motion pipeline is not available")
+    try:
+        engine.patch_material(
+            "log_solid",
+            falling_island_break_kind="stable",
+            gravity_scale=0.0,
+            wind_coupling=0.0,
+            drag_scale=0.0,
+        )
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        log_id = engine.rulebook.material_id("log_solid")
+        for x in range(8, 11):
+            for y in range(8, 10):
+                engine.set_cell(x, y, "log_solid", phase=Phase.FALLING_ISLAND, mark_dirty=False)
+                engine.island_id[y, x] = 95
+        engine.islands[95] = FallingIslandRecord(
+            island_id=95,
+            bbox=(8, 8, 11, 10),
+            velocity_xy=(120.0, -0.49),
+            subcell_offset=(0.0, 0.0),
+        )
+        _seed_gpu_authoritative_active_tiles(engine, [(0, 0)])
+        engine.bridge.clear_gpu_authoritative("island_runtime")
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "ambient_temperature",
+            "flow_velocity",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+        engine.material_id.fill(0)
+        engine.phase.fill(0)
+        engine.island_id.fill(0)
+
+        def fail_cpu_components(*args: object, **kwargs: object) -> list[tuple[int, np.ndarray]]:
+            raise AssertionError("formal falling-island hot path must not resolve components on CPU")
+
+        def fail_cpu_component_bfs(*args: object, **kwargs: object) -> list[np.ndarray]:
+            raise AssertionError("formal falling-island hot path must not call CPU component BFS")
+
+        def fail_component_readback(*args: object, **kwargs: object) -> tuple[np.ndarray, np.ndarray]:
+            raise AssertionError("formal falling-island hot path must not read component metadata")
+
+        def fail_reservation_readback(*args: object, **kwargs: object) -> np.ndarray:
+            raise AssertionError("formal falling-island hot path must not read reservations back to CPU")
+
+        pipeline = engine.motion_solver.gpu_pipeline
+        monkeypatch.setattr(engine.motion_solver, "_resolve_falling_island_components", fail_cpu_components)
+        monkeypatch.setattr(engine.motion_solver, "_connected_island_components", fail_cpu_component_bfs)
+        monkeypatch.setattr(engine.motion_solver, "_component_entry_from_gpu_metadata", fail_cpu_components)
+        monkeypatch.setattr(pipeline, "label_falling_island_component_metadata", fail_component_readback)
+        monkeypatch.setattr(pipeline, "label_falling_island_component_metadata_texture", fail_component_readback)
+        monkeypatch.setattr(pipeline, "_read_falling_island_reservations", fail_reservation_readback)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            used_gpu = engine.motion_solver._move_falling_islands(engine, dt=1.0 / 60.0, use_gpu=True)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        core = _bridge_cell_core(engine)
+        bridge_island_id = np.frombuffer(
+            engine.bridge.buffers["island_id"].read(size=engine.width * engine.height * np.dtype(np.int32).itemsize),
+            dtype=np.int32,
+        ).reshape((engine.height, engine.width))
+        runtime_records = _bridge_island_runtime_records(engine)
+        resources = pipeline.resources
+        assert resources is not None
+        reservation_count = np.frombuffer(resources.island_reservation_count.read(size=4), dtype=np.int32, count=1)
+        reservations = np.frombuffer(
+            resources.island_reservations.read(size=int(reservation_count[0]) * falling_island_reservation_dtype().itemsize),
+            dtype=falling_island_reservation_dtype(),
+            count=int(reservation_count[0]),
+        )
+
+        assert used_gpu is True
+        assert engine.islands == {}
+        assert engine.motion_solver.last_island_reservations.shape == (0,)
+        assert {"cell_core", "island_id", "island_runtime"}.issubset(engine.bridge.gpu_authoritative_resources)
+        assert int(reservation_count[0]) == 1
+        assert reservations["island_id"].tolist() == [95]
+        assert reservations[0]["buffer_bbox"].tolist() == [8, 8, 11, 10]
+        assert reservations[0]["target_shift"].tolist() == [2, 0]
+        assert reservations[0]["resolved_shift"].tolist() == [2, 0]
+        assert int(core["material_id"][8, 8]) == 0
+        assert np.all(core["material_id"][8:10, 10:13] == log_id)
+        assert np.all(bridge_island_id[8:10, 10:13] == 95)
+        assert runtime_records.shape == (1,)
+        assert int(runtime_records[0]["island_id"]) == 95
+        assert runtime_records[0]["buffer_bbox"].tolist() == [10, 8, 13, 10]
+    finally:
+        engine.close()
+
+
+def test_gpu_motion_formal_falling_island_sparse_bbox_seeds_runtime_without_cpu_components(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=64, height=64, gas_cell_size=4)
+    if not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU motion pipeline is not available")
+    try:
+        engine.patch_material(
+            "log_solid",
+            falling_island_break_kind="stable",
+            gravity_scale=0.0,
+            wind_coupling=0.0,
+            drag_scale=0.0,
+        )
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        log_id = engine.rulebook.material_id("log_solid")
+        island_cells = [(8, 8), (9, 8), (8, 9), (8, 10)]
+        for x, y in island_cells:
+            engine.set_cell(x, y, "log_solid", phase=Phase.FALLING_ISLAND, mark_dirty=False)
+            engine.island_id[y, x] = 96
+        engine.islands[96] = FallingIslandRecord(
+            island_id=96,
+            bbox=(8, 8, 10, 11),
+            velocity_xy=(120.0, -0.49),
+            subcell_offset=(0.0, 0.0),
+        )
+        _seed_gpu_authoritative_active_tiles(engine, [(0, 0)])
+        engine.bridge.clear_gpu_authoritative("island_runtime")
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "ambient_temperature",
+            "flow_velocity",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+        engine.material_id.fill(0)
+        engine.phase.fill(0)
+        engine.island_id.fill(0)
+
+        def fail_cpu_components(*args: object, **kwargs: object) -> list[tuple[int, np.ndarray]]:
+            raise AssertionError("formal sparse falling-island hot path must not resolve components on CPU")
+
+        def fail_cpu_component_bfs(*args: object, **kwargs: object) -> list[np.ndarray]:
+            raise AssertionError("formal sparse falling-island hot path must not call CPU component BFS")
+
+        def fail_component_readback(*args: object, **kwargs: object) -> tuple[np.ndarray, np.ndarray]:
+            raise AssertionError("formal sparse falling-island hot path must not read component metadata")
+
+        def fail_reservation_readback(*args: object, **kwargs: object) -> np.ndarray:
+            raise AssertionError("formal sparse falling-island hot path must not read reservations back to CPU")
+
+        pipeline = engine.motion_solver.gpu_pipeline
+        monkeypatch.setattr(engine.motion_solver, "_resolve_falling_island_components", fail_cpu_components)
+        monkeypatch.setattr(engine.motion_solver, "_connected_island_components", fail_cpu_component_bfs)
+        monkeypatch.setattr(engine.motion_solver, "_component_entry_from_gpu_metadata", fail_cpu_components)
+        monkeypatch.setattr(pipeline, "label_falling_island_component_metadata", fail_component_readback)
+        monkeypatch.setattr(pipeline, "label_falling_island_component_metadata_texture", fail_component_readback)
+        monkeypatch.setattr(pipeline, "_read_falling_island_reservations", fail_reservation_readback)
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            used_gpu = engine.motion_solver._move_falling_islands(engine, dt=1.0 / 60.0, use_gpu=True)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        core = _bridge_cell_core(engine)
+        bridge_island_id = np.frombuffer(
+            engine.bridge.buffers["island_id"].read(size=engine.width * engine.height * np.dtype(np.int32).itemsize),
+            dtype=np.int32,
+        ).reshape((engine.height, engine.width))
+        runtime_records = _bridge_island_runtime_records(engine)
+
+        assert used_gpu is True
+        assert engine.islands == {}
+        assert int(core["material_id"][8, 8]) == 0
+        assert int(core["material_id"][8, 10]) == log_id
+        assert int(core["material_id"][8, 11]) == log_id
+        assert int(core["material_id"][9, 10]) == log_id
+        assert int(core["material_id"][10, 10]) == log_id
+        assert int(core["material_id"][9, 11]) == 0
+        assert int(core["material_id"][10, 11]) == 0
+        assert bridge_island_id[8, 10:12].tolist() == [96, 96]
+        assert bridge_island_id[9, 10:12].tolist() == [96, 0]
+        assert bridge_island_id[10, 10:12].tolist() == [96, 0]
+        assert runtime_records.shape == (1,)
+        assert int(runtime_records[0]["island_id"]) == 96
+        assert runtime_records[0]["buffer_bbox"].tolist() == [10, 8, 12, 11]
+    finally:
+        engine.close()
 
 
 def test_gpu_motion_solver_falling_island_shift_target_and_residual_do_not_call_cpu_dda(
@@ -48454,7 +61334,7 @@ def test_gpu_motion_solver_falling_island_shift_target_and_residual_do_not_call_
     engine.islands[33] = FallingIslandRecord(
         island_id=33,
         bbox=(8, 8, 10, 10),
-        velocity_xy=(2.0, -0.49),
+        velocity_xy=(120.0, -0.49),
         subcell_offset=(0.0, 0.0),
     )
 
@@ -48474,10 +61354,10 @@ def test_gpu_motion_solver_falling_island_shift_target_and_residual_do_not_call_
     assert reservations.shape == (1,)
     assert reservations[0]["target_shift"].tolist() == [2, 0]
     assert reservations[0]["reserved_shift"].tolist() == [2, 0]
-    assert np.allclose(reservations[0]["subcell_offset"], np.array([0.0, 0.41], dtype=np.float32))
+    assert np.allclose(reservations[0]["subcell_offset"], np.array([0.0, 0.41 / 60.0], dtype=np.float32))
     assert np.all(engine.island_id[8:10, 10:12] == 33)
     assert engine.islands[33].bbox == (10, 8, 12, 10)
-    assert np.allclose(engine.islands[33].subcell_offset, (0.0, 0.41), atol=1.0e-6)
+    assert np.allclose(engine.islands[33].subcell_offset, (0.0, 0.41 / 60.0), atol=1.0e-6)
 
 
 def test_gpu_motion_falling_island_apply_consumes_uploaded_reservation_buffer(
@@ -48492,7 +61372,7 @@ def test_gpu_motion_falling_island_apply_consumes_uploaded_reservation_buffer(
     engine.islands[61] = FallingIslandRecord(
         island_id=61,
         bbox=(8, 8, 10, 10),
-        velocity_xy=(2.0, -0.49),
+        velocity_xy=(120.0, -0.49),
         subcell_offset=(0.0, 0.0),
     )
 
@@ -48530,13 +61410,13 @@ def test_gpu_motion_pipeline_resolves_stacked_falling_island_follow_through_afte
     engine.islands[41] = FallingIslandRecord(
         island_id=41,
         bbox=(10, 10, 12, 12),
-        velocity_xy=(0.0, 0.41),
+        velocity_xy=(0.0, 59.1),
         subcell_offset=(0.0, 0.0),
     )
     engine.islands[42] = FallingIslandRecord(
         island_id=42,
         bbox=(10, 8, 12, 10),
-        velocity_xy=(0.0, 0.41),
+        velocity_xy=(0.0, 59.1),
         subcell_offset=(0.0, 0.0),
     )
 
@@ -48585,13 +61465,13 @@ def test_gpu_motion_pipeline_falling_island_reservation_resolve_does_not_call_cp
     engine.islands[41] = FallingIslandRecord(
         island_id=41,
         bbox=(10, 10, 12, 12),
-        velocity_xy=(0.0, 0.41),
+        velocity_xy=(0.0, 59.1),
         subcell_offset=(0.0, 0.0),
     )
     engine.islands[42] = FallingIslandRecord(
         island_id=42,
         bbox=(10, 8, 12, 10),
-        velocity_xy=(0.0, 0.41),
+        velocity_xy=(0.0, 59.1),
         subcell_offset=(0.0, 0.0),
     )
 
@@ -48670,6 +61550,28 @@ def test_gpu_motion_pipeline_uploaded_falling_island_resolve_does_not_readback(
     pipeline = engine.motion_solver.gpu_pipeline
     pipeline.upload_falling_island_reservations(engine, reservations)
     monkeypatch.setattr(pipeline, "_read_falling_island_reservations", fail_reservation_readback)
+    monkeypatch.setattr(
+        pipeline,
+        "publish_bridge_falling_island_reservations",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("formal uploaded falling-island resolve should not eagerly publish bridge reservations")
+        ),
+    )
+    pipeline._ensure_programs(engine.bridge.ctx)
+    resolve_program = pipeline.programs["resolve_falling_island_reservations"]
+    original_run_indirect = resolve_program.run_indirect
+    resolve_dispatches = 0
+
+    def fail_direct_resolve(*args: object, **kwargs: object) -> None:
+        raise AssertionError("formal uploaded falling-island resolve must use reservation-count indirect")
+
+    def count_resolve_dispatches(indirect_buffer: object) -> object:
+        nonlocal resolve_dispatches
+        resolve_dispatches += 1
+        return original_run_indirect(indirect_buffer)
+
+    monkeypatch.setattr(resolve_program, "run", fail_direct_resolve)
+    monkeypatch.setattr(resolve_program, "run_indirect", count_resolve_dispatches)
 
     previous_frame_active = engine._world_simulation_frame_active
     engine._world_simulation_frame_active = True
@@ -48685,12 +61587,6 @@ def test_gpu_motion_pipeline_uploaded_falling_island_resolve_does_not_readback(
         dtype=falling_island_reservation_dtype(),
         count=len(reservations),
     )
-    bridge_count = np.frombuffer(engine.bridge.buffers["island_reservation_count"].read(size=4), dtype=np.int32)
-    bridge_resolved = np.frombuffer(
-        engine.bridge.buffers["island_reservation"].read(size=len(reservations) * falling_island_reservation_dtype().itemsize),
-        dtype=falling_island_reservation_dtype(),
-        count=len(reservations),
-    )
     runtime_count = np.frombuffer(engine.bridge.buffers["island_runtime_count"].read(size=4), dtype=np.int32, count=1)
     runtime_records = np.frombuffer(
         engine.bridge.buffers["island_runtime"].read(size=int(runtime_count[0]) * island_runtime_dtype().itemsize),
@@ -48698,28 +61594,74 @@ def test_gpu_motion_pipeline_uploaded_falling_island_resolve_does_not_readback(
         count=int(runtime_count[0]),
     )
     reservation_by_id = {int(record["island_id"]): record for record in resolved}
-    bridge_reservation_by_id = {int(record["island_id"]): record for record in bridge_resolved}
     runtime_by_id = {int(record["island_id"]): record for record in runtime_records}
 
     assert resolved_uploaded is True
+    assert resolve_dispatches == 1
     assert pipeline.last_cpu_cell_state_upload_skipped is True
     assert pipeline.last_cpu_island_id_upload_skipped is True
-    assert "island_reservation" in engine.bridge.gpu_authoritative_resources
+    assert "island_reservation" not in engine.bridge.gpu_authoritative_resources
     assert "island_runtime" in engine.bridge.gpu_authoritative_resources
-    assert int(bridge_count[0]) == 2
     assert int(runtime_count[0]) == 2
     assert reservation_by_id[41]["resolved_shift"].tolist() == [0, 1]
     assert reservation_by_id[42]["resolved_shift"].tolist() == [0, 1]
     assert int(reservation_by_id[42]["resolve_state"]) == ISLAND_RESOLVE_RERESOLVED
-    assert bridge_reservation_by_id[41]["resolved_shift"].tolist() == [0, 1]
-    assert bridge_reservation_by_id[42]["resolved_shift"].tolist() == [0, 1]
-    assert int(bridge_reservation_by_id[42]["resolve_state"]) == ISLAND_RESOLVE_RERESOLVED
     assert runtime_by_id[41]["buffer_bbox"].tolist() == [10, 11, 12, 13]
     assert runtime_by_id[41]["world_bbox"].tolist() == [10, 11, 12, 13]
     assert runtime_by_id[42]["buffer_bbox"].tolist() == [10, 9, 12, 11]
     assert runtime_by_id[42]["world_bbox"].tolist() == [10, 9, 12, 11]
     assert np.allclose(runtime_by_id[41]["velocity_xy"], np.array([0.0, 0.41], dtype=np.float32))
     assert np.allclose(runtime_by_id[42]["velocity_xy"], np.array([0.0, 0.41], dtype=np.float32))
+
+
+def test_gpu_motion_formal_publishes_bridge_island_reservation_count_from_gpu_counter() -> None:
+    engine = WorldEngine(width=32, height=24)
+    if not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU motion pipeline is not available")
+    try:
+        reservations = np.zeros((2,), dtype=falling_island_reservation_dtype())
+        reservations[0]["island_id"] = 81
+        reservations[0]["buffer_bbox"] = np.asarray((4, 5, 6, 7), dtype=np.int32)
+        reservations[0]["velocity_xy"] = np.asarray((2.0, 0.5), dtype=np.float32)
+        reservations[0]["target_shift"] = np.asarray((1, 0), dtype=np.int32)
+        reservations[0]["reserved_shift"] = np.asarray((1, 0), dtype=np.int32)
+        reservations[0]["resolved_shift"] = np.asarray((1, 0), dtype=np.int32)
+        reservations[0]["resolve_state"] = ISLAND_RESOLVE_DIRECT
+        reservations[1]["island_id"] = 82
+        reservations[1]["buffer_bbox"] = np.asarray((10, 5, 12, 7), dtype=np.int32)
+        reservations[1]["velocity_xy"] = np.asarray((0.0, 1.0), dtype=np.float32)
+        reservations[1]["target_shift"] = np.asarray((0, 1), dtype=np.int32)
+        reservations[1]["reserved_shift"] = np.asarray((0, 0), dtype=np.int32)
+        reservations[1]["resolved_shift"] = np.asarray((0, 0), dtype=np.int32)
+        reservations[1]["resolve_state"] = ISLAND_RESOLVE_BLOCKED
+
+        pipeline = engine.motion_solver.gpu_pipeline
+        pipeline.upload_falling_island_reservations(engine, reservations)
+        resources = pipeline.resources
+        assert resources is not None
+        resources.island_reservation_count.write(np.array([1], dtype=np.int32).tobytes())
+        engine.bridge.buffers["island_reservation_count"].write(np.array([99], dtype=np.int32).tobytes())
+
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            published = pipeline.publish_bridge_falling_island_reservations(engine, len(reservations))
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        bridge_count = np.frombuffer(engine.bridge.buffers["island_reservation_count"].read(size=4), dtype=np.int32)
+        bridge_reservations = np.frombuffer(
+            engine.bridge.buffers["island_reservation"].read(size=falling_island_reservation_dtype().itemsize),
+            dtype=falling_island_reservation_dtype(),
+            count=1,
+        )
+
+        assert published is True
+        assert int(bridge_count[0]) == 1
+        assert int(bridge_reservations[0]["island_id"]) == 81
+        assert "island_reservation" in engine.bridge.gpu_authoritative_resources
+    finally:
+        engine.close()
 
 
 def test_gpu_motion_pipeline_published_island_runtime_skips_settled_and_uses_paging_bbox() -> None:
@@ -48787,7 +61729,7 @@ def test_motion_solver_falling_island_shift_preserves_runtime_cell_state_and_rea
     engine.islands[21] = FallingIslandRecord(
         island_id=21,
         bbox=(8, 8, 10, 10),
-        velocity_xy=(2.0, -0.49),
+        velocity_xy=(120.0, -0.49),
         subcell_offset=(0.0, 0.0),
     )
     for tile_y in range(engine.active.tile_height):
@@ -48836,7 +61778,7 @@ def test_gpu_motion_solver_falling_island_shift_apply_does_not_call_cpu_shift(
     engine.islands[23] = FallingIslandRecord(
         island_id=23,
         bbox=(8, 8, 10, 10),
-        velocity_xy=(2.0, -0.49),
+        velocity_xy=(120.0, -0.49),
         subcell_offset=(0.0, 0.0),
     )
 
