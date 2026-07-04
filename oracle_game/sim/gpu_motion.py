@@ -7851,7 +7851,12 @@ class GPUMotionPipeline:
         if self._formal_gpu_frame(world):
             self.publish_bridge_powder_reservations(world, world.width * world.height)
             self._dispatch_index_powder_apply(world, resources)
-            self._dispatch_apply_powder_reservations(world, resources, None)
+            self._dispatch_apply_powder_reservations(
+                world,
+                resources,
+                None,
+                inputs_already_loaded=True,
+            )
             return np.zeros((0,), dtype=POWDER_RESERVATION_DTYPE)
         reservation_count = int(np.frombuffer(resources.powder_reservation_count.read(size=4), dtype=np.int32, count=1)[0])
         reservation_count = max(0, min(reservation_count, world.width * world.height))
@@ -8051,6 +8056,8 @@ class GPUMotionPipeline:
         world: "WorldEngine",
         resources: GPUMotionResources,
         reservation_count: int | None,
+        *,
+        inputs_already_loaded: bool = False,
     ) -> None:
         ctx = world.bridge.ctx
         assert ctx is not None
@@ -8060,13 +8067,14 @@ class GPUMotionPipeline:
         group_y = (world.height + LOCAL_SIZE - 1) // LOCAL_SIZE
         if formal_frame:
             self._build_powder_apply_dispatch(world, resources)
-        self._load_authoritative_bridge_inputs(
-            world,
-            resources,
-            group_x,
-            group_y,
-            use_existing_active_tile_dispatch=formal_frame,
-        )
+        if not (formal_frame and inputs_already_loaded):
+            self._load_authoritative_bridge_inputs(
+                world,
+                resources,
+                group_x,
+                group_y,
+                use_existing_active_tile_dispatch=formal_frame,
+            )
         with self._profile_pass(world, "powder_apply_main"):
             program = self.programs["apply_powder_reservations"]
             program["cell_grid_size"].value = (world.width, world.height)
