@@ -4684,8 +4684,6 @@ class WorldEngine:
                 self.reaction_solver.gpu_pipeline.flush_formal_reaction_segment(self, "before_motion")
             finally:
                 self.reaction_solver.gpu_pipeline.end_formal_reaction_segment(self, "before_motion")
-        with self._profile_pass("liquid_pre_motion_intent"):
-            self.liquid_solver.prepare_motion_flow_intent(self)
         with self._profile_pass("motion"):
             self.motion_solver.step(self, dt)
         motion_profile = getattr(getattr(self.motion_solver, "gpu_pipeline", None), "last_pass_profile", None)

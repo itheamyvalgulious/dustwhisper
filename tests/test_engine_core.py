@@ -50248,7 +50248,6 @@ def test_gpu_realtime_budget_active_does_not_skip_solver_stages(monkeypatch: pyt
     monkeypatch.setattr(engine.gas_solver, "step", record_solver("gas"))
     monkeypatch.setattr(engine.heat_solver, "step", record_solver("heat"))
     monkeypatch.setattr(engine.motion_solver, "step", record_solver("motion"))
-    monkeypatch.setattr(engine.liquid_solver, "prepare_motion_flow_intent", lambda world: calls.append("liquid_pre_motion_intent"))
     monkeypatch.setattr(engine.liquid_solver, "step", record_solver("liquid"))
     monkeypatch.setattr(engine.optics_solver, "step", record_solver("optics"))
     monkeypatch.setattr(engine.reaction_solver, "_advance_timed_slots", lambda world: calls.append("reaction_timed"))
@@ -50271,11 +50270,9 @@ def test_gpu_realtime_budget_active_does_not_skip_solver_stages(monkeypatch: pyt
     assert {"reaction_self", "reaction_material_gas", "reaction_material_light"}.issubset(set(calls))
     assert calls.count("reaction_material_material") == 1
     assert calls.count("reaction_material_gas") == 1
-    assert calls.index("reaction_timed") < calls.index("liquid_pre_motion_intent")
-    assert calls.index("reaction_self") < calls.index("liquid_pre_motion_intent")
     assert calls.index("reaction_timed") < calls.index("motion")
     assert calls.index("reaction_self") < calls.index("motion")
-    assert calls.index("reaction_material_material") < calls.index("liquid_pre_motion_intent")
+    assert calls.index("reaction_material_material") < calls.index("motion")
     assert calls.index("reaction_material_gas") < calls.index("motion")
     assert calls.index("reaction_material_light") < calls.index("optics")
     assert report["gpu_realtime_budget"]["skipped_stages"] == []
