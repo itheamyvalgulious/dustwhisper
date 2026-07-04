@@ -350,6 +350,7 @@ class GPUReactionPipeline:
             apply_material_side_effects=self._compiled_actions_include_emit_material(compiled),
             apply_gas_side_effects=self._compiled_actions_include_modify_gas(compiled),
             modify_gas_layer_mask=self._compiled_modify_gas_layer_mask(compiled, world.gas_concentration.shape[0]),
+            may_have_flow_sources=self._compiled_actions_include_flow_sources(compiled),
         )
         with self._profile_pass(world, "timed_publish_cell_state"):
             self._download_cell_state(world, resources, direct_core_outputs=formal_gpu_frame)
@@ -494,6 +495,7 @@ class GPUReactionPipeline:
             apply_material_side_effects=self._compiled_actions_include_emit_material(compiled),
             apply_gas_side_effects=self._compiled_actions_include_modify_gas(compiled),
             modify_gas_layer_mask=self._compiled_modify_gas_layer_mask(compiled, world.gas_concentration.shape[0]),
+            may_have_flow_sources=self._compiled_actions_include_flow_sources(compiled),
         )
         with self._profile_pass(world, "self_publish_cell_state"):
             self._download_cell_state(
@@ -629,7 +631,7 @@ class GPUReactionPipeline:
             material_tag_field="light_tag_mask",
         )
         light_dose_guard = self._formal_light_dose_guard_buffer(world)
-        if light_dose_guard is not None:
+        if light_dose_guard is not None and self._formal_segment_batch_base_key is None:
             return self._run_formal_guarded_material_light(
                 world,
                 compiled,
@@ -704,7 +706,10 @@ class GPUReactionPipeline:
         self._set_uniform_if_present(program, "rule_candidate_word_count", self._rule_candidate_word_count(rule_count))
         self._set_uniform_if_present(program, "gas_cell_size", world.gas_cell_size)
         self._set_uniform_if_present(program, "gas_count", world.gas_concentration.shape[0])
+        self._set_uniform_if_present(program, "gas_grid_size", (world.gas_width, world.gas_height))
         self._set_uniform_if_present(program, "random_target_count", int(self.random_target_count))
+        self._set_uniform_if_present(program, "direct_gas_delta_enabled", False)
+        self._set_uniform_if_present(program, "direct_modify_gas_layer_mask", 0)
         material_in, phase_in, temp_in, integrity_in, velocity_in, timer_in = self._current_cell_textures(resources)
         material_in.use(location=0)
         phase_in.use(location=1)
@@ -730,6 +735,7 @@ class GPUReactionPipeline:
         resources.rule_lhs_candidate_masks.bind_to_storage_buffer(binding=12)
         resources.light_emitter_buffer.bind_to_storage_buffer(binding=14)
         resources.light_emitter_count.bind_to_storage_buffer(binding=15)
+        resources.gas_delta_buffer.bind_to_storage_buffer(binding=13)
         self._bind_local_cell_action_output_images(resources, direct_core_outputs=True)
         group_x = (world.width + LOCAL_SIZE - 1) // LOCAL_SIZE
         group_y = (world.height + LOCAL_SIZE - 1) // LOCAL_SIZE
@@ -1798,6 +1804,27 @@ class GPUReactionPipeline:
         resources.light_emitter_buffer.bind_to_storage_buffer(binding=14)
         resources.light_emitter_count.bind_to_storage_buffer(binding=15)
         direct_core_outputs = self._formal_gpu_frame(world)
+        may_have_flow_sources = (
+            modifies_gas
+            and self._compiled_actions_include_flow_sources(compiled_actions)
+        )
+        direct_action_gas_delta = (
+            direct_core_outputs
+            and modifies_gas
+            and not has_rhs_consume
+            and self._formal_segment_batch_active()
+            and self._formal_segment_batch_key is not None
+        )
+        modify_gas_layer_mask = self._compiled_modify_gas_layer_mask(
+            compiled_actions,
+            world.gas_concentration.shape[0],
+        )
+        self._set_uniform_if_present(program, "gas_grid_size", (world.gas_width, world.gas_height))
+        self._set_uniform_if_present(program, "direct_gas_delta_enabled", bool(direct_action_gas_delta))
+        self._set_uniform_if_present(program, "direct_modify_gas_layer_mask", int(modify_gas_layer_mask))
+        if direct_action_gas_delta:
+            assert self._formal_segment_batch_key is not None
+            self._clear_formal_segment_gas_delta(world, resources, self._formal_segment_batch_key)
         self._bind_local_cell_action_output_images(resources, direct_core_outputs=direct_core_outputs)
         group_x = (world.width + LOCAL_SIZE - 1) // LOCAL_SIZE
         group_y = (world.height + LOCAL_SIZE - 1) // LOCAL_SIZE
@@ -1823,10 +1850,6 @@ class GPUReactionPipeline:
                     direct_core_outputs=direct_core_outputs,
                 )
         if gas_side_effects_required:
-            may_have_flow_sources = (
-                modifies_gas
-                and self._compiled_actions_include_flow_sources(compiled_actions)
-            )
             with self._profile_pass(world, f"{program_name}_gas_side_effects"):
                 self._run_cell_gas_side_effect_pass(
                     world,
@@ -1834,11 +1857,9 @@ class GPUReactionPipeline:
                     apply_action_side_effects=modifies_gas,
                     material_gas_rule_count=rule_count if program_name == "material_gas" and has_rhs_consume else 0,
                     may_have_flow_sources=may_have_flow_sources,
-                    modify_gas_layer_mask=self._compiled_modify_gas_layer_mask(
-                        compiled_actions,
-                        world.gas_concentration.shape[0],
-                    ),
+                    modify_gas_layer_mask=modify_gas_layer_mask,
                     direct_core_outputs=direct_core_outputs,
+                    action_gas_delta_already_applied=direct_action_gas_delta,
                 )
         if program_name == "material_light" and has_rhs_consume:
             with self._profile_pass(world, f"{program_name}_dose_consume"):
@@ -1858,6 +1879,7 @@ class GPUReactionPipeline:
         apply_material_side_effects: bool = False,
         apply_gas_side_effects: bool = False,
         modify_gas_layer_mask: int | None = None,
+        may_have_flow_sources: bool = True,
     ) -> None:
         program = self.programs[program_name]
         self._set_uniform_if_present(program, "cell_grid_size", (world.width, world.height))
@@ -1866,6 +1888,22 @@ class GPUReactionPipeline:
         self._set_uniform_if_present(program, "gas_count", world.gas_concentration.shape[0])
         self._set_uniform_if_present(program, "random_target_count", int(self.random_target_count))
         self._set_uniform_if_present(program, "self_rule_count", int(self_rule_count))
+        self._set_uniform_if_present(program, "gas_grid_size", (world.gas_width, world.gas_height))
+        direct_core_outputs = self._formal_gpu_frame(world)
+        direct_action_gas_delta = (
+            direct_core_outputs
+            and program_name == "timed_apply"
+            and apply_gas_side_effects
+            and self._formal_segment_batch_active()
+            and self._formal_segment_batch_key is not None
+        )
+        if modify_gas_layer_mask is None:
+            modify_gas_layer_mask = (1 << min(31, int(world.gas_concentration.shape[0]))) - 1
+        self._set_uniform_if_present(program, "direct_gas_delta_enabled", bool(direct_action_gas_delta))
+        self._set_uniform_if_present(program, "direct_modify_gas_layer_mask", int(modify_gas_layer_mask))
+        if direct_action_gas_delta:
+            assert self._formal_segment_batch_key is not None
+            self._clear_formal_segment_gas_delta(world, resources, self._formal_segment_batch_key)
         material_in, phase_in, temp_in, integrity_in, velocity_in, timer_in = self._current_cell_textures(resources)
         material_in.use(location=0)
         phase_in.use(location=1)
@@ -1892,7 +1930,8 @@ class GPUReactionPipeline:
         resources.self_rule_f.bind_to_storage_buffer(binding=13)
         resources.light_emitter_buffer.bind_to_storage_buffer(binding=14)
         resources.light_emitter_count.bind_to_storage_buffer(binding=15)
-        direct_core_outputs = self._formal_gpu_frame(world)
+        if direct_action_gas_delta:
+            resources.gas_delta_buffer.bind_to_storage_buffer(binding=13)
         self._bind_local_cell_action_output_images(resources, direct_core_outputs=direct_core_outputs)
         group_x = (world.width + LOCAL_SIZE - 1) // LOCAL_SIZE
         group_y = (world.height + LOCAL_SIZE - 1) // LOCAL_SIZE
@@ -1922,8 +1961,10 @@ class GPUReactionPipeline:
                 self._run_cell_gas_side_effect_pass(
                     world,
                     resources,
+                    may_have_flow_sources=may_have_flow_sources,
                     modify_gas_layer_mask=modify_gas_layer_mask,
                     direct_core_outputs=direct_core_outputs,
+                    action_gas_delta_already_applied=direct_action_gas_delta,
                 )
 
     def _run_timed_candidate_action_pass(
@@ -1980,7 +2021,7 @@ class GPUReactionPipeline:
                 raise RuntimeError("formal timed reaction candidate apply requires ModernGL ComputeShader.run_indirect")
             program.run_indirect(resources.timed_candidate_dispatch_args)
             self._sync_compute_writes(ctx)
-            ctx.memory_barrier(ctx.SHADER_STORAGE_BARRIER_BIT)
+            self._sync_storage_and_indirect_writes(ctx)
 
         group_x = (world.width + LOCAL_SIZE - 1) // LOCAL_SIZE
         group_y = (world.height + LOCAL_SIZE - 1) // LOCAL_SIZE
@@ -2249,7 +2290,32 @@ class GPUReactionPipeline:
         direct_core_outputs: bool = False,
         timed_candidate_outputs: bool = False,
         light_dose_guard_buffer: Any | None = None,
+        action_gas_delta_already_applied: bool = False,
     ) -> None:
+        if action_gas_delta_already_applied:
+            if may_have_flow_sources:
+                with self._profile_pass(world, "cell_gas_action_delta_flow_source_scatter"):
+                    self._run_cell_gas_action_delta_pass(
+                        world,
+                        resources,
+                        modify_gas_layer_mask=(
+                            int(modify_gas_layer_mask)
+                            if modify_gas_layer_mask is not None
+                            else (1 << min(31, int(world.gas_concentration.shape[0]))) - 1
+                        ),
+                        may_have_flow_sources=may_have_flow_sources,
+                        direct_core_outputs=direct_core_outputs,
+                        light_dose_guard_buffer=light_dose_guard_buffer,
+                        gas_delta_already_applied=True,
+                    )
+                with self._profile_pass(world, "cell_gas_action_delta_flow_sources"):
+                    self._append_flow_sources_from_gpu(
+                        world,
+                        resources,
+                        may_have_flow_sources=may_have_flow_sources,
+                        light_dose_guard_buffer=light_dose_guard_buffer,
+                    )
+            return
         if timed_candidate_outputs:
             if not apply_action_side_effects or material_gas_rule_count > 0:
                 return
@@ -2349,6 +2415,7 @@ class GPUReactionPipeline:
         may_have_flow_sources: bool,
         direct_core_outputs: bool = False,
         light_dose_guard_buffer: Any | None = None,
+        gas_delta_already_applied: bool = False,
     ) -> None:
         ctx = world.bridge.ctx
         assert ctx is not None
@@ -2360,7 +2427,9 @@ class GPUReactionPipeline:
             and segment_key is not None
         )
         gas_delta_count = int(world.gas_width * world.gas_height * world.gas_concentration.shape[0])
-        if batch_formal_delta:
+        if gas_delta_already_applied:
+            pass
+        elif batch_formal_delta:
             self._clear_formal_segment_gas_delta(world, resources, segment_key)
         else:
             clear_program = self.programs["clear_cell_gas_delta"]
@@ -2389,6 +2458,7 @@ class GPUReactionPipeline:
         scatter_program["gas_count"].value = int(world.gas_concentration.shape[0])
         scatter_program["modify_gas_layer_mask"].value = int(modify_gas_layer_mask)
         scatter_program["use_local_deferred_outputs"].value = bool(direct_core_outputs)
+        scatter_program["gas_delta_already_applied"].value = bool(gas_delta_already_applied)
         resources.trigger_lo_tex.use(location=0)
         resources.trigger_hi_tex.use(location=1)
         resources.deferred_scale_lo_tex.use(location=2)
@@ -2417,7 +2487,7 @@ class GPUReactionPipeline:
             else:
                 scatter_program.run(scatter_group_x, scatter_group_y, 1)
             ctx.memory_barrier(ctx.SHADER_STORAGE_BARRIER_BIT | ctx.SHADER_IMAGE_ACCESS_BARRIER_BIT)
-        if batch_formal_delta:
+        if batch_formal_delta or gas_delta_already_applied:
             return
 
         apply_program = self.programs["apply_cell_gas_delta"]
@@ -3643,7 +3713,10 @@ class GPUReactionPipeline:
             uniform int rule_count;
             uniform int gas_cell_size;
             uniform int gas_count;
+            uniform ivec2 gas_grid_size;
             uniform int random_target_count;
+            uniform bool direct_gas_delta_enabled;
+            uniform uint direct_modify_gas_layer_mask;
             layout(binding=0) uniform sampler2D material_tex;
             layout(binding=1) uniform sampler2D phase_tex;
             layout(binding=2) uniform sampler2D temp_tex;
@@ -3687,6 +3760,11 @@ class GPUReactionPipeline:
             layout(std430, binding=15) buffer ReactionCounters {{
                 uint reaction_counts[16];
             }};
+            // DIRECT_GAS_DELTA_STORAGE_BEGIN
+            layout(std430, binding=13) buffer DirectGasDelta {{
+                int direct_gas_delta[];
+            }};
+            // DIRECT_GAS_DELTA_STORAGE_END
             const uint CONSUME_POLICY_LHS_ID = {CONSUME_POLICY_LHS}u;
             const uint CONSUME_POLICY_RHS_ID = {CONSUME_POLICY_RHS}u;
             const uint CONSUME_POLICY_BOTH_ID = {CONSUME_POLICY_BOTH}u;
@@ -3747,6 +3825,41 @@ class GPUReactionPipeline:
                 }}
                 deferred_count += 1;
             }}
+            // DIRECT_GAS_DELTA_FUNCTIONS_BEGIN
+            bool direct_gas_layer_enabled(int layer) {{
+                if (layer < 0 || layer >= gas_count) {{
+                    return false;
+                }}
+                if (layer >= 31) {{
+                    return true;
+                }}
+                return (direct_modify_gas_layer_mask & (1u << uint(layer))) != 0u;
+            }}
+            int direct_gas_delta_index(ivec2 gas_cell, int layer) {{
+                return (layer * gas_grid_size.y + gas_cell.y) * gas_grid_size.x + gas_cell.x;
+            }}
+            bool apply_direct_gas_delta(ivec2 gid, ivec4 ai, vec4 af, float scale, inout int deferred_count) {{
+                if (!direct_gas_delta_enabled || ai.x != {TYPE_MODIFY_GAS} || !direct_gas_layer_enabled(ai.y)) {{
+                    return false;
+                }}
+                ivec2 gas_cell = ivec2(
+                    min(gas_grid_size.x - 1, max(0, gid.x / gas_cell_size)),
+                    min(gas_grid_size.y - 1, max(0, gid.y / gas_cell_size))
+                );
+                float delta = af.x * scale;
+                int fixed_delta = int(round(clamp(
+                    delta * float({GAS_DELTA_FIXED_SCALE}),
+                    -2147483000.0,
+                    2147483000.0
+                )));
+                if (fixed_delta != 0) {{
+                    atomicAdd(direct_gas_delta[direct_gas_delta_index(gas_cell, ai.y)], fixed_delta);
+                }}
+                atomicAdd(reaction_counts[1], 1u);
+                atomicAdd(reaction_counts[1 + {TYPE_MODIFY_GAS}], 1u);
+                return true;
+            }}
+            // DIRECT_GAS_DELTA_FUNCTIONS_END
             vec2 light_direction(ivec2 gid, int direction_id) {{
                 if (direction_id == {DIRECTION_IDS["right"]}) {{
                     return vec2(1.0, 0.0);
@@ -3884,15 +3997,27 @@ class GPUReactionPipeline:
                         }}
                     }}
                 }} else if (ai.x == {TYPE_MODIFY_GAS}) {{
-                    append_deferred(
-                        deferred_action_lo,
-                        deferred_action_hi,
-                        deferred_scale_lo,
-                        deferred_scale_hi,
-                        deferred_count,
-                        action_index,
-                        scale
-                    );
+                    if (!apply_direct_gas_delta(gid, ai, af, scale, deferred_count)) {{
+                        append_deferred(
+                            deferred_action_lo,
+                            deferred_action_hi,
+                            deferred_scale_lo,
+                            deferred_scale_hi,
+                            deferred_count,
+                            action_index,
+                            scale
+                        );
+                    }} else if (ai.w != 0) {{
+                        append_deferred(
+                            deferred_action_lo,
+                            deferred_action_hi,
+                            deferred_scale_lo,
+                            deferred_scale_hi,
+                            deferred_count,
+                            action_index,
+                            scale
+                        );
+                    }}
                 }} else if (ai.x == {TYPE_EMIT_LIGHT}) {{
                     append_light_emitter(gid, ai, af, scale);
                 }} else if (ai.x == {TYPE_EMIT_MATERIAL}) {{
@@ -3990,7 +4115,28 @@ class GPUReactionPipeline:
                 }}
             }}
         """
-        self_apply_helper = helper.replace(local_action_rule_storage, "")
+        direct_storage_begin = "            // DIRECT_GAS_DELTA_STORAGE_BEGIN\n"
+        direct_storage_end = "            // DIRECT_GAS_DELTA_STORAGE_END\n"
+        direct_functions_begin = "            // DIRECT_GAS_DELTA_FUNCTIONS_BEGIN\n"
+        direct_functions_end = "            // DIRECT_GAS_DELTA_FUNCTIONS_END\n"
+
+        def without_marked_block(source: str, begin: str, end: str, replacement: str = "") -> str:
+            start = source.index(begin)
+            stop = source.index(end, start) + len(end)
+            return source[:start] + replacement + source[stop:]
+
+        no_direct_helper = without_marked_block(helper, direct_storage_begin, direct_storage_end)
+        no_direct_helper = without_marked_block(
+            no_direct_helper,
+            direct_functions_begin,
+            direct_functions_end,
+            """
+            bool apply_direct_gas_delta(ivec2 gid, ivec4 ai, vec4 af, float scale, inout int deferred_count) {
+                return false;
+            }
+            """,
+        )
+        self_apply_helper = no_direct_helper.replace(local_action_rule_storage, "")
         lhs_candidate_helper = f"""
             const int RULE_CANDIDATE_WORDS = {RULE_CANDIDATE_WORDS};
             const int RULE_CANDIDATE_VECS = {RULE_CANDIDATE_VECS};
@@ -4286,7 +4432,7 @@ class GPUReactionPipeline:
             """
         )
         self.programs["timed_apply_candidates"] = ctx.compute_shader(
-            helper
+            no_direct_helper
             + local_action_output_layout
             + """
             layout(std430, binding=12) readonly buffer TimedCandidateList {
@@ -5404,6 +5550,7 @@ class GPUReactionPipeline:
             uniform int gas_count;
             uniform uint modify_gas_layer_mask;
             uniform bool use_local_deferred_outputs;
+            uniform bool gas_delta_already_applied;
             layout(binding=0) uniform sampler2D action_lo_tex;
             layout(binding=1) uniform sampler2D action_hi_tex;
             layout(binding=2) uniform sampler2D scale_lo_tex;
@@ -5481,18 +5628,20 @@ class GPUReactionPipeline:
                         continue;
                     }}
                     vec4 af = action_f[action_index];
-                    float delta = af.x * scales[slot];
-                    int fixed_delta = int(round(clamp(
-                        delta * float({GAS_DELTA_FIXED_SCALE}),
-                        -2147483000.0,
-                        2147483000.0
-                    )));
-                    if (fixed_delta != 0) {{
-                        atomicAdd(gas_delta[gas_delta_index(gas_cell, ai.y)], fixed_delta);
+                    if (!gas_delta_already_applied) {{
+                        float delta = af.x * scales[slot];
+                        int fixed_delta = int(round(clamp(
+                            delta * float({GAS_DELTA_FIXED_SCALE}),
+                            -2147483000.0,
+                            2147483000.0
+                        )));
+                        if (fixed_delta != 0) {{
+                            atomicAdd(gas_delta[gas_delta_index(gas_cell, ai.y)], fixed_delta);
+                        }}
+                        atomicAdd(reaction_counts[1], 1u);
+                        atomicAdd(reaction_counts[1 + {TYPE_MODIFY_GAS}], 1u);
                     }}
                     write_flow_sources(gas_cell, ai, af, scales[slot], (slot_offset + slot) * 4);
-                    atomicAdd(reaction_counts[1], 1u);
-                    atomicAdd(reaction_counts[1 + {TYPE_MODIFY_GAS}], 1u);
                 }}
             }}
 

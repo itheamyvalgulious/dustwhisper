@@ -39661,6 +39661,7 @@ def test_gpu_reaction_formal_segment_batches_modify_gas_delta_until_flush(
     assert gas_publish_calls == 1
     assert summary.get("cell_gas_action_delta_segment_clear", {}).get("count", 0) == 1
     assert summary.get("cell_gas_action_delta_segment_apply", {}).get("count", 0) == 1
+    assert summary.get("cell_gas_action_delta_scatter", {}).get("count", 0) == 0
     assert summary.get("cell_gas_action_delta_clear", {}).get("count", 0) == 0
     assert summary.get("cell_gas_action_delta_apply", {}).get("count", 0) == 0
     assert summary.get("cell_gas_action_delta_publish", {}).get("count", 0) == 0
@@ -52224,6 +52225,9 @@ def test_formal_gpu_reaction_timed_modify_gas_loads_and_publishes_gas_and_ambien
         monkeypatch.setattr(load_bridge_dose_program, "run", fail_load_bridge_dose)
         monkeypatch.setattr(GPUBridge, "sync_world", fail_sync_world)
 
+        engine.profile_passes_enabled = True
+        engine.profile_passes_sync = True
+        pipeline.reset_pass_profile()
         previous_frame_active = engine._world_simulation_frame_active
         engine._world_simulation_frame_active = True
         try:
@@ -52246,6 +52250,94 @@ def test_formal_gpu_reaction_timed_modify_gas_loads_and_publishes_gas_and_ambien
         assert pipeline.last_cpu_mirror_downloaded is False
         assert np.isclose(float(gas[water_gas, gas_y, gas_x]), 0.75)
         assert np.isclose(float(ambient[gas_y, gas_x]), 41.0)
+        summary = pipeline.last_pass_profile["summary"]
+        assert summary.get("cell_gas_action_delta_segment_clear", {}).get("count", 0) == 1
+        assert summary.get("cell_gas_action_delta_segment_apply", {}).get("count", 0) == 1
+        assert summary.get("cell_gas_action_delta_scatter", {}).get("count", 0) == 0
+    finally:
+        engine.close()
+
+
+def test_formal_gpu_reaction_timed_modify_gas_with_flow_uses_direct_delta_and_flow_source() -> None:
+    engine = WorldEngine(width=16, height=16, gas_cell_size=4)
+    pipeline = engine.reaction_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU reaction pipeline is not available")
+    try:
+        engine.replace_reaction_table(
+            [
+                ReactionAction(
+                    ReactionType.MODIFY_GAS,
+                    gas_species="water_gas",
+                    speed=5.0,
+                    strength=6.0,
+                    range_cells=3,
+                    direction=Direction.RIGHT,
+                    duration=0,
+                )
+            ],
+            {
+                "material_material": [],
+                "material_gas": [],
+                "material_light": [],
+                "gas_gas": [],
+                "gas_light": [],
+                "self_rules": [],
+            },
+        )
+        engine.patch_material("gold_solid", reaction_slots=(1, -1, -1, -1, -1, -1, -1, -1))
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(4, 4, "gold_solid", mark_dirty=False)
+        engine.timer_pack[4, 4, 0] = 1
+        water_gas = engine.rulebook.gas_id("water_gas")
+        gas_y, gas_x = engine.cell_to_gas(4, 4)
+        engine.gas_concentration[water_gas, gas_y, gas_x] = 0.25
+        engine.flow_velocity.fill(0.0)
+        engine.active.mark_rect(0, 0, engine.width, engine.height)
+        engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "gas_concentration",
+            "ambient_temperature",
+            "flow_velocity",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+
+        engine.profile_passes_enabled = True
+        engine.profile_passes_sync = True
+        pipeline.reset_pass_profile()
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            assert pipeline.begin_formal_reaction_segment(engine, "before_motion") is True
+            batch = pipeline.run_timed_actions(
+                engine,
+                solve_cell_mask=np.ones((engine.height, engine.width), dtype=np.bool_),
+            )
+            assert batch is FORMAL_GPU_EMPTY_DEFERRED_BATCH
+            assert pipeline.flush_formal_reaction_segment(engine, "before_motion") is True
+        finally:
+            pipeline.end_formal_reaction_segment(engine, "before_motion")
+            engine._world_simulation_frame_active = previous_frame_active
+
+        gas = _bridge_gas_concentration(engine)
+        bridge_flow = np.frombuffer(engine.bridge.textures["flow_velocity"].read(), dtype="f4").reshape(
+            engine.flow_velocity.shape
+        )
+        summary = pipeline.last_pass_profile["summary"]
+        assert np.isclose(float(gas[water_gas, gas_y, gas_x]), 0.75)
+        assert bridge_flow[gas_y, gas_x, 0] > 0.09
+        assert np.isclose(float(bridge_flow[gas_y, gas_x, 1]), 0.0)
+        assert summary.get("cell_gas_action_delta_segment_clear", {}).get("count", 0) == 1
+        assert summary.get("cell_gas_action_delta_segment_apply", {}).get("count", 0) == 1
+        assert summary.get("cell_gas_action_delta_flow_source_scatter", {}).get("count", 0) == 1
+        assert summary.get("cell_gas_action_delta_flow_sources", {}).get("count", 0) == 1
+        assert summary.get("cell_gas_action_delta_clear", {}).get("count", 0) == 0
+        assert summary.get("cell_gas_action_delta_apply", {}).get("count", 0) == 0
+        assert summary.get("cell_gas_action_delta_publish", {}).get("count", 0) == 0
     finally:
         engine.close()
 
