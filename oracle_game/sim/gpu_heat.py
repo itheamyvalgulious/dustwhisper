@@ -389,17 +389,16 @@ class GPUHeatPipeline:
                 int active_tile_ttl[];
             }};
             layout(r32f, binding=1) writeonly uniform image2D active_tile_img;
-            bool source_tile_active(ivec2 tile) {{
-                if (tile.x < 0 || tile.y < 0 || tile.x >= tile_grid_size.x || tile.y >= tile_grid_size.y) {{
-                    return false;
-                }}
-                int index = tile.y * tile_grid_size.x + tile.x;
-                return active_tile_ttl[index] > 0;
-            }}
             bool expanded_tile_active(ivec2 tile) {{
-                for (int source_y = tile.y - expansion_radius; source_y <= tile.y + expansion_radius; ++source_y) {{
-                    for (int source_x = tile.x - expansion_radius; source_x <= tile.x + expansion_radius; ++source_x) {{
-                        if (source_tile_active(ivec2(source_x, source_y))) {{
+                int radius = max(0, expansion_radius);
+                int source_y0 = max(0, tile.y - radius);
+                int source_y1 = min(tile_grid_size.y - 1, tile.y + radius);
+                int source_x0 = max(0, tile.x - radius);
+                int source_x1 = min(tile_grid_size.x - 1, tile.x + radius);
+                for (int source_y = source_y0; source_y <= source_y1; ++source_y) {{
+                    int row_index = source_y * tile_grid_size.x;
+                    for (int source_x = source_x0; source_x <= source_x1; ++source_x) {{
+                        if (active_tile_ttl[row_index + source_x] > 0) {{
                             return true;
                         }}
                     }}
@@ -1123,26 +1122,59 @@ class GPUHeatPipeline:
                     min(gid.x / gas_cell_size, gas_grid_size.x - 1),
                     min(gid.y / gas_cell_size, gas_grid_size.y - 1)
                 );
-                int current_material = int(texelFetch(material_after_tex, gid, 0).x + 0.5);
+                float material_value = texelFetch(material_after_tex, gid, 0).x;
+                float phase_value = texelFetch(phase_after_tex, gid, 0).x;
+                float flags_value = texelFetch(cell_flags_after_tex, gid, 0).x;
+                vec4 timer_value = texelFetch(timer_after_tex, gid, 0);
+                float temperature = texelFetch(temp_after_tex, gid, 0).x;
+                float integrity_value = texelFetch(integrity_after_tex, gid, 0).x;
+                float island_value = texelFetch(island_id_after_tex, gid, 0).x;
+                float entity_value = texelFetch(entity_id_after_tex, gid, 0).x;
+                float displaced_value = texelFetch(displaced_after_tex, gid, 0).x;
+                vec2 velocity_value = texelFetch(velocity_after_tex, gid, 0).xy;
+                int current_material = int(material_value + 0.5);
                 if (!solve_gas_cell_active(gas_cell) || current_material != 0) {{
-                    copy_after_targets(gid);
+                    store_payload(
+                        gid,
+                        material_value,
+                        phase_value,
+                        flags_value,
+                        timer_value,
+                        temperature,
+                        integrity_value,
+                        island_value,
+                        entity_value,
+                        displaced_value,
+                        velocity_value
+                    );
                     return;
                 }}
                 int empty_rank = empty_rank_in_gas_cell(gid, gas_cell);
                 int target_material = target_material_for_empty_rank(gas_cell, empty_rank);
                 if (target_material <= 0) {{
-                    copy_after_targets(gid);
+                    store_payload(
+                        gid,
+                        material_value,
+                        phase_value,
+                        flags_value,
+                        timer_value,
+                        temperature,
+                        integrity_value,
+                        island_value,
+                        entity_value,
+                        displaced_value,
+                        velocity_value
+                    );
                     return;
                 }}
                 int resolved_phase = phase_params[target_material].x;
-                float temperature = texelFetch(temp_after_tex, gid, 0).x;
                 float spawn_temperature = response_params[target_material].z;
                 if (!isnan(spawn_temperature)) {{
                     temperature = max(temperature, spawn_temperature);
                 }}
-                float entity_value = 0.0;
-                float displaced_value = 0.0;
-                float island_value = resolved_phase == phase_falling_island ? texelFetch(island_id_after_tex, gid, 0).x : 0.0;
+                entity_value = 0.0;
+                displaced_value = 0.0;
+                island_value = resolved_phase == phase_falling_island ? island_value : 0.0;
                 store_payload(
                     gid,
                     float(target_material),
@@ -1154,7 +1186,7 @@ class GPUHeatPipeline:
                     island_value,
                     entity_value,
                     displaced_value,
-                    texelFetch(velocity_after_tex, gid, 0).xy
+                    velocity_value
                 );
             }}
             """
