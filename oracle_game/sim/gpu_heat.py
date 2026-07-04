@@ -670,10 +670,10 @@ class GPUHeatPipeline:
                     return;
                 }}
                 bool is_active = solve_cell_active(gid);
-                int previous_material = int(texelFetch(material_tex, gid, 0).x + 0.5);
-                int previous_phase = int(texelFetch(phase_tex, gid, 0).x + 0.5);
                 float material_value = texelFetch(material_tex, gid, 0).x;
                 float phase_value = texelFetch(phase_tex, gid, 0).x;
+                int previous_material = int(material_value + 0.5);
+                int previous_phase = int(phase_value + 0.5);
                 float flags_value = texelFetch(cell_flags_tex, gid, 0).x;
                 vec4 timer_value = texelFetch(timer_tex, gid, 0);
                 float temperature = texelFetch(temp_tex, gid, 0).x;
