@@ -272,6 +272,7 @@ class WorldEngine:
         self.profile_passes_sync = False
         self.last_pass_profile: dict[str, Any] = {"passes": [], "summary": {}, "skipped_stages": []}
         self.last_skipped_gpu_stages: list[str] = []
+        self.formal_collapse_interval_frames = 4
         self.collapse_dirty_regions: list[tuple[int, int, int, int]] = []
         self.collapse_deferred_regions: list[tuple[int, int, int, int]] = []
         self._gpu_collapse_structure_dirty_tiles_pending = False
@@ -428,6 +429,15 @@ class WorldEngine:
 
     def _skip_budgeted_gpu_stage(self, stage: str) -> bool:
         return False
+
+    def _should_run_formal_collapse_this_frame(self) -> bool:
+        if self.simulation_backend != "gpu":
+            return True
+        interval = max(1, int(getattr(self, "formal_collapse_interval_frames", 1)))
+        if interval <= 1:
+            return True
+        frame_id = max(1, int(getattr(self, "frame_id", 1)))
+        return (frame_id - 1) % interval == 0
 
     @contextmanager
     def _profile_pass(self, name: str):
@@ -4627,11 +4637,13 @@ class WorldEngine:
             self.collapse_solver.gpu_pipeline.reset_pass_profile()
         collapse_pipeline = self.collapse_solver.gpu_pipeline
         with self._profile_pass("collapse"):
-            with collapse_pipeline._profile_pass(self, "dirty_tile_drain"):
-                self._drain_gpu_collapse_structure_dirty_tiles()
-            with collapse_pipeline._profile_pass(self, "solver_runtime_reset"):
-                self.collapse_solver.reset_runtime_state(self)
-            self.collapse_solver.step(self)
+            if self._should_run_formal_collapse_this_frame():
+                with collapse_pipeline._profile_pass(self, "dirty_tile_drain"):
+                    self._drain_gpu_collapse_structure_dirty_tiles()
+                self.collapse_solver.step(self)
+            else:
+                with collapse_pipeline._profile_pass(self, "scheduled_defer"):
+                    pass
         collapse_profile = getattr(getattr(self.collapse_solver, "gpu_pipeline", None), "last_pass_profile", None)
         if self.profile_passes_enabled and isinstance(collapse_profile, dict):
             self.last_pass_profile["collapse"] = collapse_profile
@@ -4659,6 +4671,16 @@ class WorldEngine:
                     self.reaction_solver._advance_timed_slots(self)
                 with self._profile_pass("reaction_self"):
                     self.reaction_solver._run_self_rules(self)
+                with self._profile_pass("reaction_material_material"):
+                    self.reaction_solver._run_material_material(self)
+                with self._profile_pass("reaction_material_gas"):
+                    self.reaction_solver._run_material_gas(self)
+                with self._profile_pass("reaction_material_light"):
+                    self.reaction_solver._run_material_light(self)
+                with self._profile_pass("reaction_gas_gas"):
+                    self.reaction_solver._run_gas_gas(self)
+                with self._profile_pass("reaction_gas_light"):
+                    self.reaction_solver._run_gas_light(self)
                 self.reaction_solver.gpu_pipeline.flush_formal_reaction_segment(self, "before_motion")
             finally:
                 self.reaction_solver.gpu_pipeline.end_formal_reaction_segment(self, "before_motion")
@@ -4679,22 +4701,6 @@ class WorldEngine:
         optics_profile = getattr(self.optics_solver, "last_pass_profile", None)
         if self.profile_passes_enabled and isinstance(optics_profile, dict):
             self.last_pass_profile["optics"] = optics_profile
-        with self._profile_pass("reactions after optics"):
-            self.reaction_solver.gpu_pipeline.begin_formal_reaction_segment(self, "after_optics")
-            try:
-                with self._profile_pass("reaction_material_material"):
-                    self.reaction_solver._run_material_material(self)
-                with self._profile_pass("reaction_material_gas"):
-                    self.reaction_solver._run_material_gas(self)
-                with self._profile_pass("reaction_material_light"):
-                    self.reaction_solver._run_material_light(self)
-                with self._profile_pass("reaction_gas_gas"):
-                    self.reaction_solver._run_gas_gas(self)
-                with self._profile_pass("reaction_gas_light"):
-                    self.reaction_solver._run_gas_light(self)
-                self.reaction_solver.gpu_pipeline.flush_formal_reaction_segment(self, "after_optics")
-            finally:
-                self.reaction_solver.gpu_pipeline.end_formal_reaction_segment(self, "after_optics")
         with self._profile_pass("latch_clear"):
             if self.reaction_solver.gpu_pipeline.clear_reaction_latches(self):
                 self.reaction_solver._note_runtime_backend("gpu")

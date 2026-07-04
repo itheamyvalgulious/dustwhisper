@@ -234,6 +234,7 @@ class GPUReactionPipeline:
         self._formal_light_counters_cleared_key: tuple[object, ...] | None = None
         self._formal_pending_bridge_publish_key: tuple[object, ...] | None = None
         self._formal_pending_bridge_publish: set[str] = set()
+        self._formal_pending_gas_delta_key: tuple[object, ...] | None = None
         self._formal_cell_state_role_key: tuple[object, ...] | None = None
         self._formal_cell_state_read_role: str = "ping"
 
@@ -1275,10 +1276,23 @@ class GPUReactionPipeline:
         )
 
     def _reaction_state_segment(self, reaction_group: str | None) -> str | None:
-        if reaction_group in {"timed", "self"}:
+        if (
+            reaction_group in {"material_material", "material_gas", "material_light", "gas_gas", "gas_light"}
+            and self._formal_segment_batch_base_key is not None
+            and len(self._formal_segment_batch_base_key) >= 3
+            and self._formal_segment_batch_base_key[2] in {"before_motion", "after_optics"}
+        ):
+            return str(self._formal_segment_batch_base_key[2])
+        if reaction_group in {
+            "timed",
+            "self",
+            "material_material",
+            "material_gas",
+            "material_light",
+            "gas_gas",
+            "gas_light",
+        }:
             return "before_motion"
-        if reaction_group in {"material_material", "material_gas", "material_light", "gas_gas", "gas_light"}:
-            return "after_optics"
         return None
 
     def _bridge_cell_core_read_role_only_load(self, reaction_group: str | None) -> bool:
@@ -1431,6 +1445,7 @@ class GPUReactionPipeline:
         self._formal_light_counters_cleared_key = None
         self._formal_pending_bridge_publish_key = None
         self._formal_pending_bridge_publish.clear()
+        self._formal_pending_gas_delta_key = None
         self._formal_active_mask_cache_key = None
         self._formal_loaded_bridge_inputs_key = None
         self._formal_loaded_bridge_inputs.clear()
@@ -1446,6 +1461,7 @@ class GPUReactionPipeline:
         self._formal_light_counters_cleared_key = None
         self._formal_pending_bridge_publish_key = None
         self._formal_pending_bridge_publish.clear()
+        self._formal_pending_gas_delta_key = None
         self._formal_active_mask_cache_key = None
         self._formal_loaded_bridge_inputs_key = None
         self._formal_loaded_bridge_inputs.clear()
@@ -1469,16 +1485,17 @@ class GPUReactionPipeline:
         if not self._formal_gpu_frame(world) or self.resources is None:
             return False
         segment_key = self._formal_reaction_segment_cache_key(world, self.resources, segment)
+        gas_delta_flushed = self._flush_formal_segment_gas_delta(world, self.resources, segment_key)
         if (
             segment_key is None
             or self._formal_segment_batch_key != segment_key
             or self._formal_pending_bridge_publish_key != segment_key
         ):
-            return False
+            return gas_delta_flushed
         pending = set(self._formal_pending_bridge_publish)
         if not pending:
             self._formal_pending_bridge_publish_key = None
-            return False
+            return gas_delta_flushed
         if "cell" in pending:
             with self._profile_pass(world, "publish_bridge_cell"):
                 self._publish_bridge_cell_state(
@@ -1498,6 +1515,52 @@ class GPUReactionPipeline:
                 self._publish_bridge_dose_state(world, self.resources)
         self._formal_pending_bridge_publish.clear()
         self._formal_pending_bridge_publish_key = None
+        return True
+
+    def _clear_formal_segment_gas_delta(
+        self,
+        world: "WorldEngine",
+        resources: GPUReactionResources,
+        segment_key: tuple[object, ...],
+    ) -> None:
+        if self._formal_pending_gas_delta_key == segment_key:
+            return
+        ctx = world.bridge.ctx
+        assert ctx is not None
+        gas_delta_count = int(world.gas_width * world.gas_height * world.gas_concentration.shape[0])
+        clear_program = self.programs["clear_cell_gas_delta"]
+        clear_program["delta_count"].value = gas_delta_count
+        resources.gas_delta_buffer.bind_to_storage_buffer(binding=0)
+        with self._profile_pass(world, "cell_gas_action_delta_segment_clear"):
+            clear_program.run((gas_delta_count + LOCAL_SIZE - 1) // LOCAL_SIZE, 1, 1)
+            ctx.memory_barrier(ctx.SHADER_STORAGE_BARRIER_BIT)
+        self._formal_pending_gas_delta_key = segment_key
+
+    def _flush_formal_segment_gas_delta(
+        self,
+        world: "WorldEngine",
+        resources: GPUReactionResources,
+        segment_key: tuple[object, ...] | None,
+    ) -> bool:
+        if segment_key is None or self._formal_pending_gas_delta_key != segment_key:
+            return False
+        ctx = world.bridge.ctx
+        assert ctx is not None
+        apply_program = self.programs["apply_cell_gas_delta"]
+        apply_program["gas_grid_size"].value = (world.gas_width, world.gas_height)
+        apply_program["gas_count"].value = int(world.gas_concentration.shape[0])
+        resources.gas_ping.use(location=0)
+        resources.gas_delta_buffer.bind_to_storage_buffer(binding=0)
+        resources.gas_pong.bind_to_image(0, read=False, write=True)
+        with self._profile_pass(world, "cell_gas_action_delta_segment_apply"):
+            apply_program.run(
+                (world.gas_width + LOCAL_SIZE - 1) // LOCAL_SIZE,
+                (world.gas_height + LOCAL_SIZE - 1) // LOCAL_SIZE,
+                int(world.gas_concentration.shape[0]),
+            )
+            self._sync_compute_writes(ctx)
+        self._download_gas_state(world, resources)
+        self._formal_pending_gas_delta_key = None
         return True
 
     def _clear_reaction_latches_on_bridge(self, world: "WorldEngine") -> None:
@@ -2289,25 +2352,35 @@ class GPUReactionPipeline:
     ) -> None:
         ctx = world.bridge.ctx
         assert ctx is not None
+        segment_key = self._formal_segment_batch_key
+        batch_formal_delta = (
+            self._formal_segment_batch_active()
+            and direct_core_outputs
+            and not may_have_flow_sources
+            and segment_key is not None
+        )
         gas_delta_count = int(world.gas_width * world.gas_height * world.gas_concentration.shape[0])
-        clear_program = self.programs["clear_cell_gas_delta"]
-        clear_program["delta_count"].value = gas_delta_count
-        resources.gas_delta_buffer.bind_to_storage_buffer(binding=0)
-        with self._profile_pass(world, "cell_gas_action_delta_clear"):
-            clear_groups = (gas_delta_count + LOCAL_SIZE - 1) // LOCAL_SIZE
-            if light_dose_guard_buffer is not None:
-                self._run_light_dose_guarded_dispatch(
-                    world,
-                    resources,
-                    clear_program,
-                    light_dose_guard_buffer,
-                    clear_groups,
-                    1,
-                    1,
-                )
-            else:
-                clear_program.run(clear_groups, 1, 1)
-            ctx.memory_barrier(ctx.SHADER_STORAGE_BARRIER_BIT)
+        if batch_formal_delta:
+            self._clear_formal_segment_gas_delta(world, resources, segment_key)
+        else:
+            clear_program = self.programs["clear_cell_gas_delta"]
+            clear_program["delta_count"].value = gas_delta_count
+            resources.gas_delta_buffer.bind_to_storage_buffer(binding=0)
+            with self._profile_pass(world, "cell_gas_action_delta_clear"):
+                clear_groups = (gas_delta_count + LOCAL_SIZE - 1) // LOCAL_SIZE
+                if light_dose_guard_buffer is not None:
+                    self._run_light_dose_guarded_dispatch(
+                        world,
+                        resources,
+                        clear_program,
+                        light_dose_guard_buffer,
+                        clear_groups,
+                        1,
+                        1,
+                    )
+                else:
+                    clear_program.run(clear_groups, 1, 1)
+                ctx.memory_barrier(ctx.SHADER_STORAGE_BARRIER_BIT)
 
         scatter_program = self.programs["scatter_cell_gas_action_delta"]
         scatter_program["cell_grid_size"].value = (world.width, world.height)
@@ -2344,6 +2417,8 @@ class GPUReactionPipeline:
             else:
                 scatter_program.run(scatter_group_x, scatter_group_y, 1)
             ctx.memory_barrier(ctx.SHADER_STORAGE_BARRIER_BIT | ctx.SHADER_IMAGE_ACCESS_BARRIER_BIT)
+        if batch_formal_delta:
+            return
 
         apply_program = self.programs["apply_cell_gas_delta"]
         apply_program["gas_grid_size"].value = (world.gas_width, world.gas_height)
@@ -2395,13 +2470,22 @@ class GPUReactionPipeline:
     ) -> None:
         ctx = world.bridge.ctx
         assert ctx is not None
+        segment_key = self._formal_segment_batch_key
+        batch_formal_delta = (
+            self._formal_segment_batch_active()
+            and not may_have_flow_sources
+            and segment_key is not None
+        )
         gas_delta_count = int(world.gas_width * world.gas_height * world.gas_concentration.shape[0])
-        clear_program = self.programs["clear_cell_gas_delta"]
-        clear_program["delta_count"].value = gas_delta_count
-        resources.gas_delta_buffer.bind_to_storage_buffer(binding=0)
-        with self._profile_pass(world, "cell_gas_action_delta_clear"):
-            clear_program.run((gas_delta_count + LOCAL_SIZE - 1) // LOCAL_SIZE, 1, 1)
-            ctx.memory_barrier(ctx.SHADER_STORAGE_BARRIER_BIT)
+        if batch_formal_delta:
+            self._clear_formal_segment_gas_delta(world, resources, segment_key)
+        else:
+            clear_program = self.programs["clear_cell_gas_delta"]
+            clear_program["delta_count"].value = gas_delta_count
+            resources.gas_delta_buffer.bind_to_storage_buffer(binding=0)
+            with self._profile_pass(world, "cell_gas_action_delta_clear"):
+                clear_program.run((gas_delta_count + LOCAL_SIZE - 1) // LOCAL_SIZE, 1, 1)
+                ctx.memory_barrier(ctx.SHADER_STORAGE_BARRIER_BIT)
 
         scatter_program = self.programs["scatter_cell_gas_action_delta_candidates"]
         scatter_program["cell_grid_size"].value = (world.width, world.height)
@@ -2427,6 +2511,8 @@ class GPUReactionPipeline:
                 | ctx.SHADER_IMAGE_ACCESS_BARRIER_BIT
                 | ctx.TEXTURE_FETCH_BARRIER_BIT
             )
+        if batch_formal_delta:
+            return
 
         apply_program = self.programs["apply_cell_gas_delta"]
         apply_program["gas_grid_size"].value = (world.gas_width, world.gas_height)
@@ -7399,10 +7485,10 @@ class GPUReactionPipeline:
             return GPUReactionBridgeInputLoads(
                 cell_core=True,
                 gas=reads_gas,
-                ambient=gas_published,
+                ambient=reads_ambient,
                 flow_velocity=modifies_gas and self._compiled_actions_include_flow_sources(compiled_actions),
-                cell_dose=False,
-                gas_dose=False,
+                cell_dose=reads_cell_dose,
+                gas_dose=reads_gas_dose,
             )
         if segment == "after_optics":
             return GPUReactionBridgeInputLoads(

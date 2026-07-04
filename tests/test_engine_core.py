@@ -39599,6 +39599,73 @@ def test_gpu_reaction_formal_cache_reuses_resident_state_between_after_optics_gr
     assert summary.get("material_gas_upload_state.load_bridge_gas", {}).get("count", 0) == 1
 
 
+def test_gpu_reaction_formal_segment_batches_modify_gas_delta_until_flush(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=32, height=32, gas_cell_size=4)
+    pipeline = engine.reaction_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU reaction pipeline is not available")
+    engine.replace_reaction_table(
+        [ReactionAction(ReactionType.MODIFY_GAS, gas_species="water_gas", speed=4.0, duration=0)],
+        {
+            "material_material": [],
+            "material_gas": [
+                PairReactionRule(
+                    lhs_material="gold_solid",
+                    rhs_gas="poison_gas",
+                    threshold=0.1,
+                    result_action=1,
+                ),
+            ],
+            "material_light": [],
+            "gas_gas": [],
+            "gas_light": [],
+            "self_rules": [],
+        },
+    )
+    engine.clear_cell_region(0, 0, engine.width, engine.height)
+    engine.set_cell(8, 8, "gold_solid", mark_dirty=False)
+    poison_gas = engine.rulebook.gas_id("poison_gas")
+    gy, gx = engine.cell_to_gas(8, 8)
+    engine.gas_concentration[poison_gas, gy, gx] = 0.5
+    _seed_gpu_authoritative_active_tiles(engine, [(0, 0)])
+    engine.bridge.mark_gpu_authoritative("cell_core", "gas_concentration", "ambient_temperature", "flow_velocity")
+
+    gas_publish_calls = 0
+    original_gas_publish = pipeline._publish_bridge_gas_state
+
+    def count_gas_publish(world: WorldEngine, resources: object, **kwargs: object) -> None:
+        nonlocal gas_publish_calls
+        gas_publish_calls += 1
+        original_gas_publish(world, resources, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(pipeline, "_publish_bridge_gas_state", count_gas_publish)
+    engine.profile_passes_enabled = True
+    engine.profile_passes_sync = True
+    pipeline.reset_pass_profile()
+    previous_frame_active = engine._world_simulation_frame_active
+    engine._world_simulation_frame_active = True
+    try:
+        engine.reaction_solver.reset_runtime_state(engine)
+        pipeline.begin_formal_reaction_segment(engine, "before_motion")
+        engine.reaction_solver._run_material_gas(engine)
+        engine.reaction_solver._run_material_gas(engine)
+        assert gas_publish_calls == 0
+        assert pipeline.flush_formal_reaction_segment(engine, "before_motion") is True
+    finally:
+        pipeline.end_formal_reaction_segment(engine, "before_motion")
+        engine._world_simulation_frame_active = previous_frame_active
+
+    summary = pipeline.last_pass_profile["summary"]
+    assert gas_publish_calls == 1
+    assert summary.get("cell_gas_action_delta_segment_clear", {}).get("count", 0) == 1
+    assert summary.get("cell_gas_action_delta_segment_apply", {}).get("count", 0) == 1
+    assert summary.get("cell_gas_action_delta_clear", {}).get("count", 0) == 0
+    assert summary.get("cell_gas_action_delta_apply", {}).get("count", 0) == 0
+    assert summary.get("cell_gas_action_delta_publish", {}).get("count", 0) == 0
+
+
 def test_gpu_reaction_formal_frame_applies_flow_sources_to_bridge_without_cpu_force_source_readback() -> None:
     engine = WorldEngine(width=16, height=16, gas_cell_size=4)
     pipeline = engine.reaction_solver.gpu_pipeline
@@ -50197,8 +50264,8 @@ def test_gpu_realtime_budget_active_does_not_skip_solver_stages(monkeypatch: pyt
     assert engine._gpu_realtime_budget_active() is True
     assert engine.reaction_solver.gpu_pipeline._reaction_state_segment("timed") == "before_motion"
     assert engine.reaction_solver.gpu_pipeline._reaction_state_segment("self") == "before_motion"
-    assert engine.reaction_solver.gpu_pipeline._reaction_state_segment("material_material") == "after_optics"
-    assert engine.reaction_solver.gpu_pipeline._reaction_state_segment("material_gas") == "after_optics"
+    assert engine.reaction_solver.gpu_pipeline._reaction_state_segment("material_material") == "before_motion"
+    assert engine.reaction_solver.gpu_pipeline._reaction_state_segment("material_gas") == "before_motion"
     assert {"gas", "heat", "motion", "liquid", "optics"}.issubset(set(calls))
     assert {"reaction_self", "reaction_material_gas", "reaction_material_light"}.issubset(set(calls))
     assert calls.count("reaction_material_material") == 1
@@ -50207,15 +50274,63 @@ def test_gpu_realtime_budget_active_does_not_skip_solver_stages(monkeypatch: pyt
     assert calls.index("reaction_self") < calls.index("liquid_pre_motion_intent")
     assert calls.index("reaction_timed") < calls.index("motion")
     assert calls.index("reaction_self") < calls.index("motion")
-    assert calls.index("optics") < calls.index("reaction_material_material")
-    assert calls.index("optics") < calls.index("reaction_material_gas")
-    assert calls.index("motion") < calls.index("reaction_material_material")
-    assert calls.index("motion") < calls.index("reaction_material_gas")
+    assert calls.index("reaction_material_material") < calls.index("liquid_pre_motion_intent")
+    assert calls.index("reaction_material_gas") < calls.index("motion")
+    assert calls.index("reaction_material_light") < calls.index("optics")
     assert report["gpu_realtime_budget"]["skipped_stages"] == []
     assert report["backends"]["gas"] == "gpu"
     assert report["backends"]["heat"] == "gpu"
     assert report["backends"]["liquid"] == "gpu"
     assert report["backends"]["optics"] == "gpu"
+
+
+def test_formal_gpu_world_step_schedules_collapse_without_dropping_dirty_regions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=16, height=16)
+    engine.simulation_backend = "gpu"
+    engine.formal_collapse_interval_frames = 4
+    engine.collapse_dirty_regions[:] = [(1, 2, 3, 4)]
+
+    collapse_frames: list[int] = []
+    gas_frames: list[int] = []
+
+    monkeypatch.setattr(engine, "_needs_pre_simulation_bridge_sync", lambda frame_input=None: False)
+    monkeypatch.setattr(type(engine.bridge), "decay_active_scheduler", lambda self, world: True)
+
+    def record_collapse(world: WorldEngine) -> None:
+        collapse_frames.append(int(world.frame_id))
+        world.collapse_dirty_regions.clear()
+        world.collapse_solver.last_backend = "gpu"
+
+    def record_gas(world: WorldEngine, dt: float) -> None:
+        gas_frames.append(int(world.frame_id))
+        world.gas_solver.last_backend = "gpu"
+
+    monkeypatch.setattr(engine.collapse_solver, "step", record_collapse)
+    monkeypatch.setattr(engine.gas_solver, "step", record_gas)
+    monkeypatch.setattr(engine.heat_solver, "step", lambda world, dt: setattr(world.heat_solver, "last_backend", "gpu"))
+    monkeypatch.setattr(engine.motion_solver, "step", lambda world, dt: setattr(world.motion_solver, "last_backend", "gpu"))
+    monkeypatch.setattr(engine.liquid_solver, "prepare_motion_flow_intent", lambda world: None)
+    monkeypatch.setattr(engine.liquid_solver, "step", lambda world: setattr(world.liquid_solver, "last_backend", "gpu"))
+    monkeypatch.setattr(engine.optics_solver, "step", lambda world: setattr(world.optics_solver, "last_backend", "gpu"))
+    monkeypatch.setattr(engine.reaction_solver, "_advance_timed_slots", lambda world: None)
+    monkeypatch.setattr(engine.reaction_solver, "_run_self_rules", lambda world: None)
+    monkeypatch.setattr(engine.reaction_solver, "_run_material_material", lambda world: None)
+    monkeypatch.setattr(engine.reaction_solver, "_run_material_gas", lambda world: None)
+    monkeypatch.setattr(engine.reaction_solver, "_run_material_light", lambda world: None)
+    monkeypatch.setattr(engine.reaction_solver, "_run_gas_gas", lambda world: None)
+    monkeypatch.setattr(engine.reaction_solver, "_run_gas_light", lambda world: None)
+    monkeypatch.setattr(engine.reaction_solver.gpu_pipeline, "clear_reaction_latches", lambda world: True)
+
+    for index in range(5):
+        if index == 1:
+            engine.collapse_dirty_regions[:] = [(5, 6, 7, 8)]
+        engine.step()
+
+    assert collapse_frames == [1, 5]
+    assert gas_frames == [1, 2, 3, 4, 5]
+    assert engine.collapse_dirty_regions == []
 
 
 def test_gpu_realtime_budget_ignores_total_resolution_when_gpu_active_scheduler_is_authoritative() -> None:
