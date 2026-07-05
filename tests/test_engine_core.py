@@ -38455,6 +38455,55 @@ def test_gpu_reaction_action_compile_cache_uses_bridge_generation_and_invalidate
     assert np.isclose(float(patched_compiled[1][action_index, 0]), original_delta + 5.0)
 
 
+def test_gpu_reaction_timed_action_compile_uses_only_timer_slots() -> None:
+    engine = WorldEngine(width=16, height=16)
+    pipeline = engine.reaction_solver.gpu_pipeline
+    try:
+        engine.replace_reaction_table(
+            [
+                ReactionAction(ReactionType.MODIFY_TEMPERATURE, delta=3.0, duration=0),
+                ReactionAction(
+                    ReactionType.MODIFY_GAS,
+                    gas_species="water_gas",
+                    speed=2.0,
+                    strength=1.0,
+                    range_cells=4,
+                    duration=0,
+                ),
+            ],
+            {
+                "material_material": [],
+                "material_gas": [],
+                "material_light": [],
+                "gas_gas": [],
+                "gas_light": [],
+                "self_rules": [],
+            },
+        )
+        engine.bridge.sync_rule_tables(engine)
+        material_rows = engine.bridge.shadow_typed_tables["material_table"].copy()
+        action_rows = engine.bridge.shadow_typed_tables["reaction_action_table"]
+        gold_id = engine.rulebook.material_id("gold_solid")
+        material_rows["reaction_slots"][:, :] = -1
+        material_rows["reaction_slots"][gold_id] = (1, -1, -1, -1, 2, -1, -1, -1)
+
+        all_used = pipeline._cached_used_action_indices_for_material_slots(engine, material_rows)
+        timed_used = pipeline._cached_used_action_indices_for_material_slots(engine, material_rows, slot_count=4)
+
+        assert all_used is not None
+        assert timed_used is not None
+        assert 1 in all_used
+        assert 2 in all_used
+        assert 1 in timed_used
+        assert 2 not in timed_used
+
+        timed_compiled = pipeline._compile_action_buffers_cached(engine, action_rows, timed_used)
+        assert timed_compiled is not None
+        assert not pipeline._compiled_actions_include_flow_sources(timed_compiled)
+    finally:
+        engine.close()
+
+
 def test_gpu_reaction_action_compile_paths_use_generation_caches_source() -> None:
     assert "_cached_used_action_indices_for_material_slots" in inspect.getsource(GPUReactionPipeline.run_timed_actions)
     assert "_cached_used_action_indices_for_self_rules" in inspect.getsource(GPUReactionPipeline.run_self_actions)

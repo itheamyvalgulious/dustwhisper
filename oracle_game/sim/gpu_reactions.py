@@ -326,7 +326,7 @@ class GPUReactionPipeline:
         action_table = world.bridge.shadow_typed_tables["reaction_action_table"]
         material_table = world.bridge.shadow_typed_tables["material_table"]
         with self._profile_pass(world, "timed_compile_actions"):
-            used_indices = self._cached_used_action_indices_for_material_slots(world, material_table)
+            used_indices = self._cached_used_action_indices_for_material_slots(world, material_table, slot_count=4)
             compiled = self._compile_action_buffers_cached(world, action_table, used_indices)
         if compiled is None:
             return None
@@ -9489,11 +9489,19 @@ class GPUReactionPipeline:
             used_indices.add(action_index)
         return used_indices
 
-    def _used_action_indices_for_material_slots(self, material_table: np.ndarray) -> set[int] | None:
+    def _used_action_indices_for_material_slots(
+        self,
+        material_table: np.ndarray,
+        *,
+        slot_count: int | None = None,
+    ) -> set[int] | None:
         if "reaction_slots" not in material_table.dtype.names:
             return None
         used_indices: set[int] = set()
-        for raw_action in np.asarray(material_table["reaction_slots"], dtype=np.int32).reshape(-1):
+        reaction_slots = np.asarray(material_table["reaction_slots"], dtype=np.int32)
+        if slot_count is not None:
+            reaction_slots = reaction_slots[:, : max(0, min(int(slot_count), reaction_slots.shape[1]))]
+        for raw_action in reaction_slots.reshape(-1):
             action_index = int(raw_action)
             if action_index < 0:
                 continue
@@ -9506,16 +9514,22 @@ class GPUReactionPipeline:
         self,
         world: "WorldEngine",
         material_table: np.ndarray,
+        *,
+        slot_count: int | None = None,
     ) -> set[int] | None:
         key = (
             "material_slots",
             int(world.bridge.table_generations.get("materials", 0)),
             int(material_table.shape[0]),
+            None if slot_count is None else int(slot_count),
         )
         if key not in self._used_action_indices_cache:
             if len(self._used_action_indices_cache) > 64:
                 self._used_action_indices_cache.clear()
-            self._used_action_indices_cache[key] = self._used_action_indices_for_material_slots(material_table)
+            self._used_action_indices_cache[key] = self._used_action_indices_for_material_slots(
+                material_table,
+                slot_count=slot_count,
+            )
         return self._used_action_indices_cache[key]
 
     def _used_action_indices_for_self_rules(
