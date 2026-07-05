@@ -5686,6 +5686,10 @@ class GPUReactionPipeline:
                 return texelFetch(scale_hi_tex, cell, 0);
             }}
 
+            bool action_vector_empty(vec4 actions) {{
+                return all(lessThan(abs(actions), vec4(0.5)));
+            }}
+
             void main() {{
                 ivec2 cell = ivec2(gl_GlobalInvocationID.xy);
                 if (cell.x >= cell_grid_size.x || cell.y >= cell_grid_size.y) {{
@@ -5698,18 +5702,14 @@ class GPUReactionPipeline:
                     min(gas_grid_size.x - 1, max(0, cell.x / gas_cell_size)),
                     min(gas_grid_size.y - 1, max(0, cell.y / gas_cell_size))
                 );
-                scatter_action_vector(
-                    gas_cell,
-                    fetch_action_lo(cell),
-                    fetch_scale_lo(cell),
-                    0
-                );
-                scatter_action_vector(
-                    gas_cell,
-                    fetch_action_hi(cell),
-                    fetch_scale_hi(cell),
-                    4
-                );
+                vec4 action_lo = fetch_action_lo(cell);
+                if (!action_vector_empty(action_lo)) {{
+                    scatter_action_vector(gas_cell, action_lo, fetch_scale_lo(cell), 0);
+                }}
+                vec4 action_hi = fetch_action_hi(cell);
+                if (!action_vector_empty(action_hi)) {{
+                    scatter_action_vector(gas_cell, action_hi, fetch_scale_hi(cell), 4);
+                }}
             }}
             """
         )
@@ -5820,6 +5820,10 @@ class GPUReactionPipeline:
                 }}
             }}
 
+            bool action_vector_empty(vec4 actions) {{
+                return all(lessThan(abs(actions), vec4(0.5)));
+            }}
+
             void main() {{
                 uint candidate_slot = linear_thread_index();
                 if (candidate_slot >= timed_candidate_count[0]) {{
@@ -5834,18 +5838,24 @@ class GPUReactionPipeline:
                     min(gas_grid_size.x - 1, max(0, cell.x / gas_cell_size)),
                     min(gas_grid_size.y - 1, max(0, cell.y / gas_cell_size))
                 );
-                scatter_action_vector(
-                    gas_cell,
-                    texelFetch(deferred_lo_local_tex, ivec3(cell, 0), 0),
-                    texelFetch(deferred_lo_local_tex, ivec3(cell, 1), 0),
-                    0
-                );
-                scatter_action_vector(
-                    gas_cell,
-                    texelFetch(deferred_hi_local_tex, ivec3(cell, 0), 0),
-                    texelFetch(deferred_hi_local_tex, ivec3(cell, 1), 0),
-                    4
-                );
+                vec4 action_lo = texelFetch(deferred_lo_local_tex, ivec3(cell, 0), 0);
+                if (!action_vector_empty(action_lo)) {{
+                    scatter_action_vector(
+                        gas_cell,
+                        action_lo,
+                        texelFetch(deferred_lo_local_tex, ivec3(cell, 1), 0),
+                        0
+                    );
+                }}
+                vec4 action_hi = texelFetch(deferred_hi_local_tex, ivec3(cell, 0), 0);
+                if (!action_vector_empty(action_hi)) {{
+                    scatter_action_vector(
+                        gas_cell,
+                        action_hi,
+                        texelFetch(deferred_hi_local_tex, ivec3(cell, 1), 0),
+                        4
+                    );
+                }}
             }}
             """
         )
