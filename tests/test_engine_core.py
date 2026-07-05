@@ -52470,7 +52470,7 @@ def test_formal_gpu_reaction_direct_core_skips_scatter_and_consumes_local_output
         water_gas = engine.rulebook.gas_id("water_gas")
         gas_y, gas_x = engine.cell_to_gas(4, 4)
 
-        assert velocity_copy_calls >= 2
+        assert velocity_copy_calls == 1
         assert material_side_effect_direct_flags == [True]
         assert gas_side_effect_direct_flags == [True]
         assert segment_accumulate_direct_flags and all(segment_accumulate_direct_flags)

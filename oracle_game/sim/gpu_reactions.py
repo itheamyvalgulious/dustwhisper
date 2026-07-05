@@ -1831,9 +1831,12 @@ class GPUReactionPipeline:
         with self._profile_pass(world, f"{program_name}_shader"):
             program.run(group_x, group_y, 1)
             self._sync_compute_writes(world.bridge.ctx)
+        apply_material_side_effects = self._compiled_actions_include_emit_material(compiled_actions)
+        material_side_effect_copies_velocity = bool(direct_core_outputs and apply_material_side_effects)
         if direct_core_outputs:
-            with self._profile_pass(world, f"{program_name}_velocity_copy"):
-                self._copy_current_velocity_to_next_role(world, resources, group_x, group_y)
+            if not material_side_effect_copies_velocity:
+                with self._profile_pass(world, f"{program_name}_velocity_copy"):
+                    self._copy_current_velocity_to_next_role(world, resources, group_x, group_y)
         else:
             with self._profile_pass(world, f"{program_name}_scatter"):
                 self._scatter_local_cell_action_outputs(
@@ -1842,12 +1845,13 @@ class GPUReactionPipeline:
                     group_x,
                     group_y,
                 )
-        if self._compiled_actions_include_emit_material(compiled_actions):
+        if apply_material_side_effects:
             with self._profile_pass(world, f"{program_name}_material_side_effects"):
                 self._run_cell_material_side_effect_pass(
                     world,
                     resources,
                     direct_core_outputs=direct_core_outputs,
+                    copy_velocity_passthrough=material_side_effect_copies_velocity,
                 )
         if gas_side_effects_required:
             with self._profile_pass(world, f"{program_name}_gas_side_effects"):
@@ -1938,9 +1942,11 @@ class GPUReactionPipeline:
         with self._profile_pass(world, f"{program_name}_shader"):
             program.run(group_x, group_y, 1)
             self._sync_compute_writes(world.bridge.ctx)
+        material_side_effect_copies_velocity = bool(direct_core_outputs and apply_material_side_effects)
         if direct_core_outputs:
-            with self._profile_pass(world, f"{program_name}_velocity_copy"):
-                self._copy_current_velocity_to_next_role(world, resources, group_x, group_y)
+            if not material_side_effect_copies_velocity:
+                with self._profile_pass(world, f"{program_name}_velocity_copy"):
+                    self._copy_current_velocity_to_next_role(world, resources, group_x, group_y)
         else:
             with self._profile_pass(world, f"{program_name}_scatter"):
                 self._scatter_local_cell_action_outputs(
@@ -1955,6 +1961,7 @@ class GPUReactionPipeline:
                     world,
                     resources,
                     direct_core_outputs=direct_core_outputs,
+                    copy_velocity_passthrough=material_side_effect_copies_velocity,
                 )
         if apply_gas_side_effects:
             with self._profile_pass(world, f"{program_name}_gas_side_effects"):
@@ -2695,6 +2702,7 @@ class GPUReactionPipeline:
         direct_core_outputs: bool = False,
         timed_candidate_outputs: bool = False,
         light_dose_guard_buffer: Any | None = None,
+        copy_velocity_passthrough: bool = False,
     ) -> None:
         if timed_candidate_outputs:
             self._run_timed_candidate_material_side_effect_pass(world, resources)
@@ -2702,6 +2710,7 @@ class GPUReactionPipeline:
         program = self.programs["cell_material_side_effects"]
         self._set_uniform_if_present(program, "cell_grid_size", (world.width, world.height))
         self._set_uniform_if_present(program, "use_local_deferred_outputs", bool(direct_core_outputs))
+        self._set_uniform_if_present(program, "copy_velocity_passthrough", bool(copy_velocity_passthrough))
         material_in, _phase_in, temp_in, _integrity_in, velocity_in, _timer_in = self._current_cell_textures(resources)
         material_in.use(location=0)
         velocity_in.use(location=1)
@@ -5064,6 +5073,7 @@ class GPUReactionPipeline:
             layout(local_size_x={LOCAL_SIZE}, local_size_y={LOCAL_SIZE}, local_size_z=1) in;
             uniform ivec2 cell_grid_size;
             uniform bool use_local_deferred_outputs;
+            uniform bool copy_velocity_passthrough;
             layout(binding=0) uniform sampler2D material_tex;
             layout(binding=1) uniform sampler2D velocity_tex;
             layout(binding=2) uniform sampler2D action_lo_tex;
@@ -5206,6 +5216,9 @@ class GPUReactionPipeline:
                 ivec2 target = ivec2(gl_GlobalInvocationID.xy);
                 if (target.x >= cell_grid_size.x || target.y >= cell_grid_size.y) {{
                     return;
+                }}
+                if (copy_velocity_passthrough) {{
+                    imageStore(velocity_out_img, target, texelFetch(velocity_tex, target, 0));
                 }}
                 if (texelFetch(material_tex, target, 0).x > 0.5) {{
                     return;
