@@ -39776,6 +39776,72 @@ def test_gpu_reaction_formal_frame_deferred_batch_skips_full_grid_readback() -> 
     assert np.allclose(bridge_emitters[0, 1], emitters[0, 1])
 
 
+def test_formal_gpu_reaction_deferred_light_emitters_publish_once_at_segment_flush(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=16, height=16, gas_cell_size=4)
+    pipeline = engine.reaction_solver.gpu_pipeline
+    if not pipeline.available(engine):
+        pytest.skip("GPU reaction pipeline is not available")
+    try:
+        engine.replace_reaction_table(
+            [ReactionAction(ReactionType.MODIFY_TEMPERATURE, delta=1.0, duration=0)],
+            {
+                "material_material": [],
+                "material_gas": [],
+                "material_light": [],
+                "gas_gas": [],
+                "gas_light": [],
+                "self_rules": [],
+            },
+        )
+        engine.patch_material("gold_solid", reaction_slots=(1, -1, -1, -1, -1, -1, -1, -1))
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(4, 4, "gold_solid", mark_dirty=False)
+        engine.timer_pack[4, 4, 0] = 1
+        engine.active.mark_rect(0, 0, engine.width, engine.height)
+        engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "gas_concentration",
+            "ambient_temperature",
+            "flow_velocity",
+            "cell_optical_dose",
+            "gas_optical_dose",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+
+        publish_calls = 0
+        original_publish = pipeline._publish_bridge_light_emitters
+
+        def count_publish(world: WorldEngine, resources: object) -> None:
+            nonlocal publish_calls
+            publish_calls += 1
+            original_publish(world, resources)
+
+        monkeypatch.setattr(pipeline, "_publish_bridge_light_emitters", count_publish)
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            assert pipeline.begin_formal_reaction_segment(engine, "before_motion") is True
+            batch = pipeline.run_timed_actions(
+                engine,
+                solve_cell_mask=np.ones((engine.height, engine.width), dtype=np.bool_),
+            )
+            assert batch is FORMAL_GPU_EMPTY_DEFERRED_BATCH
+            assert publish_calls == 0
+            assert pipeline.flush_formal_reaction_segment(engine, "before_motion") is True
+            assert publish_calls == 1
+        finally:
+            pipeline.end_formal_reaction_segment(engine, "before_motion")
+            engine._world_simulation_frame_active = previous_frame_active
+    finally:
+        engine.close()
+
+
 def test_formal_gpu_reaction_transient_clear_does_not_zero_light_emitter_buffer_on_cpu() -> None:
     class NoWriteBuffer:
         def __init__(self, inner: object) -> None:

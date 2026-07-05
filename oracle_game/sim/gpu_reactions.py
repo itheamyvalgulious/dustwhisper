@@ -1543,6 +1543,9 @@ class GPUReactionPipeline:
         if "dose" in pending:
             with self._profile_pass(world, "publish_bridge_dose"):
                 self._publish_bridge_dose_state(world, self.resources)
+        if "light_emitters" in pending:
+            with self._profile_pass(world, "publish_bridge_light_emitters"):
+                self._publish_bridge_light_emitters(world, self.resources)
         self._formal_pending_bridge_publish.clear()
         self._formal_pending_bridge_publish_key = None
         return True
@@ -8924,7 +8927,10 @@ class GPUReactionPipeline:
                     "GPU reaction pipeline encountered unsupported deferred action indices "
                     f"{unsupported}; CPU fallback is disabled"
                 )
-            self._publish_bridge_light_emitters(world, resources)
+            if self._formal_segment_batch_active():
+                self._mark_formal_bridge_publish_pending(world, resources, "light_emitters")
+            else:
+                self._publish_bridge_light_emitters(world, resources)
             return FORMAL_GPU_EMPTY_DEFERRED_BATCH
         reaction_counts = np.frombuffer(resources.light_emitter_count.read(), dtype=np.uint32, count=16).copy()
         emitted_light_count = int(reaction_counts[0])
