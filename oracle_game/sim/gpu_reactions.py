@@ -5698,16 +5698,21 @@ class GPUReactionPipeline:
                 if (texelFetch(active_cell_tex, cell, 0).x <= 0.5) {{
                     return;
                 }}
+                vec4 action_lo = fetch_action_lo(cell);
+                vec4 action_hi = fetch_action_hi(cell);
+                bool has_action_lo = !action_vector_empty(action_lo);
+                bool has_action_hi = !action_vector_empty(action_hi);
+                if (!has_action_lo && !has_action_hi) {{
+                    return;
+                }}
                 ivec2 gas_cell = ivec2(
                     min(gas_grid_size.x - 1, max(0, cell.x / gas_cell_size)),
                     min(gas_grid_size.y - 1, max(0, cell.y / gas_cell_size))
                 );
-                vec4 action_lo = fetch_action_lo(cell);
-                if (!action_vector_empty(action_lo)) {{
+                if (has_action_lo) {{
                     scatter_action_vector(gas_cell, action_lo, fetch_scale_lo(cell), 0);
                 }}
-                vec4 action_hi = fetch_action_hi(cell);
-                if (!action_vector_empty(action_hi)) {{
+                if (has_action_hi) {{
                     scatter_action_vector(gas_cell, action_hi, fetch_scale_hi(cell), 4);
                 }}
             }}
@@ -5834,12 +5839,18 @@ class GPUReactionPipeline:
                     int(cell_index % uint(cell_grid_size.x)),
                     int(cell_index / uint(cell_grid_size.x))
                 );
+                vec4 action_lo = texelFetch(deferred_lo_local_tex, ivec3(cell, 0), 0);
+                vec4 action_hi = texelFetch(deferred_hi_local_tex, ivec3(cell, 0), 0);
+                bool has_action_lo = !action_vector_empty(action_lo);
+                bool has_action_hi = !action_vector_empty(action_hi);
+                if (!has_action_lo && !has_action_hi) {{
+                    return;
+                }}
                 ivec2 gas_cell = ivec2(
                     min(gas_grid_size.x - 1, max(0, cell.x / gas_cell_size)),
                     min(gas_grid_size.y - 1, max(0, cell.y / gas_cell_size))
                 );
-                vec4 action_lo = texelFetch(deferred_lo_local_tex, ivec3(cell, 0), 0);
-                if (!action_vector_empty(action_lo)) {{
+                if (has_action_lo) {{
                     scatter_action_vector(
                         gas_cell,
                         action_lo,
@@ -5847,8 +5858,7 @@ class GPUReactionPipeline:
                         0
                     );
                 }}
-                vec4 action_hi = texelFetch(deferred_hi_local_tex, ivec3(cell, 0), 0);
-                if (!action_vector_empty(action_hi)) {{
+                if (has_action_hi) {{
                     scatter_action_vector(
                         gas_cell,
                         action_hi,
@@ -6090,6 +6100,10 @@ class GPUReactionPipeline:
                 return texelFetch(scale_hi_tex, cell, 0);
             }}
 
+            bool action_vector_empty(vec4 actions) {{
+                return all(lessThan(abs(actions), vec4(0.5)));
+            }}
+
             bool action_layer_enabled(int layer) {{
                 if (layer < 0) {{
                     return false;
@@ -6119,22 +6133,28 @@ class GPUReactionPipeline:
                     for (int x = x0; x < x1; ++x) {{
                         ivec2 cell = ivec2(x, y);
                         if (apply_actions_for_layer) {{
-                            apply_action_vector(
-                                gid.xy,
-                                gid.z,
-                                fetch_action_lo(cell),
-                                fetch_scale_lo(cell),
-                                0,
-                                gas_value
-                            );
-                            apply_action_vector(
-                                gid.xy,
-                                gid.z,
-                                fetch_action_hi(cell),
-                                fetch_scale_hi(cell),
-                                4,
-                                gas_value
-                            );
+                            vec4 action_lo = fetch_action_lo(cell);
+                            if (!action_vector_empty(action_lo)) {{
+                                apply_action_vector(
+                                    gid.xy,
+                                    gid.z,
+                                    action_lo,
+                                    fetch_scale_lo(cell),
+                                    0,
+                                    gas_value
+                                );
+                            }}
+                            vec4 action_hi = fetch_action_hi(cell);
+                            if (!action_vector_empty(action_hi)) {{
+                                apply_action_vector(
+                                    gid.xy,
+                                    gid.z,
+                                    action_hi,
+                                    fetch_scale_hi(cell),
+                                    4,
+                                    gas_value
+                                );
+                            }}
                         }}
                         if (material_gas_rule_count > 0) {{
                             apply_material_gas_rhs_consume(gid.xy, gid.z, cell, gas_value);
