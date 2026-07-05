@@ -6422,6 +6422,8 @@ class GPUReactionPipeline:
                 int deferred_count = 0;
                 int material_id = int(material_value + 0.5);
                 if (solve_active(gid) && material_id > 0) {
+                    int phase_id = int(phase_value + 0.5);
+                    uint material_reaction_tags = material_tags[clamp_material_id(material_id)].x;
                     for (int word_index = 0; word_index < rule_candidate_word_count; ++word_index) {
                         uint candidate_bits = lhs_rule_candidate_word(material_id, word_index);
                         while (candidate_bits != 0u) {
@@ -6437,12 +6439,12 @@ class GPUReactionPipeline:
                             if (ri.x >= 0 && material_id != ri.x) {
                                 continue;
                             }
-                            if (!mask_matches(material_tags[clamp_material_id(material_id)].x, rt.x)) {
+                            if (!mask_matches(material_reaction_tags, rt.x)) {
                                 continue;
                             }
                             int phase_mask = int(rt.z);
                             float rule_scale = rf.w;
-                            if (phase_mask != 0 && ((1 << int(phase_value + 0.5)) & phase_mask) == 0) {
+                            if (phase_mask != 0 && ((1 << phase_id) & phase_mask) == 0) {
                                 continue;
                             }
                             if (temp_value < rf.x || temp_value > rf.y) {
@@ -6582,6 +6584,8 @@ class GPUReactionPipeline:
                 );
                 int material_id = int(material_value + 0.5);
                 if (material_id > 0) {
+                    int phase_id = int(phase_value + 0.5);
+                    uint material_reaction_tags = material_tags[clamp_material_id(material_id)].y;
                     for (int word_index = 0; word_index < rule_candidate_word_count; ++word_index) {
                         uint candidate_bits = lhs_rule_candidate_word(material_id, word_index);
                         while (candidate_bits != 0u) {
@@ -6597,12 +6601,12 @@ class GPUReactionPipeline:
                             if (ri.x >= 0 && material_id != ri.x) {
                                 continue;
                             }
-                            if (!mask_matches(material_tags[clamp_material_id(material_id)].y, rt.x)) {
+                            if (!mask_matches(material_reaction_tags, rt.x)) {
                                 continue;
                             }
                             int phase_mask = int(rt.z);
                             float rule_scale = rf.w;
-                            if (phase_mask != 0 && ((1 << int(phase_value + 0.5)) & phase_mask) == 0) {
+                            if (phase_mask != 0 && ((1 << phase_id) & phase_mask) == 0) {
                                 continue;
                             }
                             if (temp_value < rf.x || temp_value > rf.y) {
@@ -6733,6 +6737,8 @@ class GPUReactionPipeline:
                 }
                 int material_id = int(material_value + 0.5);
                 if (material_id > 0) {
+                    int phase_id = int(phase_value + 0.5);
+                    uint material_reaction_tags = material_tags[clamp_material_id(material_id)].z;
                     for (int word_index = 0; word_index < rule_candidate_word_count; ++word_index) {
                         uint candidate_bits = lhs_rule_candidate_word(material_id, word_index);
                         while (candidate_bits != 0u) {
@@ -6748,12 +6754,12 @@ class GPUReactionPipeline:
                             if (ri.x >= 0 && material_id != ri.x) {
                                 continue;
                             }
-                            if (!mask_matches(material_tags[clamp_material_id(material_id)].z, rt.x)) {
+                            if (!mask_matches(material_reaction_tags, rt.x)) {
                                 continue;
                             }
                             float rule_scale = rf.w;
                             int phase_mask = int(rt.z);
-                            if (phase_mask != 0 && ((1 << int(phase_value + 0.5)) & phase_mask) == 0) {
+                            if (phase_mask != 0 && ((1 << phase_id) & phase_mask) == 0) {
                                 continue;
                             }
                             if (temp_value < rf.x || temp_value > rf.y) {
