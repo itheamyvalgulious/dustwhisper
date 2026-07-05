@@ -479,8 +479,19 @@ class GPUReactionPipeline:
             return None
         self._ensure_programs(world.bridge.ctx)
         resources = self._ensure_resources(world)
+        flow_source_layers = self._compiled_self_rule_flow_source_layers(
+            rule_table,
+            material_table,
+            compiled,
+        )
         with self._profile_pass(world, "self_upload_state"):
-            self._upload_state(world, resources, reaction_group="self", compiled_actions=compiled)
+            self._upload_state(
+                world,
+                resources,
+                reaction_group="self",
+                compiled_actions=compiled,
+                flow_source_layers=flow_source_layers,
+            )
         upload_cell_mask, upload_gas_mask = self._active_masks_for_cell_reaction_upload(
             world,
             solve_cell_mask,
@@ -507,6 +518,7 @@ class GPUReactionPipeline:
             apply_gas_side_effects=self._compiled_actions_include_modify_gas(compiled),
             modify_gas_layer_mask=self._compiled_modify_gas_layer_mask(compiled, world.gas_concentration.shape[0]),
             may_have_flow_sources=self._compiled_actions_include_flow_sources(compiled),
+            flow_source_layers=flow_source_layers,
         )
         with self._profile_pass(world, "self_publish_cell_state"):
             self._download_cell_state(
@@ -7606,6 +7618,7 @@ class GPUReactionPipeline:
         compiled_actions: tuple[np.ndarray, np.ndarray] | None = None,
         light_dose_guard_buffer: Any | None = None,
         publishes_gas: bool | None = None,
+        flow_source_layers: int | None = None,
     ) -> None:
         world.bridge.sync_rule_tables(world)
         authoritative = world.bridge.gpu_authoritative_resources
@@ -7713,6 +7726,11 @@ class GPUReactionPipeline:
             resources.gas_dose_pong.write(world.gas_optical_dose.astype("f4").tobytes())
         if formal_gpu_frame:
             clear_requirements = self._transient_clear_requirements(reaction_group, compiled_actions)
+            if flow_source_layers is not None:
+                clear_requirements["flow_source_layers"] = max(
+                    1,
+                    min(FLOW_SOURCE_LAYERS, int(flow_source_layers)),
+                )
             if clear_requirements["clear_light_counters"]:
                 if cache_key is None:
                     self._formal_light_counters_cleared_key = None
@@ -9102,6 +9120,45 @@ class GPUReactionPipeline:
     def _compiled_actions_include_flow_sources(self, compiled_actions: tuple[np.ndarray, np.ndarray]) -> bool:
         action_i = np.asarray(compiled_actions[0], dtype=np.int32)
         return bool(np.any((action_i[:, 0] == TYPE_MODIFY_GAS) & (action_i[:, 3] != 0)))
+
+    @staticmethod
+    def _compiled_self_rule_flow_source_layers(
+        rule_table: np.ndarray,
+        material_table: np.ndarray,
+        compiled_actions: tuple[np.ndarray, np.ndarray],
+    ) -> int:
+        action_i = np.asarray(compiled_actions[0], dtype=np.int32)
+        if not bool(np.any((action_i[:, 0] == TYPE_MODIFY_GAS) & (action_i[:, 3] != 0))):
+            return FLOW_SOURCE_LAYERS
+        if "trigger_slot_index" not in rule_table.dtype.names or "reaction_slots" not in material_table.dtype.names:
+            return FLOW_SOURCE_LAYERS
+        material_count = int(material_table.shape[0])
+        max_flow_slot = -1
+        for rule in rule_table:
+            slot_index = int(rule["trigger_slot_index"])
+            if slot_index < 0:
+                continue
+            if slot_index >= 8:
+                return FLOW_SOURCE_LAYERS
+            material_id = int(rule["material_id"]) if "material_id" in rule_table.dtype.names else -1
+            if material_id > 0:
+                if material_id >= material_count:
+                    return FLOW_SOURCE_LAYERS
+                raw_actions = np.asarray(material_table["reaction_slots"][material_id : material_id + 1, slot_index])
+            else:
+                raw_actions = np.asarray(material_table["reaction_slots"][:, slot_index])
+            for raw_action in np.asarray(raw_actions, dtype=np.int32).reshape(-1):
+                action_index = int(raw_action)
+                if action_index < 0:
+                    continue
+                if action_index >= action_i.shape[0]:
+                    return FLOW_SOURCE_LAYERS
+                ai = action_i[action_index]
+                if int(ai[0]) == TYPE_MODIFY_GAS and int(ai[3]) != 0:
+                    max_flow_slot = max(max_flow_slot, slot_index)
+        if max_flow_slot < 0:
+            return FLOW_SOURCE_LAYERS
+        return max(1, min(FLOW_SOURCE_LAYERS, (max_flow_slot + 1) * 4))
 
     @staticmethod
     def _compiled_modify_gas_layer_mask(compiled_actions: tuple[np.ndarray, np.ndarray], gas_count: int) -> int:
