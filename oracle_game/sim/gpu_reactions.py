@@ -361,6 +361,7 @@ class GPUReactionPipeline:
             apply_gas_side_effects=self._compiled_actions_include_modify_gas(compiled),
             modify_gas_layer_mask=self._compiled_modify_gas_layer_mask(compiled, world.gas_concentration.shape[0]),
             may_have_flow_sources=self._compiled_actions_include_flow_sources(compiled),
+            flow_source_layers=16,
         )
         with self._profile_pass(world, "timed_publish_cell_state"):
             self._download_cell_state(world, resources, direct_core_outputs=formal_gpu_frame)
@@ -1921,6 +1922,7 @@ class GPUReactionPipeline:
         apply_gas_side_effects: bool = False,
         modify_gas_layer_mask: int | None = None,
         may_have_flow_sources: bool = True,
+        flow_source_layers: int = FLOW_SOURCE_LAYERS,
     ) -> None:
         program = self.programs[program_name]
         self._set_uniform_if_present(program, "cell_grid_size", (world.width, world.height))
@@ -2009,6 +2011,7 @@ class GPUReactionPipeline:
                     modify_gas_layer_mask=modify_gas_layer_mask,
                     direct_core_outputs=direct_core_outputs,
                     action_gas_delta_already_applied=direct_action_gas_delta,
+                    flow_source_layers=flow_source_layers,
                 )
 
     def _run_timed_candidate_action_pass(
@@ -2335,6 +2338,7 @@ class GPUReactionPipeline:
         timed_candidate_outputs: bool = False,
         light_dose_guard_buffer: Any | None = None,
         action_gas_delta_already_applied: bool = False,
+        flow_source_layers: int = FLOW_SOURCE_LAYERS,
     ) -> None:
         if action_gas_delta_already_applied:
             if may_have_flow_sources:
@@ -2351,6 +2355,7 @@ class GPUReactionPipeline:
                         direct_core_outputs=direct_core_outputs,
                         light_dose_guard_buffer=light_dose_guard_buffer,
                         gas_delta_already_applied=True,
+                        flow_source_layers=flow_source_layers,
                     )
                 with self._profile_pass(world, "cell_gas_action_delta_flow_sources"):
                     self._append_flow_sources_from_gpu(
@@ -2358,6 +2363,7 @@ class GPUReactionPipeline:
                         resources,
                         may_have_flow_sources=may_have_flow_sources,
                         light_dose_guard_buffer=light_dose_guard_buffer,
+                        flow_source_layers=flow_source_layers,
                     )
             return
         if timed_candidate_outputs:
@@ -2382,6 +2388,7 @@ class GPUReactionPipeline:
                 may_have_flow_sources=may_have_flow_sources,
                 direct_core_outputs=direct_core_outputs,
                 light_dose_guard_buffer=light_dose_guard_buffer,
+                flow_source_layers=flow_source_layers,
             )
             return
         program = self.programs["cell_gas_side_effects"]
@@ -2460,6 +2467,7 @@ class GPUReactionPipeline:
         direct_core_outputs: bool = False,
         light_dose_guard_buffer: Any | None = None,
         gas_delta_already_applied: bool = False,
+        flow_source_layers: int = FLOW_SOURCE_LAYERS,
     ) -> None:
         ctx = world.bridge.ctx
         assert ctx is not None
@@ -2572,6 +2580,7 @@ class GPUReactionPipeline:
                 resources,
                 may_have_flow_sources=may_have_flow_sources,
                 light_dose_guard_buffer=light_dose_guard_buffer,
+                flow_source_layers=flow_source_layers,
             )
 
     def _run_timed_candidate_gas_side_effect_pass(
@@ -3477,6 +3486,7 @@ class GPUReactionPipeline:
             uniform int gas_cell_size;
             uniform int tile_size;
             uniform int active_ttl_reset;
+            uniform int flow_source_layers;
             uniform float impulse_dt;
             layout(binding=0) uniform sampler2D flow_velocity_tex;
             layout(binding=1) uniform sampler2DArray flow_source_tex;
@@ -3508,7 +3518,8 @@ class GPUReactionPipeline:
                     return;
                 }}
                 vec2 velocity = texelFetch(flow_velocity_tex, gid, 0).xy;
-                for (int layer = 0; layer < {FLOW_SOURCE_LAYERS}; ++layer) {{
+                int layer_count = min(flow_source_layers, {FLOW_SOURCE_LAYERS});
+                for (int layer = 0; layer < layer_count; ++layer) {{
                     vec4 source = texelFetch(flow_source_tex, ivec3(gid, layer), 0);
                     vec2 direction = source.xy;
                     float radius = source.z;
@@ -7844,6 +7855,7 @@ class GPUReactionPipeline:
             "clear_flow_sources": bool(
                 compiled_actions is not None and self._compiled_actions_include_flow_sources(compiled_actions)
             ),
+            "flow_source_layers": 16 if reaction_group == "timed" else FLOW_SOURCE_LAYERS,
             "clear_emit_material_mask": emits_material,
             "clear_emit_material_buffers": emits_material and reaction_group in {"gas_gas", "gas_light"},
         }
@@ -7886,6 +7898,7 @@ class GPUReactionPipeline:
         clear_flow_sources: bool = False,
         clear_emit_material_mask: bool = False,
         clear_emit_material_buffers: bool = False,
+        flow_source_layers: int = FLOW_SOURCE_LAYERS,
         profile_scope: str | None = None,
         light_dose_guard_buffer: Any | None = None,
     ) -> None:
@@ -7959,7 +7972,8 @@ class GPUReactionPipeline:
             with self._profile_scoped_pass(world, profile_scope, "clear_transient_flow_sources"):
                 flow_program = self.programs["clear_transient_flow_sources"]
                 flow_program["gas_grid_size"].value = (world.gas_width, world.gas_height)
-                flow_program["flow_source_layers"].value = FLOW_SOURCE_LAYERS
+                active_flow_source_layers = max(1, min(FLOW_SOURCE_LAYERS, int(flow_source_layers)))
+                flow_program["flow_source_layers"].value = active_flow_source_layers
                 resources.flow_source_tex.bind_to_image(0, read=False, write=True)
                 group_x = (world.gas_width + LOCAL_SIZE - 1) // LOCAL_SIZE
                 group_y = (world.gas_height + LOCAL_SIZE - 1) // LOCAL_SIZE
@@ -7971,10 +7985,10 @@ class GPUReactionPipeline:
                         light_dose_guard_buffer,
                         group_x,
                         group_y,
-                        FLOW_SOURCE_LAYERS,
+                        active_flow_source_layers,
                     )
                 else:
-                    flow_program.run(group_x, group_y, FLOW_SOURCE_LAYERS)
+                    flow_program.run(group_x, group_y, active_flow_source_layers)
                 ran_clear = True
         else:
             with self._profile_scoped_pass(world, profile_scope, "clear_transient_flow_sources_skipped"):
@@ -8699,6 +8713,7 @@ class GPUReactionPipeline:
         resources: GPUReactionResources,
         *,
         light_dose_guard_buffer: Any | None = None,
+        flow_source_layers: int = FLOW_SOURCE_LAYERS,
     ) -> None:
         bridge = world.bridge
         bridge.ensure_world_resources(world)
@@ -8710,6 +8725,8 @@ class GPUReactionPipeline:
         program["gas_cell_size"].value = int(world.gas_cell_size)
         program["tile_size"].value = int(world.active.tile_size)
         program["active_ttl_reset"].value = int(world.active.active_ttl_reset)
+        active_flow_source_layers = max(1, min(FLOW_SOURCE_LAYERS, int(flow_source_layers)))
+        program["flow_source_layers"].value = active_flow_source_layers
         program["impulse_dt"].value = 1.0 / 60.0
         resources.flow_velocity_tex.use(location=0)
         resources.flow_source_tex.use(location=1)
@@ -8945,6 +8962,7 @@ class GPUReactionPipeline:
         *,
         may_have_flow_sources: bool = True,
         light_dose_guard_buffer: Any | None = None,
+        flow_source_layers: int = FLOW_SOURCE_LAYERS,
     ) -> None:
         if not may_have_flow_sources:
             return
@@ -8953,6 +8971,7 @@ class GPUReactionPipeline:
                 world,
                 resources,
                 light_dose_guard_buffer=light_dose_guard_buffer,
+                flow_source_layers=flow_source_layers,
             )
             self.last_cpu_mirror_downloaded = False
             return
