@@ -653,6 +653,7 @@ class GPUReactionPipeline:
             rule_count,
             solve_cell_mask,
             lhs_rule_candidate_masks=lhs_candidate_masks,
+            light_dose_guard_buffer=light_dose_guard,
         )
 
     def _run_formal_guarded_material_light(
@@ -1717,6 +1718,7 @@ class GPUReactionPipeline:
         rule_count: int,
         solve_cell_mask: object | None,
         lhs_rule_candidate_masks: np.ndarray | None = None,
+        light_dose_guard_buffer: Any | None = None,
     ) -> GPUDeferredActionBatch:
         self._ensure_programs(world.bridge.ctx)
         resources = self._ensure_resources(world)
@@ -1730,6 +1732,7 @@ class GPUReactionPipeline:
                 reaction_group=program_name,
                 compiled_actions=compiled_actions,
                 publishes_gas=gas_side_effects_required,
+                light_dose_guard_buffer=light_dose_guard_buffer,
             )
         upload_cell_mask, upload_gas_mask = self._active_masks_for_cell_reaction_upload(
             world,
@@ -1743,6 +1746,7 @@ class GPUReactionPipeline:
                 upload_cell_mask,
                 upload_gas_mask,
                 reaction_group=program_name,
+                light_dose_guard_buffer=light_dose_guard_buffer,
             )
         rule_i_buffer = getattr(resources, f"{program_name[:2]}_rule_i", None)
         rule_f_buffer = getattr(resources, f"{program_name[:2]}_rule_f", None)
@@ -1829,14 +1833,30 @@ class GPUReactionPipeline:
         group_x = (world.width + LOCAL_SIZE - 1) // LOCAL_SIZE
         group_y = (world.height + LOCAL_SIZE - 1) // LOCAL_SIZE
         with self._profile_pass(world, f"{program_name}_shader"):
-            program.run(group_x, group_y, 1)
+            if light_dose_guard_buffer is not None:
+                self._run_light_dose_guarded_dispatch(
+                    world,
+                    resources,
+                    program,
+                    light_dose_guard_buffer,
+                    group_x,
+                    group_y,
+                    1,
+                )
+            else:
+                program.run(group_x, group_y, 1)
             self._sync_compute_writes(world.bridge.ctx)
         apply_material_side_effects = self._compiled_actions_include_emit_material(compiled_actions)
         material_side_effect_copies_velocity = bool(direct_core_outputs and apply_material_side_effects)
         if direct_core_outputs:
             if not material_side_effect_copies_velocity:
                 with self._profile_pass(world, f"{program_name}_velocity_copy"):
-                    self._copy_current_velocity_to_next_role(world, resources, group_x, group_y)
+                    self._copy_current_velocity_to_next_role(
+                        world,
+                        resources,
+                        group_x,
+                        group_y,
+                    )
         else:
             with self._profile_pass(world, f"{program_name}_scatter"):
                 self._scatter_local_cell_action_outputs(
@@ -1852,6 +1872,7 @@ class GPUReactionPipeline:
                     resources,
                     direct_core_outputs=direct_core_outputs,
                     copy_velocity_passthrough=material_side_effect_copies_velocity,
+                    light_dose_guard_buffer=light_dose_guard_buffer,
                 )
         if gas_side_effects_required:
             with self._profile_pass(world, f"{program_name}_gas_side_effects"):
@@ -1864,10 +1885,16 @@ class GPUReactionPipeline:
                     modify_gas_layer_mask=modify_gas_layer_mask,
                     direct_core_outputs=direct_core_outputs,
                     action_gas_delta_already_applied=direct_action_gas_delta,
+                    light_dose_guard_buffer=light_dose_guard_buffer,
                 )
         if program_name == "material_light" and has_rhs_consume:
             with self._profile_pass(world, f"{program_name}_dose_consume"):
-                self._run_material_light_dose_consume_pass(world, resources, rule_count)
+                self._run_material_light_dose_consume_pass(
+                    world,
+                    resources,
+                    rule_count,
+                    light_dose_guard_buffer=light_dose_guard_buffer,
+                )
         with self._profile_pass(world, f"{program_name}_publish_cell_state"):
             self._download_cell_state(world, resources, direct_core_outputs=direct_core_outputs)
         with self._profile_pass(world, f"{program_name}_publish_deferred"):
