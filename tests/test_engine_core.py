@@ -60182,6 +60182,54 @@ def test_gpu_motion_pipeline_bridge_runtime_plan_does_not_pack_cpu_islands(
     assert int(reservations[0]["resolve_state"]) == ISLAND_RESOLVE_DIRECT
 
 
+def test_gpu_motion_bridge_runtime_plan_uses_bridge_state_without_staging_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = WorldEngine(width=32, height=24)
+    if not engine.motion_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU motion pipeline is not available")
+    engine.patch_material("log_solid", gravity_scale=0.0, wind_coupling=0.0, drag_scale=0.0)
+    engine.clear_cell_region(0, 0, engine.width, engine.height)
+    for x, y in [(8, 8), (9, 8), (8, 9), (9, 9)]:
+        engine.set_cell(x, y, "log_solid", phase=Phase.FALLING_ISLAND, mark_dirty=False)
+        engine.island_id[y, x] = 91
+    engine.bridge.sync_world(engine)
+    engine.bridge.mark_gpu_authoritative("cell_core", "island_id", "island_runtime")
+    engine.islands.clear()
+    engine.material_id.fill(0)
+    engine.phase.fill(0)
+    engine.island_id.fill(0)
+
+    def fail_bridge_input_load(*args: object, **kwargs: object) -> None:
+        raise AssertionError("bridge-runtime planning must read authoritative island state directly")
+
+    pipeline = engine.motion_solver.gpu_pipeline
+    monkeypatch.setattr(pipeline, "_load_authoritative_bridge_inputs", fail_bridge_input_load)
+
+    previous_frame_active = engine._world_simulation_frame_active
+    engine._world_simulation_frame_active = True
+    try:
+        reservation_count = pipeline.plan_uploaded_falling_island_reservations_from_bridge_runtime(
+            engine,
+            1.0 / 60.0,
+            runtime_capacity=1,
+        )
+    finally:
+        engine._world_simulation_frame_active = previous_frame_active
+
+    resources = pipeline.resources
+    assert resources is not None
+    reservations = np.frombuffer(
+        resources.island_reservations.read(size=reservation_count * falling_island_reservation_dtype().itemsize),
+        dtype=falling_island_reservation_dtype(),
+        count=reservation_count,
+    )
+
+    assert int(reservation_count) == 1
+    assert int(reservations[0]["island_id"]) == 91
+    assert reservations[0]["reserved_shift"].tolist() == [0, 1]
+
+
 def test_gpu_motion_bridge_runtime_plan_uses_runtime_count_buffer_not_capacity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

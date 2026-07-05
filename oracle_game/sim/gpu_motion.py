@@ -8670,18 +8670,19 @@ class GPUMotionPipeline:
                 self._ensure_bridge_runtime_reservation_capacity(ctx, resources, runtime_capacity)
                 upload_plan = self._cpu_upload_plan(world)
                 self._record_cpu_upload_plan(upload_plan)
+                use_bridge_state = self._bridge_authoritative_island_state(world)
                 if upload_plan["cell_core"]:
                     resources.material_tex.write(world.material_id.astype("f4").tobytes())
                 if upload_plan["island_id"]:
                     resources.island_id_tex.write(world.island_id.astype("f4").tobytes())
-                cell_group_x = (world.width + LOCAL_SIZE - 1) // LOCAL_SIZE
-                cell_group_y = (world.height + LOCAL_SIZE - 1) // LOCAL_SIZE
-                self._load_authoritative_bridge_inputs(world, resources, cell_group_x, cell_group_y)
+                if not use_bridge_state:
+                    cell_group_x = (world.width + LOCAL_SIZE - 1) // LOCAL_SIZE
+                    cell_group_y = (world.height + LOCAL_SIZE - 1) // LOCAL_SIZE
+                    self._load_authoritative_bridge_inputs(world, resources, cell_group_x, cell_group_y)
                 self._upload_material_rule_params(world, resources)
                 program = self.programs["plan_bridge_runtime_falling_island_reservations"]
                 program["cell_grid_size"].value = (world.width, world.height)
                 program["runtime_capacity"].value = runtime_capacity
-                use_bridge_state = self._bridge_authoritative_island_state(world)
                 program["use_bridge_authoritative_state"].value = bool(use_bridge_state)
                 program["dt"].value = float(dt)
                 resources.material_tex.use(location=0)
