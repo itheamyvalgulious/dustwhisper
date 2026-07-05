@@ -8,7 +8,17 @@ from typing import Any
 import numpy as np
 
 from oracle_game.gpu import CONSUME_POLICY_IDS, DIRECTION_IDS, typed_material_id
-from oracle_game.sim.gpu_collapse_dirty import mark_collapse_structure_dirty_tiles_from_bridge_cell_core
+from oracle_game.sim.gpu_collapse_dirty import (
+    COLLAPSE_STRUCTURE_DIRTY_TILE_COUNT_BUFFER,
+    COLLAPSE_STRUCTURE_DIRTY_TILE_DISPATCH_ARGS_BUFFER,
+    COLLAPSE_STRUCTURE_DIRTY_TILE_LIST_BUFFER,
+    COLLAPSE_STRUCTURE_DIRTY_TILE_MASK_BUFFER,
+    _active_scheduler_gpu_authoritative,
+    _ensure_material_flags_buffer,
+    ensure_collapse_structure_dirty_tile_mask,
+    ensure_collapse_structure_dirty_tile_queue,
+    mark_collapse_structure_dirty_tiles_from_bridge_cell_core,
+)
 from oracle_game.types import ForceSource
 from oracle_game.types import CellFlag, Phase, ReactionType
 
@@ -3264,7 +3274,12 @@ class GPUReactionPipeline:
             #version 430
             layout(local_size_x={LOCAL_SIZE}, local_size_y={LOCAL_SIZE}, local_size_z=1) in;
             uniform ivec2 cell_grid_size;
+            uniform ivec2 tile_grid_size;
+            uniform int tile_size;
+            uniform int material_count;
+            uniform int phase_falling_island;
             uniform bool use_cell_meta_texture;
+            uniform bool mark_structure_dirty;
             layout(binding=0) uniform sampler2D material_tex;
             layout(binding=1) uniform sampler2D phase_tex;
             layout(binding=2) uniform sampler2D temp_tex;
@@ -3278,6 +3293,21 @@ class GPUReactionPipeline:
             layout(std430, binding=0) buffer BridgeCellCoreBuffer {{
                 uint bridge_cell_core[];
             }};
+            layout(std430, binding=1) readonly buffer MaterialParticipationBuffer {{
+                uint material_participates[];
+            }};
+            layout(std430, binding=2) buffer DirtyTileMaskBuffer {{
+                uint dirty_tile_mask[];
+            }};
+            layout(std430, binding=3) buffer DirtyTileCountBuffer {{
+                uint dirty_tile_count[];
+            }};
+            layout(std430, binding=4) buffer DirtyTileListBuffer {{
+                ivec2 dirty_tile_list[];
+            }};
+            layout(std430, binding=5) buffer DirtyTileDispatchArgsBuffer {{
+                uint dirty_tile_dispatch_args[];
+            }};
             uint pack_timer(vec4 timer) {{
                 uvec4 value = uvec4(clamp(round(timer), vec4(0.0), vec4(255.0)));
                 return value.x | (value.y << 8u) | (value.z << 16u) | (value.w << 24u);
@@ -3290,6 +3320,53 @@ class GPUReactionPipeline:
                     texelFetch(cell_reset_tex, cell, 0).x,
                     texelFetch(reaction_latched_tex, cell, 0).x
                 );
+            }}
+            uint structure_flags(int material_id, int phase_value) {{
+                if (material_id <= 0 || material_id >= material_count || phase_value == phase_falling_island) {{
+                    return 0u;
+                }}
+                return material_participates[material_id];
+            }}
+            void append_dirty_tile(ivec2 tile) {{
+                if (tile.x < 0 || tile.y < 0 || tile.x >= tile_grid_size.x || tile.y >= tile_grid_size.y) {{
+                    return;
+                }}
+                int tile_index = tile.y * tile_grid_size.x + tile.x;
+                uint previous = atomicOr(dirty_tile_mask[tile_index], 1u);
+                if ((previous & 1u) != 0u) {{
+                    return;
+                }}
+                uint slot = atomicAdd(dirty_tile_count[0], 1u);
+                dirty_tile_list[int(slot)] = tile;
+                atomicMax(dirty_tile_dispatch_args[0], slot + 1u);
+            }}
+            void mark_dirty_if_structure_changed(ivec2 gid, uint previous_word, uint material, uint phase) {{
+                if (!mark_structure_dirty) {{
+                    return;
+                }}
+                int old_material = int(previous_word & 0xFFFFu);
+                int old_phase = int((previous_word >> 16u) & 0xFFu);
+                uint old_flags = structure_flags(old_material, old_phase);
+                uint new_flags = structure_flags(int(material), int(phase));
+                if (old_flags == new_flags) {{
+                    return;
+                }}
+                ivec2 tile = gid / tile_size;
+                ivec2 tile_origin = tile * tile_size;
+                ivec2 local_cell = gid - tile_origin;
+                append_dirty_tile(tile);
+                if (local_cell.x == 0) {{
+                    append_dirty_tile(tile + ivec2(-1, 0));
+                }}
+                if (local_cell.x + 1 >= tile_size) {{
+                    append_dirty_tile(tile + ivec2(1, 0));
+                }}
+                if (local_cell.y == 0) {{
+                    append_dirty_tile(tile + ivec2(0, -1));
+                }}
+                if (local_cell.y + 1 >= tile_size) {{
+                    append_dirty_tile(tile + ivec2(0, 1));
+                }}
             }}
             void main() {{
                 ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
@@ -3312,6 +3389,7 @@ class GPUReactionPipeline:
                 vec2 velocity = texelFetch(velocity_tex, gid, 0).xy;
                 float temperature = texelFetch(temp_tex, gid, 0).x;
                 uint integrity = uint(clamp(round(texelFetch(integrity_tex, gid, 0).x), 0.0, 65535.0));
+                mark_dirty_if_structure_changed(gid, previous_word, material, phase);
                 bridge_cell_core[word_index] = material | (phase << 16u) | (flags << 24u);
                 bridge_cell_core[word_index + 1] = packHalf2x16(velocity);
                 bridge_cell_core[word_index + 2] = floatBitsToUint(temperature);
@@ -8446,7 +8524,21 @@ class GPUReactionPipeline:
             resources,
             source_role or "pong",
         )
-        if mark_structure_dirty:
+        fuse_structure_dirty_mark = False
+        dirty_buffer = None
+        dirty_count = None
+        dirty_list = None
+        dirty_dispatch_args = None
+        material_flags_buffer = None
+        material_count = 0
+        if mark_structure_dirty and self._formal_gpu_frame(world) and _active_scheduler_gpu_authoritative(world):
+            dirty_buffer = ensure_collapse_structure_dirty_tile_mask(world)
+            dirty_queue = ensure_collapse_structure_dirty_tile_queue(world)
+            if dirty_buffer is not None and dirty_queue is not None:
+                dirty_count, dirty_list, dirty_dispatch_args = dirty_queue
+                material_flags_buffer, material_count = _ensure_material_flags_buffer(world)
+                fuse_structure_dirty_mark = True
+        if mark_structure_dirty and not fuse_structure_dirty_mark:
             mark_collapse_structure_dirty_tiles_from_bridge_cell_core(
                 world,
                 material_tex,
@@ -8456,6 +8548,11 @@ class GPUReactionPipeline:
         program = self.programs["publish_bridge_cell"]
         program["cell_grid_size"].value = (world.width, world.height)
         program["use_cell_meta_texture"].value = cell_meta_texture is not None
+        program["mark_structure_dirty"].value = bool(fuse_structure_dirty_mark)
+        program["tile_grid_size"].value = (int(world.active.tile_width), int(world.active.tile_height))
+        program["tile_size"].value = int(world.active.tile_size)
+        program["material_count"].value = int(material_count)
+        program["phase_falling_island"].value = int(Phase.FALLING_ISLAND)
         material_tex.use(location=0)
         phase_tex.use(location=1)
         temp_tex.use(location=2)
@@ -8467,6 +8564,17 @@ class GPUReactionPipeline:
         (cell_meta_texture or resources.local_cell_meta_out).use(location=8)
         bridge.textures["material"].bind_to_image(0, read=False, write=True)
         bridge.buffers["cell_core"].bind_to_storage_buffer(binding=0)
+        if fuse_structure_dirty_mark:
+            assert dirty_buffer is not None
+            assert dirty_count is not None
+            assert dirty_list is not None
+            assert dirty_dispatch_args is not None
+            assert material_flags_buffer is not None
+            material_flags_buffer.bind_to_storage_buffer(binding=1)
+            dirty_buffer.bind_to_storage_buffer(binding=2)
+            dirty_count.bind_to_storage_buffer(binding=3)
+            dirty_list.bind_to_storage_buffer(binding=4)
+            dirty_dispatch_args.bind_to_storage_buffer(binding=5)
         group_x = (world.width + LOCAL_SIZE - 1) // LOCAL_SIZE
         group_y = (world.height + LOCAL_SIZE - 1) // LOCAL_SIZE
         if light_dose_guard_buffer is not None:
@@ -8482,6 +8590,14 @@ class GPUReactionPipeline:
         else:
             program.run(group_x, group_y, 1)
         self._sync_compute_writes(bridge.ctx)
+        if fuse_structure_dirty_mark:
+            setattr(world, "_gpu_collapse_structure_dirty_tiles_pending", True)
+            bridge.mark_gpu_authoritative(
+                COLLAPSE_STRUCTURE_DIRTY_TILE_MASK_BUFFER,
+                COLLAPSE_STRUCTURE_DIRTY_TILE_COUNT_BUFFER,
+                COLLAPSE_STRUCTURE_DIRTY_TILE_LIST_BUFFER,
+                COLLAPSE_STRUCTURE_DIRTY_TILE_DISPATCH_ARGS_BUFFER,
+            )
         bridge.mark_gpu_authoritative("cell_core", "material")
 
     def _publish_bridge_gas_state(
