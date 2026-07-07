@@ -1501,6 +1501,7 @@ class GPUMotionPipeline:
             uniform bool velocity_out_active_only;
             uniform bool use_active_tile_dispatch;
             uniform bool use_powder_apply_touch_sources;
+            uniform bool write_cell_core;
             layout(binding=0) uniform sampler2D material_tex;
             layout(binding=1) uniform sampler2D phase_tex;
             layout(binding=2) uniform sampler2D flags_tex;
@@ -1632,15 +1633,17 @@ class GPUMotionPipeline:
                 int entity = int(round(texelFetch(entity_tex, gid, 0).x));
                 int displaced = int(round(texelFetch(displaced_tex, gid, 0).x));
                 int word_index = cell_index * 5;
-                bridge_cell_core[word_index] = material | (phase << 16u) | (flags << 24u);
-                bridge_cell_core[word_index + 1] = packHalf2x16(velocity);
-                bridge_cell_core[word_index + 2] = floatBitsToUint(temperature);
-                bridge_cell_core[word_index + 3] = pack_timer(timer);
-                bridge_cell_core[word_index + 4] = integrity;
+                if (write_cell_core) {{
+                    bridge_cell_core[word_index] = material | (phase << 16u) | (flags << 24u);
+                    bridge_cell_core[word_index + 1] = packHalf2x16(velocity);
+                    bridge_cell_core[word_index + 2] = floatBitsToUint(temperature);
+                    bridge_cell_core[word_index + 3] = pack_timer(timer);
+                    bridge_cell_core[word_index + 4] = integrity;
+                    imageStore(bridge_material_img, gid, vec4(float(material), 0.0, 0.0, 0.0));
+                }}
                 bridge_island_id[cell_index] = island;
                 bridge_entity_id[cell_index] = entity;
                 bridge_displaced[cell_index] = displaced;
-                imageStore(bridge_material_img, gid, vec4(float(material), 0.0, 0.0, 0.0));
             }}
             """
         )
@@ -6787,6 +6790,7 @@ class GPUMotionPipeline:
         program["velocity_out_active_only"].value = bool(velocity_out_active_only)
         program["use_active_tile_dispatch"].value = bool(active_tile_indirect)
         program["use_powder_apply_touch_sources"].value = bool(use_powder_apply_touch_sources)
+        program["write_cell_core"].value = not bool(getattr(world, "phase_c_defer_cell_publish", False))
         material_tex.use(location=0)
         phase_tex.use(location=1)
         flags_tex.use(location=2)

@@ -3757,6 +3757,7 @@ class GPULiquidPipeline:
             layout(binding=7) uniform sampler2D island_tex;
             layout(binding=8) uniform sampler2D entity_tex;
             layout(binding=9) uniform sampler2D displaced_tex;
+            uniform bool write_cell_core;
             layout(std430, binding=0) writeonly buffer BridgeCellCoreBuffer {{
                 uint bridge_cell_core[];
             }};
@@ -3826,15 +3827,17 @@ class GPULiquidPipeline:
                 int entity = int(round(texelFetch(entity_tex, gid, 0).x));
                 int displaced = int(round(texelFetch(displaced_tex, gid, 0).x));
                 int word_index = cell_index * 5;
-                bridge_cell_core[word_index] = material | (phase << 16u) | (flags << 24u);
-                bridge_cell_core[word_index + 1] = packHalf2x16(velocity);
-                bridge_cell_core[word_index + 2] = floatBitsToUint(temperature);
-                bridge_cell_core[word_index + 3] = pack_timer(texelFetch(timer_tex, gid, 0));
-                bridge_cell_core[word_index + 4] = integrity;
+                if (write_cell_core) {{
+                    bridge_cell_core[word_index] = material | (phase << 16u) | (flags << 24u);
+                    bridge_cell_core[word_index + 1] = packHalf2x16(velocity);
+                    bridge_cell_core[word_index + 2] = floatBitsToUint(temperature);
+                    bridge_cell_core[word_index + 3] = pack_timer(texelFetch(timer_tex, gid, 0));
+                    bridge_cell_core[word_index + 4] = integrity;
+                    imageStore(bridge_material_img, gid, vec4(float(material), 0.0, 0.0, 0.0));
+                }}
                 bridge_island_id[cell_index] = island;
                 bridge_entity_id[cell_index] = entity;
                 bridge_displaced[cell_index] = displaced;
-                imageStore(bridge_material_img, gid, vec4(float(material), 0.0, 0.0, 0.0));
             }}
             """
         )
@@ -4087,6 +4090,7 @@ class GPULiquidPipeline:
         program["tile_grid_size"].value = (world.active.tile_width, world.active.tile_height)
         program["tile_size"].value = int(world.active.tile_size)
         program["use_active_tile_dispatch"].value = bool(active_tile_indirect)
+        program["write_cell_core"].value = not bool(getattr(world, "phase_c_defer_cell_publish", False))
         material_tex = resources.material_out if use_out else resources.material_in
         phase_tex = resources.phase_out if use_out else resources.phase_in
         flags_tex = resources.flags_out if use_out else resources.flags_in

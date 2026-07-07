@@ -3304,6 +3304,7 @@ class GPUReactionPipeline:
             uniform int phase_falling_island;
             uniform bool use_cell_meta_texture;
             uniform bool mark_structure_dirty;
+            uniform bool write_cell_core;
             layout(binding=0) uniform sampler2D material_tex;
             layout(binding=1) uniform sampler2D phase_tex;
             layout(binding=2) uniform sampler2D temp_tex;
@@ -3414,12 +3415,14 @@ class GPUReactionPipeline:
                 float temperature = texelFetch(temp_tex, gid, 0).x;
                 uint integrity = uint(clamp(round(texelFetch(integrity_tex, gid, 0).x), 0.0, 65535.0));
                 mark_dirty_if_structure_changed(gid, previous_word, material, phase);
-                bridge_cell_core[word_index] = material | (phase << 16u) | (flags << 24u);
-                bridge_cell_core[word_index + 1] = packHalf2x16(velocity);
-                bridge_cell_core[word_index + 2] = floatBitsToUint(temperature);
-                bridge_cell_core[word_index + 3] = pack_timer(texelFetch(timer_tex, gid, 0));
-                bridge_cell_core[word_index + 4] = integrity;
-                imageStore(bridge_material_img, gid, vec4(float(material), 0.0, 0.0, 0.0));
+                if (write_cell_core) {{
+                    bridge_cell_core[word_index] = material | (phase << 16u) | (flags << 24u);
+                    bridge_cell_core[word_index + 1] = packHalf2x16(velocity);
+                    bridge_cell_core[word_index + 2] = floatBitsToUint(temperature);
+                    bridge_cell_core[word_index + 3] = pack_timer(texelFetch(timer_tex, gid, 0));
+                    bridge_cell_core[word_index + 4] = integrity;
+                    imageStore(bridge_material_img, gid, vec4(float(material), 0.0, 0.0, 0.0));
+                }}
             }}
             """
         )
@@ -8584,6 +8587,7 @@ class GPUReactionPipeline:
         program["cell_grid_size"].value = (world.width, world.height)
         program["use_cell_meta_texture"].value = cell_meta_texture is not None
         program["mark_structure_dirty"].value = bool(fuse_structure_dirty_mark)
+        program["write_cell_core"].value = not bool(getattr(world, "phase_c_defer_cell_publish", False))
         program["tile_grid_size"].value = (int(world.active.tile_width), int(world.active.tile_height))
         program["tile_size"].value = int(world.active.tile_size)
         program["material_count"].value = int(material_count)
