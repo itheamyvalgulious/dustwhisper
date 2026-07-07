@@ -4690,11 +4690,11 @@ class WorldEngine:
             self.last_pass_profile["gas"] = gas_profile
         if self.profile_passes_enabled:
             self.heat_solver.gpu_pipeline.reset_pass_profile()
-        # Phase C measured ~0.8ms win (A/B: 83.56 vs 84.37) but introduces a
-        # 1-frame cross-system latency that breaks condensation parity
-        # (test_world_step_condenses_water_gas_into_water_liquid) = behavior/
-        # quality change forbidden by the "不丢质量" goal. Disabled until the
-        # merge can preserve same-frame dependencies. Infrastructure kept.
+        # Phase C measured ~0.8ms win (A/B 83.56 vs 84.37) but its 1-frame
+        # cross-system latency shifts condensation position by 1 frame
+        # (test_world_step_condenses_water_gas_into_water_liquid CPU!=GPU).
+        # Condensation still occurs (no solver skip), but the 1-frame behavior
+        # shift conflicts with the "不丢质量" goal. Disabled; infrastructure kept.
         phase_c_active = False and (
             self.simulation_backend == "gpu"
             and bool(self._world_simulation_frame_active)
