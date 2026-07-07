@@ -54,6 +54,7 @@ from oracle_game.sim.gpu_page_stripes import GPUPageStripePipeline
 from oracle_game.sim.gpu_world_commands import COMMAND_KIND_IDS as GPU_WORLD_COMMAND_KIND_IDS
 from oracle_game.sim.gpu_world_commands import GPUWorldCommandPipeline
 from oracle_game.sim.reactions import ReactionSolver
+from oracle_game.sim.gpu_merge import GPUMergePipeline, MergeCandidates
 from oracle_game.types import (
     CellFlag,
     CarrierIntent,
@@ -356,6 +357,7 @@ class WorldEngine:
         self.liquid_solver = LiquidSolver()
         self.optics_solver = OpticsSolver()
         self.reaction_solver = ReactionSolver()
+        self.merge_pipeline = GPUMergePipeline()
         self.placeholder_pipeline = GPUPlaceholderPipeline()
         self.page_stripe_pipeline = GPUPageStripePipeline()
         self.grid_command_pipeline = GPUWorldCommandPipeline()
