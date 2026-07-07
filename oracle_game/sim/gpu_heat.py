@@ -1284,6 +1284,7 @@ class GPUHeatPipeline:
             uniform int material_count;
             uniform int phase_falling_island;
             uniform bool mark_structure_dirty;
+            uniform bool write_cell_core;
             layout(binding=0) uniform sampler2D material_tex;
             layout(binding=1) uniform sampler2D phase_tex;
             layout(binding=2) uniform sampler2D flags_tex;
@@ -1391,15 +1392,17 @@ class GPUHeatPipeline:
                 int word_index = cell_index * 5;
                 uint previous_word = bridge_cell_core[word_index];
                 mark_dirty_if_structure_changed(gid, previous_word, material, phase);
-                bridge_cell_core[word_index] = material | (phase << 16u) | (flags << 24u);
-                bridge_cell_core[word_index + 1] = packHalf2x16(velocity);
-                bridge_cell_core[word_index + 2] = floatBitsToUint(temperature);
-                bridge_cell_core[word_index + 3] = pack_timer(texelFetch(timer_tex, gid, 0));
-                bridge_cell_core[word_index + 4] = integrity;
+                if (write_cell_core) {{
+                    bridge_cell_core[word_index] = material | (phase << 16u) | (flags << 24u);
+                    bridge_cell_core[word_index + 1] = packHalf2x16(velocity);
+                    bridge_cell_core[word_index + 2] = floatBitsToUint(temperature);
+                    bridge_cell_core[word_index + 3] = pack_timer(texelFetch(timer_tex, gid, 0));
+                    bridge_cell_core[word_index + 4] = integrity;
+                    imageStore(bridge_material_img, gid, vec4(float(material), 0.0, 0.0, 0.0));
+                }}
                 bridge_island_id[cell_index] = island;
                 bridge_entity_id[cell_index] = entity;
                 bridge_displaced[cell_index] = displaced;
-                imageStore(bridge_material_img, gid, vec4(float(material), 0.0, 0.0, 0.0));
             }}
             """
         )
@@ -2202,6 +2205,7 @@ class GPUHeatPipeline:
             cell_program["material_count"].value = int(material_count)
             cell_program["phase_falling_island"].value = int(Phase.FALLING_ISLAND)
             cell_program["mark_structure_dirty"].value = bool(fuse_structure_dirty_mark)
+            cell_program["write_cell_core"].value = not bool(getattr(world, "phase_c_defer_cell_publish", False))
             cell_program["material_tex"].value = 0
             cell_program["phase_tex"].value = 1
             cell_program["flags_tex"].value = 2
