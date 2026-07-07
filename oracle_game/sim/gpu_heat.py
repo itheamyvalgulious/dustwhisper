@@ -2242,6 +2242,7 @@ class GPUHeatPipeline:
                 dirty_count.bind_to_storage_buffer(binding=6)
                 dirty_list.bind_to_storage_buffer(binding=7)
                 dirty_dispatch_args.bind_to_storage_buffer(binding=8)
+        if not bool(getattr(world, "phase_c_defer_cell_publish", False)):
             cell_program.run(group_x, group_y, 1)
 
         with self._profile_pass(world, "publish_bridge_outputs.gas"):

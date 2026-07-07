@@ -1537,15 +1537,16 @@ class GPUReactionPipeline:
                     "latched": self.resources.segment_reaction_latched_tex,
                 }
             with self._profile_pass(world, "publish_bridge_cell"):
-                self._publish_bridge_cell_state(
-                    world,
-                    self.resources,
-                    source_role=self._formal_cell_read_role()
-                    if self._formal_before_motion_cell_roles_active()
-                    else None,
-                    cell_reset_texture=self.resources.segment_cell_reset_tex,
-                    reaction_latched_texture=self.resources.segment_reaction_latched_tex,
-                )
+                if not bool(getattr(world, "phase_c_defer_cell_publish", False)):
+                    self._publish_bridge_cell_state(
+                        world,
+                        self.resources,
+                        source_role=self._formal_cell_read_role()
+                        if self._formal_before_motion_cell_roles_active()
+                        else None,
+                        cell_reset_texture=self.resources.segment_cell_reset_tex,
+                        reaction_latched_texture=self.resources.segment_reaction_latched_tex,
+                    )
         if "gas" in pending:
             with self._profile_pass(world, "publish_bridge_gas"):
                 self._publish_bridge_gas_state(world, self.resources)
