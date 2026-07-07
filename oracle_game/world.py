@@ -4566,6 +4566,38 @@ class WorldEngine:
         finally:
             self._world_simulation_frame_active = previous_frame_active
 
+    def _merge_phase_c(self) -> None:
+        rxn_pipe = self.reaction_solver.gpu_pipeline
+        rxn_cand = getattr(rxn_pipe, "_phase_c_rxn_candidate", None)
+        if rxn_cand is None:
+            return
+        hr = self.heat_solver.gpu_pipeline.resources
+        mr = self.motion_solver.gpu_pipeline.resources
+        lr = self.liquid_solver.gpu_pipeline.resources
+        candidates = MergeCandidates(
+            heat={
+                "material": hr.material_tex,
+                "phase": hr.phase_tex,
+                "temp": hr.temp_ping,
+                "integrity": hr.integrity_tex,
+                "flags": hr.cell_flags_tex,
+            },
+            reactions=rxn_cand,
+            motion={
+                "material": mr.material_tex,
+                "phase": mr.phase_tex,
+                "velocity": mr.velocity_tex,
+            },
+            liquid={
+                "material": lr.material_in,
+                "phase": lr.phase_in,
+                "flags": lr.flags_in,
+                "timer": lr.timer_in,
+                "velocity": lr.velocity_in,
+            },
+        )
+        self.merge_pipeline.merge_cell_core(self, candidates)
+
     def _step_once_impl(
         self,
         dt: float,
@@ -4658,6 +4690,12 @@ class WorldEngine:
             self.last_pass_profile["gas"] = gas_profile
         if self.profile_passes_enabled:
             self.heat_solver.gpu_pipeline.reset_pass_profile()
+        phase_c_active = False and (
+            self.simulation_backend == "gpu"
+            and bool(self._world_simulation_frame_active)
+            and self.merge_pipeline.available(self)
+        )
+        self.phase_c_defer_cell_publish = phase_c_active
         with self._profile_pass("heat"):
             self.heat_solver.step(self, dt)
         heat_profile = getattr(getattr(self.heat_solver, "gpu_pipeline", None), "last_pass_profile", None)
@@ -4696,6 +4734,10 @@ class WorldEngine:
         liquid_profile = getattr(getattr(self.liquid_solver, "gpu_pipeline", None), "last_pass_profile", None)
         if self.profile_passes_enabled and isinstance(liquid_profile, dict):
             self.last_pass_profile["liquid"] = liquid_profile
+        if phase_c_active:
+            with self._profile_pass("merge_cell_core"):
+                self._merge_phase_c()
+            self.phase_c_defer_cell_publish = False
         with self._profile_pass("optics"):
             self.optics_solver.step(self)
         optics_profile = getattr(self.optics_solver, "last_pass_profile", None)

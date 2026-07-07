@@ -1480,6 +1480,7 @@ class GPUReactionPipeline:
         self._formal_loaded_bridge_inputs_key = None
         self._formal_loaded_bridge_inputs.clear()
         self._reset_formal_cell_read_role()
+        self._phase_c_rxn_candidate = None
         return True
 
     def end_formal_reaction_segment(self, world: "WorldEngine", segment: str) -> None:
@@ -1527,6 +1528,14 @@ class GPUReactionPipeline:
             self._formal_pending_bridge_publish_key = None
             return gas_delta_flushed
         if "cell" in pending:
+            if bool(getattr(world, "phase_c_defer_cell_publish", False)):
+                role = self._formal_cell_read_role() if self._formal_before_motion_cell_roles_active() else "pong"
+                mt, pt, tp, it, vt, tm = self._cell_role_textures(self.resources, role)
+                self._phase_c_rxn_candidate = {
+                    "material": mt, "phase": pt, "temp": tp, "integrity": it,
+                    "velocity": vt, "timer": tm,
+                    "latched": self.resources.segment_reaction_latched_tex,
+                }
             with self._profile_pass(world, "publish_bridge_cell"):
                 self._publish_bridge_cell_state(
                     world,

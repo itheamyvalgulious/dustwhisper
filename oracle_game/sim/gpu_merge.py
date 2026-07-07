@@ -100,7 +100,7 @@ class GPUMergePipeline:
             layout(binding=7) uniform sampler2D rxn_temp_tex;
             layout(binding=8) uniform sampler2D rxn_integrity_tex;
             layout(binding=9) uniform sampler2D rxn_timer_tex;
-            layout(binding=10) uniform sampler2D rxn_flags_tex;
+            layout(binding=10) uniform sampler2D rxn_latched_tex;
             layout(binding=11) uniform sampler2D rxn_velocity_tex;
             // motion candidate
             layout(binding=12) uniform sampler2D motion_material_tex;
@@ -163,7 +163,7 @@ class GPUMergePipeline:
                 float rxn_temp = texelFetch(rxn_temp_tex, gid, 0).x;
                 float rxn_integrity = texelFetch(rxn_integrity_tex, gid, 0).x;
                 vec4 rxn_timer = texelFetch(rxn_timer_tex, gid, 0);
-                float rxn_flags = texelFetch(rxn_flags_tex, gid, 0).x;
+                float rxn_latched = texelFetch(rxn_latched_tex, gid, 0).x;
                 vec2 rxn_velocity = texelFetch(rxn_velocity_tex, gid, 0).xy;
 
                 float motion_material = texelFetch(motion_material_tex, gid, 0).x;
@@ -203,11 +203,15 @@ class GPUMergePipeline:
                 if (rxn_timer != prev_timer) timer = rxn_timer;
                 else if (liquid_timer != prev_timer) timer = liquid_timer;
 
-                // flags: reactions > liquid > heat
-                float flags = prev_flags;
-                if (changed_f(rxn_flags, prev_flags)) flags = rxn_flags;
-                else if (changed_f(liquid_flags, prev_flags)) flags = liquid_flags;
+                // flags: liquid/heat candidates carry the full flags byte (prev | their
+                // changes); reactions only sets the REACTION_LATCHED bit (bit 1 == 2).
+                float flags;
+                if (changed_f(liquid_flags, prev_flags)) flags = liquid_flags;
                 else if (changed_f(heat_flags, prev_flags)) flags = heat_flags;
+                else flags = prev_flags;
+                if (rxn_latched != 0.0) {{
+                    flags = float(uint(flags + 0.5) | 2u);
+                }}
 
                 // velocity: motion > liquid
                 vec2 velocity = prev_velocity;
@@ -258,7 +262,7 @@ class GPUMergePipeline:
         r["temp"].use(location=7)
         r["integrity"].use(location=8)
         r["timer"].use(location=9)
-        r["flags"].use(location=10)
+        r["latched"].use(location=10)
         r["velocity"].use(location=11)
         m["material"].use(location=12)
         m["phase"].use(location=13)
