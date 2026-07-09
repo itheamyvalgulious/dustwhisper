@@ -120,9 +120,6 @@ class GPUCollapsePipeline(GPUPipelineBase):
         self._last_formal_connected_tile_mask_name: str | None = None
         self._formal_connected_cell_frontier_generation = 0
 
-    def _profile_enabled(self, world: "WorldEngine") -> bool:
-        return bool(getattr(world, "profile_passes_enabled", False))
-
     # ``reset_pass_profile`` inherited from GPUPipelineBase.
     # ``_profile_pass`` inherited from GPUPipelineBase.
     # ``available`` inherited from GPUPipelineBase.

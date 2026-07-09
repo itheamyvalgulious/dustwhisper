@@ -184,9 +184,6 @@ class GPUMotionPipeline(GPUPipelineBase):
         self.last_published_island_runtime_capacity = 0
         self.last_pass_profile: dict[str, Any] = {"passes": [], "summary": {}}
 
-    def _profile_enabled(self, world: "WorldEngine") -> bool:
-        return bool(getattr(world, "profile_passes_enabled", False))
-
     def _reset_pass_profile(self) -> None:
         self.last_pass_profile = {"passes": [], "summary": {}}
 
