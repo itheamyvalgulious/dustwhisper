@@ -73,15 +73,11 @@ from oracle_game.types import (
 
 from oracle_game.world_constants import (
     BASE_MATERIAL_RUNTIME_ALIASES,
-    CARDINAL_DIRECTION_VECTORS,
     ENTITY_STATE_PATCH_METADATA_FIELDS,
     GPU_REALTIME_BUDGET_CELL_THRESHOLD,
-    IGNORED_ANCHOR_FILTERS,
     PAIR_REACTION_RULE_SET_NAMES,
     REACTION_RULE_SET_NAMES,
-    TARGET_QUERY_CELLS_PER_METER,
     TARGET_QUERY_DISTANCE_HINT_CELLS,
-    TERRAIN_ANCHOR_FILTERS,
     UNSET_CONTROLLER_STATE,
 )
 from oracle_game.world_capabilities import serialize_engine_capabilities
@@ -559,6 +555,38 @@ from oracle_game.world_internal_helpers import (
     downsample_cells_to_gas,
     readback_request_status,
     submit_entity_controller_turn,
+)
+from oracle_game.world_intent_helpers import (
+    _build_entity_feedback_from_current_state,
+    _build_entity_feedback_from_world,
+    _build_observation_requests,
+    _clamp_world_position,
+    _combine_resolution_notes,
+    _default_target_source_position,
+    _distance_meters_to_cells,
+    _entity_center_buffer_position,
+    _entity_center_world_position,
+    _entity_matches_anchor_filters,
+    _entity_placeholder_bbox,
+    _intent_resolution_status,
+    _material_state_for_position,
+    _normalized_world_direction,
+    _normalize_runtime_force_source,
+    _patch_entity_states,
+    _preview_can_occupy_placeholder_cell,
+    _public_resolved_target,
+    _resolve_carrier_intents,
+    _resolve_change_intents,
+    _resolve_intent_source_positions,
+    _resolve_intent_world_position,
+    _resolve_query_source_position,
+    _resolve_readback_requests,
+    _source_facing_vector,
+    _terrain_hill_cell_matches,
+    _terrain_tree_cell_matches,
+    _world_cell_material_has_tag,
+    _world_distance_sq,
+    _world_gas_window_for_cell_world_rect,
 )
 
 
@@ -2179,26 +2207,7 @@ class WorldEngine:
     _sync_entity_observation_specs = _sync_entity_observation_specs
 
     def _patch_entity_states(self, patches: list[EntityStatePatch]) -> None:
-        next_entity_states = dict(self.entity_states)
-        for patch in patches:
-            entity = next_entity_states.get(patch.entity_id)
-            if entity is None:
-                raise KeyError(patch.entity_id)
-            patch_fields = {name: value for name, value in patch.fields.items() if not name.startswith("_")}
-            world_x = patch.fields.get(
-                "_world_x",
-                patch_fields.get("x", entity.world_x if entity.world_x is not None else entity.x),
-            )
-            world_y = patch.fields.get(
-                "_world_y",
-                patch_fields.get("y", entity.world_y if entity.world_y is not None else entity.y),
-            )
-            next_entity_states[patch.entity_id] = self._coerce_entity_state(
-                replace(entity, **dict(patch_fields), world_x=int(world_x), world_y=int(world_y))
-            )
-        self.entity_states = next_entity_states
-        placeholders, _ = self._frame_entities_to_placeholders_and_observations(list(self.entity_states.values()))
-        self._sync_entity_placeholders(placeholders)
+        return _patch_entity_states(self, patches)
 
     _build_preview_entity_placeholders = _build_preview_entity_placeholders
 
@@ -2210,15 +2219,7 @@ class WorldEngine:
         current_cells: dict[tuple[int, int], int],
         released_cells: set[tuple[int, int]],
     ) -> bool:
-        if not self.in_bounds(x, y):
-            return False
-        placeholder_material_id = self._resolve_sanctioned_placeholder_material_id(str(placeholder.material))
-        if placeholder_material_id <= 0:
-            return False
-        material_id, phase = self._material_state_for_position(x, y, released_cells=released_cells)
-        if current_cells.get((x, y)) == placeholder.entity_id and material_id > 0 and self._shadow_material_is_placeholder(material_id):
-            return True
-        return material_id == 0 or phase == int(Phase.LIQUID)
+        return _preview_can_occupy_placeholder_cell(self, x, y, placeholder, current_cells, released_cells)
 
     def _material_state_for_position(
         self,
@@ -2228,24 +2229,14 @@ class WorldEngine:
         blocked_cells: set[tuple[int, int]] | None = None,
         released_cells: set[tuple[int, int]] | None = None,
     ) -> tuple[int, int]:
-        material_id = int(self.material_id[y, x])
-        phase = int(self.phase[y, x])
-        cell = (x, y)
-        if released_cells is not None and cell in released_cells and material_id > 0 and self._shadow_material_is_placeholder(material_id):
-            displaced_material = int(self.placeholder_displaced_material[y, x])
-            if displaced_material > 0:
-                return displaced_material, int(Phase.LIQUID)
-            return 0, 0
-        if blocked_cells is not None and cell in blocked_cells:
-            return int(self.placeholder_material_id), int(Phase.STATIC_SOLID)
-        return material_id, phase
+        return _material_state_for_position(self, x, y, blocked_cells=blocked_cells, released_cells=released_cells)
 
     def _build_observation_requests(
         self,
         targets: list[ObservationTarget],
         resolved_targets: dict[str, ResolvedTarget],
     ) -> list[ReadbackRequest]:
-        return [request for _, request in self._build_observation_request_pairs(targets, resolved_targets)]
+        return _build_observation_requests(self, targets, resolved_targets)
 
     _build_observation_request = _build_observation_request
 
@@ -2254,12 +2245,7 @@ class WorldEngine:
         requests: list[ReadbackRequest],
         resolved_targets: dict[str, ResolvedTarget],
     ) -> list[ReadbackRequest]:
-        resolved: list[ReadbackRequest] = []
-        for request in requests:
-            concrete = self._resolve_readback_request(request, resolved_targets)
-            if concrete is not None:
-                resolved.append(concrete)
-        return resolved
+        return _resolve_readback_requests(self, requests, resolved_targets)
 
     _resolve_readback_request = _resolve_readback_request
 
@@ -2270,49 +2256,20 @@ class WorldEngine:
         intents: list[ChangeIntent],
         resolved_targets: dict[str, ResolvedTarget],
     ) -> tuple[dict[str, ResolvedChangeIntent], list[WorldCommand]]:
-        resolved: dict[str, ResolvedChangeIntent] = {}
-        commands: list[WorldCommand] = []
-        for intent in intents:
-            resolved_intent = self._resolve_change_intent(intent, resolved_targets)
-            resolved[intent.intent_id] = resolved_intent
-            commands.extend(WorldCommand(kind=command.kind, payload=deepcopy(command.payload)) for command in resolved_intent.generated_commands)
-        return resolved, commands
+        return _resolve_change_intents(self, intents, resolved_targets)
 
     def _public_resolved_change_intent(self, intent: ResolvedChangeIntent) -> ResolvedChangeIntent:
         return _public_resolved_change_intent(self, intent)
 
     def _public_resolved_target(self, target: ResolvedTarget) -> ResolvedTarget:
-        return replace(
-            target,
-            source_position=(
-                None
-                if target.source_world_position is None
-                else tuple(int(value) for value in target.source_world_position)
-            ),
-            anchor_position=(
-                None
-                if target.anchor_world_position is None
-                else tuple(int(value) for value in target.anchor_world_position)
-            ),
-            resolved_position=(
-                None
-                if target.resolved_world_position is None
-                else tuple(int(value) for value in target.resolved_world_position)
-            ),
-        )
+        return _public_resolved_target(self, target)
 
     def _resolve_carrier_intents(
         self,
         intents: list[CarrierIntent],
         resolved_targets: dict[str, ResolvedTarget],
     ) -> tuple[dict[str, ResolvedCarrierIntent], list[WorldCommand]]:
-        resolved: dict[str, ResolvedCarrierIntent] = {}
-        commands: list[WorldCommand] = []
-        for intent in intents:
-            resolved_intent = self._resolve_carrier_intent(intent, resolved_targets)
-            resolved[intent.intent_id] = resolved_intent
-            commands.extend(WorldCommand(kind=command.kind, payload=deepcopy(command.payload)) for command in resolved_intent.generated_commands)
-        return resolved, commands
+        return _resolve_carrier_intents(self, intents, resolved_targets)
 
     _public_resolved_carrier_intent = _public_resolved_carrier_intent
 
@@ -2332,19 +2289,14 @@ class WorldEngine:
         target_dy: int,
         resolved_targets: dict[str, ResolvedTarget],
     ) -> tuple[int, int] | None:
-        if target_query_id is not None:
-            target = resolved_targets.get(target_query_id)
-            if target is None or target.status not in {"resolved", "drifted"} or target.resolved_world_position is None:
-                return None
-            return (
-                int(target.resolved_world_position[0]) + int(target_dx),
-                int(target.resolved_world_position[1]) + int(target_dy),
-            )
-        if center_x is None or center_y is None:
-            return None
-        return (
-            int(center_x) + int(target_dx),
-            int(center_y) + int(target_dy),
+        return _resolve_intent_world_position(
+            self,
+            target_query_id=target_query_id,
+            center_x=center_x,
+            center_y=center_y,
+            target_dx=target_dx,
+            target_dy=target_dy,
+            resolved_targets=resolved_targets,
         )
 
     def _resolve_intent_source_positions(
@@ -2354,29 +2306,19 @@ class WorldEngine:
         source_x: int | None,
         source_y: int | None,
     ) -> tuple[tuple[int, int], tuple[int, int]]:
-        if source_entity_id is not None:
-            entity = self.entity_states.get(int(source_entity_id))
-            if entity is not None:
-                world_position = self._entity_center_world_position(entity)
-                return self._world_to_buffer_clamped(*world_position), world_position
-        if source_x is not None and source_y is not None:
-            world_position = (int(source_x), int(source_y))
-            buffer_position = self._world_to_buffer_clamped(*world_position)
-            return buffer_position, world_position
-        buffer_position = self._default_target_source_position()
-        return buffer_position, self._buffer_to_world_position(buffer_position)
+        return _resolve_intent_source_positions(
+            self,
+            source_entity_id=source_entity_id,
+            source_x=source_x,
+            source_y=source_y,
+        )
 
     @staticmethod
     def _normalized_world_direction(
         source_world_position: tuple[int, int],
         target_world_position: tuple[int, int],
     ) -> tuple[float, float] | None:
-        delta = np.asarray(target_world_position, dtype=np.float32) - np.asarray(source_world_position, dtype=np.float32)
-        length = float(np.linalg.norm(delta))
-        if length <= 1e-6:
-            return None
-        direction = delta / length
-        return (float(direction[0]), float(direction[1]))
+        return _normalized_world_direction(source_world_position, target_world_position)
 
     _disk_world_cells = _disk_world_cells
 
@@ -2407,18 +2349,11 @@ class WorldEngine:
 
     @staticmethod
     def _intent_resolution_status(*, drifted: bool, fallback_applied: bool) -> str:
-        if fallback_applied:
-            return "fallback"
-        if drifted:
-            return "drifted"
-        return "resolved"
+        return _intent_resolution_status(drifted=drifted, fallback_applied=fallback_applied)
 
     @staticmethod
     def _combine_resolution_notes(*notes: str | None) -> str | None:
-        filtered = [note for note in notes if note]
-        if not filtered:
-            return None
-        return "; ".join(filtered)
+        return _combine_resolution_notes(*notes)
 
     _resolve_targeted_commands = _resolve_targeted_commands
 
@@ -2428,28 +2363,13 @@ class WorldEngine:
 
     @staticmethod
     def _distance_meters_to_cells(distance_meters: float) -> int:
-        cells = int(round(float(distance_meters) * TARGET_QUERY_CELLS_PER_METER))
-        if cells == 0 and abs(float(distance_meters)) > 1e-6:
-            return 1 if distance_meters > 0.0 else -1
-        return cells
+        return _distance_meters_to_cells(distance_meters)
 
     def _resolve_query_source_position(self, query: TargetQuery) -> tuple[int, int] | None:
-        if query.source_entity_id is not None:
-            entity = self.entity_states.get(int(query.source_entity_id))
-            if entity is None:
-                return None
-            return self._world_to_buffer_clamped(*self._entity_center_world_position(entity))
-        if query.source_x is not None and query.source_y is not None:
-            return self._world_to_buffer_clamped(int(query.source_x), int(query.source_y))
-        if query.source_x is None and query.source_y is None:
-            return self._default_target_source_position()
-        return None
+        return _resolve_query_source_position(self, query)
 
     def _default_target_source_position(self) -> tuple[int, int]:
-        return (
-            (int(self.paging.buffer_origin_x) + int(self.paging.active_width) // 2) % self.width,
-            (int(self.paging.buffer_origin_y) + int(self.paging.active_height) // 2) % self.height,
-        )
+        return _default_target_source_position(self)
 
     def _resolve_anchor_target(
         self,
@@ -2463,74 +2383,22 @@ class WorldEngine:
     _resolve_terrain_anchor = _resolve_terrain_anchor
 
     def _entity_matches_anchor_filters(self, entity: EntityState, filters: tuple[str, ...]) -> bool:
-        area = max(1, int(entity.width) * int(entity.height))
-        entity_tags = set(entity.tags)
-        for item in filters:
-            if item in TERRAIN_ANCHOR_FILTERS or item in IGNORED_ANCHOR_FILTERS:
-                continue
-            if item in CARDINAL_DIRECTION_VECTORS or item in {"forward", "backward"}:
-                continue
-            if item == "big":
-                if area < 4:
-                    return False
-                continue
-            if item == "small":
-                if area > 1:
-                    return False
-                continue
-            if item not in entity_tags:
-                return False
-        return True
+        return _entity_matches_anchor_filters(self, entity, filters)
 
     _terrain_cell_matches = _terrain_cell_matches
 
     def _terrain_tree_cell_matches(self, x: int, y: int, material_id: int, phase: int) -> bool:
-        if material_id == 0 or phase in {int(Phase.LIQUID), int(Phase.POWDER)}:
-            return False
-        if not self._world_cell_material_has_tag(x, y, "plant"):
-            return False
-        if not (
-            self._world_cell_material_has_tag(x, y - 1, "plant")
-            or self._world_cell_material_has_tag(x, y + 1, "plant")
-        ):
-            return False
-        plant_neighbors = 0
-        for dy in (-1, 0, 1):
-            for dx in (-1, 0, 1):
-                if dx == 0 and dy == 0:
-                    continue
-                if self._world_cell_material_has_tag(x + dx, y + dy, "plant"):
-                    plant_neighbors += 1
-        return plant_neighbors >= 2
+        return _terrain_tree_cell_matches(self, x, y, material_id, phase)
 
     def _terrain_hill_cell_matches(self, x: int, y: int, material_id: int, phase: int) -> bool:
-        if material_id == 0 or phase == int(Phase.LIQUID):
-            return False
-        if self._world_cell_material_has_tag(x, y, "plant") or self._world_cell_material_has_tag(x, y, "placeholder"):
-            return False
-        if not self._world_cell_is_empty_local(x, y - 1):
-            return False
-        if self._world_cell_is_solid_local(x - 1, y) or self._world_cell_is_solid_local(x + 1, y):
-            return False
-        left_support = self._world_cell_is_solid_local(x - 1, y + 1) or self._world_cell_is_solid_local(x - 1, y + 2)
-        right_support = self._world_cell_is_solid_local(x + 1, y + 1) or self._world_cell_is_solid_local(x + 1, y + 2)
-        return left_support and right_support
+        return _terrain_hill_cell_matches(self, x, y, material_id, phase)
 
     _world_cell_is_solid_local = _world_cell_is_solid_local
 
     _world_cell_is_empty_local = _world_cell_is_empty_local
 
     def _world_cell_material_has_tag(self, x: int, y: int, tag: str) -> bool:
-        material_id, _ = self._bounded_material_state_for_position(x, y)
-        if material_id == 0:
-            return False
-        material_id = int(material_id)
-        if tag == "plant":
-            return self._shadow_material_is_plant(material_id)
-        if tag == "placeholder":
-            return self._shadow_material_is_placeholder(material_id)
-        material = self._shadow_material_def(material_id)
-        return material is not None and tag in material.tags
+        return _world_cell_material_has_tag(self, x, y, tag)
 
     _bounded_material_state_for_position = _bounded_material_state_for_position
 
@@ -2541,28 +2409,13 @@ class WorldEngine:
     _direction_vector = _direction_vector
 
     def _source_facing_vector(self, source_entity_id: int | None) -> tuple[float, float]:
-        if source_entity_id is not None:
-            entity = self.entity_states.get(int(source_entity_id))
-            if entity is not None:
-                if entity.facing_xy is not None:
-                    return (float(entity.facing_xy[0]), float(entity.facing_xy[1]))
-                if entity.velocity_xy != (0.0, 0.0):
-                    return (float(entity.velocity_xy[0]), float(entity.velocity_xy[1]))
-        return (1.0, 0.0)
+        return _source_facing_vector(self, source_entity_id)
 
     def _entity_center_buffer_position(self, entity: EntityState) -> tuple[int, int]:
-        return (
-            int(entity.x) + max(0, int(entity.width) - 1) // 2,
-            int(entity.y) + max(0, int(entity.height) - 1) // 2,
-        )
+        return _entity_center_buffer_position(self, entity)
 
     def _entity_center_world_position(self, entity: EntityState) -> tuple[int, int]:
-        if entity.world_x is not None and entity.world_y is not None:
-            return (
-                int(entity.world_x) + max(0, int(entity.width) - 1) // 2,
-                int(entity.world_y) + max(0, int(entity.height) - 1) // 2,
-            )
-        return self._buffer_to_world_position(self._entity_center_buffer_position(entity))
+        return _entity_center_world_position(self, entity)
 
     _buffer_to_world_position = _buffer_to_world_position
 
@@ -2575,15 +2428,7 @@ class WorldEngine:
     _force_source_buffer_position = _force_source_buffer_position
 
     def _normalize_runtime_force_source(self, force_source: ForceSource) -> ForceSource:
-        world_x, world_y = self._force_source_world_position(force_source)
-        buffer_x, buffer_y = self._world_to_buffer_float_position((world_x, world_y))
-        return replace(
-            force_source,
-            x=float(buffer_x),
-            y=float(buffer_y),
-            world_x=float(world_x),
-            world_y=float(world_y),
-        )
+        return _normalize_runtime_force_source(self, force_source)
 
     _buffer_gas_to_world_position = _buffer_gas_to_world_position
 
@@ -2606,30 +2451,14 @@ class WorldEngine:
         world_x1: int,
         world_y1: int,
     ) -> tuple[int, int, int, int]:
-        if world_x1 <= world_x0 or world_y1 <= world_y0:
-            gas_world_x0 = int(world_x0) // int(self.gas_cell_size)
-            gas_world_y0 = int(world_y0) // int(self.gas_cell_size)
-            return (gas_world_x0, gas_world_y0, gas_world_x0, gas_world_y0)
-        return (
-            int(world_x0) // int(self.gas_cell_size),
-            int(world_y0) // int(self.gas_cell_size),
-            int((int(world_x1) + int(self.gas_cell_size) - 1) // int(self.gas_cell_size)),
-            int((int(world_y1) + int(self.gas_cell_size) - 1) // int(self.gas_cell_size)),
-        )
+        return _world_gas_window_for_cell_world_rect(self, world_x0, world_y0, world_x1, world_y1)
 
     _pack_cell_core_world_window = _pack_cell_core_world_window
 
     _world_to_buffer_clamped = _world_to_buffer_clamped
 
     def _clamp_world_position(self, world_x: int, world_y: int) -> tuple[int, int]:
-        min_world_x = int(self.paging.origin_x)
-        min_world_y = int(self.paging.origin_y)
-        max_world_x = min_world_x + self.width - 1
-        max_world_y = min_world_y + self.height - 1
-        return (
-            max(min_world_x, min(max_world_x, int(world_x))),
-            max(min_world_y, min(max_world_y, int(world_y))),
-        )
+        return _clamp_world_position(self, world_x, world_y)
 
     _find_nearest_empty_world_position = _find_nearest_empty_world_position
 
@@ -2637,17 +2466,10 @@ class WorldEngine:
 
     @staticmethod
     def _world_distance_sq(left: tuple[int, int], right: tuple[int, int]) -> float:
-        dx = float(right[0] - left[0])
-        dy = float(right[1] - left[1])
-        return dx * dx + dy * dy
+        return _world_distance_sq(left, right)
 
     def _entity_placeholder_bbox(self, entity_id: int) -> tuple[int, int, int, int] | None:
-        cells = self.entity_placeholders.get(entity_id)
-        if not cells:
-            return None
-        xs = [cell[0] for cell in cells]
-        ys = [cell[1] for cell in cells]
-        return (min(xs), min(ys), max(xs) + 1, max(ys) + 1)
+        return _entity_placeholder_bbox(self, entity_id)
 
     _collect_observations = _collect_observations
 
@@ -2656,16 +2478,7 @@ class WorldEngine:
     _build_entity_feedback = _build_entity_feedback
 
     def _build_entity_feedback_from_world(self, entity: EntityState) -> EntityFeedback | None:
-        cell_state = {
-            "material_id": self.material_id,
-            "phase": self.phase,
-            "integrity": self.integrity,
-        }
-        entity_runtime = {
-            "entity_id": self.entity_id,
-            "placeholder_displaced_material": self.placeholder_displaced_material,
-        }
-        return self._build_entity_feedback_from_state(entity, cell_state=cell_state, entity_runtime=entity_runtime)
+        return _build_entity_feedback_from_world(self, entity)
 
     def _build_entity_feedback_from_current_state(
         self,
@@ -2673,10 +2486,10 @@ class WorldEngine:
         *,
         allow_gpu_sync_readback: bool = False,
     ) -> EntityFeedback | None:
-        return self._build_entity_feedback_from_state(
+        return _build_entity_feedback_from_current_state(
+            self,
             entity,
-            cell_state=self._current_cell_state_snapshot(allow_gpu_sync_readback=allow_gpu_sync_readback),
-            entity_runtime=self._current_entity_runtime_snapshot(allow_gpu_sync_readback=allow_gpu_sync_readback),
+            allow_gpu_sync_readback=allow_gpu_sync_readback,
         )
 
     _build_entity_feedback_from_state = _build_entity_feedback_from_state
