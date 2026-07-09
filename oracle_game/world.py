@@ -227,6 +227,27 @@ from oracle_game.world_geometry import (
     _world_to_buffer_clamped,
     _world_to_buffer_float_position,
 )
+from oracle_game.world_paging import (
+    _apply_page_stripe,
+    _apply_page_stripe_dense_cpu,
+    _capture_page_stripe_cpu_snapshot,
+    _coerce_page_store_key,
+    _coerce_page_stripe_payload,
+    _default_page_stripe_payload,
+    _stripe_buffer_ranges,
+    advance_paging,
+    apply_page_stripe,
+    apply_stored_page_stripe,
+    capture_page_stripe,
+    clear_page_store,
+    export_page_store_entries,
+    focus_paging,
+    import_page_store_entries,
+    list_page_store_stripe_keys,
+    load_page_stripe,
+    page_store_has_stripe,
+    store_page_stripe,
+)
 from oracle_game.world_intent_resolver import (
     _resolve_carrier_intent,
     _resolve_change_intent,
@@ -2304,7 +2325,7 @@ class WorldEngine:
         self.queue_command("inject_light", **payload)
 
     def focus_paging(self, center_x: int, center_y: int) -> list[PageStripeUpdate]:
-        return self.paging.focus_on(center_x, center_y)
+        return focus_paging(self, center_x, center_y)
 
     def advance_paging(
         self,
@@ -2317,134 +2338,22 @@ class WorldEngine:
         target_dy: int = 0,
         target_queries: list[TargetQuery | dict[str, Any]] | None = None,
     ) -> list[PageStripeUpdate]:
-        center_x, center_y, resolved_target_query_id = self._resolve_direct_targeted_coords(
-            "advance_paging",
+        return advance_paging(
+            self,
             center_x,
             center_y,
+            immediate=immediate,
             target_query_id=target_query_id,
             target_dx=target_dx,
             target_dy=target_dy,
             target_queries=target_queries,
         )
-        if immediate:
-            if not self._bridge_inputs_prepared:
-                self._prepare_bridge_frame_inputs()
-            return self._advance_paging(center_x, center_y)
-        payload: dict[str, Any] = {"center_x": center_x, "center_y": center_y}
-        if resolved_target_query_id is not None:
-            payload["resolved_target_query_id"] = resolved_target_query_id
-        self.queue_command("advance_paging", **payload)
-        return []
 
     def capture_page_stripe(self, update: PageStripeUpdate) -> dict[str, Any]:
-        update = self._contextualize_page_stripe_update(update)
-        if self.simulation_backend == "gpu":
-            if self._gpu_cpu_dirty_resources:
-                self.bridge.sync_world(self)
-                self._gpu_cpu_dirty_resources.clear()
-            return self.page_stripe_pipeline.capture(self, update)
-        return self._capture_page_stripe_cpu_snapshot(update)
+        return capture_page_stripe(self, update)
 
     def _capture_page_stripe_cpu_snapshot(self, update: PageStripeUpdate) -> dict[str, Any]:
-        gas_ranges = self._stripe_buffer_ranges(update, gas_grid=True)
-        cell_axis = 1 if update.axis == "x" else 0
-        cell_dose_axis = 2 if update.axis == "x" else 1
-        material_id = self._capture_stripe_array(self.material_id, update, stripe_axis=cell_axis)
-        phase = self._capture_stripe_array(self.phase, update, stripe_axis=cell_axis)
-        island_id = self._capture_stripe_array(self.island_id, update, stripe_axis=cell_axis)
-        entity_id = self._capture_stripe_array(self.entity_id, update, stripe_axis=cell_axis)
-        placeholder_displaced_material = self._capture_stripe_array(
-            self.placeholder_displaced_material,
-            update,
-            stripe_axis=cell_axis,
-        )
-        phase, island_id, entity_id, placeholder_displaced_material = self._normalize_cell_runtime_arrays(
-            material_id,
-            phase,
-            island_id,
-            entity_id,
-            placeholder_displaced_material,
-        )
-        runtime_payload = self._capture_page_stripe_island_runtime(
-            island_id
-        )
-        runtime_payload["entity_placeholder_entity_id"] = self._capture_page_stripe_entity_placeholder_runtime(
-            update,
-            stripe_axis=cell_axis,
-        )
-        payload = {
-            "meta": {
-                "axis": update.axis,
-                "world_start": update.world_start,
-                "world_end": update.world_end,
-                "buffer_start": update.buffer_start,
-                "buffer_end": update.buffer_end,
-                "kind": update.kind,
-                "cross_world_start": update.cross_world_start,
-                "cross_world_end": update.cross_world_end,
-            },
-            "cell": {
-                "material_id": material_id,
-                "phase": phase,
-                "cell_flags": self._capture_stripe_array(self.cell_flags, update, stripe_axis=cell_axis),
-                "velocity": self._capture_stripe_array(self.velocity, update, stripe_axis=cell_axis),
-                "cell_temperature": self._capture_stripe_array(self.cell_temperature, update, stripe_axis=cell_axis),
-                "timer_pack": self._capture_stripe_array(self.timer_pack, update, stripe_axis=cell_axis),
-                "integrity": self._capture_stripe_array(self.integrity, update, stripe_axis=cell_axis),
-                "island_id": island_id,
-                "entity_id": entity_id,
-                "placeholder_displaced_material": placeholder_displaced_material,
-                "collapse_delay_pending": self._capture_stripe_array(
-                    self.collapse_delay_pending.astype(np.uint8),
-                    update,
-                    stripe_axis=cell_axis,
-                ),
-                "visible_illumination": self._capture_stripe_array(
-                    self.visible_illumination,
-                    update,
-                    stripe_axis=cell_axis,
-                ),
-                "cell_optical_dose": self._capture_stripe_array(
-                    self.cell_optical_dose,
-                    update,
-                    stripe_axis=cell_dose_axis,
-                ),
-            },
-            "runtime": runtime_payload,
-            "gas": {
-                "ambient_temperature": self._capture_stripe_array(
-                    self.ambient_temperature,
-                    update,
-                    stripe_axis=1 if update.axis == "x" else 0,
-                    ranges=gas_ranges,
-                ),
-                "flow_velocity": self._capture_stripe_array(
-                    self.flow_velocity,
-                    update,
-                    stripe_axis=1 if update.axis == "x" else 0,
-                    ranges=gas_ranges,
-                ),
-                "pressure_ping": self._capture_stripe_array(
-                    self.pressure_ping,
-                    update,
-                    stripe_axis=1 if update.axis == "x" else 0,
-                    ranges=gas_ranges,
-                ),
-                "gas_concentration": self._capture_stripe_array(
-                    self.gas_concentration,
-                    update,
-                    stripe_axis=2 if update.axis == "x" else 1,
-                    ranges=gas_ranges,
-                ),
-                "gas_optical_dose": self._capture_stripe_array(
-                    self.gas_optical_dose,
-                    update,
-                    stripe_axis=2 if update.axis == "x" else 1,
-                    ranges=gas_ranges,
-                ),
-            },
-        }
-        return payload
+        return _capture_page_stripe_cpu_snapshot(self, update)
 
     def apply_page_stripe(
         self,
@@ -2453,38 +2362,16 @@ class WorldEngine:
         *,
         immediate: bool = False,
     ) -> None:
-        update = self._contextualize_page_stripe_update(update)
-        payload = self._coerce_page_stripe_payload(payload)
-        if immediate:
-            if not self._bridge_inputs_prepared:
-                self._prepare_bridge_frame_inputs()
-            self.bridge_frame_paging_updates.append(PageStripeUpdate(**asdict(update)))
-            self._apply_page_stripe(update, payload)
-            self._record_bridge_page_stripe(update, payload)
-            return
-        self.queue_command(
-            "apply_page_stripe",
-            update=asdict(update),
-            payload=payload,
-        )
+        return apply_page_stripe(self, update, payload, immediate=immediate)
 
     def store_page_stripe(self, update: PageStripeUpdate, payload: dict[str, Any]) -> dict[str, Any]:
-        update = self._contextualize_page_stripe_update(update)
-        normalized_payload = self._coerce_page_stripe_payload(payload)
-        self.page_store.save(update, normalized_payload)
-        stored_payload = self.page_store.load(update)
-        assert stored_payload is not None
-        return self._coerce_page_stripe_payload(stored_payload)
+        return store_page_stripe(self, update, payload)
 
     def capture_page_stripe_to_store(self, update: PageStripeUpdate) -> dict[str, Any]:
         return self.store_page_stripe(update, self.capture_page_stripe(update))
 
     def load_page_stripe(self, update: PageStripeUpdate) -> dict[str, Any] | None:
-        update = self._contextualize_page_stripe_update(update)
-        payload = self.page_store.load(update)
-        if payload is None:
-            return None
-        return self._coerce_page_stripe_payload(payload)
+        return load_page_stripe(self, update)
 
     def apply_stored_page_stripe(
         self,
@@ -2492,62 +2379,22 @@ class WorldEngine:
         *,
         immediate: bool = False,
     ) -> dict[str, Any] | None:
-        payload = self.load_page_stripe(update)
-        if payload is None:
-            return None
-        self.apply_page_stripe(update, payload, immediate=immediate)
-        return payload
+        return apply_stored_page_stripe(self, update, immediate=immediate)
 
     def page_store_has_stripe(self, update: PageStripeUpdate) -> bool:
-        update = self._contextualize_page_stripe_update(update)
-        return bool(self.page_store.has(update))
+        return page_store_has_stripe(self, update)
 
     def list_page_store_stripe_keys(self) -> list[StoredStripeKey] | None:
-        list_keys = getattr(self.page_store, "keys", None)
-        if not callable(list_keys):
-            return None
-        return [self._coerce_page_store_key(key) for key in list_keys()]
+        return list_page_store_stripe_keys(self)
 
     def export_page_store_entries(self) -> dict[str, Any]:
-        keys = self.list_page_store_stripe_keys()
-        entries: list[dict[str, Any]] = []
-        if keys is not None:
-            for key in keys:
-                payload = self.page_store.load(self._page_store_key_lookup_update(key))
-                if payload is None:
-                    continue
-                entries.append(
-                    {
-                        "key": self.serialize_page_store_key(key),
-                        "payload": self.serialize_page_stripe_payload(self._coerce_page_stripe_payload(payload)),
-                    }
-                )
-        return {
-            "stored_stripes": int(self.page_store.stored_count()),
-            "key_listing_supported": keys is not None,
-            "entries": entries,
-        }
+        return export_page_store_entries(self)
 
     def import_page_store_entries(self, entries: Iterable[dict[str, Any]], *, clear: bool = False) -> dict[str, int]:
-        cleared = 0
-        if clear:
-            cleared = self.clear_page_store()
-        imported = 0
-        for entry in entries:
-            key = self._coerce_page_store_key(entry["key"])
-            payload = self._coerce_page_stripe_payload(dict(entry["payload"]))
-            self.page_store.save(self._page_store_key_lookup_update(key), payload)
-            imported += 1
-        return {
-            "cleared": int(cleared),
-            "imported": int(imported),
-            "stored_stripes": int(self.page_store.stored_count()),
-        }
+        return import_page_store_entries(self, entries, clear=clear)
 
     def clear_page_store(self) -> int:
-        cleared = int(self.page_store.stored_count())
-        self.page_store.clear()
-        return cleared
+        return clear_page_store(self)
 
     def serialize_page_store_state(self) -> dict[str, Any]:
         return serialize_page_store_state(self)
@@ -2556,30 +2403,7 @@ class WorldEngine:
         self,
         key: StoredStripeKey | PageStripeUpdate | dict[str, Any],
     ) -> StoredStripeKey:
-        if isinstance(key, StoredStripeKey):
-            return StoredStripeKey(
-                axis=str(key.axis),
-                world_start=int(key.world_start),
-                world_end=int(key.world_end),
-                cross_world_start=int(getattr(key, "cross_world_start", 0)),
-                cross_world_end=int(getattr(key, "cross_world_end", 0)),
-            )
-        if isinstance(key, PageStripeUpdate):
-            return StoredStripeKey(
-                axis=str(key.axis),
-                world_start=int(key.world_start),
-                world_end=int(key.world_end),
-                cross_world_start=0 if key.cross_world_start is None else int(key.cross_world_start),
-                cross_world_end=0 if key.cross_world_end is None else int(key.cross_world_end),
-            )
-        payload = dict(key)
-        return StoredStripeKey(
-            axis=str(payload["axis"]),
-            world_start=int(payload["world_start"]),
-            world_end=int(payload["world_end"]),
-            cross_world_start=int(payload.get("cross_world_start", 0)),
-            cross_world_end=int(payload.get("cross_world_end", 0)),
-        )
+        return _coerce_page_store_key(self, key)
 
     @staticmethod
     def _page_store_key_lookup_update(key: StoredStripeKey) -> PageStripeUpdate:
@@ -2595,73 +2419,7 @@ class WorldEngine:
         )
 
     def _coerce_page_stripe_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
-        cell_payload = dict(payload["cell"])
-        gas_payload = dict(payload["gas"])
-        runtime_payload = None if payload.get("runtime") is None else dict(payload["runtime"])
-        gas_concentration = np.asarray(
-            gas_payload["gas_concentration"],
-            dtype=self.gas_concentration.dtype,
-        ).copy()
-        np.maximum(gas_concentration, 0.0, out=gas_concentration)
-        if runtime_payload is not None and "entity_placeholder_entity_id" in runtime_payload:
-            runtime_payload["entity_placeholder_entity_id"] = np.asarray(
-                runtime_payload["entity_placeholder_entity_id"],
-                dtype=np.int32,
-            )
-        if runtime_payload is not None:
-            if "island_ids" in runtime_payload:
-                runtime_payload["island_ids"] = np.asarray(runtime_payload["island_ids"], dtype=np.int32)
-            if "island_velocity" in runtime_payload:
-                runtime_payload["island_velocity"] = np.asarray(runtime_payload["island_velocity"], dtype=np.float32)
-            if "island_subcell_offset" in runtime_payload:
-                runtime_payload["island_subcell_offset"] = np.asarray(
-                    runtime_payload["island_subcell_offset"],
-                    dtype=np.float32,
-                )
-        return {
-            "meta": dict(payload["meta"]),
-            "cell": {
-                "material_id": np.asarray(cell_payload["material_id"], dtype=self.material_id.dtype),
-                "phase": np.asarray(cell_payload["phase"], dtype=self.phase.dtype),
-                "cell_flags": np.asarray(cell_payload["cell_flags"], dtype=self.cell_flags.dtype),
-                "velocity": np.asarray(cell_payload["velocity"], dtype=self.velocity.dtype),
-                "cell_temperature": np.asarray(cell_payload["cell_temperature"], dtype=self.cell_temperature.dtype),
-                "timer_pack": np.asarray(cell_payload["timer_pack"], dtype=self.timer_pack.dtype),
-                "integrity": np.asarray(cell_payload["integrity"], dtype=self.integrity.dtype),
-                "island_id": np.asarray(cell_payload["island_id"], dtype=self.island_id.dtype),
-                "entity_id": np.asarray(cell_payload["entity_id"], dtype=self.entity_id.dtype),
-                "placeholder_displaced_material": np.asarray(
-                    cell_payload["placeholder_displaced_material"],
-                    dtype=self.placeholder_displaced_material.dtype,
-                ),
-                "collapse_delay_pending": np.asarray(
-                    cell_payload["collapse_delay_pending"],
-                    dtype=np.uint8,
-                ),
-                "visible_illumination": np.asarray(
-                    cell_payload["visible_illumination"],
-                    dtype=self.visible_illumination.dtype,
-                ),
-                "cell_optical_dose": np.asarray(
-                    cell_payload["cell_optical_dose"],
-                    dtype=self.cell_optical_dose.dtype,
-                ),
-            },
-            "runtime": runtime_payload,
-            "gas": {
-                "ambient_temperature": np.asarray(
-                    gas_payload["ambient_temperature"],
-                    dtype=self.ambient_temperature.dtype,
-                ),
-                "flow_velocity": np.asarray(gas_payload["flow_velocity"], dtype=self.flow_velocity.dtype),
-                "pressure_ping": np.asarray(gas_payload["pressure_ping"], dtype=self.pressure_ping.dtype),
-                "gas_concentration": gas_concentration,
-                "gas_optical_dose": np.asarray(
-                    gas_payload["gas_optical_dose"],
-                    dtype=self.gas_optical_dose.dtype,
-                ),
-            },
-        }
+        return _coerce_page_stripe_payload(self, payload)
 
     def sync_entity_placeholders(
         self,
@@ -5157,113 +4915,10 @@ class WorldEngine:
         return (gx0, gy0, gx1, gy1)
 
     def _apply_page_stripe(self, update: PageStripeUpdate, payload: dict[str, Any]) -> None:
-        if self._gpu_pipeline_available(
-            self.page_stripe_pipeline,
-            "page stripe",
-            require=self.simulation_backend == "gpu",
-        ):
-            self.page_stripe_pipeline.apply(self, update, payload)
-        else:
-            self._require_cpu_oracle_backend("page stripe")
-            self.page_stripe_pipeline.last_backend = "cpu"
-            self.page_stripe_pipeline.last_cpu_mirror_downloaded = True
-            self._apply_page_stripe_dense_cpu(update, payload)
-
-        self._normalize_page_stripe_cell_runtime(update)
-
-        runtime_payload = payload.get("runtime")
-        self._merge_island_runtime_payload(runtime_payload, update=update, payload=payload)
-        if self.page_stripe_pipeline.last_cpu_mirror_downloaded:
-            self._queue_loaded_collapse_pending_regions(update)
-        else:
-            self._queue_loaded_collapse_pending_regions_from_payload(update, payload)
-        self._mark_loaded_page_stripe_active(update)
-        if self.page_stripe_pipeline.last_cpu_mirror_downloaded:
-            self._rebuild_island_records()
-        self._apply_page_stripe_entity_placeholder_runtime(
-            update,
-            None
-            if runtime_payload is None
-            else runtime_payload.get("entity_placeholder_entity_id"),
-        )
-        self._invalidate_gpu_authoritative_resources("active_meta", "active_tile_ttl", "active_chunk_mask")
+        return _apply_page_stripe(self, update, payload)
 
     def _apply_page_stripe_dense_cpu(self, update: PageStripeUpdate, payload: dict[str, Any]) -> None:
-        gas_ranges = self._stripe_buffer_ranges(update, gas_grid=True)
-        cell_payload = payload["cell"]
-        gas_payload = payload["gas"]
-        cell_axis = 1 if update.axis == "x" else 0
-        cell_dose_axis = 2 if update.axis == "x" else 1
-
-        self._write_stripe_array(self.material_id, update, cell_payload["material_id"], stripe_axis=cell_axis)
-        self._write_stripe_array(self.phase, update, cell_payload["phase"], stripe_axis=cell_axis)
-        self._write_stripe_array(self.cell_flags, update, cell_payload["cell_flags"], stripe_axis=cell_axis)
-        self._write_stripe_array(self.velocity, update, cell_payload["velocity"], stripe_axis=cell_axis)
-        self._write_stripe_array(self.cell_temperature, update, cell_payload["cell_temperature"], stripe_axis=cell_axis)
-        self._write_stripe_array(self.timer_pack, update, cell_payload["timer_pack"], stripe_axis=cell_axis)
-        self._write_stripe_array(self.integrity, update, cell_payload["integrity"], stripe_axis=cell_axis)
-        self._write_stripe_array(self.island_id, update, cell_payload["island_id"], stripe_axis=cell_axis)
-        self._write_stripe_array(self.entity_id, update, cell_payload["entity_id"], stripe_axis=cell_axis)
-        self._write_stripe_array(
-            self.placeholder_displaced_material,
-            update,
-            cell_payload["placeholder_displaced_material"],
-            stripe_axis=cell_axis,
-        )
-        self._write_stripe_array(
-            self.collapse_delay_pending,
-            update,
-            np.asarray(cell_payload["collapse_delay_pending"], dtype=np.bool_),
-            stripe_axis=cell_axis,
-        )
-        self._write_stripe_array(
-            self.visible_illumination,
-            update,
-            cell_payload["visible_illumination"],
-            stripe_axis=cell_axis,
-        )
-        self._write_stripe_array(
-            self.cell_optical_dose,
-            update,
-            cell_payload["cell_optical_dose"],
-            stripe_axis=cell_dose_axis,
-        )
-
-        self._write_stripe_array(
-            self.ambient_temperature,
-            update,
-            gas_payload["ambient_temperature"],
-            stripe_axis=1 if update.axis == "x" else 0,
-            ranges=gas_ranges,
-        )
-        self._write_stripe_array(
-            self.flow_velocity,
-            update,
-            gas_payload["flow_velocity"],
-            stripe_axis=1 if update.axis == "x" else 0,
-            ranges=gas_ranges,
-        )
-        self._write_stripe_array(
-            self.pressure_ping,
-            update,
-            gas_payload["pressure_ping"],
-            stripe_axis=1 if update.axis == "x" else 0,
-            ranges=gas_ranges,
-        )
-        self._write_stripe_array(
-            self.gas_concentration,
-            update,
-            gas_payload["gas_concentration"],
-            stripe_axis=2 if update.axis == "x" else 1,
-            ranges=gas_ranges,
-        )
-        self._write_stripe_array(
-            self.gas_optical_dose,
-            update,
-            gas_payload["gas_optical_dose"],
-            stripe_axis=2 if update.axis == "x" else 1,
-            ranges=gas_ranges,
-        )
+        return _apply_page_stripe_dense_cpu(self, update, payload)
 
     def _queue_loaded_collapse_pending_regions_from_payload(
         self,
@@ -6959,76 +6614,10 @@ class WorldEngine:
             offset += span
 
     def _default_page_stripe_payload(self, update: PageStripeUpdate) -> dict[str, Any]:
-        cell_span = self.paging.stripe_span(update)
-        gas_span = cell_span // self.gas_cell_size
-        cell_width = cell_span if update.axis == "x" else self.width
-        cell_height = self.height if update.axis == "x" else cell_span
-        gas_width = gas_span if update.axis == "x" else self.gas_width
-        gas_height = self.gas_height if update.axis == "x" else gas_span
-        light_count = self.cell_optical_dose.shape[0]
-        gas_count = self.gas_concentration.shape[0]
-        payload = {
-            "meta": {
-                "axis": update.axis,
-                "world_start": update.world_start,
-                "world_end": update.world_end,
-                "buffer_start": update.buffer_start,
-                "buffer_end": update.buffer_end,
-                "kind": "generated",
-            },
-            "cell": {
-                "material_id": np.zeros((cell_height, cell_width), dtype=np.int32),
-                "phase": np.zeros((cell_height, cell_width), dtype=np.uint8),
-                "cell_flags": np.zeros((cell_height, cell_width), dtype=np.uint8),
-                "velocity": np.zeros((cell_height, cell_width, 2), dtype=np.float32),
-                "cell_temperature": np.full((cell_height, cell_width), 20.0, dtype=np.float32),
-                "timer_pack": np.zeros((cell_height, cell_width, 4), dtype=np.uint8),
-                "integrity": np.zeros((cell_height, cell_width), dtype=np.float32),
-                "island_id": np.zeros((cell_height, cell_width), dtype=np.int32),
-                "entity_id": np.zeros((cell_height, cell_width), dtype=np.int32),
-                "placeholder_displaced_material": np.zeros((cell_height, cell_width), dtype=np.int32),
-                "collapse_delay_pending": np.zeros((cell_height, cell_width), dtype=np.uint8),
-                "visible_illumination": np.zeros((cell_height, cell_width, 3), dtype=np.float32),
-                "cell_optical_dose": np.zeros((light_count, cell_height, cell_width), dtype=np.float32),
-            },
-            "runtime": {
-                "island_ids": np.zeros((0,), dtype=np.int32),
-                "island_velocity": np.zeros((0, 2), dtype=np.float32),
-                "island_subcell_offset": np.zeros((0, 2), dtype=np.float32),
-                "entity_placeholder_entity_id": np.zeros((cell_height, cell_width), dtype=np.int32),
-            },
-            "gas": {
-                "ambient_temperature": np.full((gas_height, gas_width), 20.0, dtype=np.float32),
-                "flow_velocity": np.zeros((gas_height, gas_width, 2), dtype=np.float32),
-                "pressure_ping": np.zeros((gas_height, gas_width), dtype=np.float32),
-                "gas_concentration": np.zeros((gas_count, gas_height, gas_width), dtype=np.float32),
-                "gas_optical_dose": np.zeros((light_count, gas_height, gas_width), dtype=np.float32),
-            },
-        }
-        if 0 <= self.air_gas_species_id < gas_count:
-            payload["gas"]["gas_concentration"][self.air_gas_species_id] = 1.0
-        return payload
+        return _default_page_stripe_payload(self, update)
 
     def _stripe_buffer_ranges(self, update: PageStripeUpdate, *, gas_grid: bool) -> list[tuple[int, int]]:
-        if not gas_grid:
-            return self.paging.stripe_buffer_ranges(update)
-        cell_span = self.paging.stripe_span(update)
-        if cell_span % self.gas_cell_size != 0 or update.buffer_start % self.gas_cell_size != 0:
-            raise ValueError("page stripe is not aligned to the gas grid")
-        size = self.gas_width if update.axis == "x" else self.gas_height
-        span = min(size, cell_span // self.gas_cell_size)
-        if span <= 0:
-            return []
-        start = (update.buffer_start // self.gas_cell_size) % size
-        if span >= size:
-            return [(0, size)]
-        end = (start + span) % size
-        if start < end:
-            return [(start, end)]
-        ranges = [(start, size)]
-        if end > 0:
-            ranges.append((0, end))
-        return ranges
+        return _stripe_buffer_ranges(self, update, gas_grid=gas_grid)
 
     def _mark_loaded_page_stripe_active(self, update: PageStripeUpdate) -> None:
         for start, end in self._stripe_buffer_ranges(update, gas_grid=False):
