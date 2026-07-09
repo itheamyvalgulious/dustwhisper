@@ -21,9 +21,6 @@ from oracle_game.gpu import (
     GPUSegmentedCellCoreWindowReadbackSource,
     GPUSegmentedTextureReadbackSource,
     GPUTextureReadbackSource,
-    typed_gas_id,
-    typed_material_id,
-    typed_light_id,
     unpack_cell_core,
 )
 from oracle_game.readback_contract import READBACK_ALLOWED_CHANNELS
@@ -329,6 +326,36 @@ from oracle_game.world_table_validation import (
     _validate_named_reference,
     _validate_reaction_payload,
     _validate_unique_identity_fields,
+)
+from oracle_game.world_shadow_tables import (
+    _reaction_rule_list,
+    _resolve_sanctioned_gas_id,
+    _resolve_sanctioned_light_id,
+    _resolve_sanctioned_material_id,
+    _resolve_sanctioned_placeholder_material_id,
+    _shadow_condense_target_material_id,
+    _shadow_gas_name,
+    _shadow_gas_row_valid,
+    _shadow_gas_species_def,
+    _shadow_light_color,
+    _shadow_light_default_range,
+    _shadow_light_dose_channel,
+    _shadow_light_name,
+    _shadow_light_name_and_range,
+    _shadow_light_row_valid,
+    _shadow_light_type_def,
+    _shadow_material_base_integrity,
+    _shadow_material_default_phase,
+    _shadow_material_def,
+    _shadow_material_id_by_name,
+    _shadow_material_is_placeholder,
+    _shadow_material_is_plant,
+    _shadow_material_name,
+    _shadow_material_optics_def,
+    _shadow_material_row_valid,
+    _shadow_material_spawn_temperature,
+    _shadow_reaction_action,
+    _shadow_reaction_rule,
 )
 from oracle_game.world_runtime_rebuild import (
     _apply_page_stripe_entity_placeholder_runtime,
@@ -6057,304 +6084,76 @@ class WorldEngine:
         self.clear_cell(x, y, mark_dirty=False)
 
     def _resolve_sanctioned_material_id(self, name: str) -> int:
-        self.bridge.sync_rule_tables(self)
-        material_table = self.bridge.shadow_typed_tables.get("material_table")
-        if material_table is None:
-            return 0
-        canonical_names = [str(name)]
-        alias = BASE_MATERIAL_RUNTIME_ALIASES.get(str(name))
-        if alias is not None and alias != name:
-            canonical_names.append(alias)
-        for candidate_name in canonical_names:
-            material_id = int(typed_material_id(material_table, candidate_name))
-            if material_id <= 0 or material_id >= int(material_table.shape[0]):
-                continue
-            if int(material_table[material_id]["name_hash"]) == 0:
-                continue
-            return material_id
-        return 0
+        return _resolve_sanctioned_material_id(self, name)
 
     def _shadow_material_id_by_name(self, name: str | None) -> int:
-        canonical_name = self._canonical_material_input_name(name)
-        if canonical_name is None:
-            return 0
-        materials_payload = self._shadow_material_payload()
-        if materials_payload is not None:
-            for item in materials_payload:
-                if self._canonical_material_input_name(item.get("name")) != canonical_name:
-                    continue
-                return int(item.get("material_id", 0))
-        material_table = self.bridge.shadow_typed_tables.get("material_table")
-        if material_table is None:
-            return 0
-        return int(typed_material_id(material_table, canonical_name))
+        return _shadow_material_id_by_name(self, name)
 
     def _resolve_sanctioned_placeholder_material_id(self, name: str) -> int:
-        material_id = self._resolve_sanctioned_material_id(name)
-        if not self._shadow_material_is_placeholder(material_id):
-            return 0
-        return material_id
+        return _resolve_sanctioned_placeholder_material_id(self, name)
 
     def _resolve_sanctioned_light_id(self, name: str) -> int:
-        self.bridge.sync_rule_tables(self)
-        light_table = self.bridge.shadow_typed_tables.get("light_table")
-        if light_table is None:
-            return -1
-        light_id = int(typed_light_id(light_table, name))
-        if light_id < 0 or light_id >= int(light_table.shape[0]):
-            return -1
-        if int(light_table[light_id]["name_hash"]) == 0:
-            return -1
-        return light_id
+        return _resolve_sanctioned_light_id(self, name)
 
     def _resolve_sanctioned_gas_id(self, name: str) -> int:
-        self.bridge.sync_rule_tables(self)
-        gas_table = self.bridge.shadow_typed_tables.get("gas_table")
-        if gas_table is None:
-            return -1
-        species_id = int(typed_gas_id(gas_table, name))
-        if species_id < 0 or species_id >= int(gas_table.shape[0]):
-            return -1
-        if int(gas_table[species_id]["name_hash"]) == 0:
-            return -1
-        return species_id
+        return _resolve_sanctioned_gas_id(self, name)
 
     def _shadow_material_row_valid(self, material_id: int) -> bool:
-        material_table = self.bridge.shadow_typed_tables.get("material_table")
-        if material_table is None:
-            return True
-        if material_id <= 0 or material_id >= int(material_table.shape[0]):
-            return False
-        return int(material_table[int(material_id)]["name_hash"]) != 0
+        return _shadow_material_row_valid(self, material_id)
 
     def _shadow_gas_row_valid(self, species_id: int) -> bool:
-        gas_table = self.bridge.shadow_typed_tables.get("gas_table")
-        if gas_table is None:
-            return True
-        if species_id < 0 or species_id >= int(gas_table.shape[0]):
-            return False
-        return int(gas_table[int(species_id)]["name_hash"]) != 0
+        return _shadow_gas_row_valid(self, species_id)
 
     def _shadow_light_row_valid(self, light_id: int) -> bool:
-        light_table = self.bridge.shadow_typed_tables.get("light_table")
-        if light_table is None:
-            return True
-        if light_id < 0 or light_id >= int(light_table.shape[0]):
-            return False
-        return int(light_table[int(light_id)]["name_hash"]) != 0
+        return _shadow_light_row_valid(self, light_id)
 
     def _shadow_material_def(self, material_id: int) -> MaterialDef | None:
-        if not self._shadow_material_row_valid(int(material_id)):
-            return None
-        for item in self._shadow_material_payload():
-            if int(item.get("material_id", 0)) == int(material_id):
-                return self._coerce_material_def(item)
-        return None
+        return _shadow_material_def(self, material_id)
 
     def _shadow_light_type_def(self, light_id: int) -> LightTypeDef | None:
-        if not self._shadow_light_row_valid(int(light_id)):
-            return None
-        for item in self._shadow_light_type_payload():
-            if int(item.get("light_type_id", -1)) == int(light_id):
-                return self._coerce_light_type_def(item)
-        return None
+        return _shadow_light_type_def(self, light_id)
 
     def _shadow_gas_species_def(self, species_id: int) -> GasSpeciesDef | None:
-        if not self._shadow_gas_row_valid(int(species_id)):
-            return None
-        for item in self._shadow_gas_species_payload():
-            if int(item.get("species_id", -1)) == int(species_id):
-                return self._coerce_gas_species_def(item)
-        return None
+        return _shadow_gas_species_def(self, species_id)
 
     def _shadow_material_optics_def(self, material_name: str, light_type: str) -> MaterialOpticsDef | None:
-        payload = self.bridge.shadow_tables.get("optics")
-        if payload is not None:
-            for item in payload:
-                if str(item.get("material_name", "")) == material_name and str(item.get("light_type", "")) == light_type:
-                    return self._coerce_material_optics_def(item)
-            return None
-        optics_table = self.bridge.shadow_typed_tables.get("optics_table")
-        material_id = self._resolve_sanctioned_material_id(material_name)
-        light_id = self._resolve_sanctioned_light_id(light_type)
-        if material_id <=0 or light_id <0:
-            return None
-        if optics_table is not None:
-            for row in optics_table:
-                if int(row["material_id"]) == material_id and int(row["light_type_id"]) == light_id:
-                    return MaterialOpticsDef(
-                    material_name=material_name,
-                    light_type=light_type,
-                    absorption=float(row["absorption"]),
-                    scattering=float(row["scattering"]),
-                    refraction=float(row["refraction"]),
-                    )
-        return None
+        return _shadow_material_optics_def(self, material_name, light_type)
+
     def _shadow_material_name(self, material_id: int) -> str | None:
-        material = self._shadow_material_def(int(material_id))
-        if material is not None and material.name:
-            return str(material.name)
-        if not self._shadow_material_row_valid(int(material_id)):
-            return None
-        if self._shadow_has_table_payload("materials"):
-            return None
-        if 0 <= int(material_id) < len(self.material_name_by_id) and self.material_name_by_id[int(material_id)]:
-            return self.material_name_by_id[int(material_id)]
-        return None
+        return _shadow_material_name(self, material_id)
 
     def _shadow_gas_name(self, species_id: int) -> str | None:
-        gas = self._shadow_gas_species_def(int(species_id))
-        if gas is not None and gas.name:
-            return str(gas.name)
-        if not self._shadow_gas_row_valid(int(species_id)):
-            return None
-        if self._shadow_has_table_payload("gases"):
-            return None
-
-        return self.gas_name_by_id[int(species_id)]
-        return None
+        return _shadow_gas_name(self, species_id)
 
     def _shadow_light_name(self, light_id: int) -> str | None:
-        light = self._shadow_light_type_def(int(light_id))
-        if light is not None and light.name:
-            return str(light.name)
-        if not self._shadow_light_row_valid(int(light_id)):
-            return None
-        if self._shadow_has_table_payload("lights"):
-            return None
-        if 0 <= int(light_id) < len(self.light_name_by_id) and self.light_name_by_id[int(light_id)]:
-            return self.light_name_by_id[int(light_id)]
-        return None
+        return _shadow_light_name(self, light_id)
 
     def _shadow_light_default_range(self, light_id: int) -> int | None:
-        light_table = self.bridge.shadow_typed_tables.get("light_table")
-        if light_table is not None and 0 <= int(light_id) < int(light_table.shape[0]):
-            row = light_table[int(light_id)]
-            if int(row["name_hash"]) == 0:
-                return None
-            return int(row["default_range"])
-        light = self._shadow_light_type_def(int(light_id))
-        if light is not None:
-            return int(light.default_range)
-        if self._shadow_has_table_payload("lights"):
-            return None
-        if 0 <= int(light_id) < self.light_default_range.shape[0]:
-            return int(self.light_default_range[int(light_id)])
-        return None
+        return _shadow_light_default_range(self, light_id)
 
     def _shadow_light_dose_channel(self, light_id: int) -> int | None:
-        light_table = self.bridge.shadow_typed_tables.get("light_table")
-        if light_table is not None and 0 <= int(light_id) < int(light_table.shape[0]):
-            row = light_table[int(light_id)]
-            if int(row["name_hash"]) == 0:
-                return None
-            return int(row["dose_channel_id"])
-        light = self._shadow_light_type_def(int(light_id))
-        if light is not None:
-            return int(light.dose_channel_id)
-        if self._shadow_has_table_payload("lights"):
-            return None
-        if 0 <= int(light_id) < self.light_dose_channel.shape[0]:
-            return int(self.light_dose_channel[int(light_id)])
-        return None
+        return _shadow_light_dose_channel(self, light_id)
 
     def _shadow_light_color(self, light_id: int) -> np.ndarray | None:
-        light_table = self.bridge.shadow_typed_tables.get("light_table")
-        if light_table is not None and 0 <= int(light_id) < int(light_table.shape[0]):
-            row = light_table[int(light_id)]
-            if int(row["name_hash"]) == 0:
-                return None
-            return np.asarray(row["color"], dtype=np.float32)
-        light = self._shadow_light_type_def(int(light_id))
-        if light is not None:
-            return np.asarray(light.color, dtype=np.float32)
-        if self._shadow_has_table_payload("lights"):
-            return None
-        if 0 <= int(light_id) < self.light_color.shape[0]:
-            return np.asarray(self.light_color[int(light_id)], dtype=np.float32)
-        return None
+        return _shadow_light_color(self, light_id)
 
     def _shadow_light_name_and_range(self, light_id: int) -> tuple[str, int] | None:
-        light_name = self._shadow_light_name(int(light_id))
-        if light_name is None:
-            return None
-        default_range = self._shadow_light_default_range(int(light_id))
-        if default_range is None:
-            return None
-        return (light_name, default_range)
+        return _shadow_light_name_and_range(self, light_id)
 
     def _shadow_material_default_phase(self, material_id: int) -> int | None:
-        material_table = self.bridge.shadow_typed_tables.get("material_table")
-        if material_table is not None and 0 <= int(material_id) < int(material_table.shape[0]):
-            row = material_table[int(material_id)]
-            if int(row["name_hash"]) == 0:
-                return None
-            return int(row["default_phase"])
-        shadow_material = self._shadow_material_def(int(material_id))
-        if shadow_material is not None:
-            return int(shadow_material.default_phase)
-        if self._shadow_has_table_payload("materials"):
-            return None
-        if 0 <= int(material_id) < self.material_default_phase.shape[0]:
-            return int(self.material_default_phase[int(material_id)])
-        return None
+        return _shadow_material_default_phase(self, material_id)
 
     def _shadow_material_base_integrity(self, material_id: int) -> float | None:
-        material_table = self.bridge.shadow_typed_tables.get("material_table")
-        if material_table is not None and 0 <= int(material_id) < int(material_table.shape[0]):
-            row = material_table[int(material_id)]
-            if int(row["name_hash"]) == 0:
-                return None
-            return float(row["base_integrity"])
-        shadow_material = self._shadow_material_def(int(material_id))
-        if shadow_material is not None:
-            return float(shadow_material.base_integrity)
-        if self._shadow_has_table_payload("materials"):
-            return None
-        if 0 <= int(material_id) < self.material_base_integrity.shape[0]:
-            return float(self.material_base_integrity[int(material_id)])
-        return None
+        return _shadow_material_base_integrity(self, material_id)
 
     def _shadow_material_spawn_temperature(self, material_id: int) -> float | None:
-        material_table = self.bridge.shadow_typed_tables.get("material_table")
-        if material_table is not None and 0 <= int(material_id) < int(material_table.shape[0]):
-            row = material_table[int(material_id)]
-            if int(row["name_hash"]) == 0:
-                return None
-            value = float(row["spawn_temperature"])
-            return None if np.isnan(value) else value
-        shadow_material = self._shadow_material_def(int(material_id))
-        if shadow_material is not None and shadow_material.spawn_temperature is not None:
-            return float(shadow_material.spawn_temperature)
-        if self._shadow_has_table_payload("materials"):
-            return None
-        if 0 <= int(material_id) < self.material_spawn_temperature.shape[0]:
-            value = float(self.material_spawn_temperature[int(material_id)])
-            return None if np.isnan(value) else value
-        return None
+        return _shadow_material_spawn_temperature(self, material_id)
 
     def _shadow_condense_target_material_id(self, species_id: int) -> int:
-        gas_table = self.bridge.shadow_typed_tables.get("gas_table")
-        if gas_table is not None and 0 <= int(species_id) < int(gas_table.shape[0]):
-            row = gas_table[int(species_id)]
-            if int(row["name_hash"]) != 0:
-                return int(row["condense_to_material_id"])
-        gas = self._shadow_gas_species_def(int(species_id))
-        if gas is None or gas.condense_to_material is None:
-            return 0
-        return self._shadow_material_id_by_name(gas.condense_to_material)
+        return _shadow_condense_target_material_id(self, species_id)
 
     def _shadow_material_is_placeholder(self, material_id: int) -> bool:
-        shadow_material = self._shadow_material_def(int(material_id))
-        if shadow_material is not None:
-            return shadow_material.render_group == "placeholder" or "placeholder" in shadow_material.tags
-        if self.bridge.shadow_typed_tables.get("material_table") is not None:
-            return False
-        if self._shadow_has_table_payload("materials"):
-            return False
-        if 0 <= int(material_id) < self.material_is_placeholder.shape[0]:
-            return bool(self.material_is_placeholder[int(material_id)])
-        return False
+        return _shadow_material_is_placeholder(self, material_id)
 
     def _material_placeholder_mask(self, material_id: np.ndarray) -> np.ndarray:
         ids = np.asarray(material_id, dtype=np.int64)
@@ -6365,55 +6164,13 @@ class WorldEngine:
         return mask
 
     def _shadow_material_is_plant(self, material_id: int) -> bool:
-        shadow_material = self._shadow_material_def(int(material_id))
-        if shadow_material is not None:
-            return shadow_material.render_group == "plant" or "plant" in shadow_material.tags
-        if self.bridge.shadow_typed_tables.get("material_table") is not None:
-            return False
-        if self._shadow_has_table_payload("materials"):
-            return False
-        if 0 <= int(material_id) < self.material_is_plant.shape[0]:
-            return bool(self.material_is_plant[int(material_id)])
-        return False
+        return _shadow_material_is_plant(self, material_id)
 
     def _shadow_reaction_action(self, index: int) -> ReactionAction | None:
-        if index ==0:
-            return self.rulebook.reaction_actions[0] if self.rulebook.reaction_actions else ReactionAction(ReactionType.NONE)
-        payload = self._shadow_reaction_payload()
-        actions = payload.get("actions", [])
-        if index >0 and index <= len(actions):
-            return self._coerce_reaction_action(actions[index -1])
-        if self._shadow_has_table_payload("reactions"):
-            return None
-        if index >=0 and index < len(self.rulebook.reaction_actions):
-            return self.rulebook.reaction_actions[index]
-        return None
+        return _shadow_reaction_action(self, index)
 
     def _reaction_rule_list(self, rule_set: str) -> list[PairReactionRule] | list[SelfReactionRule]:
-        normalized = str(rule_set)
-        payload = self._shadow_reaction_payload()
-        if payload is not None:
-            rules_payload = payload.get("rules", {})
-            entries = list(rules_payload.get(normalized, []))
-            if normalized == "self_rules":
-                return [self._coerce_self_reaction_rule(entry) for entry in entries]
-            if normalized in PAIR_REACTION_RULE_SET_NAMES:
-                return [self._coerce_pair_reaction_rule(entry) for entry in entries]
-        if self._shadow_has_table_payload("reactions"):
-            return []
-        if normalized == "material_material":
-            return self.rulebook.material_material_rules
-        if normalized == "material_gas":
-            return self.rulebook.material_gas_rules
-        if normalized == "material_light":
-            return self.rulebook.material_light_rules
-        if normalized == "gas_gas":
-            return self.rulebook.gas_gas_rules
-        if normalized == "gas_light":
-            return self.rulebook.gas_light_rules
-        if normalized == "self_rules":
-            return self.rulebook.self_rules
-        raise KeyError(rule_set)
+        return _reaction_rule_list(self, rule_set)
 
     def _set_reaction_rule_list(self, rule_set: str, entries: list[dict[str, Any]] | list[PairReactionRule] | list[SelfReactionRule]) -> None:
         normalized = str(rule_set)
@@ -6498,19 +6255,7 @@ class WorldEngine:
             material["reaction_slots"] = tuple(clamped_slots)
 
     def _shadow_reaction_rule(self, rule_set: str, index: int) -> PairReactionRule | SelfReactionRule | None:
-        payload = self._shadow_reaction_payload()
-        normalized = str(rule_set)
-        rules = payload.get("rules", {})
-        entries = rules.get(normalized, [])
-        if (0 <= index) and index < len(entries):
-            if normalized == "self_rules":
-                return self._coerce_self_reaction_rule(entries[index])
-            return self._coerce_pair_reaction_rule(entries[index])
-        if self._shadow_has_table_payload("reactions"):
-            return None
-        if (0 <= index) and index < len(rules_list):
-            return rules_list[index]
-        return None
+        return _shadow_reaction_rule(self, rule_set, index)
 
     def _occupy_entity_placeholder_cell(self, x: int, y: int, placeholder: EntityPlaceholder) -> bool:
         if not self.in_bounds(x, y):
