@@ -251,6 +251,29 @@ from oracle_game.world_command_queue import (
     request_world_command,
     write_material_region,
 )
+from oracle_game.world_entity_sync import (
+    sync_entity_placeholders,
+    sync_entity_states,
+    patch_entity_states,
+    sync_entity_observation_specs,
+    set_force_sources,
+    set_emitters,
+    consume_entity_observation_results,
+    _preview_consume_entity_observation_results,
+    _sync_entity_placeholders,
+    _release_entity_placeholder_cell,
+    _occupy_entity_placeholder_cell,
+    _frame_entities_to_placeholders_and_observations,
+    _sync_entity_states,
+    _sync_entity_observation_specs,
+    _build_preview_entity_placeholders,
+    _build_observation_request,
+    _resolve_readback_request,
+    _collect_observations,
+    _collect_entity_feedback,
+    _build_entity_feedback,
+    _build_entity_feedback_from_state,
+)
 from oracle_game.world_paging import (
     _apply_page_stripe,
     _apply_page_stripe_dense_cpu,
@@ -2125,18 +2148,7 @@ class WorldEngine:
         *,
         immediate: bool = False,
     ) -> None:
-        placeholders = [self._public_entity_placeholder_input(placeholder) for placeholder in placeholders]
-        if immediate:
-            if not self._bridge_inputs_prepared:
-                self._prepare_bridge_frame_inputs()
-            self._sync_entity_placeholders(
-                [self._frame_entity_placeholder_input(placeholder) for placeholder in placeholders]
-            )
-            return
-        self.queue_command(
-            "sync_entity_placeholders",
-            placeholders=[asdict(placeholder) for placeholder in placeholders],
-        )
+        sync_entity_placeholders(self, placeholders, immediate=immediate)
 
     def sync_entity_states(
         self,
@@ -2144,19 +2156,7 @@ class WorldEngine:
         *,
         immediate: bool = False,
     ) -> None:
-        entities = [self._public_entity_state_input(entity) for entity in entities]
-        if immediate:
-            if not self._bridge_inputs_prepared:
-                self._prepare_bridge_frame_inputs()
-            placeholders, _ = self._sync_entity_states(
-                [self._frame_entity_state_input(entity) for entity in entities]
-            )
-            self._sync_entity_placeholders(placeholders)
-            return
-        self.queue_command(
-            "sync_entity_states",
-            entities=[asdict(entity) for entity in entities],
-        )
+        sync_entity_states(self, entities, immediate=immediate)
 
     def patch_entity_states(
         self,
@@ -2164,18 +2164,7 @@ class WorldEngine:
         *,
         immediate: bool = False,
     ) -> None:
-        patches = [self._public_entity_state_patch_input(patch) for patch in patches]
-        if immediate:
-            if not self._bridge_inputs_prepared:
-                self._prepare_bridge_frame_inputs()
-            self._patch_entity_states(
-                [self._frame_entity_state_patch_input(patch) for patch in patches]
-            )
-            return
-        self.queue_command(
-            "patch_entity_states",
-            patches=[asdict(patch) for patch in patches],
-        )
+        patch_entity_states(self, patches, immediate=immediate)
 
     def sync_entity_observation_specs(
         self,
@@ -2183,14 +2172,7 @@ class WorldEngine:
         *,
         immediate: bool = False,
     ) -> None:
-        observations = [self._coerce_entity_observation_spec(observation) for observation in observations]
-        if immediate:
-            self._sync_entity_observation_specs(observations)
-            return
-        self.queue_command(
-            "sync_entity_observation_specs",
-            observations=[asdict(observation) for observation in observations],
-        )
+        sync_entity_observation_specs(self, observations, immediate=immediate)
 
     def set_force_sources(
         self,
@@ -2198,26 +2180,7 @@ class WorldEngine:
         *,
         immediate: bool = False,
     ) -> None:
-        force_sources = [self._public_force_source_input(force_source) for force_source in force_sources]
-        if immediate:
-            self._sync_force_sources(
-                [self._normalize_runtime_force_source(force_source) for force_source in force_sources]
-            )
-            return
-        self.queue_command(
-            "set_force_sources",
-            force_sources=[
-                {
-                    "x": float(force_source.world_x),
-                    "y": float(force_source.world_y),
-                    "direction": [float(force_source.direction[0]), float(force_source.direction[1])],
-                    "radius": float(force_source.radius),
-                    "strength": float(force_source.strength),
-                    "lifetime": float(force_source.lifetime),
-                }
-                for force_source in force_sources
-            ],
-        )
+        set_force_sources(self, force_sources, immediate=immediate)
 
     def set_emitters(
         self,
@@ -2225,35 +2188,7 @@ class WorldEngine:
         *,
         immediate: bool = False,
     ) -> None:
-        emitters = [self._coerce_emitter(emitter) for emitter in emitters]
-        if immediate:
-            normalized_emitters = [
-                {
-                    **dict(emitter),
-                    "origin": self._world_to_buffer_clamped(
-                        int(emitter["world_origin"][0]),
-                        int(emitter["world_origin"][1]),
-                    ),
-                }
-                for emitter in emitters
-            ]
-            self._sync_persistent_emitters(normalized_emitters)
-            return
-        self.queue_command(
-            "set_emitters",
-            emitters=[
-                {
-                    "x": int(emitter["origin"][0]),
-                    "y": int(emitter["origin"][1]),
-                    "light_type": str(emitter["light_type"]),
-                    "direction": list(emitter["direction"]),
-                    "spread": float(emitter["spread"]),
-                    "strength": float(emitter["strength"]),
-                    "radius": int(emitter["range_cells"]),
-                }
-                for emitter in emitters
-            ],
-        )
+        set_emitters(self, emitters, immediate=immediate)
 
     def patch_material(self, name: str, *, immediate: bool = True, **fields: Any) -> None:
         if not immediate:
@@ -2529,16 +2464,7 @@ class WorldEngine:
         *,
         current_frame_id: int | None = None,
     ) -> dict[str, Any]:
-        consumed_readbacks = self.poll_all_readbacks(current_frame_id=current_frame_id)
-        observations = self._collect_observations(consumed_readbacks)
-        entity_feedback = self._collect_entity_feedback(consumed_readbacks)
-        frame_id = self.frame_id if current_frame_id is None else int(current_frame_id)
-        return self._store_entity_observation_consume_snapshot(
-            frame_id=frame_id,
-            consumed_readbacks=consumed_readbacks,
-            observations=observations,
-            entity_feedback=entity_feedback,
-        )
+        return consume_entity_observation_results(self, current_frame_id=current_frame_id)
 
     def run_entity_controller_turn(
         self,
@@ -2577,13 +2503,7 @@ class WorldEngine:
         return _build_preview_controller_turn_entities(self, entities=entities, patches=patches, observation_specs=observation_specs)
 
     def _preview_consume_entity_observation_results(self) -> dict[str, Any]:
-        saved_completed_readbacks = deepcopy(self.completed_readbacks)
-        saved_last_snapshot = deepcopy(self.last_entity_observation_consume_snapshot)
-        try:
-            return self.consume_entity_observation_results()
-        finally:
-            self.completed_readbacks = saved_completed_readbacks
-            self.last_entity_observation_consume_snapshot = saved_last_snapshot
+        return _preview_consume_entity_observation_results(self)
 
     def controller_turn_to_frame_input(
         self,
@@ -4753,93 +4673,7 @@ class WorldEngine:
             self._invalidate_gpu_authoritative_resources("active_meta", "active_tile_ttl", "active_chunk_mask")
 
     def _sync_entity_placeholders(self, placeholders: list[EntityPlaceholder]) -> None:
-        self.bridge_frame_placeholders.extend(replace(placeholder) for placeholder in placeholders)
-        current_cells = {
-            cell: entity_id
-            for entity_id, cells in self.entity_placeholders.items()
-            for cell in cells
-        }
-        next_cells: dict[tuple[int, int], EntityPlaceholder] = {}
-        for placeholder in placeholders:
-            for y in range(placeholder.y, placeholder.y + max(0, placeholder.height)):
-                for x in range(placeholder.x, placeholder.x + max(0, placeholder.width)):
-                    if not self.in_bounds(x, y):
-                        continue
-                    next_cells[(x, y)] = placeholder
-
-        changed_cells: set[tuple[int, int]] = set()
-        for cell, entity_id in current_cells.items():
-            next_placeholder = next_cells.get(cell)
-            if next_placeholder is None or next_placeholder.entity_id != entity_id:
-                changed_cells.add(cell)
-        for cell, placeholder in next_cells.items():
-            if current_cells.get(cell) != placeholder.entity_id:
-                changed_cells.add(cell)
-
-        if self._gpu_pipeline_available(
-            self.placeholder_pipeline,
-            "placeholder",
-            require=self.simulation_backend == "gpu",
-        ):
-            if current_cells or next_cells:
-                if self.simulation_backend == "gpu" and self._world_simulation_frame_active and (
-                    not self._bridge_inputs_prepared or self._gpu_cpu_dirty_resources
-                ):
-                    self._sync_pre_simulation_bridge_without_debug_upload()
-                    self._gpu_cpu_dirty_resources.clear()
-                    self._bridge_inputs_prepared = True
-                self.placeholder_pipeline.apply(self, placeholders)
-                if self.placeholder_pipeline.last_cpu_mirror_downloaded:
-                    self._rebuild_entity_placeholder_index()
-                else:
-                    next_entity_cells: dict[int, set[tuple[int, int]]] = {}
-                    for cell, placeholder in next_cells.items():
-                        next_entity_cells.setdefault(int(placeholder.entity_id), set()).add(cell)
-                    self.entity_placeholders = next_entity_cells
-            else:
-                self.entity_placeholders.clear()
-                self.placeholder_pipeline.last_backend = "idle"
-            for x, y in sorted(changed_cells):
-                self._mark_active_rect_runtime(
-                    max(0, x - 1),
-                    max(0, y - 1),
-                    min(self.width, x + 2),
-                    min(self.height, y + 2),
-                )
-            self.bridge_frame_placeholder_dirty_rects.extend((x, y, x + 1, y + 1) for x, y in sorted(changed_cells))
-            return
-
-        self._require_cpu_oracle_backend("placeholder")
-        self.placeholder_pipeline.last_backend = "cpu" if (current_cells or next_cells) else "idle"
-        for cell, entity_id in current_cells.items():
-            next_placeholder = next_cells.get(cell)
-            x, y = cell
-            material_id = int(self.material_id[y, x])
-            if (
-                next_placeholder is not None
-                and next_placeholder.entity_id == entity_id
-                and material_id > 0
-                and self._shadow_material_is_placeholder(material_id)
-            ):
-                continue
-            self._release_entity_placeholder_cell(x, y, entity_id)
-
-        next_entity_cells: dict[int, set[tuple[int, int]]] = {}
-        for cell, placeholder in next_cells.items():
-            x, y = cell
-            material_id = int(self.material_id[y, x])
-            if (
-                current_cells.get(cell) == placeholder.entity_id
-                and material_id > 0
-                and self._shadow_material_is_placeholder(material_id)
-            ):
-                next_entity_cells.setdefault(placeholder.entity_id, set()).add(cell)
-                self.entity_id[y, x] = placeholder.entity_id
-                continue
-            if self._occupy_entity_placeholder_cell(x, y, placeholder):
-                next_entity_cells.setdefault(placeholder.entity_id, set()).add(cell)
-        self.entity_placeholders = next_entity_cells
-        self.bridge_frame_placeholder_dirty_rects.extend((x, y, x + 1, y + 1) for x, y in sorted(changed_cells))
+        _sync_entity_placeholders(self, placeholders)
 
     def _sync_force_sources(self, force_sources: list[ForceSource]) -> None:
         self.force_sources = [
@@ -4903,26 +4737,7 @@ class WorldEngine:
         self.bridge_frame_page_stripes.append((PageStripeUpdate(**asdict(update)), deepcopy(payload)))
 
     def _release_entity_placeholder_cell(self, x: int, y: int, entity_id: int) -> None:
-        if not self.in_bounds(x, y):
-            return
-        if int(self.entity_id[y, x]) != entity_id:
-            return
-        self.entity_id[y, x] = 0
-        material_id = int(self.material_id[y, x])
-        if material_id <= 0 or not self._shadow_material_is_placeholder(material_id):
-            return
-        displaced_material = int(self.placeholder_displaced_material[y, x])
-        if displaced_material > 0:
-            self.material_id[y, x] = displaced_material
-            self.phase[y, x] = int(Phase.LIQUID)
-            self.cell_flags[y, x] = 0
-            self.timer_pack[y, x] = 0
-            shadow_integrity = self._shadow_material_base_integrity(displaced_material)
-            self.integrity[y, x] = float(shadow_integrity) if shadow_integrity is not None else 0.0
-            self.placeholder_displaced_material[y, x] = 0
-            self._mark_active_rect_runtime(max(0, x - 1), max(0, y - 1), min(self.width, x + 2), min(self.height, y + 2))
-            return
-        self.clear_cell(x, y, mark_dirty=False)
+        _release_entity_placeholder_cell(self, x, y, entity_id)
 
     def _mirror_release_entity_placeholder_cell(self, x: int, y: int, entity_id: int) -> None:
         if not self.in_bounds(x, y):
@@ -5122,18 +4937,7 @@ class WorldEngine:
         return _shadow_reaction_rule(self, rule_set, index)
 
     def _occupy_entity_placeholder_cell(self, x: int, y: int, placeholder: EntityPlaceholder) -> bool:
-        if not self.in_bounds(x, y):
-            return False
-        placeholder_material_id = self._resolve_sanctioned_placeholder_material_id(str(placeholder.material))
-        if placeholder_material_id <= 0:
-            return False
-        material_id = int(self.material_id[y, x])
-        if material_id != 0 and int(self.phase[y, x]) != int(Phase.LIQUID):
-            return False
-        self.set_cell_by_id(x, y, placeholder_material_id, mark_dirty=False)
-        self.entity_id[y, x] = placeholder.entity_id
-        self._mark_active_rect_runtime(max(0, x - 1), max(0, y - 1), min(self.width, x + 2), min(self.height, y + 2))
-        return True
+        return _occupy_entity_placeholder_cell(self, x, y, placeholder)
 
     def _mirror_occupy_entity_placeholder_cell(self, x: int, y: int, placeholder: EntityPlaceholder) -> bool:
         if not self.in_bounds(x, y):
@@ -5153,33 +4957,7 @@ class WorldEngine:
         self,
         entities: list[EntityState],
     ) -> tuple[list[EntityPlaceholder], list[ObservationTarget]]:
-        placeholders = [
-            EntityPlaceholder(
-                entity_id=entity.entity_id,
-                x=entity.x,
-                y=entity.y,
-                width=entity.width,
-                height=entity.height,
-                material=entity.placeholder_material,
-                world_x=entity.world_x,
-                world_y=entity.world_y,
-            )
-            for entity in entities
-        ]
-        observation_targets = [
-            ObservationTarget(
-                observer_id=entity.entity_id,
-                entity_id=entity.entity_id,
-                channels=entity.observe_channels,
-                pad_cells=entity.observe_pad_cells,
-                width=entity.observe_width,
-                height=entity.observe_height,
-                label=entity.observe_label,
-            )
-            for entity in entities
-            if entity.observe_channels
-        ]
-        return placeholders, observation_targets
+        return _frame_entities_to_placeholders_and_observations(self, entities)
 
     def _runtime_entities_to_immediate_observation_targets(
         self,
@@ -5215,24 +4993,10 @@ class WorldEngine:
         return targets
 
     def _sync_entity_states(self, entities: list[EntityState]) -> tuple[list[EntityPlaceholder], list[ObservationTarget]]:
-        self.entity_states = {entity.entity_id: entity for entity in entities}
-        placeholders, observation_targets = self._frame_entities_to_placeholders_and_observations(entities)
-        return placeholders, observation_targets
+        return _sync_entity_states(self, entities)
 
     def _sync_entity_observation_specs(self, observations: list[EntityObservationSpec]) -> None:
-        observation_by_entity_id = {observation.entity_id: observation for observation in observations}
-        self.entity_states = {
-            entity_id: replace(
-                entity,
-                observe_channels=observation.observe_channels if observation is not None else (),
-                observe_pad_cells=int(observation.observe_pad_cells) if observation is not None else 0,
-                observe_width=None if observation is None else observation.observe_width,
-                observe_height=None if observation is None else observation.observe_height,
-                observe_label=None if observation is None else observation.observe_label,
-            )
-            for entity_id, entity in self.entity_states.items()
-            for observation in [observation_by_entity_id.get(entity_id)]
-        }
+        _sync_entity_observation_specs(self, observations)
 
     def _patch_entity_states(self, patches: list[EntityStatePatch]) -> None:
         next_entity_states = dict(self.entity_states)
@@ -5260,34 +5024,7 @@ class WorldEngine:
         self,
         placeholders: list[EntityPlaceholder],
     ) -> tuple[dict[int, set[tuple[int, int]]], set[tuple[int, int]], set[tuple[int, int]]]:
-        current_cells = {
-            cell: entity_id
-            for entity_id, cells in self.entity_placeholders.items()
-            for cell in cells
-        }
-        next_cells: dict[tuple[int, int], EntityPlaceholder] = {}
-        for placeholder in placeholders:
-            for y in range(placeholder.y, placeholder.y + max(0, placeholder.height)):
-                for x in range(placeholder.x, placeholder.x + max(0, placeholder.width)):
-                    if not self.in_bounds(x, y):
-                        continue
-                    next_cells[(x, y)] = placeholder
-
-        released_cells = {
-            cell
-            for cell, entity_id in current_cells.items()
-            if next_cells.get(cell) is None or next_cells[cell].entity_id != entity_id
-        }
-        next_entity_cells: dict[int, set[tuple[int, int]]] = {}
-        for cell, placeholder in next_cells.items():
-            if self._preview_can_occupy_placeholder_cell(cell[0], cell[1], placeholder, current_cells, released_cells):
-                next_entity_cells.setdefault(placeholder.entity_id, set()).add(cell)
-        blocked_cells = {
-            cell
-            for cells in next_entity_cells.values()
-            for cell in cells
-        }
-        return next_entity_cells, blocked_cells, released_cells
+        return _build_preview_entity_placeholders(self, placeholders)
 
     def _preview_can_occupy_placeholder_cell(
         self,
@@ -5339,51 +5076,7 @@ class WorldEngine:
         target: ObservationTarget,
         resolved_targets: dict[str, ResolvedTarget],
     ) -> ReadbackRequest | None:
-        center_x = target.center_x
-        center_y = target.center_y
-        width = target.width
-        height = target.height
-        if target.target_query_id is not None and (center_x is None or center_y is None or width is None or height is None):
-            resolved_target = resolved_targets.get(target.target_query_id)
-            if resolved_target is None or resolved_target.status != "resolved" or resolved_target.resolved_world_position is None:
-                return None
-            if center_x is None:
-                center_x = int(resolved_target.resolved_world_position[0]) + int(target.target_dx)
-            if center_y is None:
-                center_y = int(resolved_target.resolved_world_position[1]) + int(target.target_dy)
-            if width is None:
-                width = 1 + int(target.pad_cells) * 2
-            if height is None:
-                height = 1 + int(target.pad_cells) * 2
-        if target.entity_id is not None and (center_x is None or center_y is None or width is None or height is None):
-            bbox = self._entity_placeholder_bbox(target.entity_id)
-            if bbox is None:
-                return None
-            x0, y0, x1, y1 = self._buffer_bbox_to_world_bbox(bbox)
-            if center_x is None:
-                center_x = (x0 + x1 - 1) // 2
-            if center_y is None:
-                center_y = (y0 + y1 - 1) // 2
-            if width is None:
-                width = (x1 - x0) + target.pad_cells * 2
-            if height is None:
-                height = (y1 - y0) + target.pad_cells * 2
-        if center_x is None or center_y is None:
-            return None
-        return self._normalize_readback_request(
-            ReadbackRequest(
-                center_x=center_x,
-                center_y=center_y,
-                width=max(1, width if width is not None else 1),
-                height=max(1, height if height is not None else 1),
-                channels=target.channels,
-                observer_id=target.observer_id,
-                label=target.label,
-                target_query_id=target.target_query_id,
-                target_dx=int(target.target_dx),
-                target_dy=int(target.target_dy),
-            )
-        )
+        return _build_observation_request(self, target, resolved_targets)
 
     def _resolve_readback_requests(
         self,
@@ -5402,33 +5095,7 @@ class WorldEngine:
         request: ReadbackRequest,
         resolved_targets: dict[str, ResolvedTarget],
     ) -> ReadbackRequest | None:
-        center_x = request.center_x
-        center_y = request.center_y
-        if request.target_query_id is not None and (center_x is None or center_y is None):
-            resolved_target = resolved_targets.get(request.target_query_id)
-            if resolved_target is None or resolved_target.status != "resolved" or resolved_target.resolved_world_position is None:
-                return None
-            if center_x is None:
-                center_x = int(resolved_target.resolved_world_position[0]) + int(request.target_dx)
-            if center_y is None:
-                center_y = int(resolved_target.resolved_world_position[1]) + int(request.target_dy)
-        if center_x is None or center_y is None:
-            return None
-        return self._normalize_readback_request(
-            ReadbackRequest(
-                request_id=request.request_id,
-                center_x=int(center_x),
-                center_y=int(center_y),
-                width=max(1, int(request.width)),
-                height=max(1, int(request.height)),
-                channels=request.channels,
-                observer_id=request.observer_id,
-                label=request.label,
-                target_query_id=request.target_query_id,
-                target_dx=int(request.target_dx),
-                target_dy=int(request.target_dy),
-            )
-        )
+        return _resolve_readback_request(self, request, resolved_targets)
 
     def _resolve_target_queries(self, queries: list[TargetQuery]) -> dict[str, ResolvedTarget]:
         return _resolve_target_queries(self, queries)
@@ -6044,90 +5711,17 @@ class WorldEngine:
         return (min(xs), min(ys), max(xs) + 1, max(ys) + 1)
 
     def _collect_observations(self, results: list[ReadbackResult]) -> dict[int, ObservationResult]:
-        observations: dict[int, ObservationResult] = {}
-        for result in results:
-            observer_id = result.request.observer_id
-            if observer_id is None:
-                continue
-            observations[observer_id] = ObservationResult(
-                observer_id=observer_id,
-                frame_id=result.frame_id,
-                request=result.request,
-                payload=result.payload,
-            )
-        return observations
+        return _collect_observations(self, results)
 
     def _collect_entity_feedback(self, results: list[ReadbackResult]) -> dict[int, EntityFeedback]:
-        feedback: dict[int, EntityFeedback] = {}
-        for result in results:
-            observer_id = result.request.observer_id
-            if observer_id is None or observer_id in feedback:
-                continue
-            entity = self.entity_states.get(observer_id)
-            if entity is None:
-                continue
-            entity_feedback = self._build_entity_feedback(result, entity)
-            if entity_feedback is not None:
-                feedback[observer_id] = entity_feedback
-        return feedback
+        return _collect_entity_feedback(self, results)
 
     def _build_entity_feedback(
         self,
         result: ReadbackResult,
         entity: EntityState,
     ) -> EntityFeedback | None:
-        cell_payload = result.payload.get("cell")
-        if cell_payload is None:
-            return None
-        core_words = cell_payload.get("core_words")
-        entity_ids = cell_payload.get("entity_id")
-        if core_words is None or entity_ids is None:
-            return None
-
-        origin_x, origin_y = (int(value) for value in cell_payload["origin"])
-        width, height = (int(value) for value in cell_payload["size"])
-
-        unpacked = unpack_cell_core(core_words)
-        cells: list[EntityCellFeedback] = []
-        base_world_x = int(entity.world_x) if entity.world_x is not None else int(self._buffer_to_world_position((int(entity.x), int(entity.y)))[0])
-        base_world_y = int(entity.world_y) if entity.world_y is not None else int(self._buffer_to_world_position((int(entity.x), int(entity.y)))[1])
-        for local_y in range(max(0, int(entity.height))):
-            for local_x in range(max(0, int(entity.width))):
-                world_x = base_world_x + local_x
-                world_y = base_world_y + local_y
-                lx = int(world_x) - origin_x
-                ly = int(world_y) - origin_y
-                if lx < 0 or ly < 0 or lx >= width or ly >= height:
-                    continue
-                material_id = int(unpacked["material_id"][ly, lx])
-                phase = int(unpacked["phase"][ly, lx])
-                integrity = float(unpacked["integrity"][ly, lx])
-                occupant_entity_id = int(entity_ids[ly, lx])
-                present = (
-                    occupant_entity_id == entity.entity_id
-                    and material_id > 0
-                    and self._shadow_material_is_placeholder(material_id)
-                )
-                cells.append(
-                    EntityCellFeedback(
-                        x=int(world_x),
-                        y=int(world_y),
-                        present=present,
-                        material_id=material_id,
-                        phase=phase,
-                        integrity=integrity,
-                        entity_id=occupant_entity_id,
-                    )
-                )
-        if not cells:
-            return None
-        bbox_xs = [cell.x for cell in cells]
-        bbox_ys = [cell.y for cell in cells]
-        return EntityFeedback(
-            entity_id=entity.entity_id,
-            bbox=(min(bbox_xs), min(bbox_ys), max(bbox_xs) + 1, max(bbox_ys) + 1),
-            cells=cells,
-        )
+        return _build_entity_feedback(self, result, entity)
 
     def _build_entity_feedback_from_world(self, entity: EntityState) -> EntityFeedback | None:
         cell_state = {
@@ -6160,46 +5754,11 @@ class WorldEngine:
         cell_state: dict[str, np.ndarray],
         entity_runtime: dict[str, np.ndarray],
     ) -> EntityFeedback | None:
-        cells: list[EntityCellFeedback] = []
-        base_world_x = int(entity.world_x) if entity.world_x is not None else int(self._buffer_to_world_position((int(entity.x), int(entity.y)))[0])
-        base_world_y = int(entity.world_y) if entity.world_y is not None else int(self._buffer_to_world_position((int(entity.x), int(entity.y)))[1])
-        material_grid = cell_state["material_id"]
-        phase_grid = cell_state["phase"]
-        integrity_grid = cell_state["integrity"]
-        entity_id_grid = entity_runtime["entity_id"]
-        for local_y in range(max(0, int(entity.height))):
-            for local_x in range(max(0, int(entity.width))):
-                world_x = base_world_x + local_x
-                world_y = base_world_y + local_y
-                buffer_x, buffer_y = self._world_to_buffer_clamped(world_x, world_y)
-                material_id = int(material_grid[buffer_y, buffer_x])
-                phase = int(phase_grid[buffer_y, buffer_x])
-                integrity = float(integrity_grid[buffer_y, buffer_x])
-                occupant_entity_id = int(entity_id_grid[buffer_y, buffer_x])
-                present = (
-                    occupant_entity_id == entity.entity_id
-                    and material_id > 0
-                    and self._shadow_material_is_placeholder(material_id)
-                )
-                cells.append(
-                    EntityCellFeedback(
-                        x=int(world_x),
-                        y=int(world_y),
-                        present=present,
-                        material_id=material_id,
-                        phase=phase,
-                        integrity=integrity,
-                        entity_id=occupant_entity_id,
-                    )
-                )
-        if not cells:
-            return None
-        bbox_xs = [cell.x for cell in cells]
-        bbox_ys = [cell.y for cell in cells]
-        return EntityFeedback(
-            entity_id=int(entity.entity_id),
-            bbox=(min(bbox_xs), min(bbox_ys), max(bbox_xs) + 1, max(bbox_ys) + 1),
-            cells=cells,
+        return _build_entity_feedback_from_state(
+            self,
+            entity,
+            cell_state=cell_state,
+            entity_runtime=entity_runtime,
         )
 
     def _capture_stripe_array(
