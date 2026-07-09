@@ -37,9 +37,9 @@ from oracle_game.sim.gpu_placeholders import GPUPlaceholderPipeline
 from oracle_game.sim.gpu_page_stripes import GPUPageStripePipeline
 from oracle_game.sim.gpu_world_commands import GPUWorldCommandPipeline
 from oracle_game.sim.reactions import ReactionSolver
-from oracle_game.sim.gpu_merge import GPUMergePipeline, MergeCandidates
+from oracle_game.sim.gpu_merge import GPUMergePipeline
 from oracle_game.types import (
-    CellFlag,
+    CarrierIntent,
     CarrierIntent,
     ChangeIntent,
     DebugView,
@@ -55,7 +55,6 @@ from oracle_game.types import (
     LightTypeDef,
     MaterialDef,
     MaterialOpticsDef,
-    ObservationResult,
     ObservationTarget,
     PageStripeUpdate,
     PairReactionRule,
@@ -483,6 +482,21 @@ from oracle_game.world_command_application import (
     _queue_loaded_collapse_pending_regions_from_payload,
     _resolve_targeted_commands,
     _subtract_page_stripe_range_from_region,
+)
+from oracle_game.world_frame_pipeline import (
+    _collect_ready_readbacks,
+    _finish_readbacks,
+    _mark_active_rect_runtime,
+    _mark_active_rects_runtime,
+    _merge_phase_c,
+    _queue_persistent_entity_observations,
+    _restore_preview_runtime_state,
+    _snapshot_preview_runtime_state,
+    _step_once,
+    _step_once_impl,
+    _store_entity_observation_consume_snapshot,
+    run_cpu_frame,
+    step,
 )
 from oracle_game.world_bridge_serializers import (
     _decode_bridge_uploaded_command,
@@ -1255,12 +1269,7 @@ class WorldEngine:
 
     delete_reaction_rule = delete_reaction_rule
 
-    def step(self, dt: float = 1.0 / 60.0, substeps: int = 1) -> None:
-        for _ in range(max(1, substeps)):
-            frame_input = self.pending_frame_inputs.popleft() if self.pending_frame_inputs else None
-            output = self._step_once(dt, frame_input=frame_input, capture_output=frame_input is not None)
-            if output is not None:
-                self.completed_frame_outputs.append(output)
+    step = step
 
     def simulation_backend_report(self) -> dict[str, Any]:
         ctx = self.bridge.ctx
@@ -1376,348 +1385,23 @@ class WorldEngine:
     run_entity_controller_cycle = run_entity_controller_cycle
 
 
-    def run_cpu_frame(
-        self,
-        frame_input: WorldFrameInput | None = None,
-        *,
-        dt: float = 1.0 / 60.0,
-        substeps: int = 1,
-    ) -> WorldFrameOutput:
-        output = self._step_once(dt, frame_input=frame_input, capture_output=True)
-        assert output is not None
-        for _ in range(max(1, substeps) - 1):
-            self._step_once(dt, frame_input=None, capture_output=False)
-            output.frame_id = self.frame_id
-        return output
+    run_cpu_frame = run_cpu_frame
 
-    def _step_once(
-        self,
-        dt: float,
-        *,
-        frame_input: WorldFrameInput | None,
-        capture_output: bool,
-    ) -> WorldFrameOutput | None:
-        previous_frame_active = self._world_simulation_frame_active
-        self._world_simulation_frame_active = True
-        try:
-            return self._step_once_impl(dt, frame_input=frame_input, capture_output=capture_output)
-        finally:
-            self._world_simulation_frame_active = previous_frame_active
+    _step_once = _step_once
 
-    def _merge_phase_c(self) -> None:
-        rxn_pipe = self.reaction_solver.gpu_pipeline
-        rxn_cand = getattr(rxn_pipe, "_phase_c_rxn_candidate", None)
-        if rxn_cand is None:
-            return
-        hr = self.heat_solver.gpu_pipeline.resources
-        mr = self.motion_solver.gpu_pipeline.resources
-        lr = self.liquid_solver.gpu_pipeline.resources
-        candidates = MergeCandidates(
-            heat={
-                "material": hr.material_tex,
-                "phase": hr.phase_tex,
-                "temp": hr.temp_ping,
-                "integrity": hr.integrity_tex,
-                "flags": hr.cell_flags_tex,
-            },
-            reactions=rxn_cand,
-            motion={
-                "material": mr.material_tex,
-                "phase": mr.phase_tex,
-                "velocity": mr.velocity_tex,
-            },
-            liquid={
-                "material": lr.material_in,
-                "phase": lr.phase_in,
-                "flags": lr.flags_in,
-                "timer": lr.timer_in,
-                "velocity": lr.velocity_in,
-            },
-        )
-        self.merge_pipeline.merge_cell_core(self, candidates)
+    _merge_phase_c = _merge_phase_c
 
-    def _step_once_impl(
-        self,
-        dt: float,
-        *,
-        frame_input: WorldFrameInput | None,
-        capture_output: bool,
-    ) -> WorldFrameOutput | None:
-        self.last_skipped_gpu_stages = []
-        self.last_pass_profile = {"passes": [], "summary": {}, "skipped_stages": self.last_skipped_gpu_stages}
-        if not self._bridge_inputs_prepared:
-            self._prepare_bridge_frame_inputs()
-        consumed_readbacks: list[ReadbackResult] = []
-        resolved_targets: dict[str, ResolvedTarget] = {}
-        resolved_change_intents: dict[str, ResolvedChangeIntent] = {}
-        resolved_carrier_intents: dict[str, ResolvedCarrierIntent] = {}
-        observations: dict[int, ObservationResult] = {}
-        entity_feedback: dict[int, EntityFeedback] = {}
-        paging_updates: list[PageStripeUpdate] = []
-        observation_plans: list[dict[str, Any]] = []
-        readback_plans: list[dict[str, Any]] = []
-        bridge_upload_snapshot: dict[str, Any] = {}
-        bridge_frame_snapshot: dict[str, Any] = {}
-        output_controller_state = deepcopy(self.controller_state_snapshot)
-        queued_observations = 0
-        queued_readbacks = 0
-        queued_commands = 0
-        placeholder_count = 0
-        with self._profile_pass("readback"):
-            self._collect_ready_readbacks(self.frame_id + 1)
-            if capture_output:
-                consumed_readbacks = self.poll_all_readbacks()
-                observations = self._collect_observations(consumed_readbacks)
-                entity_feedback = self._collect_entity_feedback(consumed_readbacks)
-        with self._profile_pass("commands"):
-            if frame_input is not None:
-                (
-                    output_controller_state,
-                    paging_updates,
-                    resolved_targets,
-                    resolved_change_intents,
-                    resolved_carrier_intents,
-                    observation_plans,
-                    readback_plans,
-                    queued_observations,
-                    queued_readbacks,
-                    queued_commands,
-                    placeholder_count,
-                ) = self._apply_frame_input(frame_input)
-            else:
-                output_controller_state = deepcopy(self.controller_state_snapshot)
+    _step_once_impl = _step_once_impl
 
-        self.frame_id += 1
-        if capture_output:
-            self._store_entity_observation_consume_snapshot(
-                frame_id=self.frame_id,
-                consumed_readbacks=consumed_readbacks,
-                observations=observations,
-                entity_feedback=entity_feedback,
-            )
-        with self._profile_pass("commands"):
-            self._apply_commands()
-        with self._profile_pass("pre_sync"):
-            if self._needs_pre_simulation_bridge_sync(frame_input=frame_input):
-                self._sync_pre_simulation_bridge_without_debug_upload()
-                self._gpu_cpu_dirty_resources.clear()
-        with self._profile_pass("commands"):
-            persistent_observation_plans = self._queue_persistent_entity_observations()
-            observation_plans.extend(persistent_observation_plans)
-            queued_observations += len(persistent_observation_plans)
-        if self.profile_passes_enabled:
-            self.collapse_solver.gpu_pipeline.reset_pass_profile()
-        collapse_pipeline = self.collapse_solver.gpu_pipeline
-        with self._profile_pass("collapse"):
-            if self._should_run_formal_collapse_this_frame():
-                with collapse_pipeline._profile_pass(self, "dirty_tile_drain"):
-                    self._drain_gpu_collapse_structure_dirty_tiles()
-                self.collapse_solver.step(self)
-            else:
-                with collapse_pipeline._profile_pass(self, "scheduled_defer"):
-                    pass
-        collapse_profile = getattr(getattr(self.collapse_solver, "gpu_pipeline", None), "last_pass_profile", None)
-        if self.profile_passes_enabled and isinstance(collapse_profile, dict):
-            self.last_pass_profile["collapse"] = collapse_profile
-        if self.profile_passes_enabled:
-            self.gas_solver.gpu_pipeline.reset_pass_profile()
-        with self._profile_pass("gas"):
-            self.gas_solver.step(self, dt)
-        gas_profile = getattr(getattr(self.gas_solver, "gpu_pipeline", None), "last_pass_profile", None)
-        if self.profile_passes_enabled and isinstance(gas_profile, dict):
-            self.last_pass_profile["gas"] = gas_profile
-        if self.profile_passes_enabled:
-            self.heat_solver.gpu_pipeline.reset_pass_profile()
-        # Phase C measured ~0.8ms win (A/B 83.56 vs 84.37) but its 1-frame
-        # cross-system latency shifts condensation position by 1 frame
-        # (test_world_step_condenses_water_gas_into_water_liquid CPU!=GPU).
-        # Condensation still occurs (no solver skip), but the 1-frame behavior
-        # shift conflicts with the "不丢质量" goal. Disabled; infrastructure kept.
-        phase_c_active = False and (
-            self.simulation_backend == "gpu"
-            and bool(self._world_simulation_frame_active)
-            and self.merge_pipeline.available(self)
-        )
-        self.phase_c_defer_cell_publish = phase_c_active
-        with self._profile_pass("heat"):
-            self.heat_solver.step(self, dt)
-        heat_profile = getattr(getattr(self.heat_solver, "gpu_pipeline", None), "last_pass_profile", None)
-        if self.profile_passes_enabled and isinstance(heat_profile, dict):
-            self.last_pass_profile["heat"] = heat_profile
-        self.reaction_solver.reset_runtime_state(self)
-        if self.profile_passes_enabled:
-            self.reaction_solver.gpu_pipeline.reset_pass_profile()
-        with self._profile_pass("reactions before motion"):
-            self.reaction_solver.gpu_pipeline.begin_formal_reaction_segment(self, "before_motion")
-            try:
-                with self._profile_pass("reaction_timed"):
-                    self.reaction_solver._advance_timed_slots(self)
-                with self._profile_pass("reaction_self"):
-                    self.reaction_solver._run_self_rules(self)
-                with self._profile_pass("reaction_material_material"):
-                    self.reaction_solver._run_material_material(self)
-                with self._profile_pass("reaction_material_gas"):
-                    self.reaction_solver._run_material_gas(self)
-                with self._profile_pass("reaction_material_light"):
-                    self.reaction_solver._run_material_light(self)
-                with self._profile_pass("reaction_gas_gas"):
-                    self.reaction_solver._run_gas_gas(self)
-                with self._profile_pass("reaction_gas_light"):
-                    self.reaction_solver._run_gas_light(self)
-                self.reaction_solver.gpu_pipeline.flush_formal_reaction_segment(self, "before_motion")
-            finally:
-                self.reaction_solver.gpu_pipeline.end_formal_reaction_segment(self, "before_motion")
-        with self._profile_pass("motion"):
-            self.motion_solver.step(self, dt)
-        motion_profile = getattr(getattr(self.motion_solver, "gpu_pipeline", None), "last_pass_profile", None)
-        if self.profile_passes_enabled and isinstance(motion_profile, dict):
-            self.last_pass_profile["motion"] = motion_profile
-        with self._profile_pass("liquid"):
-            self.liquid_solver.step(self)
-        liquid_profile = getattr(getattr(self.liquid_solver, "gpu_pipeline", None), "last_pass_profile", None)
-        if self.profile_passes_enabled and isinstance(liquid_profile, dict):
-            self.last_pass_profile["liquid"] = liquid_profile
-        if phase_c_active:
-            with self._profile_pass("merge_cell_core"):
-                self._merge_phase_c()
-            self.phase_c_defer_cell_publish = False
-        with self._profile_pass("optics"):
-            self.optics_solver.step(self)
-        optics_profile = getattr(self.optics_solver, "last_pass_profile", None)
-        if self.profile_passes_enabled and isinstance(optics_profile, dict):
-            self.last_pass_profile["optics"] = optics_profile
-        with self._profile_pass("latch_clear"):
-            if self.reaction_solver.gpu_pipeline.clear_reaction_latches(self):
-                self.reaction_solver._note_runtime_backend("gpu")
-            else:
-                self._require_gpu_stage("reaction latch clearing")
-                self.cell_flags &= np.uint8(~int(CellFlag.REACTION_LATCHED) & 0xFF)
-                self.reaction_solver._note_runtime_backend("cpu")
-        reaction_profile = getattr(getattr(self.reaction_solver, "gpu_pipeline", None), "last_pass_profile", None)
-        if self.profile_passes_enabled and isinstance(reaction_profile, dict):
-            self.last_pass_profile["reactions"] = reaction_profile
-        with self._profile_pass("active_decay"):
-            active_scheduler_gpu_authoritative = (
-                self.simulation_backend == "gpu"
-                and "active_tile_ttl" in self.bridge.gpu_authoritative_resources
-            )
-            if active_scheduler_gpu_authoritative:
-                if not self.bridge.decay_active_scheduler(self):
-                    self._require_gpu_stage("active scheduler decay")
-                    raise RuntimeError("GPU active scheduler decay failed; CPU fallback is disabled")
-            elif self.simulation_backend == "gpu":
-                self._require_gpu_stage("active scheduler decay")
-            else:
-                self.active.decay()
-        bridge_world_synced = False
-        if capture_output:
-            if self.simulation_backend != "gpu":
-                self.bridge.sync_world(self)
-                bridge_world_synced = True
-            else:
-                self.bridge.sync_force_sources(self)
-            bridge_upload_snapshot = self.serialize_bridge_upload_snapshot()
-            bridge_frame_snapshot = self.serialize_bridge_frame_snapshot()
-        with self._profile_pass("readback"):
-            self._finish_readbacks(world_synced=bridge_world_synced)
-            self._collect_ready_readbacks(self.frame_id)
-        self._bridge_inputs_prepared = False
-
-        if not capture_output:
-            return None
-        return WorldFrameOutput(
-            frame_id=self.frame_id,
-            submission_id=frame_input.submission_id if frame_input is not None else None,
-            controller_state=output_controller_state,
-            consumed_readbacks=consumed_readbacks,
-            resolved_targets=resolved_targets,
-            resolved_change_intents=resolved_change_intents,
-            resolved_carrier_intents=resolved_carrier_intents,
-            observations=observations,
-            entity_feedback=entity_feedback,
-            paging_updates=paging_updates,
-            observation_plans=observation_plans,
-            readback_plans=readback_plans,
-            bridge_upload_snapshot=bridge_upload_snapshot,
-            bridge_frame_snapshot=bridge_frame_snapshot,
-            queued_observations=queued_observations,
-            queued_readbacks=queued_readbacks,
-            queued_commands=queued_commands,
-            placeholder_count=placeholder_count,
-        )
-
-    def _queue_persistent_entity_observations(self) -> list[dict[str, Any]]:
-        if not self.entity_states:
-            return []
-        _, observation_targets = self._frame_entities_to_placeholders_and_observations(list(self.entity_states.values()))
-        observation_pairs = self._build_observation_request_pairs(observation_targets, {})
-        observation_pairs = [
-            (target, self._assign_readback_request_id(request))
-            for target, request in observation_pairs
-        ]
-        observation_requests = [request for _, request in observation_pairs]
-        self.pending_readbacks.extend(observation_requests)
-        self.bridge_frame_readback_requests.extend(replace(request) for request in observation_requests)
-        return [
-            self._serialize_observation_plan_for_target_request(target, request)
-            for target, request in observation_pairs
-        ]
+    _queue_persistent_entity_observations = _queue_persistent_entity_observations
 
     _apply_frame_input = _apply_frame_input
 
     _prepare_preview_frame_context = _prepare_preview_frame_context
 
-    def _snapshot_preview_runtime_state(self) -> dict[str, Any]:
-        return {
-            "material_id": self.material_id.copy(),
-            "phase": self.phase.copy(),
-            "cell_flags": self.cell_flags.copy(),
-            "velocity": self.velocity.copy(),
-            "cell_temperature": self.cell_temperature.copy(),
-            "timer_pack": self.timer_pack.copy(),
-            "integrity": self.integrity.copy(),
-            "island_id": self.island_id.copy(),
-            "entity_id": self.entity_id.copy(),
-            "placeholder_displaced_material": self.placeholder_displaced_material.copy(),
-            "collapse_delay_pending": self.collapse_delay_pending.copy(),
-            "flow_velocity": self.flow_velocity.copy(),
-            "ambient_temperature": self.ambient_temperature.copy(),
-            "pressure_ping": self.pressure_ping.copy(),
-            "gas_concentration": self.gas_concentration.copy(),
-            "visible_illumination": self.visible_illumination.copy(),
-            "cell_optical_dose": self.cell_optical_dose.copy(),
-            "gas_optical_dose": self.gas_optical_dose.copy(),
-            "active": deepcopy(self.active),
-            "islands": deepcopy(self.islands),
-            "next_island_id": int(self.next_island_id),
-            "collapse_dirty_regions": list(self.collapse_dirty_regions),
-            "collapse_deferred_regions": list(self.collapse_deferred_regions),
-        }
+    _snapshot_preview_runtime_state = _snapshot_preview_runtime_state
 
-    def _restore_preview_runtime_state(self, snapshot: dict[str, Any]) -> None:
-        self.material_id = snapshot["material_id"]
-        self.phase = snapshot["phase"]
-        self.cell_flags = snapshot["cell_flags"]
-        self.velocity = snapshot["velocity"]
-        self.cell_temperature = snapshot["cell_temperature"]
-        self.timer_pack = snapshot["timer_pack"]
-        self.integrity = snapshot["integrity"]
-        self.island_id = snapshot["island_id"]
-        self.entity_id = snapshot["entity_id"]
-        self.placeholder_displaced_material = snapshot["placeholder_displaced_material"]
-        self.collapse_delay_pending = snapshot["collapse_delay_pending"]
-        self.flow_velocity = snapshot["flow_velocity"]
-        self.ambient_temperature = snapshot["ambient_temperature"]
-        self.pressure_ping = snapshot["pressure_ping"]
-        self.gas_concentration = snapshot["gas_concentration"]
-        self.visible_illumination = snapshot["visible_illumination"]
-        self.cell_optical_dose = snapshot["cell_optical_dose"]
-        self.gas_optical_dose = snapshot["gas_optical_dose"]
-        self.active = snapshot["active"]
-        self.islands = deepcopy(snapshot["islands"])
-        self.next_island_id = int(snapshot["next_island_id"])
-        self.collapse_dirty_regions = snapshot["collapse_dirty_regions"]
-        self.collapse_deferred_regions = snapshot["collapse_deferred_regions"]
+    _restore_preview_runtime_state = _restore_preview_runtime_state
 
     def _contextualize_page_stripe_update(self, update: PageStripeUpdate) -> PageStripeUpdate:
         if update.axis == "x":
@@ -2360,29 +2044,7 @@ class WorldEngine:
 
     serialize_entity_feedback = serialize_entity_feedback
 
-    def _store_entity_observation_consume_snapshot(
-        self,
-        *,
-        frame_id: int,
-        consumed_readbacks: list[ReadbackResult],
-        observations: dict[int, ObservationResult],
-        entity_feedback: dict[int, EntityFeedback],
-    ) -> dict[str, Any]:
-        snapshot = {
-            "frame_id": int(frame_id),
-            "consumed": len(consumed_readbacks),
-            "consumed_readbacks": [self.serialize_readback_result(result) for result in consumed_readbacks],
-            "observations": {
-                str(observer_id): self.serialize_observation_result(result)
-                for observer_id, result in observations.items()
-            },
-            "entity_feedback": {
-                str(entity_id): self.serialize_entity_feedback(feedback)
-                for entity_id, feedback in entity_feedback.items()
-            },
-        }
-        self.last_entity_observation_consume_snapshot = snapshot
-        return deepcopy(snapshot)
+    _store_entity_observation_consume_snapshot = _store_entity_observation_consume_snapshot
 
     serialize_entity_observation_consume_state = serialize_entity_observation_consume_state
 
@@ -2441,44 +2103,9 @@ class WorldEngine:
 
     _apply_commands = _apply_commands
 
-    def _finish_readbacks(self, *, world_synced: bool = False) -> None:
-        normalized_requests = [self._assign_readback_request_id(self._normalize_readback_request(request)) for request in self.pending_readbacks]
-        self.pending_readbacks[:] = normalized_requests
-        if self.pending_readbacks and not world_synced and self.simulation_backend != "gpu":
-            self.bridge.sync_world(self)
-        remaining_pending: list[ReadbackRequest] = []
-        readback_upload_dirty = False
-        for request in self.pending_readbacks:
-            payload = self._make_readback_payload(request)
-            if not self.bridge.queue_readback(
-                self.frame_id,
-                request,
-                payload,
-                require_gpu_sources=self.simulation_backend == "gpu",
-            ):
-                remaining_pending.append(request)
-                continue
-            readback_upload_dirty = True
-            if request not in self.bridge_frame_readback_requests:
-                self.bridge_frame_readback_requests.append(replace(request))
-            if not any(existing.request_id == request.request_id for existing in self.inflight_readbacks):
-                self.inflight_readbacks.append(replace(request))
-        self.pending_readbacks[:] = remaining_pending
-        if readback_upload_dirty:
-            self.bridge.sync_readback_requests(self)
+    _finish_readbacks = _finish_readbacks
 
-    def _collect_ready_readbacks(self, current_frame_id: int) -> None:
-        while True:
-            result = self.bridge.poll_readback(current_frame_id)
-            if result is None:
-                return
-            if result.request.request_id is not None:
-                self.inflight_readbacks = [
-                    request for request in self.inflight_readbacks if request.request_id != result.request.request_id
-                ]
-                if int(result.request.request_id) in self.canceled_readback_request_ids:
-                    continue
-            self.completed_readbacks.append(result)
+    _collect_ready_readbacks = _collect_ready_readbacks
 
     def _queued_command_xy(self, command: WorldCommand) -> tuple[int, int]:
         x = int(command.payload["x"])
@@ -2547,36 +2174,9 @@ class WorldEngine:
 
     _clear_bridge_frame_inputs = _clear_bridge_frame_inputs
 
-    def _mark_active_rect_runtime(
-        self,
-        x0: int,
-        y0: int,
-        x1: int,
-        y1: int,
-        *,
-        tile_padding: int = 0,
-    ) -> None:
-        self._mark_active_rects_runtime([(x0, y0, x1, y1, tile_padding)])
+    _mark_active_rect_runtime = _mark_active_rect_runtime
 
-    def _mark_active_rects_runtime(
-        self,
-        rects: list[tuple[int, int, int, int] | tuple[int, int, int, int, int]],
-    ) -> None:
-        if not rects:
-            return
-        if self.simulation_backend == "gpu" and self._world_simulation_frame_active:
-            if not self.bridge.mark_active_rects(self, rects):
-                self._require_gpu_stage("active scheduler region marking")
-            return
-        for rect in rects:
-            if len(rect) == 4:
-                x0, y0, x1, y1 = rect
-                tile_padding = 0
-            else:
-                x0, y0, x1, y1, tile_padding = rect
-            self.active.mark_rect(int(x0), int(y0), int(x1), int(y1), tile_padding=int(tile_padding))
-        if self.simulation_backend == "gpu":
-            self._invalidate_gpu_authoritative_resources("active_meta", "active_tile_ttl", "active_chunk_mask")
+    _mark_active_rects_runtime = _mark_active_rects_runtime
 
     _sync_entity_placeholders = _sync_entity_placeholders
 
