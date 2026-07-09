@@ -61,14 +61,33 @@ def _read_raw(rel_path: str) -> str:
     return _RAW_CACHE[path]
 
 
-def shader_source(rel_path: str, subs: dict[str, Any] | None = None) -> str:
+def shader_source(
+    rel_path: str,
+    subs: dict[str, Any] | None = None,
+    includes: list[str] | None = None,
+) -> str:
     """Return the source for ``rel_path`` with ``{{NAME}}`` markers substituted.
 
     ``subs`` maps marker names to values (ints/strs).  A marker with no matching
     key raises ``KeyError`` — every marker must be satisfied so a missing
     constant is caught at compile time rather than silently left in the source.
+
+    ``includes`` is an optional list of shader paths (e.g. ``["gas/_common.comp"]``)
+    rendered with the same ``subs`` and prepended to the main source.  This
+    replaces the inline ``helper + f\"\"\"...\"\"\"`` preamble concatenation that
+    several pipelines used to share a block of helper GLSL across passes.
     """
     raw = _read_raw(rel_path)
+    parts: list[str] = []
+    if includes:
+        for inc in includes:
+            parts.append(_substitute(_read_raw(inc), subs, inc))
+    parts.append(_substitute(raw, subs, rel_path))
+    return "\n".join(parts)
+
+
+def _substitute(raw: str, subs: dict[str, Any] | None, rel_path: str) -> str:
+    """Apply ``{{NAME}}`` substitution to ``raw`` (or return it unchanged)."""
     if subs is None:
         return raw
 
@@ -90,11 +109,22 @@ def shader_source(rel_path: str, subs: dict[str, Any] | None = None) -> str:
     return result
 
 
-def build_compute_shader(ctx: _Ctx, rel_path: str, subs: dict[str, Any] | None = None):
+def build_compute_shader(
+    ctx: _Ctx,
+    rel_path: str,
+    subs: dict[str, Any] | None = None,
+    includes: list[str] | None = None,
+):
     """Compile a compute shader from a ``.comp`` file, substituting ``subs``."""
-    return ctx.compute_shader(shader_source(rel_path, subs))
+    return ctx.compute_shader(shader_source(rel_path, subs, includes))
 
 
-def build_program(ctx: _Ctx, rel_path: str, subs: dict[str, Any] | None = None, **program_kwargs: Any):
+def build_program(
+    ctx: _Ctx,
+    rel_path: str,
+    subs: dict[str, Any] | None = None,
+    includes: list[str] | None = None,
+    **program_kwargs: Any,
+):
     """Compile a linked program from a ``.glsl`` file (for vert/frag-style shaders)."""
-    return ctx.program(shader_source(rel_path, subs), **program_kwargs)
+    return ctx.program(shader_source(rel_path, subs, includes), **program_kwargs)

@@ -16,9 +16,24 @@ Re-run after each phase:
 
 ## Phases
 - [x] Phase 0 — baseline captured.
-- [ ] Phase 1 — foundation (EngineConfig, types/ split, cpu/base, gpu/base, MaterialTableAccessor, shader loader).
-  - [x] 1.1 `sim/gpu_base.py` — `GPUPipelineBase` (available, reset_pass_profile, _profile_pass, _formal_gpu_frame, _set_uniform_if_present, _sync_compute_writes + _barrier_bits hook). Pilot: `gpu_merge` subclassed (3 dup methods removed).
-- [ ] Phase 2 — GPU pipelines onto base + GLSL → shaders/.
-- [ ] Phase 3 — CPU solvers onto base + registry.
-- [ ] Phase 4 — world.py god-class split.
-- [ ] Phase 5 — entry-point splits + <1000 audit.
+- [x] Phase 1 (GPU base) — `sim/gpu_base.py` `GPUPipelineBase`; all 11 GPU pipelines subclass it (dup helpers removed; `_barrier_bits` overrides where needed). Snapshot unchanged.
+- [~] Phase 1 (other foundations) — shader loader built (`sim/shader_loader.py`); `EngineConfig`, `types/` split, `cpu/base`, `MaterialTableAccessor` still TODO.
+- [~] Phase 2 (shader extraction) — pilot done: gpu_merge GLSL → `shaders/merge/merge_cell_core.comp` (loader verified source-identical; gpu_merge 295→115 lines). 277 shaders remain across 10 files.
+- [~] Phase 4 (world.py split) — in progress:
+  - [x] constants block → `world_constants.py`
+  - [x] `serialize_engine_capabilities` (4254 lines) → `world_capabilities.py` (world.py 17279→12948)
+  - [ ] `world_capabilities.py` split into <1000 sections (subagent running)
+  - [ ] `_make_readback_payload` → `world_readback_payload.py` (subagent running)
+  - [ ] geometry bucket, intent-resolution cluster, input coercion, debug-frame, payload serializers (TODO)
+
+## Files still > 1000 lines (after current work)
+world.py (12948), gpu_collapse (11347), gpu_reactions (9675), gpu_motion (9210),
+gpu_liquid (4775), gpu.py (4465), world_capabilities.py (4284, being split),
+gpu_heat (2246), reactions.py (2011), rules.py (1578), enginedemo.py (1463),
+motion.py (1417), gpu_optics (1273), http_console.py (1164), gpu_gas (1095),
+gpu_page_stripes (1073), gpu_world_commands (1041), liquid.py (1011).
+
+## Per-extraction gates (in addition to snapshot)
+- capabilities golden: `f65d2183375bd352`
+- readback golden: `7062d287b034df0c`
+- GPU snapshot: `ce71a34376c5010d`
