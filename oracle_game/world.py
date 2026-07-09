@@ -274,6 +274,23 @@ from oracle_game.world_entity_sync import (
     _build_entity_feedback,
     _build_entity_feedback_from_state,
 )
+from oracle_game.world_frame_io import (
+    preview_frame_input,
+    submit_frame_input,
+    request_frame_input,
+    request_frame_cycle,
+    pending_frame_submission_ids,
+    cancel_frame_submission,
+    cancel_readback_request,
+    poll_frame_output,
+    poll_all_frame_outputs,
+    frame_submission_status,
+    _apply_frame_input,
+    _prepare_preview_frame_context,
+    _prepare_bridge_frame_inputs,
+    _needs_pre_simulation_bridge_sync,
+    _clear_bridge_frame_inputs,
+)
 from oracle_game.world_paging import (
     _apply_page_stripe,
     _apply_page_stripe_dense_cpu,
@@ -1705,125 +1722,13 @@ class WorldEngine:
         *,
         reserved_readback_request_ids: set[int] | None = None,
     ) -> WorldFramePreview:
-        frame_input = self._coerce_world_frame_input(frame_input)
-        saved_paging = deepcopy(self.paging)
-        saved_preview_runtime = self._snapshot_preview_runtime_state()
-        saved_entity_states = dict(self.entity_states)
-        saved_entity_placeholders = {entity_id: set(cells) for entity_id, cells in self.entity_placeholders.items()}
-        saved_controller_state = deepcopy(self.controller_state_snapshot)
-        saved_blocked_cells = None if self._resolver_blocked_cells is None else set(self._resolver_blocked_cells)
-        saved_released_cells = None if self._resolver_released_cells is None else set(self._resolver_released_cells)
-        try:
-            preview_controller_state = deepcopy(self.controller_state_snapshot)
-            if frame_input.controller_state_provided:
-                self.controller_state_snapshot = deepcopy(frame_input.controller_state)
-                preview_controller_state = deepcopy(self.controller_state_snapshot)
-            (
-                paging_updates,
-                preview_page_stripes,
-                entity_observation_targets,
-                placeholder_inputs,
-                placeholder_count,
-            ) = self._prepare_preview_frame_context(frame_input)
-            resolved_targets = self._resolve_target_queries(frame_input.target_queries)
-            resolved_change_intents, generated_commands = self._resolve_change_intents(frame_input.change_intents, resolved_targets)
-            resolved_carrier_intents, generated_carrier_commands = self._resolve_carrier_intents(
-                frame_input.carrier_intents,
-                resolved_targets,
-            )
-            observation_pairs = self._build_observation_request_pairs(
-                entity_observation_targets + frame_input.observation_targets,
-                resolved_targets,
-            )
-            observation_requests, next_preview_request_id = self._assign_preview_readback_request_ids(
-                [request for _, request in observation_pairs]
-            )
-            observation_pairs = [
-                (target, request)
-                for (target, _), request in zip(observation_pairs, observation_requests, strict=False)
-            ]
-            resolved_commands = (
-                generated_commands
-                + generated_carrier_commands
-                + self._resolve_targeted_commands(frame_input.commands, resolved_targets)
-            )
-            readback_requests, _ = self._assign_preview_readback_request_ids(
-                self._resolve_readback_requests(frame_input.readback_requests, resolved_targets),
-                next_request_id=next_preview_request_id,
-            )
-            bridge_frame_snapshot = self._serialize_preview_bridge_frame_snapshot(
-                current_entity_placeholders=saved_entity_placeholders,
-                resolved_commands=resolved_commands,
-                observation_requests=observation_requests,
-                readback_requests=readback_requests,
-                placeholder_inputs=placeholder_inputs,
-                paging_updates=paging_updates,
-                page_stripes=preview_page_stripes,
-                reserved_readback_request_ids=reserved_readback_request_ids,
-            )
-            return WorldFramePreview(
-                controller_state=preview_controller_state,
-                resolved_targets={
-                    query_id: self._public_resolved_target(target)
-                    for query_id, target in resolved_targets.items()
-                },
-                resolved_change_intents={
-                    intent_id: self._public_resolved_change_intent(intent)
-                    for intent_id, intent in resolved_change_intents.items()
-                },
-                resolved_carrier_intents={
-                    intent_id: self._public_resolved_carrier_intent(intent)
-                    for intent_id, intent in resolved_carrier_intents.items()
-                },
-                resolved_commands=[self._public_world_command(command) for command in resolved_commands],
-                observation_requests=observation_requests,
-                observation_plans=[
-                    self._serialize_observation_plan_for_target_request(target, request)
-                    for target, request in observation_pairs
-                ],
-                readback_requests=readback_requests,
-                readback_plans=self._serialize_readback_plans_for_requests(readback_requests),
-                bridge_frame_snapshot=bridge_frame_snapshot,
-                paging_updates=paging_updates,
-                placeholder_count=placeholder_count,
-            )
-        finally:
-            self._restore_preview_runtime_state(saved_preview_runtime)
-            self.paging = saved_paging
-            self.entity_states = saved_entity_states
-            self.entity_placeholders = saved_entity_placeholders
-            self.controller_state_snapshot = saved_controller_state
-            self._resolver_blocked_cells = saved_blocked_cells
-            self._resolver_released_cells = saved_released_cells
+        return preview_frame_input(self, frame_input, reserved_readback_request_ids=reserved_readback_request_ids)
 
     def submit_frame_input(self, frame_input: WorldFrameInput | dict[str, Any]) -> int:
-        frame_input = self._coerce_world_frame_input(frame_input)
-        submission_id = frame_input.submission_id
-        if submission_id is None:
-            submission_id = self.next_frame_submission_id
-        frame_input = replace(
-            frame_input,
-            submission_id=submission_id,
-            readback_requests=[self._assign_readback_request_id(request) for request in frame_input.readback_requests],
-        )
-        self.next_frame_submission_id = max(self.next_frame_submission_id, int(submission_id) + 1)
-        self.canceled_frame_submission_ids.discard(int(submission_id))
-        self.pending_frame_inputs.append(frame_input)
-        return int(submission_id)
+        return submit_frame_input(self, frame_input)
 
     def request_frame_input(self, frame_input: WorldFrameInput | dict[str, Any]) -> dict[str, Any]:
-        submission_id = self.submit_frame_input(frame_input)
-        pending_frame_input = self._pending_frame_input(submission_id)
-        preview = self.preview_frame_input(
-            pending_frame_input,
-            reserved_readback_request_ids=set(self._frame_readback_request_ids(pending_frame_input)),
-        )
-        return {
-            "queued": True,
-            "pending_frames": len(self.pending_frame_inputs),
-            "submission_id": submission_id,
-            "preview": preview,
-        }
+        return request_frame_input(self, frame_input)
 
     def request_frame_cycle(
         self,
@@ -1831,34 +1736,10 @@ class WorldEngine:
         *,
         apply_frame: bool = True,
     ) -> dict[str, Any]:
-        normalized_frame_input = {} if frame_input is None else frame_input
-        preview = self.preview_frame_input(normalized_frame_input)
-        if not apply_frame:
-            return {
-                "applied": False,
-                "queued": False,
-                "pending_frames": len(self.pending_frame_inputs),
-                "submission_id": None,
-                "preview": preview,
-                "result": None,
-            }
-        submission_id = self.submit_frame_input(normalized_frame_input)
-        pending_frame_input = self._pending_frame_input(submission_id)
-        preview = self.preview_frame_input(
-            pending_frame_input,
-            reserved_readback_request_ids=set(self._frame_readback_request_ids(pending_frame_input)),
-        )
-        return {
-            "applied": True,
-            "queued": True,
-            "pending_frames": len(self.pending_frame_inputs),
-            "submission_id": submission_id,
-            "preview": preview,
-            "result": None,
-        }
+        return request_frame_cycle(self, frame_input, apply_frame=apply_frame)
 
     def pending_frame_submission_ids(self) -> list[int]:
-        return [int(frame_input.submission_id) for frame_input in self.pending_frame_inputs if frame_input.submission_id is not None]
+        return pending_frame_submission_ids(self)
 
     def _pending_frame_input(self, submission_id: int) -> WorldFrameInput:
         for frame_input in reversed(self.pending_frame_inputs):
@@ -1875,13 +1756,7 @@ class WorldEngine:
         ]
 
     def cancel_frame_submission(self, submission_id: int) -> bool:
-        for index, frame_input in enumerate(self.pending_frame_inputs):
-            if frame_input.submission_id == submission_id:
-                del self.pending_frame_inputs[index]
-                self.canceled_frame_submission_ids.add(int(submission_id))
-                self.canceled_readback_request_ids.update(self._frame_readback_request_ids(frame_input))
-                return True
-        return False
+        return cancel_frame_submission(self, submission_id)
 
     def cancel_all_pending_frame_submissions(self) -> list[int]:
         canceled = self.pending_frame_submission_ids()
@@ -1894,63 +1769,13 @@ class WorldEngine:
         return canceled
 
     def cancel_readback_request(self, request_id: int) -> bool:
-        request_id = int(request_id)
-        canceled = False
-
-        remaining_commands: deque[WorldCommand] = deque()
-        for command in self.command_queue:
-            if command.kind == "request_readback" and int(command.payload.get("request_id", -1)) == request_id:
-                canceled = True
-                continue
-            remaining_commands.append(command)
-        self.command_queue = remaining_commands
-
-        remaining_frames: deque[WorldFrameInput] = deque()
-        for frame_input in self.pending_frame_inputs:
-            remaining_readbacks = [request for request in frame_input.readback_requests if request.request_id != request_id]
-            if len(remaining_readbacks) != len(frame_input.readback_requests):
-                frame_input = replace(frame_input, readback_requests=remaining_readbacks)
-                canceled = True
-            remaining_frames.append(frame_input)
-        self.pending_frame_inputs = remaining_frames
-
-        next_pending = [request for request in self.pending_readbacks if request.request_id != request_id]
-        if len(next_pending) != len(self.pending_readbacks):
-            canceled = True
-        self.pending_readbacks = next_pending
-
-        next_inflight = [request for request in self.inflight_readbacks if request.request_id != request_id]
-        if len(next_inflight) != len(self.inflight_readbacks):
-            canceled = True
-        self.inflight_readbacks = next_inflight
-
-        next_completed = deque(
-            result for result in self.completed_readbacks if result.request.request_id != request_id
-        )
-        if len(next_completed) != len(self.completed_readbacks):
-            canceled = True
-        self.completed_readbacks = next_completed
-
-        if canceled:
-            self.canceled_readback_request_ids.add(request_id)
-        return canceled
+        return cancel_readback_request(self, request_id)
 
     def poll_frame_output(self, submission_id: int | None = None) -> WorldFrameOutput | None:
-        if submission_id is None:
-            if not self.completed_frame_outputs:
-                return None
-            return self.completed_frame_outputs.popleft()
-        for index, output in enumerate(self.completed_frame_outputs):
-            if output.submission_id == submission_id:
-                del self.completed_frame_outputs[index]
-                return output
-        return None
+        return poll_frame_output(self, submission_id)
 
     def poll_all_frame_outputs(self) -> list[WorldFrameOutput]:
-        outputs: list[WorldFrameOutput] = []
-        while self.completed_frame_outputs:
-            outputs.append(self.completed_frame_outputs.popleft())
-        return outputs
+        return poll_all_frame_outputs(self)
 
     def serialize_pending_commands(self) -> dict[str, Any]:
         return serialize_pending_commands(self)
@@ -2005,13 +1830,7 @@ class WorldEngine:
         return serialize_ready_frame_outputs(self)
 
     def frame_submission_status(self, submission_id: int) -> str:
-        if any(frame_input.submission_id == submission_id for frame_input in self.pending_frame_inputs):
-            return "pending"
-        if any(output.submission_id == submission_id for output in self.completed_frame_outputs):
-            return "ready"
-        if submission_id in self.canceled_frame_submission_ids:
-            return "canceled"
-        return "missing"
+        return frame_submission_status(self, submission_id)
 
     def inject_light(
         self,
@@ -2955,102 +2774,7 @@ class WorldEngine:
         int,
         int,
     ]:
-        paging_updates: list[PageStripeUpdate] = []
-        resolved_targets: dict[str, ResolvedTarget] = {}
-        resolved_change_intents: dict[str, ResolvedChangeIntent] = {}
-        resolved_carrier_intents: dict[str, ResolvedCarrierIntent] = {}
-        observation_plans: list[dict[str, Any]] = []
-        readback_plans: list[dict[str, Any]] = []
-        queued_observations = 0
-        queued_readbacks = 0
-        queued_commands = 0
-        placeholder_count = 0
-        if frame_input.controller_state_provided:
-            self.controller_state_snapshot = deepcopy(frame_input.controller_state)
-        output_controller_state = deepcopy(self.controller_state_snapshot)
-        if frame_input.focus_center is not None:
-            paging_updates = self.advance_paging(
-                frame_input.focus_center[0],
-                frame_input.focus_center[1],
-                immediate=True,
-            )
-        placeholder_inputs = [
-            self._frame_entity_placeholder_input(placeholder)
-            for placeholder in (frame_input.entity_placeholders or [])
-        ]
-        if frame_input.entities is not None:
-            entity_placeholders, _ = self._sync_entity_states(
-                [self._frame_entity_state_input(entity) for entity in frame_input.entities]
-            )
-            placeholder_inputs = entity_placeholders + placeholder_inputs
-        if frame_input.entity_placeholders is not None or frame_input.entities is not None:
-            self._sync_entity_placeholders(placeholder_inputs)
-            placeholder_count = len(placeholder_inputs)
-        if frame_input.force_sources is not None:
-            self._sync_force_sources(
-                [self._frame_force_source_input(force_source) for force_source in frame_input.force_sources]
-            )
-        if frame_input.emitters is not None:
-            self._sync_persistent_emitters(
-                [self._frame_emitter_input(emitter) for emitter in frame_input.emitters]
-            )
-        resolved_targets = self._resolve_target_queries(frame_input.target_queries)
-        resolved_change_intents, generated_commands = self._resolve_change_intents(frame_input.change_intents, resolved_targets)
-        resolved_carrier_intents, generated_carrier_commands = self._resolve_carrier_intents(
-            frame_input.carrier_intents,
-            resolved_targets,
-        )
-        observation_pairs = self._build_observation_request_pairs(frame_input.observation_targets, resolved_targets)
-        observation_pairs = [
-            (target, self._assign_readback_request_id(request))
-            for target, request in observation_pairs
-        ]
-        observation_requests = [request for _, request in observation_pairs]
-        self.pending_readbacks.extend(observation_requests)
-        self.bridge_frame_readback_requests.extend(replace(request) for request in observation_requests)
-        observation_plans = [
-            self._serialize_observation_plan_for_target_request(target, request)
-            for target, request in observation_pairs
-        ]
-        queued_observations = len(observation_requests)
-        for command in (
-            generated_commands
-            + generated_carrier_commands
-            + self._resolve_targeted_commands(frame_input.commands, resolved_targets)
-        ):
-            self.queue_command(command.kind, **command.payload)
-            queued_commands += 1
-        readback_requests = self._resolve_readback_requests(frame_input.readback_requests, resolved_targets)
-        readback_requests = [self._assign_readback_request_id(request) for request in readback_requests]
-        self.pending_readbacks.extend(readback_requests)
-        self.bridge_frame_readback_requests.extend(replace(request) for request in readback_requests)
-        readback_plans = self._serialize_readback_plans_for_requests(readback_requests)
-        queued_readbacks = len(readback_requests)
-        public_resolved_targets = {
-            query_id: self._public_resolved_target(target)
-            for query_id, target in resolved_targets.items()
-        }
-        public_resolved_change_intents = {
-            intent_id: self._public_resolved_change_intent(intent)
-            for intent_id, intent in resolved_change_intents.items()
-        }
-        public_resolved_carrier_intents = {
-            intent_id: self._public_resolved_carrier_intent(intent)
-            for intent_id, intent in resolved_carrier_intents.items()
-        }
-        return (
-            output_controller_state,
-            paging_updates,
-            public_resolved_targets,
-            public_resolved_change_intents,
-            public_resolved_carrier_intents,
-            observation_plans,
-            readback_plans,
-            queued_observations,
-            queued_readbacks,
-            queued_commands,
-            placeholder_count,
-        )
+        return _apply_frame_input(self, frame_input)
 
     def _prepare_preview_frame_context(
         self,
@@ -3062,51 +2786,7 @@ class WorldEngine:
         list[EntityPlaceholder],
         int,
     ]:
-        paging = deepcopy(self.paging)
-        paging_updates: list[PageStripeUpdate] = []
-        preview_page_stripes: list[tuple[PageStripeUpdate, dict[str, Any]]] = []
-        if frame_input.focus_center is not None:
-            paging_updates = paging.focus_on(frame_input.focus_center[0], frame_input.focus_center[1])
-        self.paging = paging
-        if paging_updates:
-            preview_page_stripes = self._preview_apply_paging_updates(paging_updates)
-
-        entity_observation_targets: list[ObservationTarget] = []
-        if frame_input.entities is None:
-            preview_entity_states = dict(self.entity_states)
-            derived_placeholders: list[EntityPlaceholder] = []
-            _, entity_observation_targets = self._frame_entities_to_placeholders_and_observations(
-                list(preview_entity_states.values())
-            )
-        else:
-            frame_entities = [self._frame_entity_state_input(entity) for entity in frame_input.entities]
-            preview_entity_states = {entity.entity_id: entity for entity in frame_entities}
-            derived_placeholders, entity_observation_targets = self._frame_entities_to_placeholders_and_observations(frame_entities)
-        self.entity_states = preview_entity_states
-
-        placeholder_inputs = [
-            self._frame_entity_placeholder_input(placeholder)
-            for placeholder in (frame_input.entity_placeholders or [])
-        ]
-        placeholder_count = 0
-        if frame_input.entities is not None:
-            placeholder_inputs = derived_placeholders + placeholder_inputs
-        if frame_input.entities is not None or frame_input.entity_placeholders is not None:
-            preview_placeholders, blocked_cells, released_cells = self._build_preview_entity_placeholders(placeholder_inputs)
-            self.entity_placeholders = preview_placeholders
-            self._resolver_blocked_cells = blocked_cells
-            self._resolver_released_cells = released_cells
-            placeholder_count = len(placeholder_inputs)
-        else:
-            self._resolver_blocked_cells = None
-            self._resolver_released_cells = None
-        return (
-            paging_updates,
-            preview_page_stripes,
-            entity_observation_targets,
-            placeholder_inputs,
-            placeholder_count,
-        )
+        return _prepare_preview_frame_context(self, frame_input)
 
     def _snapshot_preview_runtime_state(self) -> dict[str, Any]:
         return {
@@ -4605,23 +4285,10 @@ class WorldEngine:
         return updates
 
     def _prepare_bridge_frame_inputs(self) -> None:
-        pending_placeholder_dirty_rects = list(self._pending_placeholder_dirty_rects)
-        self._clear_bridge_frame_inputs(keep_commands=False, prepared=True)
-        if pending_placeholder_dirty_rects:
-            self.bridge_frame_placeholder_dirty_rects.extend(pending_placeholder_dirty_rects)
-            self._pending_placeholder_dirty_rects.clear()
+        return _prepare_bridge_frame_inputs(self)
 
     def _needs_pre_simulation_bridge_sync(self, *, frame_input: WorldFrameInput | None) -> bool:
-        if self.simulation_backend != "gpu":
-            return False
-        return bool(
-            frame_input is not None
-            or self.bridge_frame_placeholders
-            or self.bridge_frame_placeholder_dirty_rects
-            or self.bridge_frame_paging_updates
-            or self.bridge_frame_page_stripes
-            or self._gpu_cpu_dirty_resources
-        )
+        return _needs_pre_simulation_bridge_sync(self, frame_input=frame_input)
 
     def _sync_pre_simulation_bridge_without_debug_upload(self) -> None:
         try:
@@ -4632,14 +4299,7 @@ class WorldEngine:
             self.bridge.sync_world(self)
 
     def _clear_bridge_frame_inputs(self, *, keep_commands: bool, prepared: bool) -> None:
-        if not keep_commands:
-            self.bridge_frame_commands.clear()
-        self.bridge_frame_readback_requests.clear()
-        self.bridge_frame_placeholders.clear()
-        self.bridge_frame_placeholder_dirty_rects.clear()
-        self.bridge_frame_paging_updates.clear()
-        self.bridge_frame_page_stripes.clear()
-        self._bridge_inputs_prepared = prepared
+        return _clear_bridge_frame_inputs(self, keep_commands=keep_commands, prepared=prepared)
 
     def _mark_active_rect_runtime(
         self,
