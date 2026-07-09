@@ -1,0 +1,30 @@
+
+            layout(std430, binding=3) buffer MaterialPhaseBuffer {
+                ivec4 phase_params[{{MAX_MATERIALS}}];
+            };
+            layout(binding=4) uniform sampler2D temp_tex;
+            layout(r32f, binding=5) writeonly uniform image2D boil_target_img;
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
+                    return;
+                }
+                if (!solve_cell_active(gid)) {
+                    imageStore(boil_target_img, gid, vec4(0.0, 0.0, 0.0, 0.0));
+                    return;
+                }
+                int material_id = material_id_at(gid);
+                if (material_id <= 0) {
+                    imageStore(boil_target_img, gid, vec4(0.0, 0.0, 0.0, 0.0));
+                    return;
+                }
+                float boil_point = params[material_id].w;
+                int gas_species_plus_one = phase_params[material_id].w;
+                float temperature = texelFetch(temp_tex, gid, 0).x;
+                int target_species = 0;
+                if (!isnan(boil_point) && gas_species_plus_one > 0 && temperature > boil_point) {
+                    target_species = gas_species_plus_one;
+                }
+                imageStore(boil_target_img, gid, vec4(float(target_species), 0.0, 0.0, 0.0));
+            }
+            

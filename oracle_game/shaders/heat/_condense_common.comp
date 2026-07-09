@@ -1,0 +1,40 @@
+
+            #version 430
+            layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+            uniform ivec2 cell_grid_size;
+            uniform ivec2 gas_grid_size;
+            uniform ivec2 tile_grid_size;
+            uniform int gas_cell_size;
+            uniform int tile_size;
+            uniform int gas_species_count;
+            uniform int phase_falling_island;
+            uniform int phase_liquid;
+            layout(std430, binding=3) buffer MaterialPhaseBuffer {
+                ivec4 phase_params[{{MAX_MATERIALS}}];
+            };
+            layout(std430, binding=7) buffer MaterialResponseBuffer {
+                vec4 response_params[{{MAX_MATERIALS}}];
+            };
+            layout(std430, binding=8) buffer GasCondenseBuffer {
+                vec4 gas_params[{{MAX_GAS_SPECIES}}];
+            };
+            layout(binding=2) uniform sampler2D active_tile_tex;
+            bool solve_gas_cell_active(ivec2 gas_cell) {
+                int x0 = gas_cell.x * gas_cell_size;
+                int y0 = gas_cell.y * gas_cell_size;
+                int x1 = min(cell_grid_size.x, x0 + gas_cell_size);
+                int y1 = min(cell_grid_size.y, y0 + gas_cell_size);
+                int tile_x0 = max(0, x0 / tile_size);
+                int tile_y0 = max(0, y0 / tile_size);
+                int tile_x1 = min(tile_grid_size.x, (x1 + tile_size - 1) / tile_size);
+                int tile_y1 = min(tile_grid_size.y, (y1 + tile_size - 1) / tile_size);
+                for (int tile_y = tile_y0; tile_y < tile_y1; ++tile_y) {
+                    for (int tile_x = tile_x0; tile_x < tile_x1; ++tile_x) {
+                        if (texelFetch(active_tile_tex, ivec2(tile_x, tile_y), 0).x > 0.5) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }
+        

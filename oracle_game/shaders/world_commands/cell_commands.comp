@@ -1,0 +1,130 @@
+
+            layout(local_size_x={{PASS_LOCAL_SIZE}}, local_size_y={{PASS_LOCAL_SIZE}}, local_size_z=1) in;
+            uniform ivec2 cell_grid_size;
+            uniform ivec2 gas_grid_size;
+            uniform int gas_cell_size;
+            uniform int command_count;
+            uniform int phase_falling_island;
+            uniform int render_group_placeholder;
+
+            layout(std430, binding=0) buffer MaterialBuffer { int material_id[]; };
+            layout(std430, binding=1) buffer PhaseBuffer { int phase[]; };
+            layout(std430, binding=2) buffer FlagsBuffer { int flags[]; };
+            layout(std430, binding=3) buffer TimerBuffer { ivec4 timer_pack[]; };
+            layout(std430, binding=4) buffer TemperatureBuffer { float temperature[]; };
+            layout(std430, binding=5) buffer IntegrityBuffer { float integrity[]; };
+            layout(std430, binding=6) buffer VelocityBuffer { vec2 velocity[]; };
+            layout(std430, binding=7) buffer IslandBuffer { int island_id[]; };
+            layout(std430, binding=8) buffer EntityBuffer { int entity_id[]; };
+            layout(std430, binding=9) buffer DisplacedBuffer { int displaced_material[]; };
+            layout(std430, binding=10) readonly buffer AmbientBuffer { float ambient_temperature[]; };
+            layout(std430, binding=11) readonly buffer CommandI0 { ivec4 command_i0[]; };
+            layout(std430, binding=12) readonly buffer CommandI1 { ivec4 command_i1[]; };
+            layout(std430, binding=13) readonly buffer CommandI2 { ivec4 command_i2[]; };
+            layout(std430, binding=14) readonly buffer CommandF { vec4 command_f[]; };
+            layout(std430, binding=15) readonly buffer MaterialParams { vec4 material_params[{{MAX_MATERIALS}}]; };
+
+            int cell_index(ivec2 cell) {
+                return cell.y * cell_grid_size.x + cell.x;
+            }
+
+            int material_slot(int mid) {
+                return clamp(mid, 0, {{MAX_MATERIALS_MINUS_1}});
+            }
+
+            bool is_placeholder_material(int mid) {
+                return mid > 0 && int(material_params[material_slot(mid)].z + 0.5) == render_group_placeholder;
+            }
+
+            int default_phase_for(int mid) {
+                return int(material_params[material_slot(mid)].x + 0.5);
+            }
+
+            float base_integrity_for(int mid) {
+                return material_params[material_slot(mid)].y;
+            }
+
+            float spawn_temperature_for(int mid) {
+                return material_params[material_slot(mid)].w;
+            }
+
+            bool in_circle(ivec2 cell, ivec2 center, int radius) {
+                ivec2 delta = cell - center;
+                return dot(delta, delta) <= radius * radius;
+            }
+
+            void write_material(int index, int target_material) {
+                int previous_material = material_id[index];
+                int previous_phase = phase[index];
+                int previous_displaced = displaced_material[index];
+                int target_phase = default_phase_for(target_material);
+                bool target_placeholder = is_placeholder_material(target_material);
+                bool previous_placeholder = is_placeholder_material(previous_material);
+
+                material_id[index] = target_material;
+                phase[index] = target_phase;
+                flags[index] = 0;
+                timer_pack[index] = ivec4(0);
+                integrity[index] = base_integrity_for(target_material);
+                float spawn_temperature = spawn_temperature_for(target_material);
+                if (!isnan(spawn_temperature)) {
+                    temperature[index] = max(temperature[index], spawn_temperature);
+                }
+                if (target_placeholder) {
+                    if (previous_placeholder) {
+                        displaced_material[index] = previous_displaced;
+                    } else if (previous_material != 0 && previous_phase == {{PHASE_LIQUID}}) {
+                        displaced_material[index] = previous_material;
+                    } else {
+                        displaced_material[index] = 0;
+                    }
+                } else {
+                    entity_id[index] = 0;
+                    displaced_material[index] = 0;
+                }
+                if (target_phase != phase_falling_island) {
+                    island_id[index] = 0;
+                }
+            }
+
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
+                    return;
+                }
+                int index = cell_index(gid);
+                for (int i = 0; i < command_count; ++i) {
+                    ivec4 c0 = command_i0[i];
+                    ivec4 c1 = command_i1[i];
+                    ivec4 c2 = command_i2[i];
+                    vec4 cf = command_f[i];
+                    if (c0.x == KIND_INJECT_MATERIAL) {
+                        if (c1.z > 0 && in_circle(gid, c0.yz, max(0, c0.w))) {
+                            write_material(index, c1.z);
+                        }
+                    } else if (c0.x == KIND_WRITE_MATERIAL_REGION) {
+                        if (
+                            c1.z > 0
+                            && gid.x >= c0.y
+                            && gid.y >= c0.z
+                            && gid.x < c0.y + max(0, c1.x)
+                            && gid.y < c0.z + max(0, c1.y)
+                        ) {
+                            write_material(index, c1.z);
+                        }
+                    } else if (c0.x == KIND_INJECT_TEMPERATURE) {
+                        if (in_circle(gid, c0.yz, max(0, c0.w))) {
+                            temperature[index] += cf.x;
+                        }
+                    } else if (c0.x == KIND_INJECT_VELOCITY) {
+                        if ((c2.x == CARRIER_CELL || c2.x == CARRIER_BOTH) && in_circle(gid, c0.yz, max(0, c0.w))) {
+                            if (c2.y == MODE_SET) {
+                                velocity[index] = cf.xy;
+                            } else {
+                                velocity[index] += cf.xy;
+                            }
+                        }
+                    }
+                }
+            }
+            

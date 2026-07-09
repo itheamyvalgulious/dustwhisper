@@ -1,0 +1,33 @@
+
+            #version 430
+            layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+            uniform ivec2 tile_grid_size;
+            uniform int expansion_radius;
+            layout(std430, binding=0) readonly buffer ActiveTileTTLBuffer {
+                int active_tile_ttl[];
+            };
+            layout(r32f, binding=1) writeonly uniform image2D active_tile_img;
+            bool expanded_tile_active(ivec2 tile) {
+                int radius = max(0, expansion_radius);
+                int source_y0 = max(0, tile.y - radius);
+                int source_y1 = min(tile_grid_size.y - 1, tile.y + radius);
+                int source_x0 = max(0, tile.x - radius);
+                int source_x1 = min(tile_grid_size.x - 1, tile.x + radius);
+                for (int source_y = source_y0; source_y <= source_y1; ++source_y) {
+                    int row_index = source_y * tile_grid_size.x;
+                    for (int source_x = source_x0; source_x <= source_x1; ++source_x) {
+                        if (active_tile_ttl[row_index + source_x] > 0) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                if (gid.x >= tile_grid_size.x || gid.y >= tile_grid_size.y) {
+                    return;
+                }
+                imageStore(active_tile_img, gid, vec4(expanded_tile_active(gid) ? 1.0 : 0.0, 0.0, 0.0, 0.0));
+            }
+            

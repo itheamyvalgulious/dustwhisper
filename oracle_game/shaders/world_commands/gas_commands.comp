@@ -1,0 +1,51 @@
+
+            layout(local_size_x={{PASS_LOCAL_SIZE}}, local_size_y={{PASS_LOCAL_SIZE}}, local_size_z=1) in;
+            uniform ivec2 gas_grid_size;
+            uniform int gas_species_count;
+            uniform int command_count;
+
+            layout(std430, binding=0) buffer FlowVelocityBuffer { vec2 flow_velocity[]; };
+            layout(std430, binding=1) buffer GasConcentrationBuffer { float gas_concentration[]; };
+            layout(std430, binding=2) readonly buffer CommandI0 { ivec4 command_i0[]; };
+            layout(std430, binding=3) readonly buffer CommandI1 { ivec4 command_i1[]; };
+            layout(std430, binding=4) readonly buffer CommandI2 { ivec4 command_i2[]; };
+            layout(std430, binding=5) readonly buffer CommandF { vec4 command_f[]; };
+
+            int gas_index(ivec2 cell) {
+                return cell.y * gas_grid_size.x + cell.x;
+            }
+
+            bool in_circle(ivec2 cell, ivec2 center, int radius) {
+                ivec2 delta = cell - center;
+                return dot(delta, delta) <= radius * radius;
+            }
+
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                if (gid.x >= gas_grid_size.x || gid.y >= gas_grid_size.y) {
+                    return;
+                }
+                int index = gas_index(gid);
+                for (int i = 0; i < command_count; ++i) {
+                    ivec4 c0 = command_i0[i];
+                    ivec4 c1 = command_i1[i];
+                    ivec4 c2 = command_i2[i];
+                    vec4 cf = command_f[i];
+                    if (c0.x == KIND_INJECT_GAS) {
+                        int species_id = c1.w;
+                        if (species_id >= 0 && species_id < gas_species_count && gid.x == c0.y && gid.y == c0.z) {
+                            int gas_offset = species_id * gas_grid_size.x * gas_grid_size.y + index;
+                            gas_concentration[gas_offset] = max(0.0, gas_concentration[gas_offset] + cf.x);
+                        }
+                    } else if (c0.x == KIND_INJECT_VELOCITY) {
+                        if ((c2.x == CARRIER_FLOW || c2.x == CARRIER_BOTH) && in_circle(gid, c1.xy, max(0, c1.z))) {
+                            if (c2.y == MODE_SET) {
+                                flow_velocity[index] = cf.xy;
+                            } else {
+                                flow_velocity[index] += cf.xy;
+                            }
+                        }
+                    }
+                }
+            }
+            

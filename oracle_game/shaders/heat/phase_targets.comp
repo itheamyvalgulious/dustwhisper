@@ -1,0 +1,49 @@
+
+            uniform int phase_liquid;
+            uniform int freeze_cold_neighbor_threshold;
+            layout(std430, binding=3) buffer MaterialPhaseBuffer {
+                ivec4 phase_params[{{MAX_MATERIALS}}];
+            };
+            layout(binding=4) uniform sampler2D phase_tex;
+            layout(binding=5) uniform sampler2D temp_tex;
+            layout(r32f, binding=6) writeonly uniform image2D phase_target_img;
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
+                    return;
+                }
+                if (!solve_cell_active(gid)) {
+                    imageStore(phase_target_img, gid, vec4(0.0, 0.0, 0.0, 0.0));
+                    return;
+                }
+                int material_id = material_id_at(gid);
+                if (material_id <= 0) {
+                    imageStore(phase_target_img, gid, vec4(0.0, 0.0, 0.0, 0.0));
+                    return;
+                }
+                vec4 material_param = params[material_id];
+                ivec4 transition = phase_params[material_id];
+                float melt_point = material_param.z;
+                float temperature = texelFetch(temp_tex, gid, 0).x;
+                int target_material = 0;
+                if (!isnan(melt_point)) {
+                    if (transition.y > 0 && temperature > melt_point) {
+                        target_material = transition.y;
+                    } else if (transition.z > 0 && transition.x == phase_liquid && temperature < melt_point) {
+                        ivec2 left = ivec2(max(gid.x - 1, 0), gid.y);
+                        ivec2 right = ivec2(min(gid.x + 1, cell_grid_size.x - 1), gid.y);
+                        ivec2 down = ivec2(gid.x, max(gid.y - 1, 0));
+                        ivec2 up = ivec2(gid.x, min(gid.y + 1, cell_grid_size.y - 1));
+                        int cold_count = 1;
+                        cold_count += texelFetch(temp_tex, left, 0).x < melt_point ? 1 : 0;
+                        cold_count += texelFetch(temp_tex, right, 0).x < melt_point ? 1 : 0;
+                        cold_count += texelFetch(temp_tex, down, 0).x < melt_point ? 1 : 0;
+                        cold_count += texelFetch(temp_tex, up, 0).x < melt_point ? 1 : 0;
+                        if (cold_count >= freeze_cold_neighbor_threshold) {
+                            target_material = transition.z;
+                        }
+                    }
+                }
+                imageStore(phase_target_img, gid, vec4(float(target_material), 0.0, 0.0, 0.0));
+            }
+            

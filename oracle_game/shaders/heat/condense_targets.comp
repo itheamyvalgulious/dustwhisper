@@ -1,0 +1,33 @@
+
+            uniform int gas_species_count;
+            layout(std430, binding=3) buffer GasCondenseBuffer {
+                vec4 gas_params[{{MAX_GAS_SPECIES}}];
+            };
+            layout(binding=4) uniform sampler2DArray gas_tex;
+            layout(binding=5) uniform sampler2D ambient_tex;
+            layout(r32f, binding=6) writeonly uniform image2DArray condense_target_img;
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                if (gid.x >= gas_grid_size.x || gid.y >= gas_grid_size.y) {
+                    return;
+                }
+                if (!solve_gas_cell_active(gid)) {
+                    for (int species = 0; species < gas_species_count; ++species) {
+                        imageStore(condense_target_img, ivec3(gid, species), vec4(0.0, 0.0, 0.0, 0.0));
+                    }
+                    return;
+                }
+                float ambient = texelFetch(ambient_tex, gid, 0).x;
+                for (int species = 0; species < gas_species_count; ++species) {
+                    vec4 species_param = gas_params[species];
+                    float condense_point = species_param.x;
+                    int target_material_id = int(species_param.y + 0.5);
+                    float concentration = texelFetch(gas_tex, ivec3(gid, species), 0).x;
+                    float target = 0.0;
+                    if (!isnan(condense_point) && target_material_id > 0 && ambient < condense_point && concentration > 0.7) {
+                        target = 1.0;
+                    }
+                    imageStore(condense_target_img, ivec3(gid, species), vec4(target, 0.0, 0.0, 0.0));
+                }
+            }
+            

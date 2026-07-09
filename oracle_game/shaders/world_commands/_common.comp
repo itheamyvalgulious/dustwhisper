@@ -1,0 +1,13 @@
+
+            #version 430
+            #define KIND_INJECT_MATERIAL {{KIND_INJECT_MATERIAL}}
+            #define KIND_WRITE_MATERIAL_REGION {{KIND_WRITE_MATERIAL_REGION}}
+            #define KIND_INJECT_TEMPERATURE {{KIND_INJECT_TEMPERATURE}}
+            #define KIND_INJECT_VELOCITY {{KIND_INJECT_VELOCITY}}
+            #define KIND_INJECT_GAS {{KIND_INJECT_GAS}}
+            #define CARRIER_CELL {{CARRIER_CELL}}
+            #define CARRIER_FLOW {{CARRIER_FLOW}}
+            #define CARRIER_BOTH {{CARRIER_BOTH}}
+            #define MODE_SET {{MODE_SET}}
+            #define MODE_ADD {{MODE_ADD}}
+        

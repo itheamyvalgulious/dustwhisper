@@ -1,0 +1,62 @@
+
+            uniform float dt;
+            uniform int phase_falling_island;
+            uniform int phase_liquid;
+            layout(std430, binding=3) buffer MaterialPhaseBuffer {
+                ivec4 phase_params[{{MAX_MATERIALS}}];
+            };
+            layout(binding=3) uniform sampler2D phase_target_tex;
+            layout(binding=4) uniform sampler2D phase_tex;
+            layout(binding=5) uniform sampler2D boil_target_tex;
+            layout(binding=6) uniform sampler2D integrity_tex;
+            layout(binding=7) uniform sampler2D displaced_tex;
+            layout(binding=8) uniform sampler2D velocity_tex;
+            layout(r32f, binding=0) writeonly uniform image2D displaced_out_img;
+            layout(rg32f, binding=1) writeonly uniform image2D velocity_out_img;
+
+            bool is_placeholder_material(int material_id) {
+                if (material_id <= 0 || material_id >= {{MAX_MATERIALS}}) {
+                    return false;
+                }
+                return int(response_params[material_id].w + 0.5) == 7;
+            }
+
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
+                    return;
+                }
+                bool is_active = solve_cell_active(gid);
+                int previous_material = int(texelFetch(material_tex, gid, 0).x + 0.5);
+                int previous_phase = int(texelFetch(phase_tex, gid, 0).x + 0.5);
+                float displaced_value = texelFetch(displaced_tex, gid, 0).x;
+                vec2 velocity_value = texelFetch(velocity_tex, gid, 0).xy;
+
+                int target_material = is_active ? int(texelFetch(phase_target_tex, gid, 0).x + 0.5) : 0;
+                if (target_material > 0) {
+                    target_material = clamp(target_material, 0, {{MAX_MATERIALS_MINUS_ONE}});
+                    if (is_placeholder_material(target_material)) {
+                        if (is_placeholder_material(previous_material)) {
+                            displaced_value = texelFetch(displaced_tex, gid, 0).x;
+                        } else if (previous_material != 0 && previous_phase == phase_liquid) {
+                            displaced_value = float(previous_material);
+                        } else {
+                            displaced_value = 0.0;
+                        }
+                    } else {
+                        displaced_value = 0.0;
+                    }
+                }
+
+                int boil_target = is_active ? int(texelFetch(boil_target_tex, gid, 0).x + 0.5) : 0;
+                if (boil_target > 0) {
+                    float integrity_value = texelFetch(integrity_tex, gid, 0).x - 0.5 * dt;
+                    if (integrity_value <= 0.0) {
+                        displaced_value = 0.0;
+                        velocity_value = vec2(0.0);
+                    }
+                }
+                imageStore(displaced_out_img, gid, vec4(displaced_value, 0.0, 0.0, 0.0));
+                imageStore(velocity_out_img, gid, vec4(velocity_value, 0.0, 0.0));
+            }
+            

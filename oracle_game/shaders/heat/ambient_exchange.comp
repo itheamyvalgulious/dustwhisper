@@ -1,0 +1,27 @@
+
+            uniform float dt;
+            layout(binding=3) uniform sampler2D temp_in_tex;
+            layout(binding=4) uniform sampler2D ambient_tex;
+            layout(r32f, binding=5) writeonly uniform image2D temp_out_img;
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
+                    return;
+                }
+                float center = texelFetch(temp_in_tex, gid, 0).x;
+                if (!solve_cell_active(gid)) {
+                    imageStore(temp_out_img, gid, vec4(center, 0.0, 0.0, 0.0));
+                    return;
+                }
+                int material_id = material_id_at(gid);
+                float exchange = params[material_id].y;
+                float heat_capacity = max(response_params[material_id].x, 1.0e-4);
+                ivec2 gas_cell = ivec2(
+                    min(gid.x / gas_cell_size, gas_grid_size.x - 1),
+                    min(gid.y / gas_cell_size, gas_grid_size.y - 1)
+                );
+                float ambient = texelFetch(ambient_tex, gas_cell, 0).x;
+                float updated = center + (ambient - center) * (exchange / heat_capacity) * dt;
+                imageStore(temp_out_img, gid, vec4(updated, 0.0, 0.0, 0.0));
+            }
+            

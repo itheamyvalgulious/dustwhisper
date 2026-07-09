@@ -9,6 +9,7 @@ import numpy as np
 from oracle_game.gpu import RENDER_GROUP_IDS, moderngl, typed_gas_id, typed_material_id
 from oracle_game.sim.gpu_base import GPUPipelineBase
 from oracle_game.sim.gpu_placeholders import MAX_MATERIALS, PASS_LOCAL_SIZE
+from oracle_game.sim.shader_loader import build_compute_shader, shader_source
 from oracle_game.types import Phase, WorldCommand
 
 
@@ -21,6 +22,26 @@ COMMAND_KIND_IDS = {
 }
 CARRIER_IDS = {"cell": 1, "flow": 2, "both": 3}
 MODE_IDS = {"set": 1, "add": 2}
+
+# Superset of every {{NAME}} marker referenced by any world_commands
+# shader; the loader ignores unused keys, so one shared dict suffices
+# for all passes.
+_SHADER_SUBS = {
+    "KIND_INJECT_MATERIAL": COMMAND_KIND_IDS["inject_material"],
+    "KIND_WRITE_MATERIAL_REGION": COMMAND_KIND_IDS["write_material_region"],
+    "KIND_INJECT_TEMPERATURE": COMMAND_KIND_IDS["inject_temperature"],
+    "KIND_INJECT_VELOCITY": COMMAND_KIND_IDS["inject_velocity"],
+    "KIND_INJECT_GAS": COMMAND_KIND_IDS["inject_gas"],
+    "CARRIER_CELL": CARRIER_IDS["cell"],
+    "CARRIER_FLOW": CARRIER_IDS["flow"],
+    "CARRIER_BOTH": CARRIER_IDS["both"],
+    "MODE_SET": MODE_IDS["set"],
+    "MODE_ADD": MODE_IDS["add"],
+    "PASS_LOCAL_SIZE": PASS_LOCAL_SIZE,
+    "MAX_MATERIALS": MAX_MATERIALS,
+    "MAX_MATERIALS_MINUS_1": MAX_MATERIALS - 1,
+    "PHASE_LIQUID": int(Phase.LIQUID),
+}
 
 
 @dataclass(slots=True)
@@ -304,382 +325,25 @@ class GPUWorldCommandPipeline(GPUPipelineBase):
     def _ensure_programs(self, ctx: Any) -> None:
         if self.programs:
             return
-        common = f"""
-            #version 430
-            #define KIND_INJECT_MATERIAL {COMMAND_KIND_IDS["inject_material"]}
-            #define KIND_WRITE_MATERIAL_REGION {COMMAND_KIND_IDS["write_material_region"]}
-            #define KIND_INJECT_TEMPERATURE {COMMAND_KIND_IDS["inject_temperature"]}
-            #define KIND_INJECT_VELOCITY {COMMAND_KIND_IDS["inject_velocity"]}
-            #define KIND_INJECT_GAS {COMMAND_KIND_IDS["inject_gas"]}
-            #define CARRIER_CELL {CARRIER_IDS["cell"]}
-            #define CARRIER_FLOW {CARRIER_IDS["flow"]}
-            #define CARRIER_BOTH {CARRIER_IDS["both"]}
-            #define MODE_SET {MODE_IDS["set"]}
-            #define MODE_ADD {MODE_IDS["add"]}
-        """
-        self.programs["cell_commands"] = ctx.compute_shader(
-            common
-            + f"""
-            layout(local_size_x={PASS_LOCAL_SIZE}, local_size_y={PASS_LOCAL_SIZE}, local_size_z=1) in;
-            uniform ivec2 cell_grid_size;
-            uniform ivec2 gas_grid_size;
-            uniform int gas_cell_size;
-            uniform int command_count;
-            uniform int phase_falling_island;
-            uniform int render_group_placeholder;
-
-            layout(std430, binding=0) buffer MaterialBuffer {{ int material_id[]; }};
-            layout(std430, binding=1) buffer PhaseBuffer {{ int phase[]; }};
-            layout(std430, binding=2) buffer FlagsBuffer {{ int flags[]; }};
-            layout(std430, binding=3) buffer TimerBuffer {{ ivec4 timer_pack[]; }};
-            layout(std430, binding=4) buffer TemperatureBuffer {{ float temperature[]; }};
-            layout(std430, binding=5) buffer IntegrityBuffer {{ float integrity[]; }};
-            layout(std430, binding=6) buffer VelocityBuffer {{ vec2 velocity[]; }};
-            layout(std430, binding=7) buffer IslandBuffer {{ int island_id[]; }};
-            layout(std430, binding=8) buffer EntityBuffer {{ int entity_id[]; }};
-            layout(std430, binding=9) buffer DisplacedBuffer {{ int displaced_material[]; }};
-            layout(std430, binding=10) readonly buffer AmbientBuffer {{ float ambient_temperature[]; }};
-            layout(std430, binding=11) readonly buffer CommandI0 {{ ivec4 command_i0[]; }};
-            layout(std430, binding=12) readonly buffer CommandI1 {{ ivec4 command_i1[]; }};
-            layout(std430, binding=13) readonly buffer CommandI2 {{ ivec4 command_i2[]; }};
-            layout(std430, binding=14) readonly buffer CommandF {{ vec4 command_f[]; }};
-            layout(std430, binding=15) readonly buffer MaterialParams {{ vec4 material_params[{MAX_MATERIALS}]; }};
-
-            int cell_index(ivec2 cell) {{
-                return cell.y * cell_grid_size.x + cell.x;
-            }}
-
-            int material_slot(int mid) {{
-                return clamp(mid, 0, {MAX_MATERIALS - 1});
-            }}
-
-            bool is_placeholder_material(int mid) {{
-                return mid > 0 && int(material_params[material_slot(mid)].z + 0.5) == render_group_placeholder;
-            }}
-
-            int default_phase_for(int mid) {{
-                return int(material_params[material_slot(mid)].x + 0.5);
-            }}
-
-            float base_integrity_for(int mid) {{
-                return material_params[material_slot(mid)].y;
-            }}
-
-            float spawn_temperature_for(int mid) {{
-                return material_params[material_slot(mid)].w;
-            }}
-
-            bool in_circle(ivec2 cell, ivec2 center, int radius) {{
-                ivec2 delta = cell - center;
-                return dot(delta, delta) <= radius * radius;
-            }}
-
-            void write_material(int index, int target_material) {{
-                int previous_material = material_id[index];
-                int previous_phase = phase[index];
-                int previous_displaced = displaced_material[index];
-                int target_phase = default_phase_for(target_material);
-                bool target_placeholder = is_placeholder_material(target_material);
-                bool previous_placeholder = is_placeholder_material(previous_material);
-
-                material_id[index] = target_material;
-                phase[index] = target_phase;
-                flags[index] = 0;
-                timer_pack[index] = ivec4(0);
-                integrity[index] = base_integrity_for(target_material);
-                float spawn_temperature = spawn_temperature_for(target_material);
-                if (!isnan(spawn_temperature)) {{
-                    temperature[index] = max(temperature[index], spawn_temperature);
-                }}
-                if (target_placeholder) {{
-                    if (previous_placeholder) {{
-                        displaced_material[index] = previous_displaced;
-                    }} else if (previous_material != 0 && previous_phase == {int(Phase.LIQUID)}) {{
-                        displaced_material[index] = previous_material;
-                    }} else {{
-                        displaced_material[index] = 0;
-                    }}
-                }} else {{
-                    entity_id[index] = 0;
-                    displaced_material[index] = 0;
-                }}
-                if (target_phase != phase_falling_island) {{
-                    island_id[index] = 0;
-                }}
-            }}
-
-            void main() {{
-                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
-                if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {{
-                    return;
-                }}
-                int index = cell_index(gid);
-                for (int i = 0; i < command_count; ++i) {{
-                    ivec4 c0 = command_i0[i];
-                    ivec4 c1 = command_i1[i];
-                    ivec4 c2 = command_i2[i];
-                    vec4 cf = command_f[i];
-                    if (c0.x == KIND_INJECT_MATERIAL) {{
-                        if (c1.z > 0 && in_circle(gid, c0.yz, max(0, c0.w))) {{
-                            write_material(index, c1.z);
-                        }}
-                    }} else if (c0.x == KIND_WRITE_MATERIAL_REGION) {{
-                        if (
-                            c1.z > 0
-                            && gid.x >= c0.y
-                            && gid.y >= c0.z
-                            && gid.x < c0.y + max(0, c1.x)
-                            && gid.y < c0.z + max(0, c1.y)
-                        ) {{
-                            write_material(index, c1.z);
-                        }}
-                    }} else if (c0.x == KIND_INJECT_TEMPERATURE) {{
-                        if (in_circle(gid, c0.yz, max(0, c0.w))) {{
-                            temperature[index] += cf.x;
-                        }}
-                    }} else if (c0.x == KIND_INJECT_VELOCITY) {{
-                        if ((c2.x == CARRIER_CELL || c2.x == CARRIER_BOTH) && in_circle(gid, c0.yz, max(0, c0.w))) {{
-                            if (c2.y == MODE_SET) {{
-                                velocity[index] = cf.xy;
-                            }} else {{
-                                velocity[index] += cf.xy;
-                            }}
-                        }}
-                    }}
-                }}
-            }}
-            """
+        self.programs["cell_commands"] = build_compute_shader(
+            ctx, "world_commands/cell_commands.comp", _SHADER_SUBS,
+            includes=["world_commands/_common.comp"],
         )
-        self.programs["gas_commands"] = ctx.compute_shader(
-            common
-            + f"""
-            layout(local_size_x={PASS_LOCAL_SIZE}, local_size_y={PASS_LOCAL_SIZE}, local_size_z=1) in;
-            uniform ivec2 gas_grid_size;
-            uniform int gas_species_count;
-            uniform int command_count;
-
-            layout(std430, binding=0) buffer FlowVelocityBuffer {{ vec2 flow_velocity[]; }};
-            layout(std430, binding=1) buffer GasConcentrationBuffer {{ float gas_concentration[]; }};
-            layout(std430, binding=2) readonly buffer CommandI0 {{ ivec4 command_i0[]; }};
-            layout(std430, binding=3) readonly buffer CommandI1 {{ ivec4 command_i1[]; }};
-            layout(std430, binding=4) readonly buffer CommandI2 {{ ivec4 command_i2[]; }};
-            layout(std430, binding=5) readonly buffer CommandF {{ vec4 command_f[]; }};
-
-            int gas_index(ivec2 cell) {{
-                return cell.y * gas_grid_size.x + cell.x;
-            }}
-
-            bool in_circle(ivec2 cell, ivec2 center, int radius) {{
-                ivec2 delta = cell - center;
-                return dot(delta, delta) <= radius * radius;
-            }}
-
-            void main() {{
-                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
-                if (gid.x >= gas_grid_size.x || gid.y >= gas_grid_size.y) {{
-                    return;
-                }}
-                int index = gas_index(gid);
-                for (int i = 0; i < command_count; ++i) {{
-                    ivec4 c0 = command_i0[i];
-                    ivec4 c1 = command_i1[i];
-                    ivec4 c2 = command_i2[i];
-                    vec4 cf = command_f[i];
-                    if (c0.x == KIND_INJECT_GAS) {{
-                        int species_id = c1.w;
-                        if (species_id >= 0 && species_id < gas_species_count && gid.x == c0.y && gid.y == c0.z) {{
-                            int gas_offset = species_id * gas_grid_size.x * gas_grid_size.y + index;
-                            gas_concentration[gas_offset] = max(0.0, gas_concentration[gas_offset] + cf.x);
-                        }}
-                    }} else if (c0.x == KIND_INJECT_VELOCITY) {{
-                        if ((c2.x == CARRIER_FLOW || c2.x == CARRIER_BOTH) && in_circle(gid, c1.xy, max(0, c1.z))) {{
-                            if (c2.y == MODE_SET) {{
-                                flow_velocity[index] = cf.xy;
-                            }} else {{
-                                flow_velocity[index] += cf.xy;
-                            }}
-                        }}
-                    }}
-                }}
-            }}
-            """
+        self.programs["gas_commands"] = build_compute_shader(
+            ctx, "world_commands/gas_commands.comp", _SHADER_SUBS,
+            includes=["world_commands/_common.comp"],
         )
-        self.programs["load_bridge_cell"] = ctx.compute_shader(
-            f"""
-            #version 430
-            layout(local_size_x={PASS_LOCAL_SIZE}, local_size_y={PASS_LOCAL_SIZE}, local_size_z=1) in;
-            uniform ivec2 cell_grid_size;
-            uniform bool copy_cell_core;
-            uniform bool copy_island_id;
-            uniform bool copy_entity_id;
-            uniform bool copy_displaced_material;
-
-            layout(std430, binding=0) readonly buffer BridgeCellCoreBuffer {{ uint bridge_cell_core[]; }};
-            layout(std430, binding=1) readonly buffer BridgeIslandBuffer {{ int bridge_island_id[]; }};
-            layout(std430, binding=2) readonly buffer BridgeEntityBuffer {{ int bridge_entity_id[]; }};
-            layout(std430, binding=3) readonly buffer BridgeDisplacedBuffer {{ int bridge_displaced[]; }};
-            layout(std430, binding=4) buffer MaterialBuffer {{ int material_id[]; }};
-            layout(std430, binding=5) buffer PhaseBuffer {{ int phase[]; }};
-            layout(std430, binding=6) buffer FlagsBuffer {{ int flags[]; }};
-            layout(std430, binding=7) buffer TimerBuffer {{ ivec4 timer_pack[]; }};
-            layout(std430, binding=8) buffer TemperatureBuffer {{ float temperature[]; }};
-            layout(std430, binding=9) buffer IntegrityBuffer {{ float integrity[]; }};
-            layout(std430, binding=10) buffer VelocityBuffer {{ vec2 velocity[]; }};
-            layout(std430, binding=11) buffer IslandBuffer {{ int island_id[]; }};
-            layout(std430, binding=12) buffer EntityBuffer {{ int entity_id[]; }};
-            layout(std430, binding=13) buffer DisplacedBuffer {{ int displaced_material[]; }};
-
-            ivec4 unpack_timer(uint word) {{
-                return ivec4(
-                    int(word & 0xFFu),
-                    int((word >> 8u) & 0xFFu),
-                    int((word >> 16u) & 0xFFu),
-                    int((word >> 24u) & 0xFFu)
-                );
-            }}
-
-            void main() {{
-                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
-                if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {{
-                    return;
-                }}
-                int cell_index = gid.y * cell_grid_size.x + gid.x;
-                if (copy_cell_core) {{
-                    int word_index = cell_index * 5;
-                    uint word0 = bridge_cell_core[word_index];
-                    material_id[cell_index] = int(word0 & 0xFFFFu);
-                    phase[cell_index] = int((word0 >> 16u) & 0xFFu);
-                    flags[cell_index] = int((word0 >> 24u) & 0xFFu);
-                    velocity[cell_index] = unpackHalf2x16(bridge_cell_core[word_index + 1]);
-                    temperature[cell_index] = uintBitsToFloat(bridge_cell_core[word_index + 2]);
-                    timer_pack[cell_index] = unpack_timer(bridge_cell_core[word_index + 3]);
-                    integrity[cell_index] = float(bridge_cell_core[word_index + 4] & 0xFFFFu);
-                }}
-                if (copy_island_id) {{
-                    island_id[cell_index] = bridge_island_id[cell_index];
-                }}
-                if (copy_entity_id) {{
-                    entity_id[cell_index] = bridge_entity_id[cell_index];
-                }}
-                if (copy_displaced_material) {{
-                    displaced_material[cell_index] = bridge_displaced[cell_index];
-                }}
-            }}
-            """
+        self.programs["load_bridge_cell"] = build_compute_shader(
+            ctx, "world_commands/load_bridge_cell.comp", _SHADER_SUBS,
         )
-        self.programs["load_bridge_gas"] = ctx.compute_shader(
-            f"""
-            #version 430
-            layout(local_size_x={PASS_LOCAL_SIZE}, local_size_y={PASS_LOCAL_SIZE}, local_size_z=1) in;
-            uniform ivec2 gas_grid_size;
-            uniform int species_count;
-            uniform bool copy_flow_velocity;
-            uniform bool copy_gas_concentration;
-            uniform bool copy_ambient_temperature;
-
-            layout(binding=0) uniform sampler2D bridge_flow_velocity_tex;
-            layout(std430, binding=1) readonly buffer BridgeGasBuffer {{ float bridge_gas[]; }};
-            layout(std430, binding=2) buffer FlowVelocityBuffer {{ vec2 flow_velocity[]; }};
-            layout(std430, binding=3) buffer GasConcentrationBuffer {{ float gas_concentration[]; }};
-            layout(binding=4) uniform sampler2D bridge_ambient_tex;
-            layout(std430, binding=5) buffer AmbientBuffer {{ float ambient_temperature[]; }};
-
-            void main() {{
-                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
-                int species = int(gl_GlobalInvocationID.z);
-                if (gid.x >= gas_grid_size.x || gid.y >= gas_grid_size.y || species >= species_count) {{
-                    return;
-                }}
-                int cell_index = gid.y * gas_grid_size.x + gid.x;
-                if (species == 0 && copy_flow_velocity) {{
-                    flow_velocity[cell_index] = texelFetch(bridge_flow_velocity_tex, gid, 0).xy;
-                }}
-                if (species == 0 && copy_ambient_temperature) {{
-                    ambient_temperature[cell_index] = texelFetch(bridge_ambient_tex, gid, 0).x;
-                }}
-                if (copy_gas_concentration) {{
-                    int gas_index = (species * gas_grid_size.y + gid.y) * gas_grid_size.x + gid.x;
-                    gas_concentration[gas_index] = max(bridge_gas[gas_index], 0.0);
-                }}
-            }}
-            """
+        self.programs["load_bridge_gas"] = build_compute_shader(
+            ctx, "world_commands/load_bridge_gas.comp", _SHADER_SUBS,
         )
-        self.programs["publish_bridge_cell"] = ctx.compute_shader(
-            f"""
-            #version 430
-            layout(local_size_x={PASS_LOCAL_SIZE}, local_size_y={PASS_LOCAL_SIZE}, local_size_z=1) in;
-            uniform ivec2 cell_grid_size;
-
-            layout(std430, binding=0) readonly buffer MaterialBuffer {{ int material_id[]; }};
-            layout(std430, binding=1) readonly buffer PhaseBuffer {{ int phase[]; }};
-            layout(std430, binding=2) readonly buffer FlagsBuffer {{ int flags[]; }};
-            layout(std430, binding=3) readonly buffer TimerBuffer {{ ivec4 timer_pack[]; }};
-            layout(std430, binding=4) readonly buffer TemperatureBuffer {{ float temperature[]; }};
-            layout(std430, binding=5) readonly buffer IntegrityBuffer {{ float integrity[]; }};
-            layout(std430, binding=6) readonly buffer VelocityBuffer {{ vec2 velocity[]; }};
-            layout(std430, binding=7) readonly buffer IslandBuffer {{ int island_id[]; }};
-            layout(std430, binding=8) readonly buffer EntityBuffer {{ int entity_id[]; }};
-            layout(std430, binding=9) readonly buffer DisplacedBuffer {{ int displaced_material[]; }};
-            layout(std430, binding=10) writeonly buffer BridgeCellCoreBuffer {{ uint bridge_cell_core[]; }};
-            layout(std430, binding=11) writeonly buffer BridgeIslandBuffer {{ int bridge_island_id[]; }};
-            layout(std430, binding=12) writeonly buffer BridgeEntityBuffer {{ int bridge_entity_id[]; }};
-            layout(std430, binding=13) writeonly buffer BridgeDisplacedBuffer {{ int bridge_displaced[]; }};
-            layout(r32f, binding=0) writeonly uniform image2D bridge_material_img;
-
-            uint pack_timer(ivec4 timer) {{
-                uvec4 value = uvec4(clamp(timer, ivec4(0), ivec4(255)));
-                return value.x | (value.y << 8u) | (value.z << 16u) | (value.w << 24u);
-            }}
-
-            void main() {{
-                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
-                if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {{
-                    return;
-                }}
-                int cell_index = gid.y * cell_grid_size.x + gid.x;
-                uint material = uint(clamp(material_id[cell_index], 0, 65535));
-                uint phase_value = uint(clamp(phase[cell_index], 0, 255));
-                uint flag_value = uint(clamp(flags[cell_index], 0, 255));
-                uint integrity_value = uint(clamp(round(integrity[cell_index]), 0.0, 65535.0));
-                int word_index = cell_index * 5;
-                bridge_cell_core[word_index] = material | (phase_value << 16u) | (flag_value << 24u);
-                bridge_cell_core[word_index + 1] = packHalf2x16(velocity[cell_index]);
-                bridge_cell_core[word_index + 2] = floatBitsToUint(temperature[cell_index]);
-                bridge_cell_core[word_index + 3] = pack_timer(timer_pack[cell_index]);
-                bridge_cell_core[word_index + 4] = integrity_value;
-                bridge_island_id[cell_index] = island_id[cell_index];
-                bridge_entity_id[cell_index] = entity_id[cell_index];
-                bridge_displaced[cell_index] = displaced_material[cell_index];
-                imageStore(bridge_material_img, gid, vec4(float(material), 0.0, 0.0, 0.0));
-            }}
-            """
+        self.programs["publish_bridge_cell"] = build_compute_shader(
+            ctx, "world_commands/publish_bridge_cell.comp", _SHADER_SUBS,
         )
-        self.programs["publish_bridge_gas"] = ctx.compute_shader(
-            f"""
-            #version 430
-            layout(local_size_x={PASS_LOCAL_SIZE}, local_size_y={PASS_LOCAL_SIZE}, local_size_z=1) in;
-            uniform ivec2 gas_grid_size;
-            uniform int species_count;
-
-            layout(std430, binding=0) readonly buffer FlowVelocityBuffer {{ vec2 flow_velocity[]; }};
-            layout(std430, binding=1) readonly buffer GasConcentrationBuffer {{ float gas_concentration[]; }};
-            layout(rg32f, binding=2) writeonly uniform image2D bridge_flow_velocity_img;
-            layout(std430, binding=3) writeonly buffer BridgeGasBuffer {{ float bridge_gas[]; }};
-
-            void main() {{
-                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
-                int species = int(gl_GlobalInvocationID.z);
-                if (gid.x >= gas_grid_size.x || gid.y >= gas_grid_size.y || species >= species_count) {{
-                    return;
-                }}
-                int cell_index = gid.y * gas_grid_size.x + gid.x;
-                if (species == 0) {{
-                    imageStore(bridge_flow_velocity_img, gid, vec4(flow_velocity[cell_index], 0.0, 0.0));
-                }}
-                int gas_index = (species * gas_grid_size.y + gid.y) * gas_grid_size.x + gid.x;
-                bridge_gas[gas_index] = max(gas_concentration[gas_index], 0.0);
-            }}
-            """
+        self.programs["publish_bridge_gas"] = build_compute_shader(
+            ctx, "world_commands/publish_bridge_gas.comp", _SHADER_SUBS,
         )
 
     def _pack_commands(self, world: "WorldEngine", commands: list[WorldCommand]) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:

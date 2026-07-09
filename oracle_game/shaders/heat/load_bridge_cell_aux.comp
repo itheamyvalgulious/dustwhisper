@@ -1,0 +1,36 @@
+
+            #version 430
+            layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+            uniform ivec2 cell_grid_size;
+            uniform bool copy_island_id;
+            uniform bool copy_entity_id;
+            uniform bool copy_displaced_material;
+            layout(std430, binding=1) readonly buffer BridgeIslandBuffer {
+                int bridge_island_id[];
+            };
+            layout(std430, binding=2) readonly buffer BridgeEntityBuffer {
+                int bridge_entity_id[];
+            };
+            layout(std430, binding=3) readonly buffer BridgeDisplacedBuffer {
+                int bridge_displaced[];
+            };
+            layout(r32f, binding=0) writeonly uniform image2D island_img;
+            layout(r32f, binding=1) writeonly uniform image2D entity_img;
+            layout(r32f, binding=2) writeonly uniform image2D displaced_img;
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
+                    return;
+                }
+                int cell_index = gid.y * cell_grid_size.x + gid.x;
+                if (copy_island_id) {
+                    imageStore(island_img, gid, vec4(float(bridge_island_id[cell_index]), 0.0, 0.0, 0.0));
+                }
+                if (copy_entity_id) {
+                    imageStore(entity_img, gid, vec4(float(bridge_entity_id[cell_index]), 0.0, 0.0, 0.0));
+                }
+                if (copy_displaced_material) {
+                    imageStore(displaced_img, gid, vec4(float(bridge_displaced[cell_index]), 0.0, 0.0, 0.0));
+                }
+            }
+            

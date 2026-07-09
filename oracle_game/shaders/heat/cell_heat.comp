@@ -1,0 +1,32 @@
+
+            uniform float dt;
+            layout(binding=3) uniform sampler2D temp_in_tex;
+            layout(binding=4) uniform sampler2D ambient_tex;
+            layout(r32f, binding=5) writeonly uniform image2D temp_out_img;
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
+                    return;
+                }
+                float center = texelFetch(temp_in_tex, gid, 0).x;
+                if (!solve_cell_active(gid)) {
+                    imageStore(temp_out_img, gid, vec4(center, 0.0, 0.0, 0.0));
+                    return;
+                }
+                int material_id = material_id_at(gid);
+                float conductivity = params[material_id].x;
+                ivec2 left = ivec2(max(gid.x - 1, 0), gid.y);
+                ivec2 right = ivec2(min(gid.x + 1, cell_grid_size.x - 1), gid.y);
+                ivec2 down = ivec2(gid.x, max(gid.y - 1, 0));
+                ivec2 up = ivec2(gid.x, min(gid.y + 1, cell_grid_size.y - 1));
+                float avg_neighbors = (
+                    texelFetch(temp_in_tex, left, 0).x +
+                    texelFetch(temp_in_tex, right, 0).x +
+                    texelFetch(temp_in_tex, down, 0).x +
+                    texelFetch(temp_in_tex, up, 0).x
+                ) * 0.25;
+                float heat_capacity = max(response_params[material_id].x, 1.0e-4);
+                float updated = center + (conductivity / heat_capacity) * (avg_neighbors - center) * dt * 0.35;
+                imageStore(temp_out_img, gid, vec4(updated, 0.0, 0.0, 0.0));
+            }
+            

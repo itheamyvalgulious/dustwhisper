@@ -1,0 +1,27 @@
+
+            layout(binding=3) uniform sampler2D ambient_in_tex;
+            layout(r32f, binding=4) writeonly uniform image2D ambient_out_img;
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                if (gid.x >= gas_grid_size.x || gid.y >= gas_grid_size.y) {
+                    return;
+                }
+                float ambient = texelFetch(ambient_in_tex, gid, 0).x;
+                if (!solve_gas_cell_active(gid)) {
+                    imageStore(ambient_out_img, gid, vec4(ambient, 0.0, 0.0, 0.0));
+                    return;
+                }
+                ivec2 left = ivec2(max(gid.x - 1, 0), gid.y);
+                ivec2 right = ivec2(min(gid.x + 1, gas_grid_size.x - 1), gid.y);
+                ivec2 down = ivec2(gid.x, max(gid.y - 1, 0));
+                ivec2 up = ivec2(gid.x, min(gid.y + 1, gas_grid_size.y - 1));
+                float lap = (
+                    texelFetch(ambient_in_tex, left, 0).x +
+                    texelFetch(ambient_in_tex, right, 0).x +
+                    texelFetch(ambient_in_tex, down, 0).x +
+                    texelFetch(ambient_in_tex, up, 0).x -
+                    4.0 * ambient
+                );
+                imageStore(ambient_out_img, gid, vec4(ambient + 0.08 * lap, 0.0, 0.0, 0.0));
+            }
+            

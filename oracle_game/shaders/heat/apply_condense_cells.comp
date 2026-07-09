@@ -1,0 +1,180 @@
+
+            layout(binding=4) uniform sampler2D material_after_tex;
+            layout(binding=5) uniform sampler2D phase_after_tex;
+            layout(binding=6) uniform sampler2D cell_flags_after_tex;
+            layout(binding=9) uniform sampler2D timer_after_tex;
+            layout(binding=10) uniform sampler2D temp_after_tex;
+            layout(binding=11) uniform sampler2D integrity_after_tex;
+            layout(binding=12) uniform sampler2D island_id_after_tex;
+            layout(binding=13) uniform sampler2D entity_id_after_tex;
+            layout(binding=22) uniform sampler2D displaced_after_tex;
+            layout(binding=23) uniform sampler2D velocity_after_tex;
+            layout(binding=24) uniform sampler2DArray condense_target_tex;
+            layout(r32f, binding=0) writeonly uniform image2D material_final_img;
+            layout(r32f, binding=1) writeonly uniform image2D phase_final_img;
+            layout(r32f, binding=2) writeonly uniform image2D cell_flags_final_img;
+            layout(rgba32f, binding=3) writeonly uniform image2D timer_final_img;
+            layout(r32f, binding=4) writeonly uniform image2D temp_final_img;
+            layout(r32f, binding=5) writeonly uniform image2D integrity_final_img;
+            layout(r32f, binding=6) writeonly uniform image2D displaced_final_img;
+            layout(rg32f, binding=7) writeonly uniform image2D velocity_final_img;
+
+            bool is_placeholder_material(int material_id) {
+                if (material_id <= 0 || material_id >= {{MAX_MATERIALS}}) {
+                    return false;
+                }
+                return int(response_params[material_id].w + 0.5) == 7;
+            }
+
+            void store_payload(
+                ivec2 cell,
+                float material_value,
+                float phase_value,
+                float flags_value,
+                vec4 timer_value,
+                float temp_value,
+                float integrity_value,
+                float island_value,
+                float entity_value,
+                float displaced_value,
+                vec2 velocity_value
+            ) {
+                imageStore(material_final_img, cell, vec4(material_value, 0.0, 0.0, 0.0));
+                imageStore(phase_final_img, cell, vec4(phase_value, 0.0, 0.0, 0.0));
+                imageStore(cell_flags_final_img, cell, vec4(flags_value, 0.0, 0.0, 0.0));
+                imageStore(timer_final_img, cell, timer_value);
+                imageStore(temp_final_img, cell, vec4(temp_value, 0.0, 0.0, 0.0));
+                imageStore(integrity_final_img, cell, vec4(integrity_value, 0.0, 0.0, 0.0));
+                imageStore(displaced_final_img, cell, vec4(displaced_value, 0.0, 0.0, 0.0));
+                imageStore(velocity_final_img, cell, vec4(velocity_value, 0.0, 0.0));
+            }
+
+            void copy_after_targets(ivec2 cell) {
+                store_payload(
+                    cell,
+                    texelFetch(material_after_tex, cell, 0).x,
+                    texelFetch(phase_after_tex, cell, 0).x,
+                    texelFetch(cell_flags_after_tex, cell, 0).x,
+                    texelFetch(timer_after_tex, cell, 0),
+                    texelFetch(temp_after_tex, cell, 0).x,
+                    texelFetch(integrity_after_tex, cell, 0).x,
+                    texelFetch(island_id_after_tex, cell, 0).x,
+                    texelFetch(entity_id_after_tex, cell, 0).x,
+                    texelFetch(displaced_after_tex, cell, 0).x,
+                    texelFetch(velocity_after_tex, cell, 0).xy
+                );
+            }
+
+            int empty_rank_in_gas_cell(ivec2 cell, ivec2 gas_cell) {
+                int rank = 0;
+                int x0 = gas_cell.x * gas_cell_size;
+                int y0 = gas_cell.y * gas_cell_size;
+                for (int local_y = 0; local_y < gas_cell_size; ++local_y) {
+                    for (int local_x = 0; local_x < gas_cell_size; ++local_x) {
+                        ivec2 probe = ivec2(x0 + local_x, y0 + local_y);
+                        if (probe.x >= cell_grid_size.x || probe.y >= cell_grid_size.y) {
+                            continue;
+                        }
+                        if (int(texelFetch(material_after_tex, probe, 0).x + 0.5) == 0) {
+                            rank += 1;
+                        }
+                        if (all(equal(probe, cell))) {
+                            return rank;
+                        }
+                    }
+                }
+                return 0;
+            }
+
+            int target_material_for_empty_rank(ivec2 gas_cell, int empty_rank) {
+                int condense_rank = 0;
+                for (int species = 0; species < gas_species_count; ++species) {
+                    int target_material = int(gas_params[species].y + 0.5);
+                    bool condenses = texelFetch(condense_target_tex, ivec3(gas_cell, species), 0).x > 0.5;
+                    if (target_material > 0 && condenses) {
+                        condense_rank += 1;
+                        if (condense_rank == empty_rank) {
+                            return clamp(target_material, 0, {{MAX_MATERIALS_MINUS_ONE}});
+                        }
+                    }
+                }
+                return 0;
+            }
+
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
+                    return;
+                }
+                ivec2 gas_cell = ivec2(
+                    min(gid.x / gas_cell_size, gas_grid_size.x - 1),
+                    min(gid.y / gas_cell_size, gas_grid_size.y - 1)
+                );
+                float material_value = texelFetch(material_after_tex, gid, 0).x;
+                float phase_value = texelFetch(phase_after_tex, gid, 0).x;
+                float flags_value = texelFetch(cell_flags_after_tex, gid, 0).x;
+                vec4 timer_value = texelFetch(timer_after_tex, gid, 0);
+                float temperature = texelFetch(temp_after_tex, gid, 0).x;
+                float integrity_value = texelFetch(integrity_after_tex, gid, 0).x;
+                float island_value = texelFetch(island_id_after_tex, gid, 0).x;
+                float entity_value = texelFetch(entity_id_after_tex, gid, 0).x;
+                float displaced_value = texelFetch(displaced_after_tex, gid, 0).x;
+                vec2 velocity_value = texelFetch(velocity_after_tex, gid, 0).xy;
+                int current_material = int(material_value + 0.5);
+                if (!solve_gas_cell_active(gas_cell) || current_material != 0) {
+                    store_payload(
+                        gid,
+                        material_value,
+                        phase_value,
+                        flags_value,
+                        timer_value,
+                        temperature,
+                        integrity_value,
+                        island_value,
+                        entity_value,
+                        displaced_value,
+                        velocity_value
+                    );
+                    return;
+                }
+                int empty_rank = empty_rank_in_gas_cell(gid, gas_cell);
+                int target_material = target_material_for_empty_rank(gas_cell, empty_rank);
+                if (target_material <= 0) {
+                    store_payload(
+                        gid,
+                        material_value,
+                        phase_value,
+                        flags_value,
+                        timer_value,
+                        temperature,
+                        integrity_value,
+                        island_value,
+                        entity_value,
+                        displaced_value,
+                        velocity_value
+                    );
+                    return;
+                }
+                int resolved_phase = phase_params[target_material].x;
+                float spawn_temperature = response_params[target_material].z;
+                if (!isnan(spawn_temperature)) {
+                    temperature = max(temperature, spawn_temperature);
+                }
+                entity_value = 0.0;
+                displaced_value = 0.0;
+                island_value = resolved_phase == phase_falling_island ? island_value : 0.0;
+                store_payload(
+                    gid,
+                    float(target_material),
+                    float(resolved_phase),
+                    0.0,
+                    vec4(0.0),
+                    temperature,
+                    response_params[target_material].y,
+                    island_value,
+                    entity_value,
+                    displaced_value,
+                    velocity_value
+                );
+            }
+            

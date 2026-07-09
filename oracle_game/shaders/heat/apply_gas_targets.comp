@@ -1,0 +1,82 @@
+
+            uniform int gas_species_count;
+            uniform float dt;
+            layout(std430, binding=3) buffer GasCondenseBuffer {
+                vec4 gas_params[{{MAX_GAS_SPECIES}}];
+            };
+            layout(binding=4) uniform sampler2DArray gas_tex;
+            layout(binding=5) uniform sampler2D boil_target_tex;
+            layout(binding=6) uniform sampler2DArray condense_target_tex;
+            layout(binding=8) uniform sampler2D material_after_tex;
+            layout(r32f, binding=0) writeonly uniform image2DArray gas_out_img;
+
+            int empty_count_after_cell_targets(ivec2 gas_cell) {
+                int empty_count = 0;
+                int x0 = gas_cell.x * gas_cell_size;
+                int y0 = gas_cell.y * gas_cell_size;
+                for (int local_y = 0; local_y < gas_cell_size; ++local_y) {
+                    for (int local_x = 0; local_x < gas_cell_size; ++local_x) {
+                        ivec2 cell = ivec2(x0 + local_x, y0 + local_y);
+                        if (cell.x >= cell_grid_size.x || cell.y >= cell_grid_size.y) {
+                            continue;
+                        }
+                        if (int(texelFetch(material_after_tex, cell, 0).x + 0.5) == 0) {
+                            empty_count += 1;
+                        }
+                    }
+                }
+                return empty_count;
+            }
+
+            int boil_count_for_species(ivec2 gas_cell, int species) {
+                int boil_count = 0;
+                int x0 = gas_cell.x * gas_cell_size;
+                int y0 = gas_cell.y * gas_cell_size;
+                for (int local_y = 0; local_y < gas_cell_size; ++local_y) {
+                    for (int local_x = 0; local_x < gas_cell_size; ++local_x) {
+                        ivec2 cell = ivec2(x0 + local_x, y0 + local_y);
+                        if (cell.x >= cell_grid_size.x || cell.y >= cell_grid_size.y) {
+                            continue;
+                        }
+                        if (int(texelFetch(boil_target_tex, cell, 0).x + 0.5) == species + 1) {
+                            boil_count += 1;
+                        }
+                    }
+                }
+                return boil_count;
+            }
+
+            int condense_rank_for_species(ivec2 gas_cell, int species) {
+                int rank = 0;
+                for (int other = 0; other <= species; ++other) {
+                    int target_material = int(gas_params[other].y + 0.5);
+                    bool condenses = texelFetch(condense_target_tex, ivec3(gas_cell, other), 0).x > 0.5;
+                    if (target_material > 0 && condenses) {
+                        rank += 1;
+                    }
+                }
+                return rank;
+            }
+
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                if (gid.x >= gas_grid_size.x || gid.y >= gas_grid_size.y) {
+                    return;
+                }
+                bool is_active = solve_gas_cell_active(gid);
+                int empty_count = is_active ? empty_count_after_cell_targets(gid) : 0;
+                for (int species = 0; species < gas_species_count; ++species) {
+                    float value = texelFetch(gas_tex, ivec3(gid, species), 0).x;
+                    if (is_active) {
+                        value += float(boil_count_for_species(gid, species)) * 0.6 * dt;
+                        int target_material = int(gas_params[species].y + 0.5);
+                        bool condenses = texelFetch(condense_target_tex, ivec3(gid, species), 0).x > 0.5;
+                        int condense_rank = condense_rank_for_species(gid, species);
+                        if (target_material > 0 && condenses && condense_rank > 0 && empty_count >= condense_rank) {
+                            value = max(0.0, value - 0.6);
+                        }
+                    }
+                    imageStore(gas_out_img, ivec3(gid, species), vec4(value, 0.0, 0.0, 0.0));
+                }
+            }
+            
