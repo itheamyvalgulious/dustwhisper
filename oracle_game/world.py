@@ -5,8 +5,7 @@ from contextlib import contextmanager
 from enum import Enum
 import threading
 import time
-from typing import Any, Iterable, Sequence
-import numpy as np
+from typing import Any
 
 from oracle_game.gpu import (
     GPUBufferReadbackSource, GPUCellCoreWindowReadbackSource,
@@ -16,7 +15,6 @@ from oracle_game.gpu import (
 )
 from oracle_game.readback_contract import READBACK_ALLOWED_CHANNELS
 from oracle_game.page_store import PageStore, StoredStripeKey
-from oracle_game.rules import build_default_payloads
 from oracle_game.types import (
     CarrierIntent, CarrierIntent, ChangeIntent, DebugView, EntityCellFeedback,
     EntityFeedback, EntityObservationSpec, EntityPlaceholder, EntityStatePatch, EntityState,
@@ -67,7 +65,7 @@ from oracle_game.world_debug_frame import (
     _optics_dose_frame, _optics_frame, _pressure_frame, _reaction_frame, _temperature_frame,
     _vector_field_frame, debug_frame
 )
-from oracle_game.world_readback_payload import make_readback_payload
+from oracle_game.world_readback_payload import make_readback_payload as _make_readback_payload
 from oracle_game.world_runtime_serializers import (
     serialize_active_runtime, serialize_collapse_runtime, serialize_gas_runtime,
     serialize_heat_runtime, serialize_liquid_runtime, serialize_motion_runtime,
@@ -244,11 +242,13 @@ from oracle_game.world_controller_turn import (
     set_controller_state
 )
 from oracle_game.world_internal_helpers import (
-    _advance_paging, _light_field_count, _mirror_release_entity_placeholder_cell,
+    _advance_paging, _build_observation_request_pairs, _frame_readback_request_ids,
+    _light_field_count, _mark_grid_world_command_runtime_regions, _mirror_release_entity_placeholder_cell,
     _page_store_key_lookup_update, _page_stripe_island_bboxes_from_payload,
-    _public_resolved_change_intent, _refresh_island_records_for_ids, _resolve_anchor_target,
-    _set_nested_payload_value, downsample_cells_to_gas, readback_request_status,
-    submit_entity_controller_turn
+    _pending_frame_input, _public_resolved_change_intent, _queued_command_xy,
+    _refresh_island_records_for_ids, _resolve_anchor_target, _set_nested_payload_value,
+    bootstrap_defaults, cancel_all_pending_frame_submissions, downsample_cells_to_gas,
+    readback_request_status, submit_entity_controller_turn
 )
 from oracle_game.world_backend_gating import (
     _gpu_active_tile_count, _gpu_context_available, _gpu_pipeline_available,
@@ -349,23 +349,16 @@ class WorldEngine:
 
     _require_gpu_stage = _require_gpu_stage
 
-    def _require_gpu_authoritative_resources(self, stage: str, *resource_names: str) -> None:
-        return _require_gpu_authoritative_resources(self, stage, *resource_names)
+    _require_gpu_authoritative_resources = _require_gpu_authoritative_resources
 
     _require_cpu_oracle_backend = _require_cpu_oracle_backend
 
-    def _invalidate_gpu_authoritative_resources(self, *resource_names: str) -> None:
-        return _invalidate_gpu_authoritative_resources(self, *resource_names)
+    _invalidate_gpu_authoritative_resources = _invalidate_gpu_authoritative_resources
 
     _invalidate_gpu_authoritative_cell_resources = _invalidate_gpu_authoritative_cell_resources
 
     def bootstrap_defaults(self) -> None:
-        payloads = build_default_payloads()
-        self.update_material_table(payloads["materials"])
-        self.update_gas_species_table(payloads["gases"])
-        self.update_light_type_table(payloads["lights"])
-        self.update_material_optics_table(payloads["optics"])
-        self.update_reaction_table(payloads["actions"], payloads["rules"])
+        return bootstrap_defaults(self)
 
     _material_table_snapshot_payload = _material_table_snapshot_payload
 
@@ -423,9 +416,7 @@ class WorldEngine:
 
     _shadow_reaction_payload = _shadow_reaction_payload
 
-    @staticmethod
-    def _payload_name_set(payload: Iterable[dict[str, Any]], field: str = "name") -> set[str]:
-        return _payload_name_set(payload, field=field)
+    _payload_name_set = staticmethod(_payload_name_set)
 
     _validate_named_reference = staticmethod(_validate_named_reference)
 
@@ -457,8 +448,7 @@ class WorldEngine:
 
     _frame_force_source_input = _frame_force_source_input
 
-    def _coerce_emitter(self, emitter: dict[str, Any]) -> dict[str, object]:
-        return _coerce_emitter(self, emitter)
+    _coerce_emitter = _coerce_emitter
 
     _frame_emitter_input = _frame_emitter_input
 
@@ -506,13 +496,9 @@ class WorldEngine:
 
     _coerce_world_command = _coerce_world_command
 
-    @classmethod
-    def _coerce_json_value(cls, value: Any) -> Any:
-        return _coerce_json_value(value)
+    _coerce_json_value = staticmethod(_coerce_json_value)
 
-    @classmethod
-    def _normalize_json_payload_value(cls, value: Any) -> Any:
-        return _normalize_json_payload_value(value)
+    _normalize_json_payload_value = staticmethod(_normalize_json_payload_value)
 
     _coerce_world_frame_input = _coerce_world_frame_input
 
@@ -589,30 +575,14 @@ class WorldEngine:
     pending_frame_submission_ids = pending_frame_submission_ids
 
     def _pending_frame_input(self, submission_id: int) -> WorldFrameInput:
-        for frame_input in reversed(self.pending_frame_inputs):
-            if frame_input.submission_id == int(submission_id):
-                return frame_input
-        raise KeyError(f"missing pending frame submission_id={submission_id}")
+        return _pending_frame_input(self, submission_id)
 
-    @staticmethod
-    def _frame_readback_request_ids(frame_input: WorldFrameInput) -> list[int]:
-        return [
-            int(request.request_id)
-            for request in frame_input.readback_requests
-            if request.request_id is not None
-        ]
+    _frame_readback_request_ids = staticmethod(_frame_readback_request_ids)
 
     cancel_frame_submission = cancel_frame_submission
 
     def cancel_all_pending_frame_submissions(self) -> list[int]:
-        canceled = self.pending_frame_submission_ids()
-        canceled_readback_ids: list[int] = []
-        for frame_input in self.pending_frame_inputs:
-            canceled_readback_ids.extend(self._frame_readback_request_ids(frame_input))
-        self.pending_frame_inputs.clear()
-        self.canceled_frame_submission_ids.update(canceled)
-        self.canceled_readback_request_ids.update(canceled_readback_ids)
-        return canceled
+        return cancel_all_pending_frame_submissions(self)
 
     cancel_readback_request = cancel_readback_request
 
@@ -796,13 +766,9 @@ class WorldEngine:
 
     in_bounds = in_bounds
 
-    def cell_xy_to_gas(self, x: int, y: int) -> tuple[int, int]:
-        """Map a cell-space (x, y) pair onto the lower-resolution gas grid."""
-        return cell_xy_to_gas(self, x, y)
+    cell_xy_to_gas = cell_xy_to_gas
 
-    def cell_to_gas(self, y: int, x: int) -> tuple[int, int]:
-        """Map a cell-space (y, x) pair onto the lower-resolution gas grid."""
-        return cell_to_gas(self, y, x)
+    cell_to_gas = cell_to_gas
 
     sample_ambient_to_cells = sample_ambient_to_cells
 
@@ -874,9 +840,7 @@ class WorldEngine:
 
     _bridge_row_count = staticmethod(_bridge_row_count)
 
-    @classmethod
-    def _normalize_bridge_slice_bounds(cls, array: np.ndarray, *, offset: int = 0, limit: int | None = None) -> tuple[int, int]:
-        return _normalize_bridge_slice_bounds(array, offset=offset, limit=limit)
+    _normalize_bridge_slice_bounds = staticmethod(_normalize_bridge_slice_bounds)
 
     _normalize_bridge_window_bounds = staticmethod(_normalize_bridge_window_bounds)
 
@@ -951,12 +915,7 @@ class WorldEngine:
         targets: list[ObservationTarget],
         resolved_targets: dict[str, ResolvedTarget],
     ) -> list[tuple[ObservationTarget, ReadbackRequest]]:
-        pairs: list[tuple[ObservationTarget, ReadbackRequest]] = []
-        for target in targets:
-            request = self._build_observation_request(target, resolved_targets)
-            if request is not None:
-                pairs.append((target, request))
-        return pairs
+        return _build_observation_request_pairs(self, targets, resolved_targets)
 
     serialize_readback_plan = serialize_readback_plan
 
@@ -1076,12 +1035,7 @@ class WorldEngine:
     _grid_world_command_runtime_regions = _grid_world_command_runtime_regions
 
     def _mark_grid_world_command_runtime_regions(self, command: WorldCommand) -> None:
-        active_rect, collapse_rect = self._grid_world_command_runtime_regions(command)
-        if active_rect is not None:
-            x0, y0, x1, y1, tile_padding = active_rect
-            self._mark_active_rect_runtime(x0, y0, x1, y1, tile_padding=tile_padding)
-        if collapse_rect is not None:
-            self._mark_collapse_dirty_rect(*collapse_rect)
+        return _mark_grid_world_command_runtime_regions(self, command)
 
     _apply_commands = _apply_commands
 
@@ -1090,17 +1044,9 @@ class WorldEngine:
     _collect_ready_readbacks = _collect_ready_readbacks
 
     def _queued_command_xy(self, command: WorldCommand) -> tuple[int, int]:
-        x = int(command.payload["x"])
-        y = int(command.payload["y"])
-        if any(
-            key in command.payload
-            for key in ("resolved_target_query_id", "resolved_change_intent_id", "resolved_carrier_intent_id")
-        ):
-            return self._world_to_buffer_clamped(x, y)
-        return self._world_to_buffer_clamped(x, y)
+        return _queued_command_xy(self, command)
 
-    def _make_readback_payload(self, request: ReadbackRequest) -> dict[str, Any]:
-        return make_readback_payload(self, request)
+    _make_readback_payload = _make_readback_payload
 
     _gas_window_for_cell_rect = _gas_window_for_cell_rect
 

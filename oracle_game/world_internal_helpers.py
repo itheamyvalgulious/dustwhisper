@@ -6,6 +6,7 @@ from typing import Any, Iterable, TYPE_CHECKING
 import numpy as np
 
 from oracle_game.page_store import StoredStripeKey
+from oracle_game.rules import build_default_payloads
 from oracle_game.types import (
     CarrierIntent,
     ChangeIntent,
@@ -20,8 +21,10 @@ from oracle_game.types import (
     Phase,
     ReadbackRequest,
     ResolvedChangeIntent,
+    ResolvedTarget,
     TargetQuery,
     WorldCommand,
+    WorldFrameInput,
 )
 from oracle_game.world_constants import (
     CARDINAL_DIRECTION_VECTORS,
@@ -350,3 +353,71 @@ def _page_stripe_island_bboxes_from_payload(
                 box[3] = max(box[3], y + 1)
         offset += span
     return {island_id: tuple(box) for island_id, box in boxes.items()}
+
+
+def bootstrap_defaults(engine: "WorldEngine") -> None:
+    payloads = build_default_payloads()
+    engine.update_material_table(payloads["materials"])
+    engine.update_gas_species_table(payloads["gases"])
+    engine.update_light_type_table(payloads["lights"])
+    engine.update_material_optics_table(payloads["optics"])
+    engine.update_reaction_table(payloads["actions"], payloads["rules"])
+
+
+def _pending_frame_input(engine: "WorldEngine", submission_id: int) -> WorldFrameInput:
+    for frame_input in reversed(engine.pending_frame_inputs):
+        if frame_input.submission_id == int(submission_id):
+            return frame_input
+    raise KeyError(f"missing pending frame submission_id={submission_id}")
+
+
+def _frame_readback_request_ids(frame_input: WorldFrameInput) -> list[int]:
+    return [
+        int(request.request_id)
+        for request in frame_input.readback_requests
+        if request.request_id is not None
+    ]
+
+
+def cancel_all_pending_frame_submissions(engine: "WorldEngine") -> list[int]:
+    canceled = engine.pending_frame_submission_ids()
+    canceled_readback_ids: list[int] = []
+    for frame_input in engine.pending_frame_inputs:
+        canceled_readback_ids.extend(engine._frame_readback_request_ids(frame_input))
+    engine.pending_frame_inputs.clear()
+    engine.canceled_frame_submission_ids.update(canceled)
+    engine.canceled_readback_request_ids.update(canceled_readback_ids)
+    return canceled
+
+
+def _build_observation_request_pairs(
+    engine: "WorldEngine",
+    targets: list[ObservationTarget],
+    resolved_targets: dict[str, ResolvedTarget],
+) -> list[tuple[ObservationTarget, ReadbackRequest]]:
+    pairs: list[tuple[ObservationTarget, ReadbackRequest]] = []
+    for target in targets:
+        request = engine._build_observation_request(target, resolved_targets)
+        if request is not None:
+            pairs.append((target, request))
+    return pairs
+
+
+def _mark_grid_world_command_runtime_regions(engine: "WorldEngine", command: WorldCommand) -> None:
+    active_rect, collapse_rect = engine._grid_world_command_runtime_regions(command)
+    if active_rect is not None:
+        x0, y0, x1, y1, tile_padding = active_rect
+        engine._mark_active_rect_runtime(x0, y0, x1, y1, tile_padding=tile_padding)
+    if collapse_rect is not None:
+        engine._mark_collapse_dirty_rect(*collapse_rect)
+
+
+def _queued_command_xy(engine: "WorldEngine", command: WorldCommand) -> tuple[int, int]:
+    x = int(command.payload["x"])
+    y = int(command.payload["y"])
+    if any(
+        key in command.payload
+        for key in ("resolved_target_query_id", "resolved_change_intent_id", "resolved_carrier_intent_id")
+    ):
+        return engine._world_to_buffer_clamped(x, y)
+    return engine._world_to_buffer_clamped(x, y)
