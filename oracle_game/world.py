@@ -150,7 +150,7 @@ from oracle_game.world_input_coercion import (
     _assign_preview_readback_request_ids, _assign_readback_request_id,
     _canonical_material_input_name, _coerce_carrier_intent, _coerce_change_intent,
     _coerce_entity_observation_spec, _coerce_entity_placeholder, _coerce_entity_state,
-    _coerce_entity_state_patch, _coerce_enum, _coerce_force_source, _coerce_gas_species_def,
+    _coerce_entity_state_patch, _coerce_emitter, _coerce_enum, _coerce_force_source, _coerce_gas_species_def,
     _coerce_json_value, _coerce_light_type_def, _coerce_material_def,
     _coerce_material_optics_def, _coerce_observation_target, _coerce_pair_reaction_rule,
     _coerce_readback_request, _coerce_reaction_action, _coerce_reaction_rules,
