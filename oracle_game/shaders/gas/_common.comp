@@ -1,0 +1,48 @@
+
+            #version 430
+            layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+            uniform ivec2 grid_size;
+            layout(binding={{ACTIVE_GAS_TEXTURE_UNIT}}) uniform sampler2D active_gas_tex;
+            vec2 clamp_pos(vec2 pos) {
+                return clamp(pos, vec2(0.5), vec2(grid_size) - vec2(0.5001));
+            }
+            bool solve_active(ivec2 cell) {
+                return texelFetch(active_gas_tex, cell, 0).x > 0.5;
+            }
+            vec2 bilerp_vec2(sampler2D tex, vec2 pos) {
+                pos = clamp_pos(pos);
+                vec2 base = pos - vec2(0.5);
+                ivec2 p0 = ivec2(floor(base));
+                ivec2 p1 = min(p0 + ivec2(1), grid_size - ivec2(1));
+                vec2 fracv = fract(base);
+                vec2 a = texelFetch(tex, p0, 0).xy;
+                vec2 b = texelFetch(tex, ivec2(p1.x, p0.y), 0).xy;
+                vec2 c = texelFetch(tex, ivec2(p0.x, p1.y), 0).xy;
+                vec2 d = texelFetch(tex, p1, 0).xy;
+                return mix(mix(a, b, fracv.x), mix(c, d, fracv.x), fracv.y);
+            }
+            float bilerp_float(sampler2D tex, vec2 pos) {
+                pos = clamp_pos(pos);
+                vec2 base = pos - vec2(0.5);
+                ivec2 p0 = ivec2(floor(base));
+                ivec2 p1 = min(p0 + ivec2(1), grid_size - ivec2(1));
+                vec2 fracv = fract(base);
+                float a = texelFetch(tex, p0, 0).x;
+                float b = texelFetch(tex, ivec2(p1.x, p0.y), 0).x;
+                float c = texelFetch(tex, ivec2(p0.x, p1.y), 0).x;
+                float d = texelFetch(tex, p1, 0).x;
+                return mix(mix(a, b, fracv.x), mix(c, d, fracv.x), fracv.y);
+            }
+            float bilerp_layer(sampler2DArray tex, vec2 pos, int layer) {
+                pos = clamp_pos(pos);
+                vec2 base = pos - vec2(0.5);
+                ivec2 p0 = ivec2(floor(base));
+                ivec2 p1 = min(p0 + ivec2(1), grid_size - ivec2(1));
+                vec2 fracv = fract(base);
+                float a = texelFetch(tex, ivec3(p0, layer), 0).x;
+                float b = texelFetch(tex, ivec3(p1.x, p0.y, layer), 0).x;
+                float c = texelFetch(tex, ivec3(p0.x, p1.y, layer), 0).x;
+                float d = texelFetch(tex, ivec3(p1, layer), 0).x;
+                return mix(mix(a, b, fracv.x), mix(c, d, fracv.x), fracv.y);
+            }
+        

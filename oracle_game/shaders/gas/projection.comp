@@ -1,0 +1,23 @@
+            layout(binding=0) uniform sampler2D pressure_tex;
+            layout(binding=1) uniform sampler2D velocity_tex;
+            layout(rg32f, binding=2) writeonly uniform image2D velocity_out_img;
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                if (gid.x >= grid_size.x || gid.y >= grid_size.y) {
+                    return;
+                }
+                vec2 vel = texelFetch(velocity_tex, gid, 0).xy;
+                if (!solve_active(gid)) {
+                    imageStore(velocity_out_img, gid, vec4(vel, 0.0, 0.0));
+                    return;
+                }
+                ivec2 left = ivec2(max(gid.x - 1, 0), gid.y);
+                ivec2 right = ivec2(min(gid.x + 1, grid_size.x - 1), gid.y);
+                ivec2 down = ivec2(gid.x, max(gid.y - 1, 0));
+                ivec2 up = ivec2(gid.x, min(gid.y + 1, grid_size.y - 1));
+                float grad_x = texelFetch(pressure_tex, right, 0).x - texelFetch(pressure_tex, left, 0).x;
+                float grad_y = texelFetch(pressure_tex, up, 0).x - texelFetch(pressure_tex, down, 0).x;
+                vel -= 0.5 * vec2(grad_x, grad_y);
+                imageStore(velocity_out_img, gid, vec4(vel, 0.0, 0.0));
+            }
+            

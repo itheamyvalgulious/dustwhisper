@@ -1,0 +1,37 @@
+            uniform float dt;
+            uniform int species_count;
+            layout(std430, binding=0) buffer SpeciesParamBuffer {
+                vec4 params[{{MAX_SPECIES}}];
+            };
+            layout(binding=1) uniform sampler2D velocity_tex;
+            layout(binding=2) uniform sampler2D ambient_in_tex;
+            layout(binding=3) uniform sampler2DArray gas_tex;
+            layout(r32f, binding=4) writeonly uniform image2D ambient_out_img;
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                if (gid.x >= grid_size.x || gid.y >= grid_size.y) {
+                    return;
+                }
+                float current = texelFetch(ambient_in_tex, gid, 0).x;
+                if (!solve_active(gid)) {
+                    imageStore(ambient_out_img, gid, vec4(current, 0.0, 0.0, 0.0));
+                    return;
+                }
+                vec2 pos = vec2(gid) + vec2(0.5);
+                vec2 vel = bilerp_vec2(velocity_tex, pos);
+                vec2 prev = pos - vel * dt;
+                float ambient = bilerp_float(ambient_in_tex, prev);
+                ivec2 left = ivec2(max(gid.x - 1, 0), gid.y);
+                ivec2 right = ivec2(min(gid.x + 1, grid_size.x - 1), gid.y);
+                ivec2 down = ivec2(gid.x, max(gid.y - 1, 0));
+                ivec2 up = ivec2(gid.x, min(gid.y + 1, grid_size.y - 1));
+                float lap = texelFetch(ambient_in_tex, left, 0).x + texelFetch(ambient_in_tex, right, 0).x +
+                            texelFetch(ambient_in_tex, down, 0).x + texelFetch(ambient_in_tex, up, 0).x -
+                            4.0 * ambient;
+                ambient += 0.08 * lap;
+                for (int species = 0; species < species_count; ++species) {
+                    ambient += texelFetch(gas_tex, ivec3(gid, species), 0).x * params[species].z * 0.01;
+                }
+                imageStore(ambient_out_img, gid, vec4(ambient, 0.0, 0.0, 0.0));
+            }
+            

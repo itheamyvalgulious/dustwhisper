@@ -1,0 +1,40 @@
+            uniform float dt;
+            uniform int density_cell_count;
+            layout(std430, binding=4) buffer DensitySumBuffer {
+                float density_sum[];
+            };
+            layout(binding=0) uniform sampler2D velocity_in_tex;
+            layout(binding=1) uniform sampler2D thermo_pressure_tex;
+            layout(binding=2) uniform sampler2D density_tex;
+            layout(rg32f, binding=3) writeonly uniform image2D velocity_out_img;
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                if (gid.x >= grid_size.x || gid.y >= grid_size.y) {
+                    return;
+                }
+                vec2 vel = texelFetch(velocity_in_tex, gid, 0).xy;
+                if (!solve_active(gid)) {
+                    imageStore(velocity_out_img, gid, vec4(vel, 0.0, 0.0));
+                    return;
+                }
+                float mean_density = density_cell_count > 0 ? density_sum[0] / float(density_cell_count) : 0.0;
+                ivec2 left = ivec2(max(gid.x - 1, 0), gid.y);
+                ivec2 right = ivec2(min(gid.x + 1, grid_size.x - 1), gid.y);
+                ivec2 down = ivec2(gid.x, max(gid.y - 1, 0));
+                ivec2 up = ivec2(gid.x, min(gid.y + 1, grid_size.y - 1));
+                float grad_x = 0.5 * (
+                    texelFetch(thermo_pressure_tex, right, 0).x -
+                    texelFetch(thermo_pressure_tex, left, 0).x
+                );
+                float grad_y = 0.5 * (
+                    texelFetch(thermo_pressure_tex, up, 0).x -
+                    texelFetch(thermo_pressure_tex, down, 0).x
+                );
+                float density = texelFetch(density_tex, gid, 0).x;
+                float inv_density = 1.0 / max(density, 0.25);
+                vel.x -= grad_x * inv_density * dt * 0.2;
+                vel.y -= grad_y * inv_density * dt * 0.2;
+                vel.y += (density - mean_density) * dt * 0.08;
+                imageStore(velocity_out_img, gid, vec4(vel, 0.0, 0.0));
+            }
+            

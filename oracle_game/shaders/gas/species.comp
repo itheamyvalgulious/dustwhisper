@@ -1,0 +1,50 @@
+            uniform float dt;
+            uniform int species_count;
+            uniform int air_index;
+            layout(std430, binding=0) buffer SpeciesParamBuffer {
+                vec4 params[{{MAX_SPECIES}}];
+            };
+            layout(binding=1) uniform sampler2D velocity_tex;
+            layout(binding=2) uniform sampler2DArray gas_in_tex;
+            layout(r32f, binding=3) writeonly uniform image2DArray gas_out_img;
+            void main() {
+                ivec3 gid = ivec3(gl_GlobalInvocationID.xyz);
+                if (gid.x >= grid_size.x || gid.y >= grid_size.y || gid.z >= species_count) {
+                    return;
+                }
+                float current = texelFetch(gas_in_tex, gid, 0).x;
+                if (!solve_active(gid.xy)) {
+                    imageStore(gas_out_img, gid, vec4(current, 0.0, 0.0, 0.0));
+                    return;
+                }
+                vec2 pos = vec2(gid.xy) + vec2(0.5);
+                vec2 vel = bilerp_vec2(velocity_tex, pos);
+                vel.y -= params[gid.z].w;
+                vec2 prev = pos - vel * dt;
+                float advected = bilerp_layer(gas_in_tex, prev, gid.z);
+                vec2 left_pos = vec2(max(gid.x - 1, 0), gid.y) + vec2(0.5);
+                vec2 right_pos = vec2(min(gid.x + 1, grid_size.x - 1), gid.y) + vec2(0.5);
+                vec2 down_pos = vec2(gid.x, max(gid.y - 1, 0)) + vec2(0.5);
+                vec2 up_pos = vec2(gid.x, min(gid.y + 1, grid_size.y - 1)) + vec2(0.5);
+                vec2 left_vel = bilerp_vec2(velocity_tex, left_pos);
+                vec2 right_vel = bilerp_vec2(velocity_tex, right_pos);
+                vec2 down_vel = bilerp_vec2(velocity_tex, down_pos);
+                vec2 up_vel = bilerp_vec2(velocity_tex, up_pos);
+                left_vel.y -= params[gid.z].w;
+                right_vel.y -= params[gid.z].w;
+                down_vel.y -= params[gid.z].w;
+                up_vel.y -= params[gid.z].w;
+                float advected_left = bilerp_layer(gas_in_tex, left_pos - left_vel * dt, gid.z);
+                float advected_right = bilerp_layer(gas_in_tex, right_pos - right_vel * dt, gid.z);
+                float advected_down = bilerp_layer(gas_in_tex, down_pos - down_vel * dt, gid.z);
+                float advected_up = bilerp_layer(gas_in_tex, up_pos - up_vel * dt, gid.z);
+                float lap = advected_left + advected_right + advected_down + advected_up - 4.0 * advected;
+                float value = advected + params[gid.z].x * dt * lap;
+                value *= max(0.0, 1.0 - params[gid.z].y * dt);
+                value = max(value, 0.0);
+                if (gid.z == air_index) {
+                    value = max(value, 0.3);
+                }
+                imageStore(gas_out_img, gid, vec4(value, 0.0, 0.0, 0.0));
+            }
+            

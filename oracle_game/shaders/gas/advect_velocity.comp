@@ -1,0 +1,19 @@
+            uniform float dt;
+            uniform float damping;
+            layout(binding=0) uniform sampler2D velocity_in_tex;
+            layout(rg32f, binding=1) writeonly uniform image2D velocity_out_img;
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                if (gid.x >= grid_size.x || gid.y >= grid_size.y) {
+                    return;
+                }
+                vec2 vel = texelFetch(velocity_in_tex, gid, 0).xy;
+                if (!solve_active(gid)) {
+                    imageStore(velocity_out_img, gid, vec4(vel, 0.0, 0.0));
+                    return;
+                }
+                vec2 prev = vec2(gid) + vec2(0.5) - vel * dt;
+                vec2 advected = bilerp_vec2(velocity_in_tex, prev) * damping;
+                imageStore(velocity_out_img, gid, vec4(advected, 0.0, 0.0));
+            }
+            

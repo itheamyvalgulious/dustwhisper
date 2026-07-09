@@ -1,0 +1,23 @@
+
+            #version 430
+            layout(local_size_x={{REDUCE_LOCAL_SIZE}}, local_size_y=1, local_size_z=1) in;
+            uniform int input_count;
+            layout(std430, binding=0) buffer InputValues {
+                float input_values[];
+            };
+            layout(std430, binding=1) buffer OutputValues {
+                float output_values[];
+            };
+            void main() {
+                int out_index = int(gl_GlobalInvocationID.x);
+                int in_index = out_index * 2;
+                if (in_index >= input_count) {
+                    return;
+                }
+                float total = input_values[in_index];
+                if (in_index + 1 < input_count) {
+                    total += input_values[in_index + 1];
+                }
+                output_values[out_index] = total;
+            }
+            

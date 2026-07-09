@@ -1,0 +1,17 @@
+
+            #version 430
+            layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+            uniform ivec2 grid_size;
+            layout(binding=0) uniform sampler2D density_tex;
+            layout(std430, binding=0) buffer DensityValues {
+                float values[];
+            };
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                if (gid.x >= grid_size.x || gid.y >= grid_size.y) {
+                    return;
+                }
+                int index = gid.y * grid_size.x + gid.x;
+                values[index] = texelFetch(density_tex, gid, 0).x;
+            }
+            
