@@ -48,7 +48,6 @@ from oracle_game.types import (
     EntityPlaceholder,
     EntityStatePatch,
     EntityState,
-    FallingIslandRecord,
     ForceSource,
     GasSpeciesDef,
     LightTypeDef,
@@ -82,7 +81,6 @@ from oracle_game.world_constants import (
     REACTION_RULE_SET_NAMES,
     TARGET_QUERY_CELLS_PER_METER,
     TARGET_QUERY_DISTANCE_HINT_CELLS,
-    TARGETED_COMMAND_COORD_FIELDS,
     TERRAIN_ANCHOR_FILTERS,
     UNSET_CONTROLLER_STATE,
 )
@@ -548,7 +546,20 @@ from oracle_game.world_controller_turn import (
     run_entity_controller_turn,
     set_controller_state,
 )
-
+from oracle_game.world_internal_helpers import (
+    _advance_paging,
+    _light_field_count,
+    _mirror_release_entity_placeholder_cell,
+    _page_store_key_lookup_update,
+    _page_stripe_island_bboxes_from_payload,
+    _public_resolved_change_intent,
+    _refresh_island_records_for_ids,
+    _resolve_anchor_target,
+    _set_nested_payload_value,
+    downsample_cells_to_gas,
+    readback_request_status,
+    submit_entity_controller_turn,
+)
 
 
 class WorldEngine:
@@ -1054,9 +1065,7 @@ class WorldEngine:
         return max(self.rulebook.gases_by_id, default=-1) + 1
 
     def _light_field_count(self) -> int:
-        max_light_id = max(self.rulebook.lights_by_id, default=-1)
-        max_dose_channel = max((int(light.dose_channel_id) for light in self.rulebook.lights_by_id.values()), default=-1)
-        return max(max_light_id, max_dose_channel) + 1
+        return _light_field_count(self)
 
     update_material_table = update_material_table
 
@@ -1173,25 +1182,7 @@ class WorldEngine:
     serialize_ready_readbacks = serialize_ready_readbacks
 
     def readback_request_status(self, request_id: int) -> str:
-        if any(
-            command.kind == "request_readback" and int(command.payload.get("request_id", -1)) == int(request_id)
-            for command in self.command_queue
-        ):
-            return "queued"
-        if any(
-            any(request.request_id == int(request_id) for request in frame_input.readback_requests)
-            for frame_input in self.pending_frame_inputs
-        ):
-            return "pending_frame"
-        if any(request.request_id == int(request_id) for request in self.pending_readbacks):
-            return "pending"
-        if any(request.request_id == int(request_id) for request in self.inflight_readbacks):
-            return "inflight"
-        if any(result.request.request_id == int(request_id) for result in self.completed_readbacks):
-            return "ready"
-        if int(request_id) in self.canceled_readback_request_ids:
-            return "canceled"
-        return "missing"
+        return readback_request_status(self, request_id)
 
     serialize_frame_state = serialize_frame_state
 
@@ -1240,16 +1231,7 @@ class WorldEngine:
 
     @staticmethod
     def _page_store_key_lookup_update(key: StoredStripeKey) -> PageStripeUpdate:
-        return PageStripeUpdate(
-            axis=str(key.axis),
-            world_start=int(key.world_start),
-            world_end=int(key.world_end),
-            buffer_start=0,
-            buffer_end=max(1, int(key.world_end) - int(key.world_start)),
-            kind="load",
-            cross_world_start=int(getattr(key, "cross_world_start", 0)),
-            cross_world_end=int(getattr(key, "cross_world_end", 0)),
-        )
+        return _page_store_key_lookup_update(key)
 
     _coerce_page_stripe_payload = _coerce_page_stripe_payload
 
@@ -1340,7 +1322,8 @@ class WorldEngine:
         readback_requests: list[ReadbackRequest | dict[str, Any]] | None = None,
         commands: list[WorldCommand | dict[str, Any]] | None = None,
     ) -> int:
-        frame_input = self.controller_turn_to_frame_input(
+        return submit_entity_controller_turn(
+            self,
             controller_state=controller_state,
             controller_state_provided=controller_state_provided,
             focus_center=focus_center,
@@ -1357,7 +1340,6 @@ class WorldEngine:
             readback_requests=readback_requests,
             commands=commands,
         )
-        return self.submit_frame_input(frame_input)
 
     request_entity_controller_turn = request_entity_controller_turn
 
@@ -1518,39 +1500,7 @@ class WorldEngine:
     allocate_island_id = allocate_island_id
 
     def _refresh_island_records_for_ids(self, island_ids: Iterable[int]) -> None:
-        touched = {int(island_id) for island_id in island_ids if int(island_id) > 0}
-        if not touched:
-            return
-        for island_id in touched:
-            invalid_mask = (self.island_id == island_id) & (
-                (self.phase != int(Phase.FALLING_ISLAND)) | (self.material_id <= 0)
-            )
-            if np.any(invalid_mask):
-                self.island_id[invalid_mask] = 0
-            coords = np.argwhere(
-                (self.island_id == island_id)
-                & (self.phase == int(Phase.FALLING_ISLAND))
-                & (self.material_id > 0)
-            )
-            if coords.size == 0:
-                self.islands.pop(island_id, None)
-                continue
-            min_y, min_x = coords.min(axis=0).tolist()
-            max_y, max_x = coords.max(axis=0).tolist()
-            previous = self.islands.get(island_id)
-            if previous is None:
-                velocity_xy = tuple(np.mean(self.velocity[coords[:, 0], coords[:, 1]], axis=0).astype(np.float32).tolist())
-                subcell_offset = (0.0, 0.0)
-            else:
-                velocity_xy = (float(previous.velocity_xy[0]), float(previous.velocity_xy[1]))
-                subcell_offset = (float(previous.subcell_offset[0]), float(previous.subcell_offset[1]))
-            self.islands[island_id] = FallingIslandRecord(
-                island_id=island_id,
-                bbox=(int(min_x), int(min_y), int(max_x) + 1, int(max_y) + 1),
-                velocity_xy=(float(velocity_xy[0]), float(velocity_xy[1])),
-                subcell_offset=subcell_offset,
-            )
-        self.next_island_id = max(int(self.next_island_id), max(self.islands, default=0) + 1, 1)
+        return _refresh_island_records_for_ids(self, island_ids)
 
     in_bounds = in_bounds
 
@@ -1587,14 +1537,7 @@ class WorldEngine:
     sample_flow_to_cells = sample_flow_to_cells
 
     def downsample_cells_to_gas(self, field: np.ndarray) -> np.ndarray:
-        result = np.zeros((self.gas_height, self.gas_width), dtype=np.float32)
-        for gy in range(self.gas_height):
-            for gx in range(self.gas_width):
-                x0 = gx * self.gas_cell_size
-                y0 = gy * self.gas_cell_size
-                block = field[y0 : min(self.height, y0 + self.gas_cell_size), x0 : min(self.width, x0 + self.gas_cell_size)]
-                result[gy, gx] = float(block.mean()) if block.size else 0.0
-        return result
+        return downsample_cells_to_gas(self, field)
 
     add_gas_from_cells = add_gas_from_cells
 
@@ -1746,14 +1689,7 @@ class WorldEngine:
 
     @staticmethod
     def _set_nested_payload_value(payload: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
-        cursor = payload
-        for key in path[:-1]:
-            child = cursor.get(key)
-            if not isinstance(child, dict):
-                child = {}
-                cursor[key] = child
-            cursor = child
-        cursor[path[-1]] = value
+        return _set_nested_payload_value(payload, path, value)
 
     serialize_bridge_upload_snapshot = serialize_bridge_upload_snapshot
 
@@ -1980,31 +1916,7 @@ class WorldEngine:
     _queue_loaded_collapse_pending_regions_from_payload = _queue_loaded_collapse_pending_regions_from_payload
 
     def _advance_paging(self, center_x: int, center_y: int) -> list[PageStripeUpdate]:
-        force_sources = [
-            replace(force_source, world_x=self._force_source_world_position(force_source)[0], world_y=self._force_source_world_position(force_source)[1])
-            for force_source in self.force_sources
-        ]
-        updates = self.focus_paging(center_x, center_y)
-        if not updates:
-            return []
-        self.bridge_frame_paging_updates.extend(
-            PageStripeUpdate(**asdict(update)) for update in updates
-        )
-        for update in updates:
-            if update.kind == "save":
-                self.page_store.save(update, self.capture_page_stripe(update))
-                self._clear_saved_page_stripe_runtime_state(update)
-        for update in updates:
-            if update.kind != "load":
-                continue
-            payload = self.page_store.load(update)
-            if payload is None:
-                payload = self._default_page_stripe_payload(update)
-            self._apply_page_stripe(update, payload)
-            self._record_bridge_page_stripe(update, payload)
-        if force_sources:
-            self._sync_force_sources(force_sources)
-        return updates
+        return _advance_paging(self, center_x, center_y)
 
     _prepare_bridge_frame_inputs = _prepare_bridge_frame_inputs
 
@@ -2090,27 +2002,7 @@ class WorldEngine:
     _release_entity_placeholder_cell = _release_entity_placeholder_cell
 
     def _mirror_release_entity_placeholder_cell(self, x: int, y: int, entity_id: int) -> None:
-        if not self.in_bounds(x, y):
-            return
-        if int(self.entity_id[y, x]) != entity_id:
-            return
-        self._invalidate_gpu_authoritative_cell_resources()
-        self.entity_id[y, x] = 0
-        material_id = int(self.material_id[y, x])
-        if material_id <= 0 or not self._shadow_material_is_placeholder(material_id):
-            return
-        displaced_material = int(self.placeholder_displaced_material[y, x])
-        if displaced_material > 0:
-            self.material_id[y, x] = displaced_material
-            self.phase[y, x] = int(Phase.LIQUID)
-            self.cell_flags[y, x] = 0
-            self.timer_pack[y, x] = 0
-            shadow_integrity = self._shadow_material_base_integrity(displaced_material)
-            self.integrity[y, x] = float(shadow_integrity) if shadow_integrity is not None else 0.0
-            self.placeholder_displaced_material[y, x] = 0
-            self._mark_active_rect_runtime(max(0, x - 1), max(0, y - 1), min(self.width, x + 2), min(self.height, y + 2))
-            return
-        self.clear_cell(x, y, mark_dirty=False)
+        return _mirror_release_entity_placeholder_cell(self, x, y, entity_id)
 
     _resolve_sanctioned_material_id = _resolve_sanctioned_material_id
 
@@ -2387,35 +2279,7 @@ class WorldEngine:
         return resolved, commands
 
     def _public_resolved_change_intent(self, intent: ResolvedChangeIntent) -> ResolvedChangeIntent:
-        effect_cells = (
-            []
-            if intent.center_world_position is None
-            else self._disk_world_cells_raw(
-                tuple(int(value) for value in intent.center_world_position),
-                int(intent.effective_radius),
-            )
-        )
-        effect_bounds = self._buffer_cell_bounds(effect_cells)
-        generated_commands = [self._public_world_command(command) for command in intent.generated_commands]
-        if intent.center_world_position is not None:
-            center_world_x = int(intent.center_world_position[0])
-            center_world_y = int(intent.center_world_position[1])
-            for command in generated_commands:
-                x_field, y_field = TARGETED_COMMAND_COORD_FIELDS.get(command.kind, (None, None))
-                if x_field is not None and y_field is not None and x_field in command.payload and y_field in command.payload:
-                    command.payload[x_field] = center_world_x
-                    command.payload[y_field] = center_world_y
-        return replace(
-            intent,
-            center_position=(
-                None
-                if intent.center_world_position is None
-                else tuple(int(value) for value in intent.center_world_position)
-            ),
-            effect_cells=effect_cells,
-            effect_bounds=effect_bounds,
-            generated_commands=generated_commands,
-        )
+        return _public_resolved_change_intent(self, intent)
 
     def _public_resolved_target(self, target: ResolvedTarget) -> ResolvedTarget:
         return replace(
@@ -2592,42 +2456,7 @@ class WorldEngine:
         query: TargetQuery,
         source_world_position: tuple[int, int],
     ) -> dict[str, Any] | None:
-        directional_filters = [item for item in query.anchor_filters if item in CARDINAL_DIRECTION_VECTORS or item in {"forward", "backward"}]
-        terrain_filters = [item for item in query.anchor_filters if item in TERRAIN_ANCHOR_FILTERS]
-        entity_filters = [
-            item
-            for item in query.anchor_filters
-            if item not in TERRAIN_ANCHOR_FILTERS
-            and item not in IGNORED_ANCHOR_FILTERS
-            and item not in CARDINAL_DIRECTION_VECTORS
-            and item not in {"forward", "backward"}
-        ]
-        entity_anchor = None
-        terrain_anchor = None
-        if query.anchor_entity_id is not None or entity_filters or (directional_filters and not terrain_filters):
-            entity_anchor = self._resolve_entity_anchor(
-                query,
-                source_world_position,
-                direction_filter=directional_filters[0] if directional_filters else None,
-            )
-        if entity_anchor is not None:
-            return entity_anchor
-        if terrain_filters:
-            terrain_anchor = self._resolve_terrain_anchor(
-                source_world_position,
-                terrain_filters,
-                direction_filter=directional_filters[0] if directional_filters else None,
-            )
-        if terrain_anchor is not None:
-            return terrain_anchor
-        if query.anchor_entity_id is None and not query.anchor_filters:
-            return {
-                "kind": "source",
-                "entity_id": query.source_entity_id,
-                "buffer_position": self._world_to_buffer_clamped(*source_world_position),
-                "world_position": source_world_position,
-            }
-        return None
+        return _resolve_anchor_target(self, query, source_world_position)
 
     _resolve_entity_anchor = _resolve_entity_anchor
 
@@ -2924,52 +2753,7 @@ class WorldEngine:
         update: PageStripeUpdate,
         payload: dict[str, Any],
     ) -> dict[int, tuple[int, int, int, int]] | None:
-        cell_payload = payload.get("cell", {})
-        try:
-            material_id = np.asarray(cell_payload["material_id"], dtype=np.int32)
-            phase = np.asarray(cell_payload["phase"], dtype=np.uint8)
-            island_id = np.asarray(cell_payload["island_id"], dtype=np.int32)
-        except KeyError:
-            return None
-        if material_id.shape != phase.shape or material_id.shape != island_id.shape:
-            return None
-        valid = (island_id > 0) & (material_id > 0) & (phase == int(Phase.FALLING_ISLAND))
-        if not np.any(valid):
-            return {}
-        boxes: dict[int, list[int]] = {}
-        offset = 0
-        for start, end in self._stripe_buffer_ranges(update, gas_grid=False):
-            span = int(end) - int(start)
-            if span <= 0:
-                continue
-            if update.axis == "x":
-                stripe = valid[:, offset : offset + span]
-                stripe_ids = island_id[:, offset : offset + span]
-                ys, xs = np.nonzero(stripe)
-                for local_y, local_x in zip(ys.tolist(), xs.tolist()):
-                    current_id = int(stripe_ids[local_y, local_x])
-                    x = int(start) + int(local_x)
-                    y = int(local_y)
-                    box = boxes.setdefault(current_id, [x, y, x + 1, y + 1])
-                    box[0] = min(box[0], x)
-                    box[1] = min(box[1], y)
-                    box[2] = max(box[2], x + 1)
-                    box[3] = max(box[3], y + 1)
-            else:
-                stripe = valid[offset : offset + span, :]
-                stripe_ids = island_id[offset : offset + span, :]
-                ys, xs = np.nonzero(stripe)
-                for local_y, local_x in zip(ys.tolist(), xs.tolist()):
-                    current_id = int(stripe_ids[local_y, local_x])
-                    x = int(local_x)
-                    y = int(start) + int(local_y)
-                    box = boxes.setdefault(current_id, [x, y, x + 1, y + 1])
-                    box[0] = min(box[0], x)
-                    box[1] = min(box[1], y)
-                    box[2] = max(box[2], x + 1)
-                    box[3] = max(box[3], y + 1)
-            offset += span
-        return {island_id: tuple(box) for island_id, box in boxes.items()}
+        return _page_stripe_island_bboxes_from_payload(self, update, payload)
 
     _merge_island_runtime_payload = _merge_island_runtime_payload
 
