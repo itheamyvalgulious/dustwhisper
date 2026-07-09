@@ -25,7 +25,7 @@ layout(std430, binding=5) buffer IslandReservationSourceIndex {
 };
 
 bool active_dispatch_cell(out ivec2 cell) {
-    int groups_per_tile_axis = max(1, (tile_size + {LOCAL_SIZE - 1}) / {{LOCAL_SIZE}});
+    int groups_per_tile_axis = max(1, (tile_size + {{LOCAL_SIZE_MINUS_1}}) / {{LOCAL_SIZE}});
     int workgroups_per_tile = groups_per_tile_axis * groups_per_tile_axis;
     uint group_index = gl_WorkGroupID.x;
     uint active_tile_index = group_index / uint(workgroups_per_tile);

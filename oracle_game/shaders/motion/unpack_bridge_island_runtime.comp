@@ -24,7 +24,7 @@ void main() {
     if (gid >= count) {
         return;
     }
-    int base = gid * {ISLAND_RUNTIME_DTYPE.itemsize // 4};
+    int base = gid * {{ISLAND_RUNTIME_WORDS}};
     int island_id = runtime_words[base];
     if (island_id <= 0) {
         island_ids[gid] = 0;

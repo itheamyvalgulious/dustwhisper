@@ -72,7 +72,7 @@ bool has_source_cell(ivec4 island_bbox, int island_id) {
 }
 
 int clamp_material(int material_id) {
-    return clamp(material_id, 0, {MAX_MATERIALS - 1});
+    return clamp(material_id, 0, {{MAX_MATERIALS_MINUS_1}});
 }
 
 int gravity_fallback_dy(ivec4 island_bbox, int island_id, float velocity_y) {
@@ -130,7 +130,7 @@ bool can_shift_delta(ivec4 island_bbox, int island_id, int dx, int dy) {
 }
 
 ivec4 runtime_bbox(int gid) {
-    int base = gid * {ISLAND_RUNTIME_DTYPE.itemsize // 4};
+    int base = gid * {{ISLAND_RUNTIME_WORDS}};
     return ivec4(
         runtime_words[base + 1],
         runtime_words[base + 2],
@@ -140,7 +140,7 @@ ivec4 runtime_bbox(int gid) {
 }
 
 vec4 runtime_motion(int gid) {
-    int base = gid * {ISLAND_RUNTIME_DTYPE.itemsize // 4};
+    int base = gid * {{ISLAND_RUNTIME_WORDS}};
     return vec4(
         intBitsToFloat(runtime_words[base + 9]),
         intBitsToFloat(runtime_words[base + 10]) + 0.9,
@@ -185,7 +185,7 @@ void main() {
         return;
     }
 
-    int base = gid * {ISLAND_RUNTIME_DTYPE.itemsize // 4};
+    int base = gid * {{ISLAND_RUNTIME_WORDS}};
     int island_id = runtime_words[base];
     ivec4 island_bbox = runtime_bbox(gid);
     if (island_id <= 0) {

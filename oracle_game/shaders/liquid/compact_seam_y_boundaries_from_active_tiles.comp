@@ -1,0 +1,64 @@
+#version 430
+layout(local_size_x=1, local_size_y=1, local_size_z=1) in;
+uniform ivec2 tile_grid_size;
+uniform uint source_workgroups_per_tile;
+uniform uint workgroups_per_boundary;
+layout(std430, binding=0) readonly buffer ActiveTileCountBuffer {
+    uint active_tile_count[];
+};
+layout(std430, binding=1) readonly buffer ActiveTileListBuffer {
+    ivec2 active_tile_list[];
+};
+layout(std430, binding=2) buffer AffectedTileCountBuffer {
+    uint affected_tile_count[];
+};
+layout(std430, binding=3) buffer AffectedTileListBuffer {
+    ivec2 affected_tile_list[];
+};
+layout(std430, binding=4) buffer AffectedTileDispatchArgsBuffer {
+    uint affected_tile_dispatch_args[];
+};
+layout(std430, binding=5) readonly buffer ActiveTileTTLBuffer {
+    int active_tile_ttl[];
+};
+
+bool tile_active(ivec2 tile) {
+    if (tile.x < 0 || tile.y < 0 || tile.x >= tile_grid_size.x || tile.y >= tile_grid_size.y) {
+        return false;
+    }
+    return active_tile_ttl[tile.y * tile_grid_size.x + tile.x] > 0;
+}
+
+void emit_boundary(ivec2 boundary_tile) {
+    if (
+        boundary_tile.x < 0
+        || boundary_tile.y < 0
+        || boundary_tile.x >= tile_grid_size.x
+        || boundary_tile.y + 1 >= tile_grid_size.y
+    ) {
+        return;
+    }
+    uint slot = atomicAdd(affected_tile_count[0], 1u);
+    affected_tile_list[int(slot)] = boundary_tile;
+    atomicMax(affected_tile_dispatch_args[0], (slot + 1u) * max(workgroups_per_boundary, 1u));
+}
+
+void main() {
+    uint groups_per_tile = max(source_workgroups_per_tile, 1u);
+    uint group_index = gl_WorkGroupID.x;
+    if ((group_index % groups_per_tile) != 0u) {
+        return;
+    }
+    uint active_index = group_index / groups_per_tile;
+    if (active_index >= active_tile_count[0]) {
+        return;
+    }
+    ivec2 tile = active_tile_list[int(active_index)];
+    if (!tile_active(tile)) {
+        return;
+    }
+    emit_boundary(tile);
+    if (tile.y > 0 && !tile_active(tile + ivec2(0, -1))) {
+        emit_boundary(tile + ivec2(0, -1));
+    }
+}

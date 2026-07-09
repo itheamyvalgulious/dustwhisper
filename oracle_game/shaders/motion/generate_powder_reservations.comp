@@ -48,7 +48,7 @@ bool in_bounds(ivec2 cell) {
 }
 
 bool active_dispatch_cell(out ivec2 cell) {
-    int groups_per_tile_axis = max(1, (tile_size + {LOCAL_SIZE - 1}) / {{LOCAL_SIZE}});
+    int groups_per_tile_axis = max(1, (tile_size + {{LOCAL_SIZE_MINUS_1}}) / {{LOCAL_SIZE}});
     int workgroups_per_tile = groups_per_tile_axis * groups_per_tile_axis;
     uint group_index = gl_WorkGroupID.x;
     uint active_tile_index = group_index / uint(workgroups_per_tile);
@@ -106,7 +106,7 @@ void main() {
     if (material_id <= 0 || (phase_id != phase_powder && phase_id != phase_liquid)) {
         return;
     }
-    material_id = clamp(material_id, 0, {MAX_MATERIALS - 1});
+    material_id = clamp(material_id, 0, {{MAX_MATERIALS_MINUS_1}});
     vec2 velocity = texelFetch(velocity_tex, source, 0).xy;
     vec4 target_payload = texelFetch(powder_target_tex, source, 0);
     ivec2 reserved = ivec2(round(target_payload.xy));

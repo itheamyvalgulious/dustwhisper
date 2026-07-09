@@ -58,7 +58,7 @@ int active_reservation_count() {
 }
 
 void store_runtime_word(int record_index, int word_offset, int value) {
-    runtime_words[record_index * {ISLAND_RUNTIME_DTYPE.itemsize // 4} + word_offset] = value;
+    runtime_words[record_index * {{ISLAND_RUNTIME_WORDS}} + word_offset] = value;
 }
 
 void main() {

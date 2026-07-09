@@ -79,7 +79,7 @@ bool blocks_dda_target(ivec2 cell) {
 }
 
 ivec2 desired_target(ivec2 source, int material_id) {
-    material_id = clamp(material_id, 0, {MAX_MATERIALS - 1});
+    material_id = clamp(material_id, 0, {{MAX_MATERIALS_MINUS_1}});
     vec2 velocity = texelFetch(velocity_tex, source, 0).xy;
     int max_step = int(material_params[material_id].x + 0.5);
     max_step = clamp(max_step, 0, max_powder_step);
@@ -166,7 +166,7 @@ ivec2 dda_target(ivec2 source, int material_id, ivec2 desired) {
 }
 
 ivec2 fallback_candidate(ivec2 source, int material_id, int index) {
-    float gravity = material_params[clamp(material_id, 0, {MAX_MATERIALS - 1})].y;
+    float gravity = material_params[clamp(material_id, 0, {{MAX_MATERIALS_MINUS_1}})].y;
     if (gravity >= 0.0) {
         if (index == 0) return source + ivec2(0, 1);
         if (index == 1) return source + ivec2(-1, 1);
@@ -183,7 +183,7 @@ ivec2 resolved_target(ivec2 source, int material_id) {
     if (reserved != source && in_bounds(reserved) && path_is_clear(source, reserved, reserved)) {
         return reserved;
     }
-    if (int(contact_params[clamp(material_id, 0, {MAX_MATERIALS - 1})].z + 0.5) != {{POWDER_SOLVER_SUSPENDED}}) {
+    if (int(contact_params[clamp(material_id, 0, {{MAX_MATERIALS_MINUS_1}})].z + 0.5) != {{POWDER_SOLVER_SUSPENDED}}) {
         for (int candidate_index = 0; candidate_index < 3; ++candidate_index) {
             ivec2 fallback = fallback_candidate(source, material_id, candidate_index);
             if (in_bounds(fallback) && !blocks_dda_target(fallback)) {
@@ -248,7 +248,7 @@ bool source_moves_out(ivec2 source) {
 }
 
 vec2 collision_response(vec2 velocity, ivec2 attempted_delta, ivec2 actual_delta, int material_id) {
-    material_id = clamp(material_id, 0, {MAX_MATERIALS - 1});
+    material_id = clamp(material_id, 0, {{MAX_MATERIALS_MINUS_1}});
     float friction = clamp(contact_params[material_id].x, 0.0, 1.0);
     float elasticity = max(0.0, contact_params[material_id].y);
     float tangential_scale = max(0.0, 1.0 - friction);

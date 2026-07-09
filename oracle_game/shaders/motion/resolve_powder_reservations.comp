@@ -144,7 +144,7 @@ bool path_is_clear(ivec2 source, ivec2 target) {
 }
 
 ivec2 fallback_candidate(ivec2 source, int material_id, int index) {
-    float gravity = material_params[clamp(material_id, 0, {MAX_MATERIALS - 1})].y;
+    float gravity = material_params[clamp(material_id, 0, {{MAX_MATERIALS_MINUS_1}})].y;
     if (gravity >= 0.0) {
         if (index == 0) return source + ivec2(0, 1);
         if (index == 1) return source + ivec2(-1, 1);
@@ -245,7 +245,7 @@ void main() {
     }
     PowderReservation reservation = reservations[index];
     ivec2 source = reservation.source_xy;
-    int material_id = clamp(reservation.material_id, 0, {MAX_MATERIALS - 1});
+    int material_id = clamp(reservation.material_id, 0, {{MAX_MATERIALS_MINUS_1}});
     ivec2 resolved = source;
     int resolve_state = {{POWDER_RESOLVE_BLOCKED}};
     ivec2 reserved = reservation.reserved_target_xy;

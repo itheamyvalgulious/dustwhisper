@@ -215,7 +215,7 @@ vec2 island_collision_response(FallingIslandReservation reservation, ivec2 actua
             if (!source_matches(reservation, source)) {
                 continue;
             }
-            int material_id = clamp(int(texelFetch(material_tex, source, 0).x + 0.5), 0, {MAX_MATERIALS - 1});
+            int material_id = clamp(int(texelFetch(material_tex, source, 0).x + 0.5), 0, {{MAX_MATERIALS_MINUS_1}});
             friction_sum += contact_params[material_id].x;
             elasticity_sum += contact_params[material_id].y;
             material_count += 1;

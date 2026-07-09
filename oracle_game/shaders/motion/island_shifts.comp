@@ -79,7 +79,7 @@ bool has_source_cell(ivec4 island_bbox, int island_id) {
 }
 
 int clamp_material(int material_id) {
-    return clamp(material_id, 0, {MAX_MATERIALS - 1});
+    return clamp(material_id, 0, {{MAX_MATERIALS_MINUS_1}});
 }
 
 int gravity_fallback_dy(ivec4 island_bbox, int island_id, float velocity_y) {

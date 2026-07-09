@@ -69,7 +69,7 @@ bool same_cell(ivec2 lhs, ivec2 rhs) {
 }
 
 bool active_dispatch_cell(out ivec2 cell) {
-    int groups_per_tile_axis = max(1, (tile_size + {LOCAL_SIZE - 1}) / {{LOCAL_SIZE}});
+    int groups_per_tile_axis = max(1, (tile_size + {{LOCAL_SIZE_MINUS_1}}) / {{LOCAL_SIZE}});
     int workgroups_per_tile = groups_per_tile_axis * groups_per_tile_axis;
     uint group_index = gl_WorkGroupID.x;
     uint active_tile_index = group_index / uint(workgroups_per_tile);
@@ -115,7 +115,7 @@ bool is_moving(PowderReservation reservation) {
 }
 
 vec2 collision_response(vec2 velocity, ivec2 attempted_delta, ivec2 actual_delta, int material_id) {
-    material_id = clamp(material_id, 0, {MAX_MATERIALS - 1});
+    material_id = clamp(material_id, 0, {{MAX_MATERIALS_MINUS_1}});
     float friction = clamp(contact_params[material_id].x, 0.0, 1.0);
     float elasticity = max(0.0, contact_params[material_id].y);
     float tangential_scale = max(0.0, 1.0 - friction);
