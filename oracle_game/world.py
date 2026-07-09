@@ -498,6 +498,14 @@ from oracle_game.world_frame_pipeline import (
     run_cpu_frame,
     step,
 )
+from oracle_game.world_demo_scene import (
+    _build_demo_scene,
+    _fill_rect,
+    _paint_material,
+    _write_material_region_immediate,
+    _world_engine_del,
+    close,
+)
 from oracle_game.world_bridge_serializers import (
     _decode_bridge_uploaded_command,
     _decode_bridge_uploaded_label,
@@ -1566,26 +1574,10 @@ class WorldEngine:
         return _subtract_page_stripe_range_from_region(region, axis=axis, start=start, end=end)
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self.gas_solver.release()
-        self.heat_solver.release()
-        self.collapse_solver.release()
-        self.motion_solver.release()
-        self.liquid_solver.release()
-        self.optics_solver.release()
-        self.reaction_solver.release()
-        self.placeholder_pipeline.release()
-        self.page_stripe_pipeline.release()
-        self.grid_command_pipeline.release()
-        self.bridge.release()
+        return close(self)
 
     def __del__(self) -> None:  # pragma: no cover
-        try:
-            self.close()
-        except Exception:
-            pass
+        _world_engine_del(self)
 
     material_by_id = material_by_id
 
@@ -3167,9 +3159,7 @@ class WorldEngine:
     _drain_gpu_collapse_structure_dirty_tiles = _drain_gpu_collapse_structure_dirty_tiles
 
     def _paint_material(self, x: int, y: int, material: str, radius: int) -> None:
-        yy, xx = np.mgrid[0:self.height, 0:self.width]
-        mask = (xx - x) ** 2 + (yy - y) ** 2 <= radius ** 2
-        self.set_material_by_mask(mask, material)
+        return _paint_material(self, x, y, material, radius)
 
     def _write_material_region_immediate(
         self,
@@ -3179,60 +3169,10 @@ class WorldEngine:
         height: int,
         material: str,
     ) -> None:
-        x0 = max(0, int(x))
-        y0 = max(0, int(y))
-        x1 = min(self.width, int(x) + max(0, int(width)))
-        y1 = min(self.height, int(y) + max(0, int(height)))
-        if x0 >= x1 or y0 >= y1:
-            return
-        for write_y in range(y0, y1):
-            for write_x in range(x0, x1):
-                self.set_cell(write_x, write_y, material)
+        return _write_material_region_immediate(self, x, y, width, height, material)
 
     def _build_demo_scene(self) -> None:
-        active_w = int(self.paging.active_width)
-        active_h = int(self.paging.active_height)
-        floor_y = max(0, active_h - 28)
-        self._fill_rect(0, floor_y, active_w, 28, "raw_stone_solid")
-        self._fill_rect(32, floor_y - 58, 160, 14, "sandstone_solid")
-        self._fill_rect(60, floor_y - 112, 118, 54, "sand_powder")
-        self._fill_rect(230, floor_y - 24, 112, 24, "water_liquid")
-        self._fill_rect(374, floor_y - 18, 78, 18, "oil_liquid")
-        self._fill_rect(500, floor_y - 86, 12, 86, "raw_stone_solid")
-        self._fill_rect(520, floor_y - 46, 130, 18, "sandstone_solid")
-        self._fill_rect(550, floor_y - 86, 76, 40, "gravel_powder")
-        self._fill_rect(690, floor_y - 140, 72, 16, "log_solid")
-        self._fill_rect(700, floor_y - 188, 12, 48, "root_solid")
+        return _build_demo_scene(self)
 
     def _fill_rect(self, x: int, y: int, width: int, height: int, material: str) -> None:
-        x0 = max(0, x)
-        y0 = max(0, y)
-        x1 = min(self.width, x + width)
-        y1 = min(self.height, y + height)
-        if x0 >= x1 or y0 >= y1:
-            return
-        material_id = self._resolve_sanctioned_material_id(material)
-        if material_id <= 0:
-            raise KeyError(material)
-        phase = int(self.material_default_phase[material_id]) if material_id < self.material_default_phase.shape[0] else 0
-        integrity = (
-            float(self.material_base_integrity[material_id])
-            if material_id < self.material_base_integrity.shape[0]
-            else 0.0
-        )
-        self.material_id[y0:y1, x0:x1] = int(material_id)
-        self.phase[y0:y1, x0:x1] = phase
-        self.cell_flags[y0:y1, x0:x1] = 0
-        self.velocity[y0:y1, x0:x1] = 0.0
-        self.timer_pack[y0:y1, x0:x1] = 0
-        self.integrity[y0:y1, x0:x1] = integrity
-        self.island_id[y0:y1, x0:x1] = 0
-        self.entity_id[y0:y1, x0:x1] = 0
-        self.placeholder_displaced_material[y0:y1, x0:x1] = 0
-        if material_id < self.material_spawn_temperature.shape[0]:
-            spawn_temperature = float(self.material_spawn_temperature[material_id])
-            if np.isfinite(spawn_temperature):
-                self.cell_temperature[y0:y1, x0:x1] = np.maximum(
-                    self.cell_temperature[y0:y1, x0:x1],
-                    spawn_temperature,
-                )
+        return _fill_rect(self, x, y, width, height, material)
