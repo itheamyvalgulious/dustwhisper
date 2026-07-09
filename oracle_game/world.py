@@ -21,7 +21,6 @@ from oracle_game.gpu import (
     GPUSegmentedCellCoreWindowReadbackSource,
     GPUSegmentedTextureReadbackSource,
     GPUTextureReadbackSource,
-    unpack_cell_core,
 )
 from oracle_game.readback_contract import READBACK_ALLOWED_CHANNELS
 from oracle_game.page_store import InMemoryPageStore, PageStore, StoredStripeKey
@@ -506,6 +505,16 @@ from oracle_game.world_demo_scene import (
     _world_engine_del,
     close,
 )
+from oracle_game.world_state_snapshots import (
+    _bridge_shadow_buffer_coord_space,
+    _current_cell_state_snapshot,
+    _current_entity_runtime_snapshot,
+    _entity_placeholder_state_gpu_authoritative,
+    _material_optics_snapshot_map,
+    _preview_bridge_placeholder_dirty_rects,
+    _runtime_entities_to_immediate_observation_targets,
+    simulation_backend_report,
+)
 from oracle_game.world_bridge_serializers import (
     _decode_bridge_uploaded_command,
     _decode_bridge_uploaded_label,
@@ -879,12 +888,7 @@ class WorldEngine:
     _material_optics_table_snapshot_payload = _material_optics_table_snapshot_payload
 
     def _material_optics_snapshot_map(self) -> dict[tuple[str, str], MaterialOpticsDef]:
-        payload = self._stable_shadow_payload("optics", self._material_optics_table_snapshot_payload)
-        snapshot: dict[tuple[str, str], MaterialOpticsDef] = {}
-        for item in payload:
-            entry = self._coerce_material_optics_def(item)
-            snapshot[(entry.material_name, entry.light_type)] = entry
-        return snapshot
+        return _material_optics_snapshot_map(self)
 
     _reaction_table_snapshot_payload = _reaction_table_snapshot_payload
 
@@ -1280,38 +1284,7 @@ class WorldEngine:
     step = step
 
     def simulation_backend_report(self) -> dict[str, Any]:
-        ctx = self.bridge.ctx
-        gpu_available = bool(self.bridge.enabled and ctx is not None and getattr(ctx, "version_code", 0) >= 430)
-        ctx_info = getattr(ctx, "info", {}) if ctx is not None else {}
-        backends = {
-            "collapse": str(self.collapse_solver.last_backend),
-            "gas": str(self.gas_solver.last_backend),
-            "heat": str(self.heat_solver.last_backend),
-            "reactions": str(self.reaction_solver.last_runtime_backend),
-            "motion": str(self.motion_solver.last_backend),
-            "liquid": str(self.liquid_solver.last_backend),
-            "placeholder": str(self.placeholder_pipeline.last_backend),
-            "page_stripe": str(self.page_stripe_pipeline.last_backend),
-            "world_commands": str(self.grid_command_pipeline.last_backend),
-            "optics": str(self.optics_solver.last_backend),
-        }
-        non_gpu = {name: backend for name, backend in backends.items() if backend not in {"gpu", "idle"}}
-        return {
-            "simulation_backend": self.simulation_backend,
-            "gpu_available": gpu_available,
-            "renderer": str(ctx_info.get("GL_RENDERER", "")),
-            "vendor": str(ctx_info.get("GL_VENDOR", "")),
-            "opengl_version": str(ctx_info.get("GL_VERSION", "")),
-            "gpu_realtime_budget": {
-                "enabled": bool(self.gpu_realtime_budget_enabled),
-                "active": bool(self._gpu_realtime_budget_active()),
-                "cell_threshold": int(self.gpu_realtime_budget_cell_threshold),
-                "skipped_stages": list(self.last_skipped_gpu_stages),
-            },
-            "backends": backends,
-            "non_gpu_backends": non_gpu,
-            "strict_gpu_ready": gpu_available and not non_gpu,
-        }
+        return simulation_backend_report(self)
 
     def poll_readbacks(self, request_id: int | None = None) -> ReadbackResult | None:
         if request_id is None:
@@ -1469,46 +1442,7 @@ class WorldEngine:
         current_entity_placeholders: dict[int, set[tuple[int, int]]],
         placeholders: list[EntityPlaceholder],
     ) -> list[dict[str, Any]]:
-        current_cells = {
-            cell: entity_id
-            for entity_id, cells in current_entity_placeholders.items()
-            for cell in cells
-        }
-        next_cells: dict[tuple[int, int], EntityPlaceholder] = {}
-        for placeholder in placeholders:
-            for y in range(placeholder.y, placeholder.y + max(0, placeholder.height)):
-                for x in range(placeholder.x, placeholder.x + max(0, placeholder.width)):
-                    if not self.in_bounds(x, y):
-                        continue
-                    next_cells[(x, y)] = placeholder
-
-        changed_cells: set[tuple[int, int]] = set()
-        for cell, entity_id in current_cells.items():
-            next_placeholder = next_cells.get(cell)
-            if next_placeholder is None or next_placeholder.entity_id != entity_id:
-                changed_cells.add(cell)
-        for cell, placeholder in next_cells.items():
-            x, y = cell
-            material_id = int(self.material_id[y, x])
-            entity_id = int(self.entity_id[y, x])
-            has_matching_placeholder_cell = (
-                material_id > 0
-                and self._shadow_material_is_placeholder(material_id)
-                and entity_id == int(placeholder.entity_id)
-            )
-            if current_cells.get(cell) != placeholder.entity_id or not has_matching_placeholder_cell:
-                changed_cells.add(cell)
-
-        payload: list[dict[str, Any]] = []
-        for x, y in sorted(changed_cells):
-            world_rect = self._buffer_bbox_to_world_bbox((int(x), int(y), int(x) + 1, int(y) + 1))
-            payload.append(
-                {
-                    "buffer_rect": [int(x), int(y), int(x) + 1, int(y) + 1],
-                    "world_rect": [int(world_rect[0]), int(world_rect[1]), int(world_rect[2]), int(world_rect[3])],
-                }
-            )
-        return payload
+        return _preview_bridge_placeholder_dirty_rects(self, current_entity_placeholders, placeholders)
 
     @staticmethod
     def _serialize_bridge_readback_request_stages(
@@ -1776,14 +1710,7 @@ class WorldEngine:
         )
 
     def _bridge_shadow_buffer_coord_space(self, array: np.ndarray) -> str | None:
-        if array.ndim < 2:
-            return None
-        trailing_shape = tuple(int(value) for value in array.shape[-2:])
-        if trailing_shape == (int(self.height), int(self.width)):
-            return "world"
-        if trailing_shape == (int(self.gas_height), int(self.gas_width)):
-            return "gas"
-        return None
+        return _bridge_shadow_buffer_coord_space(self, array)
 
     _serialize_bridge_ndarray_slice = _serialize_bridge_ndarray_slice
 
@@ -1943,86 +1870,13 @@ class WorldEngine:
     serialize_entity_observation_state = serialize_entity_observation_state
 
     def _current_cell_state_snapshot(self, *, allow_gpu_sync_readback: bool = False) -> dict[str, np.ndarray]:
-        if (
-            self.simulation_backend == "gpu"
-            and "cell_core" in self.bridge.gpu_authoritative_resources
-            and self.bridge.enabled
-            and self.bridge.ctx is not None
-            and "cell_core" in self.bridge.buffers
-        ):
-            if not allow_gpu_sync_readback:
-                return {
-                    "material_id": self.material_id,
-                    "phase": self.phase,
-                    "integrity": self.integrity,
-                }
-            try:
-                core = np.frombuffer(
-                    self.bridge.buffers["cell_core"].read(size=self.width * self.height * 5 * np.dtype(np.uint32).itemsize),
-                    dtype=np.uint32,
-                ).reshape((self.height, self.width, 5))
-                unpacked = unpack_cell_core(core)
-                return {
-                    "material_id": unpacked["material_id"].astype(np.int32, copy=False),
-                    "phase": unpacked["phase"].astype(np.uint8, copy=False),
-                    "integrity": unpacked["integrity"].astype(np.float32, copy=False),
-                }
-            except Exception as exc:
-                raise RuntimeError(
-                    "GPU-authoritative cell state is not directly readable from this thread; "
-                    "use async readback for CPU-visible world snapshots"
-                ) from exc
-        return {
-            "material_id": self.material_id,
-            "phase": self.phase,
-            "integrity": self.integrity,
-        }
+        return _current_cell_state_snapshot(self, allow_gpu_sync_readback=allow_gpu_sync_readback)
 
     def _current_entity_runtime_snapshot(self, *, allow_gpu_sync_readback: bool = False) -> dict[str, np.ndarray]:
-        if (
-            self.simulation_backend == "gpu"
-            and self.bridge.enabled
-            and self.bridge.ctx is not None
-            and "entity_id" in self.bridge.gpu_authoritative_resources
-            and "placeholder_displaced_material" in self.bridge.gpu_authoritative_resources
-            and "entity_id" in self.bridge.buffers
-            and "placeholder_displaced_material" in self.bridge.buffers
-        ):
-            if not allow_gpu_sync_readback:
-                return {
-                    "entity_id": self.entity_id,
-                    "placeholder_displaced_material": self.placeholder_displaced_material,
-                }
-            try:
-                return {
-                    "entity_id": np.frombuffer(
-                        self.bridge.buffers["entity_id"].read(size=self.entity_id.nbytes),
-                        dtype=np.int32,
-                    ).reshape(self.entity_id.shape),
-                    "placeholder_displaced_material": np.frombuffer(
-                        self.bridge.buffers["placeholder_displaced_material"].read(size=self.placeholder_displaced_material.nbytes),
-                        dtype=np.int32,
-                    ).reshape(self.placeholder_displaced_material.shape),
-                }
-            except Exception as exc:
-                raise RuntimeError(
-                    "GPU-authoritative entity runtime state is not directly readable from this thread; "
-                    "use async readback for CPU-visible world snapshots"
-                ) from exc
-        return {
-            "entity_id": self.entity_id,
-            "placeholder_displaced_material": self.placeholder_displaced_material,
-        }
+        return _current_entity_runtime_snapshot(self, allow_gpu_sync_readback=allow_gpu_sync_readback)
 
     def _entity_placeholder_state_gpu_authoritative(self) -> bool:
-        if self.simulation_backend != "gpu":
-            return False
-        authoritative = self.bridge.gpu_authoritative_resources
-        return bool(
-            "cell_core" in authoritative
-            or "entity_id" in authoritative
-            or "placeholder_displaced_material" in authoritative
-        )
+        return _entity_placeholder_state_gpu_authoritative(self)
 
     serialize_entity_placeholders = serialize_entity_placeholders
 
@@ -2426,34 +2280,7 @@ class WorldEngine:
         self,
         entities: list[EntityState],
     ) -> list[ObservationTarget]:
-        targets: list[ObservationTarget] = []
-        for entity in entities:
-            if not entity.observe_channels:
-                continue
-            if entity.world_x is not None and entity.world_y is not None:
-                world_x = int(entity.world_x)
-                world_y = int(entity.world_y)
-            else:
-                world_x, world_y = self._buffer_to_world_position((int(entity.x), int(entity.y)))
-            entity_width = max(1, int(entity.width))
-            entity_height = max(1, int(entity.height))
-            center_x = int((world_x + world_x + entity_width - 1) // 2)
-            center_y = int((world_y + world_y + entity_height - 1) // 2)
-            width = int(entity.observe_width) if entity.observe_width is not None else entity_width + int(entity.observe_pad_cells) * 2
-            height = int(entity.observe_height) if entity.observe_height is not None else entity_height + int(entity.observe_pad_cells) * 2
-            targets.append(
-                ObservationTarget(
-                    observer_id=int(entity.entity_id),
-                    center_x=int(center_x),
-                    center_y=int(center_y),
-                    width=max(1, int(width)),
-                    height=max(1, int(height)),
-                    channels=entity.observe_channels,
-                    pad_cells=int(entity.observe_pad_cells),
-                    label=entity.observe_label,
-                )
-            )
-        return targets
+        return _runtime_entities_to_immediate_observation_targets(self, entities)
 
     _sync_entity_states = _sync_entity_states
 
