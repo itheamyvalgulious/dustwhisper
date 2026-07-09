@@ -1,0 +1,105 @@
+#version 430
+layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+uniform ivec2 region_size;
+uniform int label_capacity;
+uniform int island_id_base;
+uniform int material_count;
+uniform int phase_falling_island;
+
+layout(binding=0) uniform sampler2D component_label_tex;
+layout(binding=1) uniform sampler2D material_tex;
+layout(binding=2) uniform sampler2D phase_tex;
+layout(binding=3) uniform sampler2D cell_flags_tex;
+layout(binding=4) uniform sampler2D timer_tex;
+layout(binding=5) uniform sampler2D integrity_tex;
+layout(binding=6) uniform sampler2D temp_tex;
+layout(binding=7) uniform sampler2D island_id_tex;
+layout(binding=8) uniform sampler2D entity_id_tex;
+layout(binding=9) uniform sampler2D displaced_tex;
+
+layout(r32f, binding=0) writeonly uniform image2D material_out_img;
+layout(r32f, binding=1) writeonly uniform image2D phase_out_img;
+layout(r32f, binding=2) writeonly uniform image2D cell_flags_out_img;
+layout(rgba32f, binding=3) writeonly uniform image2D timer_out_img;
+layout(r32f, binding=4) writeonly uniform image2D integrity_out_img;
+layout(r32f, binding=5) writeonly uniform image2D temp_out_img;
+
+layout(std430, binding=0) buffer CollapseGenerationIds {
+    int collapse_generation_ids[];
+};
+layout(std430, binding=1) buffer BaseIntegrityValues {
+    float base_integrity_values[];
+};
+layout(std430, binding=2) buffer SpawnTemperatureValues {
+    float spawn_temperature_values[];
+};
+layout(std430, binding=3) readonly buffer ComponentLabelIndices {
+    uint component_label_indices[];
+};
+
+int island_id_for_label(int label) {
+    if (label <= 0 || label > label_capacity) {
+        return 0;
+    }
+    uint slot_plus_one = component_label_indices[uint(label - 1)];
+    if (slot_plus_one == 0u) {
+        return 0;
+    }
+    return island_id_base + int(slot_plus_one) - 1;
+}
+
+int collapse_generation_id(int material_id) {
+    if (material_id <= 0 || material_id >= material_count) {
+        return 0;
+    }
+    return collapse_generation_ids[material_id];
+}
+
+float base_integrity_for(int material_id) {
+    if (material_id <= 0 || material_id >= material_count) {
+        return 0.0;
+    }
+    return base_integrity_values[material_id];
+}
+
+float spawn_temperature_for(int material_id) {
+    if (material_id <= 0 || material_id >= material_count) {
+        return -340282346638528859811704183484516925440.0;
+    }
+    return spawn_temperature_values[material_id];
+}
+
+void main() {
+    ivec2 cell = ivec2(gl_GlobalInvocationID.xy);
+    if (cell.x >= region_size.x || cell.y >= region_size.y) {
+        return;
+    }
+    int source_material = int(texelFetch(material_tex, cell, 0).x + 0.5);
+    float out_material = float(source_material);
+    float out_phase = texelFetch(phase_tex, cell, 0).x;
+    float out_flags = texelFetch(cell_flags_tex, cell, 0).x;
+    vec4 out_timer = texelFetch(timer_tex, cell, 0);
+    float out_integrity = texelFetch(integrity_tex, cell, 0).x;
+    float out_temperature = texelFetch(temp_tex, cell, 0).x;
+    int label = int(texelFetch(component_label_tex, cell, 0).x + 0.5);
+    int next_island_id = island_id_for_label(label);
+    if (next_island_id > 0) {
+        int generated_material = collapse_generation_id(source_material);
+        int final_material = generated_material > 0 ? generated_material : source_material;
+        out_material = float(final_material);
+        out_phase = float(phase_falling_island);
+        if (generated_material > 0) {
+            out_flags = 0.0;
+            out_timer = vec4(0.0, 0.0, 0.0, 0.0);
+            out_integrity = base_integrity_for(generated_material);
+            out_temperature = max(out_temperature, spawn_temperature_for(generated_material));
+        }
+    }
+
+    imageStore(material_out_img, cell, vec4(out_material, 0.0, 0.0, 0.0));
+    imageStore(phase_out_img, cell, vec4(out_phase, 0.0, 0.0, 0.0));
+    imageStore(cell_flags_out_img, cell, vec4(out_flags, 0.0, 0.0, 0.0));
+    imageStore(timer_out_img, cell, out_timer);
+    imageStore(integrity_out_img, cell, vec4(out_integrity, 0.0, 0.0, 0.0));
+    imageStore(temp_out_img, cell, vec4(out_temperature, 0.0, 0.0, 0.0));
+}

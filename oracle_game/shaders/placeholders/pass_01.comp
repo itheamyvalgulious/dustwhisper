@@ -1,0 +1,59 @@
+#version 430
+layout(local_size_x={{PASS_LOCAL_SIZE}}, local_size_y={{PASS_LOCAL_SIZE}}, local_size_z=1) in;
+uniform ivec2 cell_grid_size;
+uniform bool copy_cell_core;
+uniform bool copy_island_id;
+uniform bool copy_entity_id;
+uniform bool copy_displaced_material;
+
+layout(std430, binding=0) readonly buffer BridgeCellCoreBuffer { uint bridge_cell_core[]; };
+layout(std430, binding=1) readonly buffer BridgeIslandBuffer { int bridge_island_id[]; };
+layout(std430, binding=2) readonly buffer BridgeEntityBuffer { int bridge_entity_id[]; };
+layout(std430, binding=3) readonly buffer BridgeDisplacedBuffer { int bridge_displaced[]; };
+layout(std430, binding=4) buffer MaterialBuffer { int material_id[]; };
+layout(std430, binding=5) buffer PhaseBuffer { int phase[]; };
+layout(std430, binding=6) buffer FlagsBuffer { int flags[]; };
+layout(std430, binding=7) buffer TimerBuffer { ivec4 timer_pack[]; };
+layout(std430, binding=8) buffer TemperatureBuffer { float temperature[]; };
+layout(std430, binding=9) buffer IntegrityBuffer { float integrity[]; };
+layout(std430, binding=10) buffer VelocityBuffer { vec2 velocity[]; };
+layout(std430, binding=11) buffer IslandBuffer { int island_id[]; };
+layout(std430, binding=12) buffer EntityBuffer { int entity_id[]; };
+layout(std430, binding=13) buffer DisplacedBuffer { int displaced_material[]; };
+
+ivec4 unpack_timer(uint word) {
+    return ivec4(
+        int(word & 0xFFu),
+        int((word >> 8u) & 0xFFu),
+        int((word >> 16u) & 0xFFu),
+        int((word >> 24u) & 0xFFu)
+    );
+}
+
+void main() {
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
+        return;
+    }
+    int cell_index = gid.y * cell_grid_size.x + gid.x;
+    if (copy_cell_core) {
+        int word_index = cell_index * 5;
+        uint word0 = bridge_cell_core[word_index];
+        material_id[cell_index] = int(word0 & 0xFFFFu);
+        phase[cell_index] = int((word0 >> 16u) & 0xFFu);
+        flags[cell_index] = int((word0 >> 24u) & 0xFFu);
+        velocity[cell_index] = unpackHalf2x16(bridge_cell_core[word_index + 1]);
+        temperature[cell_index] = uintBitsToFloat(bridge_cell_core[word_index + 2]);
+        timer_pack[cell_index] = unpack_timer(bridge_cell_core[word_index + 3]);
+        integrity[cell_index] = float(bridge_cell_core[word_index + 4] & 0xFFFFu);
+    }
+    if (copy_island_id) {
+        island_id[cell_index] = bridge_island_id[cell_index];
+    }
+    if (copy_entity_id) {
+        entity_id[cell_index] = bridge_entity_id[cell_index];
+    }
+    if (copy_displaced_material) {
+        displaced_material[cell_index] = bridge_displaced[cell_index];
+    }
+}

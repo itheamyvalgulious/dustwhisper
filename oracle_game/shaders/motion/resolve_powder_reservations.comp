@@ -1,0 +1,287 @@
+#version 430
+layout(local_size_x={{POWDER_RESERVATION_LOCAL_SIZE}}, local_size_y=1, local_size_z=1) in;
+uniform ivec2 cell_grid_size;
+uniform ivec2 tile_grid_size;
+uniform int tile_size;
+uniform int phase_powder;
+uniform int phase_liquid;
+uniform int phase_falling_island;
+uniform bool use_bridge_authoritative_blockers;
+
+struct PowderReservation {
+    ivec2 source_xy;
+    ivec2 desired_target_xy;
+    ivec2 reserved_target_xy;
+    ivec2 resolved_target_xy;
+    vec2 velocity_xy;
+    int material_id;
+    int resolve_state;
+};
+
+layout(std430, binding=0) buffer PowderReservations {
+    PowderReservation reservations[];
+};
+layout(std430, binding=1) readonly buffer PowderReservationCount {
+    int powder_reservation_count;
+};
+layout(std430, binding=2) buffer MaterialParams {
+    vec4 material_params[{{MAX_MATERIALS}}];
+};
+layout(std430, binding=3) buffer MaterialContactParams {
+    vec4 contact_params[{{MAX_MATERIALS}}];
+};
+layout(std430, binding=4) readonly buffer PowderTargetWinners {
+    int target_winners[];
+};
+layout(std430, binding=8) readonly buffer BridgeCellCoreBuffer {
+    uint bridge_cell_core[];
+};
+layout(std430, binding=9) readonly buffer BridgeIslandBuffer {
+    int bridge_island_id[];
+};
+layout(std430, binding=10) readonly buffer BridgeEntityBuffer {
+    int bridge_entity_id[];
+};
+layout(std430, binding=11) readonly buffer BridgeDisplacedBuffer {
+    int bridge_displaced_material[];
+};
+
+layout(binding=0) uniform sampler2D material_tex;
+layout(binding=1) uniform sampler2D phase_tex;
+layout(binding=3) uniform sampler2D active_tile_tex;
+layout(binding=5) uniform sampler2D entity_id_tex;
+layout(binding=6) uniform sampler2D displaced_tex;
+
+bool in_bounds(ivec2 cell) {
+    return cell.x >= 0 && cell.y >= 0 && cell.x < cell_grid_size.x && cell.y < cell_grid_size.y;
+}
+
+int cell_index(ivec2 cell) {
+    return cell.y * cell_grid_size.x + cell.x;
+}
+
+bool solve_cell_active(ivec2 cell) {
+    ivec2 tile = ivec2(
+        min(cell.x / tile_size, tile_grid_size.x - 1),
+        min(cell.y / tile_size, tile_grid_size.y - 1)
+    );
+    return texelFetch(active_tile_tex, tile, 0).x > 0.5;
+}
+
+int material_at(ivec2 cell) {
+    if (use_bridge_authoritative_blockers) {
+        return int(bridge_cell_core[cell_index(cell) * 5] & 0xFFFFu);
+    }
+    return int(texelFetch(material_tex, cell, 0).x + 0.5);
+}
+
+int phase_at(ivec2 cell) {
+    if (use_bridge_authoritative_blockers) {
+        return int((bridge_cell_core[cell_index(cell) * 5] >> 16u) & 0xFFu);
+    }
+    return int(texelFetch(phase_tex, cell, 0).x + 0.5);
+}
+
+bool blocks_dda_target(ivec2 cell) {
+    return material_at(cell) > 0
+        || phase_at(cell) == phase_falling_island
+        || (
+            use_bridge_authoritative_blockers
+            ? bridge_entity_id[cell_index(cell)] != 0
+            : texelFetch(entity_id_tex, cell, 0).x > 0.5
+        )
+        || (
+            use_bridge_authoritative_blockers
+            ? bridge_displaced_material[cell_index(cell)] != 0
+            : texelFetch(displaced_tex, cell, 0).x > 0.5
+        );
+}
+
+int active_reservation_count() {
+    return clamp(powder_reservation_count, 0, cell_grid_size.x * cell_grid_size.y);
+}
+
+bool same_cell(ivec2 lhs, ivec2 rhs) {
+    return lhs.x == rhs.x && lhs.y == rhs.y;
+}
+
+bool path_is_clear(ivec2 source, ivec2 target) {
+    ivec2 desired = target - source;
+    if (desired.x == 0 && desired.y == 0) {
+        return true;
+    }
+    ivec2 current = ivec2(0, 0);
+    int dx = abs(desired.x);
+    int dy = -abs(desired.y);
+    int sx = current.x < desired.x ? 1 : -1;
+    int sy = current.y < desired.y ? 1 : -1;
+    int err = dx + dy;
+    while (true) {
+        if (current.x == desired.x && current.y == desired.y) {
+            break;
+        }
+        int e2 = 2 * err;
+        if (e2 >= dy) {
+            err += dy;
+            current.x += sx;
+        }
+        if (e2 <= dx) {
+            err += dx;
+            current.y += sy;
+        }
+        ivec2 sample_cell = source + current;
+        if (!in_bounds(sample_cell)) {
+            return false;
+        }
+        if (sample_cell == target) {
+            continue;
+        }
+        if (blocks_dda_target(sample_cell)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+ivec2 fallback_candidate(ivec2 source, int material_id, int index) {
+    float gravity = material_params[clamp(material_id, 0, {MAX_MATERIALS - 1})].y;
+    if (gravity >= 0.0) {
+        if (index == 0) return source + ivec2(0, 1);
+        if (index == 1) return source + ivec2(-1, 1);
+        return source + ivec2(1, 1);
+    }
+    if (index == 0) return source + ivec2(0, -1);
+    if (index == 1) return source + ivec2(-1, -1);
+    return source + ivec2(1, -1);
+}
+
+bool better_source(ivec2 candidate, ivec2 current_best) {
+    if (current_best.x < 0) {
+        return true;
+    }
+    if (candidate.y != current_best.y) {
+        return candidate.y > current_best.y;
+    }
+    return candidate.x < current_best.x;
+}
+
+bool reservation_has_live_source(PowderReservation reservation) {
+    ivec2 source = reservation.source_xy;
+    if (!in_bounds(source) || !solve_cell_active(source)) {
+        return false;
+    }
+    int material_id = material_at(source);
+    int phase_id = phase_at(source);
+    return material_id > 0
+        && (phase_id == phase_powder || phase_id == phase_liquid)
+        && material_id == reservation.material_id;
+}
+
+int source_rank(ivec2 source) {
+    int rank_y = (cell_grid_size.y - 1) - clamp(source.y, 0, cell_grid_size.y - 1);
+    int rank_x = clamp(source.x, 0, cell_grid_size.x - 1);
+    return rank_y * cell_grid_size.x + rank_x;
+}
+
+int target_winner_rank(ivec2 target) {
+    if (!in_bounds(target)) {
+        return -1;
+    }
+    int rank = target_winners[target.y * cell_grid_size.x + target.x];
+    if (rank == 2147483647) {
+        return -1;
+    }
+    return rank;
+}
+
+ivec2 resolved_path_prefix(PowderReservation reservation) {
+    ivec2 source = reservation.source_xy;
+    ivec2 target = reservation.reserved_target_xy;
+    ivec2 desired = target - source;
+    if (desired.x == 0 && desired.y == 0) {
+        return source;
+    }
+    int rank = source_rank(source);
+    ivec2 current = ivec2(0, 0);
+    ivec2 furthest = source;
+    int dx = abs(desired.x);
+    int dy = -abs(desired.y);
+    int sx = current.x < desired.x ? 1 : -1;
+    int sy = current.y < desired.y ? 1 : -1;
+    int err = dx + dy;
+    while (true) {
+        if (current.x == desired.x && current.y == desired.y) {
+            break;
+        }
+        int e2 = 2 * err;
+        if (e2 >= dy) {
+            err += dy;
+            current.x += sx;
+        }
+        if (e2 <= dx) {
+            err += dx;
+            current.y += sy;
+        }
+        ivec2 path_cell = source + current;
+        if (!in_bounds(path_cell)) {
+            break;
+        }
+        if (!same_cell(path_cell, target) && blocks_dda_target(path_cell)) {
+            break;
+        }
+        if (target_winner_rank(path_cell) != rank) {
+            break;
+        }
+        furthest = path_cell;
+    }
+    return furthest;
+}
+
+void main() {
+    int index = int(gl_GlobalInvocationID.x);
+    int count = active_reservation_count();
+    if (index >= count) {
+        return;
+    }
+    PowderReservation reservation = reservations[index];
+    ivec2 source = reservation.source_xy;
+    int material_id = clamp(reservation.material_id, 0, {MAX_MATERIALS - 1});
+    ivec2 resolved = source;
+    int resolve_state = {{POWDER_RESOLVE_BLOCKED}};
+    ivec2 reserved = reservation.reserved_target_xy;
+    bool live_source = reservation_has_live_source(reservation);
+    if (
+        live_source
+        && !same_cell(reserved, source)
+        && in_bounds(reserved)
+        && path_is_clear(source, reserved)
+    ) {
+        ivec2 path_resolved = resolved_path_prefix(reservation);
+        if (!same_cell(path_resolved, source)) {
+            resolved = path_resolved;
+            resolve_state = {{POWDER_RESOLVE_DDA}};
+        }
+    }
+    if (
+        live_source
+        && phase_at(source) == phase_powder
+        && int(contact_params[material_id].z + 0.5) != {{POWDER_SOLVER_SUSPENDED}}
+    ) {
+        for (int candidate_index = 0; candidate_index < 3; ++candidate_index) {
+            ivec2 fallback = fallback_candidate(source, material_id, candidate_index);
+            if (
+                resolve_state != {{POWDER_RESOLVE_DDA}}
+                &&
+                in_bounds(fallback)
+                && !blocks_dda_target(fallback)
+                && target_winner_rank(fallback) < 0
+            ) {
+                resolved = fallback;
+                resolve_state = {{POWDER_RESOLVE_FALLBACK}};
+                break;
+            }
+        }
+    }
+    reservations[index].resolved_target_xy = resolved;
+    reservations[index].resolve_state = resolve_state;
+}

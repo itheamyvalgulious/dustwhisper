@@ -1,0 +1,250 @@
+#version 430
+layout(local_size_x={{LOCAL_SIZE}}, local_size_y=1, local_size_z=1) in;
+uniform ivec2 cell_grid_size;
+uniform int runtime_capacity;
+uniform bool use_bridge_authoritative_state;
+uniform float dt;
+layout(binding=0) uniform sampler2D material_tex;
+layout(binding=1) uniform sampler2D island_id_tex;
+layout(std430, binding=0) readonly buffer BridgeIslandRuntimeWords {
+    int runtime_words[];
+};
+layout(std430, binding=1) buffer IslandReservationWords {
+    ivec4 reservation_words[];
+};
+layout(std430, binding=2) buffer IslandReservationCount {
+    int reservation_count;
+};
+layout(std430, binding=3) readonly buffer BridgeIslandRuntimeCount {
+    int runtime_count;
+};
+layout(std430, binding=4) readonly buffer MaterialParamBuffer {
+    vec4 material_params[];
+};
+layout(std430, binding=7) readonly buffer BridgeCellCoreBuffer {
+    uint bridge_cell_core[];
+};
+layout(std430, binding=8) readonly buffer BridgeIslandBuffer {
+    int bridge_island_id[];
+};
+
+int active_runtime_count() {
+    return clamp(runtime_count, 0, max(runtime_capacity, 0));
+}
+
+int cell_index(ivec2 cell) {
+    return cell.y * cell_grid_size.x + cell.x;
+}
+
+int material_at(ivec2 cell) {
+    if (use_bridge_authoritative_state) {
+        return int(bridge_cell_core[cell_index(cell) * 5] & 0xFFFFu);
+    }
+    return int(texelFetch(material_tex, cell, 0).x + 0.5);
+}
+
+int island_at(ivec2 cell) {
+    if (use_bridge_authoritative_state) {
+        return bridge_island_id[cell_index(cell)];
+    }
+    return int(texelFetch(island_id_tex, cell, 0).x + 0.5);
+}
+
+bool bbox_in_bounds(ivec4 island_bbox) {
+    return island_bbox.x >= 0
+        && island_bbox.y >= 0
+        && island_bbox.z <= cell_grid_size.x
+        && island_bbox.w <= cell_grid_size.y
+        && island_bbox.z > island_bbox.x
+        && island_bbox.w > island_bbox.y;
+}
+
+bool has_source_cell(ivec4 island_bbox, int island_id) {
+    for (int y = island_bbox.y; y < island_bbox.w; ++y) {
+        for (int x = island_bbox.x; x < island_bbox.z; ++x) {
+            ivec2 cell = ivec2(x, y);
+            if (island_at(cell) == island_id && material_at(cell) > 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+int clamp_material(int material_id) {
+    return clamp(material_id, 0, {MAX_MATERIALS - 1});
+}
+
+int gravity_fallback_dy(ivec4 island_bbox, int island_id, float velocity_y) {
+    float gravity_sum = 0.0;
+    int material_count = 0;
+    for (int y = island_bbox.y; y < island_bbox.w; ++y) {
+        for (int x = island_bbox.x; x < island_bbox.z; ++x) {
+            ivec2 cell = ivec2(x, y);
+            if (island_at(cell) != island_id) {
+                continue;
+            }
+            int material_id = material_at(cell);
+            if (material_id <= 0) {
+                continue;
+            }
+            gravity_sum += material_params[clamp_material(material_id)].y;
+            material_count += 1;
+        }
+    }
+    if (material_count <= 0) {
+        return 0;
+    }
+    float mean_gravity = gravity_sum / float(material_count);
+    if (abs(mean_gravity) > 1.0e-6) {
+        return mean_gravity > 0.0 ? 1 : -1;
+    }
+    if (abs(velocity_y) <= 1.0e-6) {
+        return 0;
+    }
+    return velocity_y > 0.0 ? 1 : -1;
+}
+
+bool can_shift_delta(ivec4 island_bbox, int island_id, int dx, int dy) {
+    for (int y = island_bbox.y; y < island_bbox.w; ++y) {
+        for (int x = island_bbox.x; x < island_bbox.z; ++x) {
+            if (island_at(ivec2(x, y)) != island_id) {
+                continue;
+            }
+            int nx = x + dx;
+            int ny = y + dy;
+            if (nx < 0 || ny < 0 || nx >= cell_grid_size.x || ny >= cell_grid_size.y) {
+                return false;
+            }
+            int material_id = material_at(ivec2(nx, ny));
+            if (material_id == 0) {
+                continue;
+            }
+            if (island_at(ivec2(nx, ny)) == island_id) {
+                continue;
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
+ivec4 runtime_bbox(int gid) {
+    int base = gid * {ISLAND_RUNTIME_DTYPE.itemsize // 4};
+    return ivec4(
+        runtime_words[base + 1],
+        runtime_words[base + 2],
+        runtime_words[base + 3],
+        runtime_words[base + 4]
+    );
+}
+
+vec4 runtime_motion(int gid) {
+    int base = gid * {ISLAND_RUNTIME_DTYPE.itemsize // 4};
+    return vec4(
+        intBitsToFloat(runtime_words[base + 9]),
+        intBitsToFloat(runtime_words[base + 10]) + 0.9,
+        intBitsToFloat(runtime_words[base + 11]),
+        intBitsToFloat(runtime_words[base + 12])
+    );
+}
+
+void write_reservation(int gid, int island_id, ivec4 bbox, vec4 motion, ivec4 shifts) {
+    int word_base = gid * 4;
+    int resolve_state = {{ISLAND_RESOLVE_BLOCKED}};
+    if (shifts.x != 0 || shifts.y != 0 || (shifts.z == 0 && shifts.w == 0)) {
+        resolve_state = {{ISLAND_RESOLVE_DIRECT}};
+    }
+    reservation_words[word_base] = ivec4(island_id, bbox.x, bbox.y, bbox.z);
+    reservation_words[word_base + 1] = ivec4(
+        bbox.w,
+        floatBitsToInt(motion.x),
+        floatBitsToInt(motion.y),
+        floatBitsToInt(motion.z)
+    );
+    reservation_words[word_base + 2] = ivec4(
+        floatBitsToInt(motion.w),
+        shifts.z,
+        shifts.w,
+        shifts.x
+    );
+    reservation_words[word_base + 3] = ivec4(shifts.y, shifts.x, shifts.y, resolve_state);
+}
+
+void write_empty_reservation(int gid) {
+    write_reservation(gid, 0, ivec4(0), vec4(0.0), ivec4(0));
+}
+
+void main() {
+    int gid = int(gl_GlobalInvocationID.x);
+    int count = active_runtime_count();
+    if (gid == 0) {
+        reservation_count = count;
+    }
+    if (gid >= count) {
+        return;
+    }
+
+    int base = gid * {ISLAND_RUNTIME_DTYPE.itemsize // 4};
+    int island_id = runtime_words[base];
+    ivec4 island_bbox = runtime_bbox(gid);
+    if (island_id <= 0) {
+        write_empty_reservation(gid);
+        return;
+    }
+    if (!bbox_in_bounds(island_bbox) || !has_source_cell(island_bbox, island_id)) {
+        write_reservation(gid, 0, island_bbox, vec4(0.0), ivec4(0));
+        return;
+    }
+
+    vec4 motion = runtime_motion(gid);
+    float total_x = motion.z + motion.x * dt;
+    float total_y = motion.w + motion.y * dt;
+    int target_dx = int(clamp(round(total_x), float(-{{MAX_ISLAND_DDA_STEP}}), float({{MAX_ISLAND_DDA_STEP}})));
+    int target_dy = int(clamp(round(total_y), float(-{{MAX_ISLAND_DDA_STEP}}), float({{MAX_ISLAND_DDA_STEP}})));
+    float residual_x = total_x - float(target_dx);
+    float residual_y = total_y - float(target_dy);
+    if (target_dx == 0 && target_dy == 0) {
+        int fallback_dy = gravity_fallback_dy(island_bbox, island_id, motion.y);
+        if (fallback_dy != 0) {
+            target_dy = fallback_dy;
+            residual_y = 0.0;
+        }
+    }
+
+    vec4 updated_motion = vec4(motion.x, motion.y, residual_x, residual_y);
+    int current_x = 0;
+    int current_y = 0;
+    int furthest_x = 0;
+    int furthest_y = 0;
+    if (target_dx == 0 && target_dy == 0) {
+        write_reservation(gid, island_id, island_bbox, updated_motion, ivec4(0, 0, target_dx, target_dy));
+        return;
+    }
+
+    int dx = abs(target_dx);
+    int dy = -abs(target_dy);
+    int sx = current_x < target_dx ? 1 : -1;
+    int sy = current_y < target_dy ? 1 : -1;
+    int err = dx + dy;
+    while (true) {
+        if (current_x == target_dx && current_y == target_dy) {
+            break;
+        }
+        int e2 = 2 * err;
+        if (e2 >= dy) {
+            err += dy;
+            current_x += sx;
+        }
+        if (e2 <= dx) {
+            err += dx;
+            current_y += sy;
+        }
+        if (!can_shift_delta(island_bbox, island_id, current_x, current_y)) {
+            break;
+        }
+        furthest_x = current_x;
+        furthest_y = current_y;
+    }
+    write_reservation(gid, island_id, island_bbox, updated_motion, ivec4(furthest_x, furthest_y, target_dx, target_dy));
+}

@@ -1,0 +1,57 @@
+#version 430
+layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+uniform ivec2 region_size;
+uniform ivec2 region_origin;
+uniform ivec2 cell_grid_size;
+
+layout(binding=0) uniform sampler2D material_tex;
+layout(binding=1) uniform sampler2D phase_tex;
+layout(binding=2) uniform sampler2D flags_tex;
+layout(binding=3) uniform sampler2D timer_tex;
+layout(binding=4) uniform sampler2D integrity_tex;
+layout(binding=5) uniform sampler2D temp_tex;
+layout(binding=6) uniform sampler2D island_tex;
+layout(binding=7) uniform sampler2D entity_tex;
+layout(binding=8) uniform sampler2D displaced_tex;
+
+layout(std430, binding=0) buffer BridgeCellCoreBuffer {
+    uint bridge_cell_core[];
+};
+layout(std430, binding=1) writeonly buffer BridgeIslandBuffer {
+    int bridge_island_id[];
+};
+layout(std430, binding=2) writeonly buffer BridgeEntityBuffer {
+    int bridge_entity_id[];
+};
+layout(std430, binding=3) writeonly buffer BridgeDisplacedBuffer {
+    int bridge_displaced[];
+};
+layout(r32f, binding=0) writeonly uniform image2D bridge_material_img;
+
+uint pack_timer(vec4 timer) {
+    uvec4 value = uvec4(clamp(round(timer), vec4(0.0), vec4(255.0)));
+    return value.x | (value.y << 8u) | (value.z << 16u) | (value.w << 24u);
+}
+
+void main() {
+    ivec2 local_cell = ivec2(gl_GlobalInvocationID.xy);
+    if (local_cell.x >= region_size.x || local_cell.y >= region_size.y) {
+        return;
+    }
+    ivec2 world_cell = region_origin + local_cell;
+    int cell_index = world_cell.y * cell_grid_size.x + world_cell.x;
+    int word_index = cell_index * 5;
+    uint material = uint(clamp(round(texelFetch(material_tex, local_cell, 0).x), 0.0, 65535.0));
+    uint phase = uint(clamp(round(texelFetch(phase_tex, local_cell, 0).x), 0.0, 255.0));
+    uint flags = uint(clamp(round(texelFetch(flags_tex, local_cell, 0).x), 0.0, 255.0));
+    uint preserved_velocity = bridge_cell_core[word_index + 1];
+    bridge_cell_core[word_index] = material | (phase << 16u) | (flags << 24u);
+    bridge_cell_core[word_index + 1] = preserved_velocity;
+    bridge_cell_core[word_index + 2] = floatBitsToUint(texelFetch(temp_tex, local_cell, 0).x);
+    bridge_cell_core[word_index + 3] = pack_timer(texelFetch(timer_tex, local_cell, 0));
+    bridge_cell_core[word_index + 4] = uint(clamp(round(texelFetch(integrity_tex, local_cell, 0).x), 0.0, 65535.0));
+    bridge_island_id[cell_index] = int(round(texelFetch(island_tex, local_cell, 0).x));
+    bridge_entity_id[cell_index] = int(round(texelFetch(entity_tex, local_cell, 0).x));
+    bridge_displaced[cell_index] = int(round(texelFetch(displaced_tex, local_cell, 0).x));
+    imageStore(bridge_material_img, world_cell, vec4(float(material), 0.0, 0.0, 0.0));
+}

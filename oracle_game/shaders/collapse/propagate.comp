@@ -1,0 +1,62 @@
+#version 430
+layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+uniform ivec2 region_size;
+uniform int jump;
+layout(binding=0) uniform sampler2D structural_tex;
+layout(binding=1) uniform sampler2D support_in_tex;
+layout(r32f, binding=2) writeonly uniform image2D support_out_img;
+layout(std430, binding=0) buffer ChangeFlagBuffer {
+    uint change_flag;
+};
+
+bool line_clear(ivec2 start_cell, ivec2 end_cell) {
+    ivec2 delta = end_cell - start_cell;
+    int steps = max(abs(delta.x), abs(delta.y));
+    if (steps <= 1) {
+        return true;
+    }
+    for (int step_index = 1; step_index < steps; ++step_index) {
+        float t = float(step_index) / float(steps);
+        ivec2 sample_cell = ivec2(round(mix(vec2(start_cell), vec2(end_cell), t)));
+        if (texelFetch(structural_tex, sample_cell, 0).x < 0.5) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void main() {
+    ivec2 cell = ivec2(gl_GlobalInvocationID.xy);
+    if (cell.x >= region_size.x || cell.y >= region_size.y) {
+        return;
+    }
+    float structural = texelFetch(structural_tex, cell, 0).x;
+    float current = structural > 0.5 ? texelFetch(support_in_tex, cell, 0).x : 0.0;
+    float next_value = current;
+    if (structural > 0.5 && current < 0.5) {
+        for (int oy = -1; oy <= 1 && next_value < 0.5; ++oy) {
+            for (int ox = -1; ox <= 1 && next_value < 0.5; ++ox) {
+                if (abs(ox) + abs(oy) != 1) {
+                    continue;
+                }
+                ivec2 sample_cell = cell + ivec2(ox * jump, oy * jump);
+                if (sample_cell.x < 0 || sample_cell.y < 0 || sample_cell.x >= region_size.x || sample_cell.y >= region_size.y) {
+                    continue;
+                }
+                if (texelFetch(support_in_tex, sample_cell, 0).x < 0.5) {
+                    continue;
+                }
+                if (texelFetch(structural_tex, sample_cell, 0).x < 0.5) {
+                    continue;
+                }
+                if (jump <= 1 || line_clear(sample_cell, cell)) {
+                    next_value = 1.0;
+                }
+            }
+        }
+    }
+    imageStore(support_out_img, cell, vec4(next_value, 0.0, 0.0, 0.0));
+    if (next_value > 0.5 && current < 0.5) {
+        atomicOr(change_flag, 1u);
+    }
+}

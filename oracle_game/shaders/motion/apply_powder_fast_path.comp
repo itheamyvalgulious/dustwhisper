@@ -1,0 +1,354 @@
+#version 430
+layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+uniform ivec2 cell_grid_size;
+uniform ivec2 tile_grid_size;
+uniform int tile_size;
+uniform int phase_powder;
+uniform int phase_falling_island;
+uniform int max_powder_step;
+uniform float dt;
+
+layout(std430, binding=0) buffer MaterialParamBuffer {
+    vec4 material_params[{{MAX_MATERIALS}}];
+};
+layout(std430, binding=1) buffer MaterialContactParams {
+    vec4 contact_params[{{MAX_MATERIALS}}];
+};
+layout(std430, binding=2) buffer PowderReservationCount {
+    int powder_reservation_count;
+};
+layout(std430, binding=11) buffer ActiveTileTTLBuffer {
+    int active_tile_ttl[];
+};
+
+layout(binding=0) uniform sampler2D material_tex;
+layout(binding=1) uniform sampler2D phase_tex;
+layout(binding=2) uniform sampler2D cell_flags_tex;
+layout(binding=3) uniform sampler2D velocity_tex;
+layout(binding=4) uniform sampler2D temp_tex;
+layout(binding=5) uniform sampler2D timer_tex;
+layout(binding=6) uniform sampler2D integrity_tex;
+layout(binding=7) uniform sampler2D island_id_tex;
+layout(binding=8) uniform sampler2D entity_id_tex;
+layout(binding=9) uniform sampler2D displaced_tex;
+layout(binding=10) uniform sampler2D active_tile_tex;
+
+layout(r32f, binding=0) writeonly uniform image2D material_out_img;
+layout(r32f, binding=1) writeonly uniform image2D phase_out_img;
+layout(r32f, binding=2) writeonly uniform image2D cell_flags_out_img;
+layout(rg32f, binding=3) writeonly uniform image2D velocity_out_img;
+layout(r32f, binding=4) writeonly uniform image2D temp_out_img;
+layout(rgba32f, binding=5) writeonly uniform image2D timer_out_img;
+layout(r32f, binding=6) writeonly uniform image2D integrity_out_img;
+uniform int active_ttl_reset;
+
+bool in_bounds(ivec2 cell) {
+    return cell.x >= 0 && cell.y >= 0 && cell.x < cell_grid_size.x && cell.y < cell_grid_size.y;
+}
+
+bool solve_cell_active(ivec2 cell) {
+    ivec2 tile = ivec2(
+        min(cell.x / tile_size, tile_grid_size.x - 1),
+        min(cell.y / tile_size, tile_grid_size.y - 1)
+    );
+    return texelFetch(active_tile_tex, tile, 0).x > 0.5;
+}
+
+void refresh_changed_cell(ivec2 cell) {
+    ivec2 tile = ivec2(
+        clamp(cell.x / tile_size, 0, tile_grid_size.x - 1),
+        clamp(cell.y / tile_size, 0, tile_grid_size.y - 1)
+    );
+    int tile_index = tile.y * tile_grid_size.x + tile.x;
+    active_tile_ttl[tile_index] = active_ttl_reset;
+}
+
+int material_at(ivec2 cell) {
+    return int(texelFetch(material_tex, cell, 0).x + 0.5);
+}
+
+int phase_at(ivec2 cell) {
+    return int(texelFetch(phase_tex, cell, 0).x + 0.5);
+}
+
+bool blocks_dda_target(ivec2 cell) {
+    return material_at(cell) > 0
+        || phase_at(cell) == phase_falling_island
+        || texelFetch(entity_id_tex, cell, 0).x > 0.5
+        || texelFetch(displaced_tex, cell, 0).x > 0.5;
+}
+
+ivec2 desired_target(ivec2 source, int material_id) {
+    material_id = clamp(material_id, 0, {MAX_MATERIALS - 1});
+    vec2 velocity = texelFetch(velocity_tex, source, 0).xy;
+    int max_step = int(material_params[material_id].x + 0.5);
+    max_step = clamp(max_step, 0, max_powder_step);
+    vec2 frame_delta = velocity * dt;
+    return source + ivec2(
+        int(clamp(round(frame_delta.x), float(-max_step), float(max_step))),
+        int(clamp(round(frame_delta.y), float(-max_step), float(max_step)))
+    );
+}
+
+bool path_is_clear(ivec2 source, ivec2 target, ivec2 destination) {
+    ivec2 desired = target - source;
+    if (desired.x == 0 && desired.y == 0) {
+        return true;
+    }
+    ivec2 current = ivec2(0, 0);
+    int dx = abs(desired.x);
+    int dy = -abs(desired.y);
+    int sx = current.x < desired.x ? 1 : -1;
+    int sy = current.y < desired.y ? 1 : -1;
+    int err = dx + dy;
+    while (true) {
+        if (current.x == desired.x && current.y == desired.y) {
+            break;
+        }
+        int e2 = 2 * err;
+        if (e2 >= dy) {
+            err += dy;
+            current.x += sx;
+        }
+        if (e2 <= dx) {
+            err += dx;
+            current.y += sy;
+        }
+        ivec2 sample_cell = source + current;
+        if (!in_bounds(sample_cell)) {
+            return false;
+        }
+        if (sample_cell == destination) {
+            continue;
+        }
+        if (blocks_dda_target(sample_cell)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+ivec2 dda_target(ivec2 source, int material_id, ivec2 desired) {
+    if (desired == source) {
+        return source;
+    }
+    ivec2 delta = desired - source;
+    ivec2 current = ivec2(0, 0);
+    ivec2 furthest = source;
+    int dx = abs(delta.x);
+    int dy = -abs(delta.y);
+    int sx = current.x < delta.x ? 1 : -1;
+    int sy = current.y < delta.y ? 1 : -1;
+    int err = dx + dy;
+    while (true) {
+        if (current.x == delta.x && current.y == delta.y) {
+            break;
+        }
+        int e2 = 2 * err;
+        if (e2 >= dy) {
+            err += dy;
+            current.x += sx;
+        }
+        if (e2 <= dx) {
+            err += dx;
+            current.y += sy;
+        }
+        ivec2 sample_cell = source + current;
+        if (!in_bounds(sample_cell)) {
+            break;
+        }
+        if (blocks_dda_target(sample_cell)) {
+            break;
+        }
+        furthest = sample_cell;
+    }
+    return furthest;
+}
+
+ivec2 fallback_candidate(ivec2 source, int material_id, int index) {
+    float gravity = material_params[clamp(material_id, 0, {MAX_MATERIALS - 1})].y;
+    if (gravity >= 0.0) {
+        if (index == 0) return source + ivec2(0, 1);
+        if (index == 1) return source + ivec2(-1, 1);
+        return source + ivec2(1, 1);
+    }
+    if (index == 0) return source + ivec2(0, -1);
+    if (index == 1) return source + ivec2(-1, -1);
+    return source + ivec2(1, -1);
+}
+
+ivec2 resolved_target(ivec2 source, int material_id) {
+    ivec2 desired = desired_target(source, material_id);
+    ivec2 reserved = dda_target(source, material_id, desired);
+    if (reserved != source && in_bounds(reserved) && path_is_clear(source, reserved, reserved)) {
+        return reserved;
+    }
+    if (int(contact_params[clamp(material_id, 0, {MAX_MATERIALS - 1})].z + 0.5) != {{POWDER_SOLVER_SUSPENDED}}) {
+        for (int candidate_index = 0; candidate_index < 3; ++candidate_index) {
+            ivec2 fallback = fallback_candidate(source, material_id, candidate_index);
+            if (in_bounds(fallback) && !blocks_dda_target(fallback)) {
+                return fallback;
+            }
+        }
+    }
+    return source;
+}
+
+bool source_claims_destination(ivec2 source, ivec2 destination, out ivec2 resolved) {
+    resolved = source;
+    if (!in_bounds(source) || !solve_cell_active(source)) {
+        return false;
+    }
+    int source_material = material_at(source);
+    if (source_material <= 0 || phase_at(source) != phase_powder) {
+        return false;
+    }
+    resolved = resolved_target(source, source_material);
+    return resolved == destination && resolved != source;
+}
+
+bool better_source(ivec2 candidate, ivec2 current_best) {
+    if (current_best.x < 0) {
+        return true;
+    }
+    if (candidate.y != current_best.y) {
+        return candidate.y > current_best.y;
+    }
+    return candidate.x < current_best.x;
+}
+
+ivec2 winning_source_for(ivec2 destination) {
+    ivec2 winner = ivec2(-1, -1);
+    for (int dy = -max_powder_step; dy <= max_powder_step; ++dy) {
+        for (int dx = -max_powder_step; dx <= max_powder_step; ++dx) {
+            ivec2 candidate = destination + ivec2(dx, dy);
+            ivec2 resolved;
+            if (source_claims_destination(candidate, destination, resolved) && better_source(candidate, winner)) {
+                winner = candidate;
+            }
+        }
+    }
+    return winner;
+}
+
+bool source_moves_out(ivec2 source) {
+    if (!solve_cell_active(source)) {
+        return false;
+    }
+    int source_material = material_at(source);
+    if (source_material <= 0 || phase_at(source) != phase_powder) {
+        return false;
+    }
+    ivec2 target = resolved_target(source, source_material);
+    if (target == source) {
+        return false;
+    }
+    ivec2 winner = winning_source_for(target);
+    return winner == source;
+}
+
+vec2 collision_response(vec2 velocity, ivec2 attempted_delta, ivec2 actual_delta, int material_id) {
+    material_id = clamp(material_id, 0, {MAX_MATERIALS - 1});
+    float friction = clamp(contact_params[material_id].x, 0.0, 1.0);
+    float elasticity = max(0.0, contact_params[material_id].y);
+    float tangential_scale = max(0.0, 1.0 - friction);
+    float vx = velocity.x;
+    float vy = velocity.y;
+    if (attempted_delta.x != actual_delta.x && attempted_delta.x != 0) {
+        float normal_vx = abs(vx) > 1.0e-6 ? vx : float(attempted_delta.x);
+        vx = -normal_vx * elasticity;
+        vy *= tangential_scale;
+    }
+    if (attempted_delta.y != actual_delta.y && attempted_delta.y != 0) {
+        float normal_vy = abs(vy) > 1.0e-6 ? vy : float(attempted_delta.y);
+        vy = -normal_vy * elasticity;
+        vx *= tangential_scale;
+    }
+    if (abs(vx) < 1.0e-6) vx = 0.0;
+    if (abs(vy) < 1.0e-6) vy = 0.0;
+    return vec2(vx, vy);
+}
+
+void store_payload(
+    ivec2 dst,
+    float material_value,
+    float phase_value,
+    float flags_value,
+    vec2 velocity_value,
+    float temp_value,
+    vec4 timer_value,
+    float integrity_value,
+    float island_value,
+    float entity_value,
+    float displaced_value
+) {
+    imageStore(material_out_img, dst, vec4(material_value, 0.0, 0.0, 0.0));
+    imageStore(phase_out_img, dst, vec4(phase_value, 0.0, 0.0, 0.0));
+    imageStore(cell_flags_out_img, dst, vec4(flags_value, 0.0, 0.0, 0.0));
+    imageStore(velocity_out_img, dst, vec4(velocity_value, 0.0, 0.0));
+    imageStore(temp_out_img, dst, vec4(temp_value, 0.0, 0.0, 0.0));
+    imageStore(timer_out_img, dst, timer_value);
+    imageStore(integrity_out_img, dst, vec4(integrity_value, 0.0, 0.0, 0.0));
+}
+
+void store_original(ivec2 dst) {
+    store_payload(
+        dst,
+        texelFetch(material_tex, dst, 0).x,
+        texelFetch(phase_tex, dst, 0).x,
+        texelFetch(cell_flags_tex, dst, 0).x,
+        texelFetch(velocity_tex, dst, 0).xy,
+        texelFetch(temp_tex, dst, 0).x,
+        texelFetch(timer_tex, dst, 0),
+        texelFetch(integrity_tex, dst, 0).x,
+        texelFetch(island_id_tex, dst, 0).x,
+        texelFetch(entity_id_tex, dst, 0).x,
+        texelFetch(displaced_tex, dst, 0).x
+    );
+}
+
+void store_clear(ivec2 dst) {
+    store_payload(dst, 0.0, 0.0, 0.0, vec2(0.0), 0.0, vec4(0.0), 0.0, 0.0, 0.0, 0.0);
+}
+
+void store_incoming(ivec2 dst, ivec2 src) {
+    int material_id = material_at(src);
+    ivec2 desired_delta = desired_target(src, material_id) - src;
+    ivec2 actual_delta = dst - src;
+    vec2 velocity_value = texelFetch(velocity_tex, src, 0).xy;
+    if (desired_delta != actual_delta) {
+        velocity_value = collision_response(velocity_value, desired_delta, actual_delta, material_id);
+    }
+    store_payload(
+        dst,
+        texelFetch(material_tex, src, 0).x,
+        texelFetch(phase_tex, src, 0).x,
+        texelFetch(cell_flags_tex, src, 0).x,
+        velocity_value,
+        texelFetch(temp_tex, src, 0).x,
+        texelFetch(timer_tex, src, 0),
+        texelFetch(integrity_tex, src, 0).x,
+        texelFetch(island_id_tex, src, 0).x,
+        texelFetch(entity_id_tex, src, 0).x,
+        texelFetch(displaced_tex, src, 0).x
+    );
+}
+
+void main() {
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
+        return;
+    }
+    ivec2 incoming = winning_source_for(gid);
+    if (incoming.x >= 0) {
+        refresh_changed_cell(gid);
+        store_incoming(gid, incoming);
+        return;
+    }
+    if (source_moves_out(gid)) {
+        refresh_changed_cell(gid);
+        store_clear(gid);
+        return;
+    }
+    store_original(gid);
+}

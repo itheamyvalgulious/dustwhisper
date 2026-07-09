@@ -1,0 +1,37 @@
+#version 430
+layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+uniform ivec2 region_size;
+uniform ivec2 region_origin;
+uniform int component_capacity;
+
+layout(binding=0) uniform sampler2D component_label_tex;
+
+layout(std430, binding=0) readonly buffer ComponentLabelIndices {
+    uint component_label_indices[];
+};
+layout(std430, binding=1) buffer ComponentMetadata {
+    int component_metadata[];
+};
+
+void main() {
+    ivec2 cell = ivec2(gl_GlobalInvocationID.xy);
+    if (cell.x >= region_size.x || cell.y >= region_size.y) {
+        return;
+    }
+    int label = int(texelFetch(component_label_tex, cell, 0).x + 0.5);
+    if (label <= 0 || label > component_capacity) {
+        return;
+    }
+    uint slot_plus_one = component_label_indices[uint(label - 1)];
+    if (slot_plus_one == 0u) {
+        return;
+    }
+    int base = int(slot_plus_one - 1u) * 5;
+    int world_x = region_origin.x + cell.x;
+    int world_y = region_origin.y + cell.y;
+    atomicMin(component_metadata[base + 0], world_x);
+    atomicMin(component_metadata[base + 1], world_y);
+    atomicMax(component_metadata[base + 2], world_x + 1);
+    atomicMax(component_metadata[base + 3], world_y + 1);
+    atomicAdd(component_metadata[base + 4], 1);
+}

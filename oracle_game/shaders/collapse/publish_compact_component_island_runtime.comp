@@ -1,0 +1,65 @@
+#version 430
+layout(local_size_x=256, local_size_y=1, local_size_z=1) in;
+uniform int component_capacity;
+uniform int island_id_base;
+uniform ivec2 cell_grid_size;
+uniform ivec2 paging_origin;
+uniform ivec2 paging_buffer_origin;
+
+layout(std430, binding=0) readonly buffer ComponentMetadata {
+    int component_metadata[];
+};
+layout(std430, binding=1) writeonly buffer IslandRuntimeWords {
+    int runtime_words[];
+};
+layout(std430, binding=2) buffer IslandRuntimeCount {
+    int runtime_count;
+};
+layout(std430, binding=3) readonly buffer ComponentCount {
+    uint component_count;
+};
+
+int positive_mod(int value, int divisor) {
+    int result = value % divisor;
+    return result < 0 ? result + divisor : result;
+}
+
+void store_runtime_word(int record_index, int word_offset, int value) {
+    runtime_words[record_index * {ISLAND_RUNTIME_DTYPE.itemsize // 4} + word_offset] = value;
+}
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    uint count = min(component_count, uint(max(component_capacity, 0)));
+    if (index >= count) {
+        return;
+    }
+    int base = int(index) * 5;
+    int cell_count = component_metadata[base + 4];
+    if (cell_count <= 0) {
+        return;
+    }
+    int out_index = atomicAdd(runtime_count, 1);
+    int x0 = component_metadata[base + 0];
+    int y0 = component_metadata[base + 1];
+    int x1 = component_metadata[base + 2];
+    int y1 = component_metadata[base + 3];
+    int width = max(0, x1 - x0);
+    int height = max(0, y1 - y0);
+    int world_x0 = paging_origin.x + positive_mod(x0 - paging_buffer_origin.x, cell_grid_size.x);
+    int world_y0 = paging_origin.y + positive_mod(y0 - paging_buffer_origin.y, cell_grid_size.y);
+
+    store_runtime_word(out_index, 0, island_id_base + int(index));
+    store_runtime_word(out_index, 1, x0);
+    store_runtime_word(out_index, 2, y0);
+    store_runtime_word(out_index, 3, x1);
+    store_runtime_word(out_index, 4, y1);
+    store_runtime_word(out_index, 5, world_x0);
+    store_runtime_word(out_index, 6, world_y0);
+    store_runtime_word(out_index, 7, world_x0 + width);
+    store_runtime_word(out_index, 8, world_y0 + height);
+    store_runtime_word(out_index, 9, floatBitsToInt(0.0));
+    store_runtime_word(out_index, 10, floatBitsToInt(0.0));
+    store_runtime_word(out_index, 11, floatBitsToInt(0.0));
+    store_runtime_word(out_index, 12, floatBitsToInt(0.0));
+}

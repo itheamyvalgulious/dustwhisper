@@ -1,0 +1,17 @@
+#version 430
+layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+uniform ivec2 region_size;
+
+layout(binding=0) uniform sampler2D eligibility_tex;
+layout(binding=1) uniform sampler2D boundary_connected_tex;
+layout(r32f, binding=2) writeonly uniform image2D filtered_eligibility_img;
+
+void main() {
+    ivec2 cell = ivec2(gl_GlobalInvocationID.xy);
+    if (cell.x >= region_size.x || cell.y >= region_size.y) {
+        return;
+    }
+    bool eligible = texelFetch(eligibility_tex, cell, 0).x > 0.5;
+    bool boundary_connected = texelFetch(boundary_connected_tex, cell, 0).x > 0.5;
+    imageStore(filtered_eligibility_img, cell, vec4(eligible && !boundary_connected ? 1.0 : 0.0, 0.0, 0.0, 0.0));
+}

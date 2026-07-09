@@ -1,0 +1,142 @@
+#version 430
+layout(
+    local_size_x={{FORMAL_CONNECTED_TILE_LOCAL_SIZE}},
+    local_size_y={{FORMAL_CONNECTED_TILE_LOCAL_SIZE}},
+    local_size_z=1
+) in;
+uniform ivec2 cell_grid_size;
+uniform ivec2 tile_grid_size;
+uniform int tile_size;
+uniform ivec4 seed_rect;
+
+layout(binding=0) uniform sampler2D structural_tex;
+layout(std430, binding=0) buffer ConnectedVisited {
+    int connected[];
+};
+layout(std430, binding=1) buffer ConnectedScratch {
+    int scratch[];
+};
+layout(std430, binding=2) readonly buffer ConnectedTiles {
+    int connected_tiles[];
+};
+layout(std430, binding=3) buffer FrontierTileFlags {
+    uint frontier_tile_flags[];
+};
+layout(std430, binding=4) buffer FrontierTileList {
+    ivec2 frontier_tile_list[];
+};
+layout(std430, binding=5) buffer FrontierTileCount {
+    uint frontier_tile_count[];
+};
+layout(std430, binding=6) buffer FrontierTileDispatchArgs {
+    uint frontier_tile_dispatch_args[];
+};
+layout(std430, binding=7) readonly buffer ConnectedTileCount {
+    uint connected_tile_count[];
+};
+layout(std430, binding=8) readonly buffer ConnectedTileList {
+    ivec2 connected_tile_list[];
+};
+
+shared uint s_seeded;
+shared uint s_seed_touch_left;
+shared uint s_seed_touch_right;
+shared uint s_seed_touch_top;
+shared uint s_seed_touch_bottom;
+
+bool tile_in_grid(ivec2 tile) {
+    return tile.x >= 0 && tile.y >= 0 && tile.x < tile_grid_size.x && tile.y < tile_grid_size.y;
+}
+
+bool tile_connected_mask(ivec2 tile) {
+    if (!tile_in_grid(tile)) {
+        return false;
+    }
+    int tile_index = tile.y * tile_grid_size.x + tile.x;
+    return connected_tiles[tile_index] != 0;
+}
+
+void emit_frontier_tile(ivec2 tile) {
+    if (!tile_connected_mask(tile)) {
+        return;
+    }
+    int tile_index = tile.y * tile_grid_size.x + tile.x;
+    if (atomicCompSwap(frontier_tile_flags[tile_index], 0u, 1u) != 0u) {
+        return;
+    }
+    uint slot = atomicAdd(frontier_tile_count[0], 1u);
+    frontier_tile_list[int(slot)] = tile;
+    atomicMax(frontier_tile_dispatch_args[0], slot + 1u);
+}
+
+void main() {
+    uint work_index = gl_WorkGroupID.x;
+    if (work_index >= connected_tile_count[0]) {
+        return;
+    }
+    ivec2 tile = connected_tile_list[int(work_index)];
+    if (tile.x < 0 || tile.y < 0 || tile.x >= tile_grid_size.x || tile.y >= tile_grid_size.y) {
+        return;
+    }
+    if (gl_LocalInvocationIndex == 0u) {
+        s_seeded = 0u;
+        s_seed_touch_left = 0u;
+        s_seed_touch_right = 0u;
+        s_seed_touch_top = 0u;
+        s_seed_touch_bottom = 0u;
+    }
+    barrier();
+    ivec2 local_cell = ivec2(gl_LocalInvocationID.xy);
+    ivec2 cell = tile * tile_size + local_cell;
+    bool local_valid = !(
+        local_cell.x >= tile_size ||
+        local_cell.y >= tile_size ||
+        cell.x >= cell_grid_size.x ||
+        cell.y >= cell_grid_size.y
+    );
+    int tile_index = tile.y * tile_grid_size.x + tile.x;
+    int cell_index = cell.y * cell_grid_size.x + cell.x;
+    bool in_seed =
+        local_valid &&
+        connected_tiles[tile_index] != 0 &&
+        cell.x >= seed_rect.x &&
+        cell.y >= seed_rect.y &&
+        cell.x < seed_rect.z &&
+        cell.y < seed_rect.w;
+    bool seeded = in_seed && texelFetch(structural_tex, cell, 0).x > 0.5;
+    if (local_valid) {
+        connected[cell_index] = seeded ? 1 : 0;
+        scratch[cell_index] = seeded ? 1 : 0;
+    }
+    if (seeded) {
+        atomicOr(s_seeded, 1u);
+        if (local_cell.x == 0) {
+            atomicOr(s_seed_touch_left, 1u);
+        }
+        if (local_cell.x + 1 >= tile_size || local_cell.x + 1 >= {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}) {
+            atomicOr(s_seed_touch_right, 1u);
+        }
+        if (local_cell.y == 0) {
+            atomicOr(s_seed_touch_top, 1u);
+        }
+        if (local_cell.y + 1 >= tile_size || local_cell.y + 1 >= {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}) {
+            atomicOr(s_seed_touch_bottom, 1u);
+        }
+    }
+    barrier();
+    if (gl_LocalInvocationIndex == 0u && s_seeded != 0u) {
+        emit_frontier_tile(tile);
+        if (s_seed_touch_left != 0u) {
+            emit_frontier_tile(tile + ivec2(-1, 0));
+        }
+        if (s_seed_touch_right != 0u) {
+            emit_frontier_tile(tile + ivec2(1, 0));
+        }
+        if (s_seed_touch_top != 0u) {
+            emit_frontier_tile(tile + ivec2(0, -1));
+        }
+        if (s_seed_touch_bottom != 0u) {
+            emit_frontier_tile(tile + ivec2(0, 1));
+        }
+    }
+}

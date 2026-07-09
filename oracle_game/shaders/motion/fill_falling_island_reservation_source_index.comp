@@ -1,0 +1,89 @@
+#version 430
+layout(local_size_x={{POWDER_RESERVATION_LOCAL_SIZE}}, local_size_y=1, local_size_z=1) in;
+uniform ivec2 cell_grid_size;
+
+struct FallingIslandReservation {
+    int island_id;
+    int bbox_x;
+    int bbox_y;
+    int bbox_z;
+    int bbox_w;
+    float velocity_x;
+    float velocity_y;
+    float subcell_x;
+    float subcell_y;
+    int target_dx;
+    int target_dy;
+    int reserved_dx;
+    int reserved_dy;
+    int resolved_dx;
+    int resolved_dy;
+    int resolve_state;
+};
+
+layout(std430, binding=0) readonly buffer IslandReservations {
+    FallingIslandReservation reservations[];
+};
+layout(std430, binding=1) readonly buffer IslandReservationCount {
+    int reservation_count;
+};
+layout(std430, binding=2) buffer IslandReservationSourceIndex {
+    int reservation_source_index[];
+};
+
+layout(binding=0) uniform sampler2D material_tex;
+layout(binding=1) uniform sampler2D island_id_tex;
+
+int active_reservation_count() {
+    return clamp(reservation_count, 0, cell_grid_size.x * cell_grid_size.y);
+}
+
+bool in_bounds(ivec2 cell) {
+    return cell.x >= 0 && cell.y >= 0 && cell.x < cell_grid_size.x && cell.y < cell_grid_size.y;
+}
+
+bool source_matches(FallingIslandReservation reservation, ivec2 cell) {
+    if (!in_bounds(cell)) {
+        return false;
+    }
+    if (
+        cell.x < reservation.bbox_x
+        || cell.x >= reservation.bbox_z
+        || cell.y < reservation.bbox_y
+        || cell.y >= reservation.bbox_w
+    ) {
+        return false;
+    }
+    int island_id = int(texelFetch(island_id_tex, cell, 0).x + 0.5);
+    int material_id = int(texelFetch(material_tex, cell, 0).x + 0.5);
+    return island_id == reservation.island_id && material_id > 0;
+}
+
+void main() {
+    int index = int(gl_WorkGroupID.x);
+    if (index >= active_reservation_count()) {
+        return;
+    }
+    FallingIslandReservation reservation = reservations[index];
+    if (reservation.island_id <= 0 || reservation.resolve_state == {{ISLAND_RESOLVE_STALE}}) {
+        return;
+    }
+    int x0 = clamp(min(reservation.bbox_x, reservation.bbox_z), 0, cell_grid_size.x);
+    int y0 = clamp(min(reservation.bbox_y, reservation.bbox_w), 0, cell_grid_size.y);
+    int x1 = clamp(max(reservation.bbox_x, reservation.bbox_z), 0, cell_grid_size.x);
+    int y1 = clamp(max(reservation.bbox_y, reservation.bbox_w), 0, cell_grid_size.y);
+    int bbox_width = x1 - x0;
+    int bbox_height = y1 - y0;
+    if (bbox_width <= 0 || bbox_height <= 0) {
+        return;
+    }
+    int bbox_area = bbox_width * bbox_height;
+    int local_stride = int(gl_WorkGroupSize.x);
+    for (int offset = int(gl_LocalInvocationID.x); offset < bbox_area; offset += local_stride) {
+        ivec2 source = ivec2(x0 + (offset % bbox_width), y0 + (offset / bbox_width));
+        if (!source_matches(reservation, source)) {
+            continue;
+        }
+        atomicMin(reservation_source_index[source.y * cell_grid_size.x + source.x], index);
+    }
+}

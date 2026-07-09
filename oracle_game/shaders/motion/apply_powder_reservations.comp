@@ -1,0 +1,259 @@
+#version 430
+layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+uniform ivec2 cell_grid_size;
+uniform ivec2 tile_grid_size;
+uniform int tile_size;
+uniform int active_ttl_reset;
+uniform int phase_falling_island;
+uniform int reservation_count;
+uniform bool use_reservation_count_buffer;
+uniform bool use_active_tile_dispatch;
+uniform bool skip_untouched_original_stores;
+
+struct PowderReservation {
+    ivec2 source_xy;
+    ivec2 desired_target_xy;
+    ivec2 reserved_target_xy;
+    ivec2 resolved_target_xy;
+    vec2 velocity_xy;
+    int material_id;
+    int resolve_state;
+};
+
+layout(std430, binding=0) buffer PowderReservations {
+    PowderReservation reservations[];
+};
+layout(std430, binding=1) buffer MaterialContactParams {
+    vec4 contact_params[{{MAX_MATERIALS}}];
+};
+layout(std430, binding=2) readonly buffer PowderReservationCount {
+    int reservation_counter;
+};
+layout(std430, binding=3) buffer ActiveTileTTLBuffer {
+    int active_tile_ttl[];
+};
+layout(std430, binding=4) readonly buffer PowderApplyIncoming {
+    int apply_incoming[];
+};
+layout(std430, binding=5) readonly buffer PowderApplyOutgoing {
+    int apply_outgoing[];
+};
+layout(std430, binding=6) readonly buffer ActiveTileCountBuffer {
+    uint active_tile_count[];
+};
+layout(std430, binding=7) readonly buffer ActiveTileListBuffer {
+    ivec2 active_tile_list[];
+};
+
+layout(binding=0) uniform sampler2D material_tex;
+layout(binding=1) uniform sampler2D phase_tex;
+layout(binding=2) uniform sampler2D cell_flags_tex;
+layout(binding=3) uniform sampler2D velocity_tex;
+layout(binding=4) uniform sampler2D temp_tex;
+layout(binding=5) uniform sampler2D timer_tex;
+layout(binding=6) uniform sampler2D integrity_tex;
+layout(binding=7) uniform sampler2D island_id_tex;
+layout(binding=8) uniform sampler2D entity_id_tex;
+layout(binding=9) uniform sampler2D displaced_tex;
+
+layout(r32f, binding=0) writeonly uniform image2D material_out_img;
+layout(r32f, binding=1) writeonly uniform image2D phase_out_img;
+layout(r32f, binding=2) writeonly uniform image2D cell_flags_out_img;
+layout(rg32f, binding=3) writeonly uniform image2D velocity_out_img;
+layout(r32f, binding=4) writeonly uniform image2D temp_out_img;
+layout(rgba32f, binding=5) writeonly uniform image2D timer_out_img;
+layout(r32f, binding=6) writeonly uniform image2D integrity_out_img;
+
+bool same_cell(ivec2 lhs, ivec2 rhs) {
+    return lhs.x == rhs.x && lhs.y == rhs.y;
+}
+
+bool active_dispatch_cell(out ivec2 cell) {
+    int groups_per_tile_axis = max(1, (tile_size + {LOCAL_SIZE - 1}) / {{LOCAL_SIZE}});
+    int workgroups_per_tile = groups_per_tile_axis * groups_per_tile_axis;
+    uint group_index = gl_WorkGroupID.x;
+    uint active_tile_index = group_index / uint(workgroups_per_tile);
+    if (active_tile_index >= active_tile_count[0]) {
+        return false;
+    }
+    int subtile = int(group_index % uint(workgroups_per_tile));
+    ivec2 subtile_xy = ivec2(subtile % groups_per_tile_axis, subtile / groups_per_tile_axis);
+    ivec2 tile = active_tile_list[int(active_tile_index)];
+    if (tile.x < 0 || tile.y < 0 || tile.x >= tile_grid_size.x || tile.y >= tile_grid_size.y) {
+        return false;
+    }
+    ivec2 tile_origin = tile * tile_size;
+    ivec2 local_cell = subtile_xy * {{LOCAL_SIZE}} + ivec2(gl_LocalInvocationID.xy);
+    cell = tile_origin + local_cell;
+    ivec2 tile_end = min(tile_origin + ivec2(tile_size), cell_grid_size);
+    return cell.x < tile_end.x && cell.y < tile_end.y;
+}
+
+void refresh_changed_cell(ivec2 cell) {
+    if (cell.x < 0 || cell.y < 0 || cell.x >= cell_grid_size.x || cell.y >= cell_grid_size.y) {
+        return;
+    }
+    ivec2 tile = ivec2(
+        clamp(cell.x / tile_size, 0, tile_grid_size.x - 1),
+        clamp(cell.y / tile_size, 0, tile_grid_size.y - 1)
+    );
+    active_tile_ttl[tile.y * tile_grid_size.x + tile.x] = active_ttl_reset;
+}
+
+int active_reservation_count() {
+    if (use_reservation_count_buffer) {
+        return clamp(reservation_counter, 0, cell_grid_size.x * cell_grid_size.y);
+    }
+    return clamp(reservation_count, 0, cell_grid_size.x * cell_grid_size.y);
+}
+
+bool is_moving(PowderReservation reservation) {
+    return (
+        (reservation.resolve_state == {{POWDER_RESOLVE_DDA}} || reservation.resolve_state == {{POWDER_RESOLVE_FALLBACK}})
+        && !same_cell(reservation.source_xy, reservation.resolved_target_xy)
+    );
+}
+
+vec2 collision_response(vec2 velocity, ivec2 attempted_delta, ivec2 actual_delta, int material_id) {
+    material_id = clamp(material_id, 0, {MAX_MATERIALS - 1});
+    float friction = clamp(contact_params[material_id].x, 0.0, 1.0);
+    float elasticity = max(0.0, contact_params[material_id].y);
+    float tangential_scale = max(0.0, 1.0 - friction);
+    float vx = velocity.x;
+    float vy = velocity.y;
+    if (attempted_delta.x != actual_delta.x && attempted_delta.x != 0) {
+        float normal_vx = abs(vx) > 1.0e-6 ? vx : float(attempted_delta.x);
+        vx = -normal_vx * elasticity;
+        vy *= tangential_scale;
+    }
+    if (attempted_delta.y != actual_delta.y && attempted_delta.y != 0) {
+        float normal_vy = abs(vy) > 1.0e-6 ? vy : float(attempted_delta.y);
+        vy = -normal_vy * elasticity;
+        vx *= tangential_scale;
+    }
+    if (abs(vx) < 1.0e-6) {
+        vx = 0.0;
+    }
+    if (abs(vy) < 1.0e-6) {
+        vy = 0.0;
+    }
+    return vec2(vx, vy);
+}
+
+int incoming_reservation_index(ivec2 cell) {
+    return apply_incoming[cell.y * cell_grid_size.x + cell.x];
+}
+
+int outgoing_reservation_index(ivec2 cell) {
+    return apply_outgoing[cell.y * cell_grid_size.x + cell.x];
+}
+
+void store_payload(
+    ivec2 dst,
+    float material_value,
+    float phase_value,
+    float flags_value,
+    vec2 velocity_value,
+    float temp_value,
+    vec4 timer_value,
+    float integrity_value,
+    float island_value,
+    float entity_value,
+    float displaced_value
+) {
+    imageStore(material_out_img, dst, vec4(material_value, 0.0, 0.0, 0.0));
+    imageStore(phase_out_img, dst, vec4(phase_value, 0.0, 0.0, 0.0));
+    imageStore(cell_flags_out_img, dst, vec4(flags_value, 0.0, 0.0, 0.0));
+    imageStore(velocity_out_img, dst, vec4(velocity_value, 0.0, 0.0));
+    imageStore(temp_out_img, dst, vec4(temp_value, 0.0, 0.0, 0.0));
+    imageStore(timer_out_img, dst, timer_value);
+    imageStore(integrity_out_img, dst, vec4(integrity_value, 0.0, 0.0, 0.0));
+}
+
+void store_original(ivec2 dst, vec2 velocity_override, bool override_velocity) {
+    vec2 velocity_value = override_velocity ? velocity_override : texelFetch(velocity_tex, dst, 0).xy;
+    store_payload(
+        dst,
+        texelFetch(material_tex, dst, 0).x,
+        texelFetch(phase_tex, dst, 0).x,
+        texelFetch(cell_flags_tex, dst, 0).x,
+        velocity_value,
+        texelFetch(temp_tex, dst, 0).x,
+        texelFetch(timer_tex, dst, 0),
+        texelFetch(integrity_tex, dst, 0).x,
+        texelFetch(island_id_tex, dst, 0).x,
+        texelFetch(entity_id_tex, dst, 0).x,
+        texelFetch(displaced_tex, dst, 0).x
+    );
+}
+
+void store_clear(ivec2 dst) {
+    store_payload(dst, 0.0, 0.0, 0.0, vec2(0.0), 0.0, vec4(0.0), 0.0, 0.0, 0.0, 0.0);
+}
+
+void store_incoming(ivec2 dst, PowderReservation reservation) {
+    ivec2 src = reservation.source_xy;
+    int material_id = int(texelFetch(material_tex, src, 0).x + 0.5);
+    vec2 velocity_value = texelFetch(velocity_tex, src, 0).xy;
+    ivec2 desired_delta = reservation.desired_target_xy - reservation.source_xy;
+    ivec2 actual_delta = reservation.resolved_target_xy - reservation.source_xy;
+    if (material_id != 0 && (desired_delta.x != actual_delta.x || desired_delta.y != actual_delta.y)) {
+        velocity_value = collision_response(velocity_value, desired_delta, actual_delta, material_id);
+    }
+    store_payload(
+        dst,
+        texelFetch(material_tex, src, 0).x,
+        texelFetch(phase_tex, src, 0).x,
+        texelFetch(cell_flags_tex, src, 0).x,
+        velocity_value,
+        texelFetch(temp_tex, src, 0).x,
+        texelFetch(timer_tex, src, 0),
+        texelFetch(integrity_tex, src, 0).x,
+        texelFetch(island_id_tex, src, 0).x,
+        texelFetch(entity_id_tex, src, 0).x,
+        texelFetch(displaced_tex, src, 0).x
+    );
+}
+
+void main() {
+    ivec2 gid;
+    if (use_active_tile_dispatch) {
+        if (!active_dispatch_cell(gid)) {
+            return;
+        }
+    } else {
+        gid = ivec2(gl_GlobalInvocationID.xy);
+        if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
+            return;
+        }
+    }
+    int incoming_index = incoming_reservation_index(gid);
+    int outgoing_index = outgoing_reservation_index(gid);
+    if (incoming_index >= 0) {
+        refresh_changed_cell(gid);
+        store_incoming(gid, reservations[incoming_index]);
+        return;
+    }
+    if (outgoing_index >= 0) {
+        PowderReservation reservation = reservations[outgoing_index];
+        if (is_moving(reservation)) {
+            refresh_changed_cell(gid);
+            store_clear(gid);
+            return;
+        }
+        int material_id = int(texelFetch(material_tex, gid, 0).x + 0.5);
+        ivec2 desired_delta = reservation.desired_target_xy - reservation.source_xy;
+        vec2 velocity_value = texelFetch(velocity_tex, gid, 0).xy;
+        if (desired_delta.x != 0 || desired_delta.y != 0) {
+            velocity_value = collision_response(velocity_value, desired_delta, ivec2(0, 0), material_id);
+        } else {
+            velocity_value *= 0.2;
+        }
+        store_original(gid, velocity_value, true);
+        return;
+    }
+    if (skip_untouched_original_stores) {
+        return;
+    }
+    store_original(gid, vec2(0.0), false);
+}

@@ -1,0 +1,36 @@
+#version 430
+layout(local_size_x={{LOCAL_SIZE}}, local_size_y=1, local_size_z=1) in;
+uniform int cell_count;
+uniform int clear_flags;
+
+layout(std430, binding=0) buffer IslandApplyIncoming {
+    int apply_incoming[];
+};
+layout(std430, binding=1) buffer IslandApplyOutgoing {
+    int apply_outgoing[];
+};
+layout(std430, binding=2) buffer IslandMaterializationIndex {
+    int materialization_index[];
+};
+layout(std430, binding=3) buffer IslandReservationSourceIndex {
+    int reservation_source_index[];
+};
+
+void main() {
+    int index = int(gl_GlobalInvocationID.x);
+    if (index >= cell_count) {
+        return;
+    }
+    if ((clear_flags & {{FALLING_ISLAND_INDEX_CLEAR_APPLY_INCOMING}}) != 0) {
+        apply_incoming[index] = {{INDEX_EMPTY}};
+    }
+    if ((clear_flags & {{FALLING_ISLAND_INDEX_CLEAR_APPLY_OUTGOING}}) != 0) {
+        apply_outgoing[index] = {{INDEX_EMPTY}};
+    }
+    if ((clear_flags & {{FALLING_ISLAND_INDEX_CLEAR_MATERIALIZATION}}) != 0) {
+        materialization_index[index] = {{INDEX_EMPTY}};
+    }
+    if ((clear_flags & {{FALLING_ISLAND_INDEX_CLEAR_SOURCE}}) != 0) {
+        reservation_source_index[index] = {{INDEX_EMPTY}};
+    }
+}

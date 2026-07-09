@@ -1,0 +1,109 @@
+#version 430
+layout(local_size_x={{PASS_LOCAL_SIZE}}, local_size_y={{PASS_LOCAL_SIZE}}, local_size_z=1) in;
+uniform ivec2 cell_grid_size;
+uniform ivec2 tile_grid_size;
+uniform int tile_size;
+uniform int seam_axis;
+
+layout(std430, binding=0) readonly buffer BridgeCellCoreBuffer {
+    uint bridge_cell_core[];
+};
+layout(std430, binding=3) readonly buffer ActiveTileTTLBuffer {
+    int active_tile_ttl[];
+};
+layout(std430, binding=4) readonly buffer AffectedTileCountBuffer {
+    uint affected_tile_count[];
+};
+layout(std430, binding=5) readonly buffer AffectedTileListBuffer {
+    ivec2 affected_tile_list[];
+};
+
+layout(r32f, binding=0) writeonly uniform image2D material_img;
+layout(r32f, binding=1) writeonly uniform image2D phase_img;
+layout(r32f, binding=2) writeonly uniform image2D flags_img;
+layout(rgba32f, binding=3) writeonly uniform image2D timer_img;
+layout(r32f, binding=4) writeonly uniform image2D temp_img;
+layout(r32f, binding=5) writeonly uniform image2D integrity_img;
+layout(rg32f, binding=6) writeonly uniform image2D velocity_img;
+
+vec4 unpack_timer(uint word) {
+    return vec4(
+        float(word & 0xFFu),
+        float((word >> 8u) & 0xFFu),
+        float((word >> 16u) & 0xFFu),
+        float((word >> 24u) & 0xFFu)
+    );
+}
+
+bool boundary_dispatch_cell(out ivec2 cell) {
+    int groups_x;
+    int groups_y;
+    if (seam_axis == 0) {
+        groups_x = max(1, (tile_size * 2 + {PASS_LOCAL_SIZE - 1}) / {{PASS_LOCAL_SIZE}});
+        groups_y = max(1, (tile_size + {PASS_LOCAL_SIZE - 1}) / {{PASS_LOCAL_SIZE}});
+    } else {
+        groups_x = max(1, (tile_size + {PASS_LOCAL_SIZE - 1}) / {{PASS_LOCAL_SIZE}});
+        groups_y = 1;
+    }
+    int workgroups_per_boundary = max(1, groups_x * groups_y);
+    uint group_index = gl_WorkGroupID.x;
+    uint boundary_index = group_index / uint(workgroups_per_boundary);
+    if (boundary_index >= affected_tile_count[0]) {
+        return false;
+    }
+    int subtile = int(group_index % uint(workgroups_per_boundary));
+    ivec2 subtile_xy = ivec2(subtile % groups_x, subtile / groups_x);
+    ivec2 boundary_tile = affected_tile_list[int(boundary_index)];
+    if (boundary_tile.x < 0 || boundary_tile.y < 0 || boundary_tile.x >= tile_grid_size.x || boundary_tile.y >= tile_grid_size.y) {
+        return false;
+    }
+    ivec2 origin;
+    ivec2 region_size;
+    if (seam_axis == 0) {
+        if (boundary_tile.x + 1 >= tile_grid_size.x) {
+            return false;
+        }
+        origin = boundary_tile * tile_size;
+        region_size = ivec2(tile_size * 2, tile_size);
+    } else {
+        if (boundary_tile.y + 1 >= tile_grid_size.y) {
+            return false;
+        }
+        origin = ivec2(boundary_tile.x * tile_size, (boundary_tile.y + 1) * tile_size - 1);
+        region_size = ivec2(tile_size, 2);
+    }
+    ivec2 local_cell = subtile_xy * {{PASS_LOCAL_SIZE}} + ivec2(gl_LocalInvocationID.xy);
+    if (seam_axis != 0 && local_cell.y >= 2) {
+        return false;
+    }
+    cell = origin + local_cell;
+    ivec2 region_end = min(origin + region_size, cell_grid_size);
+    return cell.x >= 0 && cell.y >= 0 && cell.x < region_end.x && cell.y < region_end.y;
+}
+
+bool tile_is_active(ivec2 cell) {
+    ivec2 tile = ivec2(
+        clamp(cell.x / max(tile_size, 1), 0, tile_grid_size.x - 1),
+        clamp(cell.y / max(tile_size, 1), 0, tile_grid_size.y - 1)
+    );
+    return active_tile_ttl[tile.y * tile_grid_size.x + tile.x] > 0;
+}
+
+void main() {
+    ivec2 gid;
+    if (!boundary_dispatch_cell(gid) || tile_is_active(gid)) {
+        return;
+    }
+    int cell_index = gid.y * cell_grid_size.x + gid.x;
+    int word_index = cell_index * 5;
+    uint word0 = bridge_cell_core[word_index];
+    float material = float(word0 & 0xFFFFu);
+    float phase = float((word0 >> 16u) & 0xFFu);
+    imageStore(material_img, gid, vec4(material, 0.0, 0.0, 0.0));
+    imageStore(phase_img, gid, vec4(phase, 0.0, 0.0, 0.0));
+    imageStore(flags_img, gid, vec4(float((word0 >> 24u) & 0xFFu), 0.0, 0.0, 0.0));
+    imageStore(timer_img, gid, unpack_timer(bridge_cell_core[word_index + 3]));
+    imageStore(temp_img, gid, vec4(uintBitsToFloat(bridge_cell_core[word_index + 2]), 0.0, 0.0, 0.0));
+    imageStore(integrity_img, gid, vec4(float(bridge_cell_core[word_index + 4] & 0xFFFFu), 0.0, 0.0, 0.0));
+    imageStore(velocity_img, gid, vec4(unpackHalf2x16(bridge_cell_core[word_index + 1]), 0.0, 0.0));
+}

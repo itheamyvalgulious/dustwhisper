@@ -1,0 +1,38 @@
+#version 430
+layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+uniform ivec2 cell_grid_size;
+uniform int component_count;
+
+layout(binding=0) uniform sampler2D island_id_tex;
+layout(binding=1) uniform sampler2D component_label_tex;
+layout(r32f, binding=2) writeonly uniform image2D island_id_out_img;
+
+layout(std430, binding=0) buffer ComponentLabels {
+    int component_labels[];
+};
+layout(std430, binding=1) buffer ComponentIslandIds {
+    int component_island_ids[];
+};
+
+int island_id_for_label(int label) {
+    for (int index = 0; index < component_count; ++index) {
+        if (component_labels[index] == label) {
+            return component_island_ids[index];
+        }
+    }
+    return 0;
+}
+
+void main() {
+    ivec2 cell = ivec2(gl_GlobalInvocationID.xy);
+    if (cell.x >= cell_grid_size.x || cell.y >= cell_grid_size.y) {
+        return;
+    }
+    int current_island_id = int(texelFetch(island_id_tex, cell, 0).x + 0.5);
+    int label = int(texelFetch(component_label_tex, cell, 0).x + 0.5);
+    int next_island_id = label > 0 ? island_id_for_label(label) : current_island_id;
+    if (label > 0 && next_island_id <= 0) {
+        next_island_id = current_island_id;
+    }
+    imageStore(island_id_out_img, cell, vec4(float(next_island_id), 0.0, 0.0, 0.0));
+}

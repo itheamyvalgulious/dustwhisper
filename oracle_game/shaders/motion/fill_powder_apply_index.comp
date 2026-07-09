@@ -1,0 +1,78 @@
+#version 430
+layout(local_size_x={{POWDER_RESERVATION_LOCAL_SIZE}}, local_size_y=1, local_size_z=1) in;
+uniform ivec2 cell_grid_size;
+
+struct PowderReservation {
+    ivec2 source_xy;
+    ivec2 desired_target_xy;
+    ivec2 reserved_target_xy;
+    ivec2 resolved_target_xy;
+    vec2 velocity_xy;
+    int material_id;
+    int resolve_state;
+};
+
+layout(std430, binding=0) buffer PowderReservations {
+    PowderReservation reservations[];
+};
+layout(std430, binding=1) readonly buffer PowderReservationCount {
+    int powder_reservation_count;
+};
+layout(std430, binding=2) readonly buffer PowderTargetWinners {
+    int target_winners[];
+};
+layout(std430, binding=3) buffer PowderApplyIncoming {
+    int apply_incoming[];
+};
+layout(std430, binding=4) buffer PowderApplyOutgoing {
+    int apply_outgoing[];
+};
+
+bool in_bounds(ivec2 cell) {
+    return cell.x >= 0 && cell.y >= 0 && cell.x < cell_grid_size.x && cell.y < cell_grid_size.y;
+}
+
+bool same_cell(ivec2 lhs, ivec2 rhs) {
+    return lhs.x == rhs.x && lhs.y == rhs.y;
+}
+
+bool is_moving(PowderReservation reservation) {
+    return (
+        (reservation.resolve_state == {{POWDER_RESOLVE_DDA}} || reservation.resolve_state == {{POWDER_RESOLVE_FALLBACK}})
+        && !same_cell(reservation.source_xy, reservation.resolved_target_xy)
+    );
+}
+
+int active_reservation_count() {
+    return clamp(powder_reservation_count, 0, cell_grid_size.x * cell_grid_size.y);
+}
+
+int source_rank(ivec2 source) {
+    int rank_y = (cell_grid_size.y - 1) - clamp(source.y, 0, cell_grid_size.y - 1);
+    int rank_x = clamp(source.x, 0, cell_grid_size.x - 1);
+    return rank_y * cell_grid_size.x + rank_x;
+}
+
+void main() {
+    int index = int(gl_GlobalInvocationID.x);
+    int count = active_reservation_count();
+    if (index >= count) {
+        return;
+    }
+    PowderReservation reservation = reservations[index];
+    if (reservation.resolve_state == {{POWDER_RESOLVE_STALE}} || !in_bounds(reservation.source_xy)) {
+        return;
+    }
+    if (!is_moving(reservation) || !in_bounds(reservation.resolved_target_xy)) {
+        return;
+    }
+    int source_index = reservation.source_xy.y * cell_grid_size.x + reservation.source_xy.x;
+    int target_index = reservation.resolved_target_xy.y * cell_grid_size.x + reservation.resolved_target_xy.x;
+    if (target_winners[target_index] == source_rank(reservation.source_xy)) {
+        apply_outgoing[source_index] = index;
+        apply_incoming[target_index] = index;
+    } else {
+        reservations[index].resolved_target_xy = reservation.source_xy;
+        reservations[index].resolve_state = {{POWDER_RESOLVE_BLOCKED}};
+    }
+}

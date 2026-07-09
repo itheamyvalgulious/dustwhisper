@@ -1,0 +1,174 @@
+#version 430
+layout(local_size_x={{PASS_LOCAL_SIZE}}, local_size_y={{PASS_LOCAL_SIZE}}, local_size_z=1) in;
+uniform ivec2 cell_grid_size;
+uniform ivec2 gas_grid_size;
+uniform int gas_cell_size;
+uniform int placeholder_count;
+uniform int phase_liquid;
+uniform int phase_falling_island;
+uniform int render_group_placeholder;
+
+struct Placeholder {
+    int entity_id;
+    int buffer_x;
+    int buffer_y;
+    int world_x;
+    int world_y;
+    int width;
+    int height;
+    int material_id;
+};
+
+layout(std430, binding=0) buffer MaterialBuffer { int material_id[]; };
+layout(std430, binding=1) buffer PhaseBuffer { int phase[]; };
+layout(std430, binding=2) buffer FlagsBuffer { int flags[]; };
+layout(std430, binding=3) buffer TimerBuffer { ivec4 timer_pack[]; };
+layout(std430, binding=4) buffer TemperatureBuffer { float temperature[]; };
+layout(std430, binding=5) buffer IntegrityBuffer { float integrity[]; };
+layout(std430, binding=6) buffer VelocityBuffer { vec2 velocity[]; };
+layout(std430, binding=7) buffer IslandBuffer { int island_id[]; };
+layout(std430, binding=8) buffer EntityBuffer { int entity_id[]; };
+layout(std430, binding=9) buffer DisplacedBuffer { int displaced_material[]; };
+layout(std430, binding=10) readonly buffer AmbientBuffer { float ambient_temperature[]; };
+layout(std430, binding=11) readonly buffer PlaceholderBuffer { Placeholder placeholders[]; };
+layout(std430, binding=12) readonly buffer MaterialParams { vec4 material_params[{{MAX_MATERIALS}}]; };
+
+int cell_index(ivec2 cell) {
+    return cell.y * cell_grid_size.x + cell.x;
+}
+
+int material_slot(int mid) {
+    return clamp(mid, 0, {MAX_MATERIALS - 1});
+}
+
+bool is_placeholder_material(int mid) {
+    if (mid <= 0) {
+        return false;
+    }
+    return int(material_params[material_slot(mid)].z + 0.5) == render_group_placeholder;
+}
+
+int default_phase_for(int mid) {
+    return int(material_params[material_slot(mid)].x + 0.5);
+}
+
+float base_integrity_for(int mid) {
+    return material_params[material_slot(mid)].y;
+}
+
+float spawn_temperature_for(int mid) {
+    return material_params[material_slot(mid)].w;
+}
+
+float ambient_for_cell(ivec2 cell) {
+    int gx = clamp(cell.x / max(1, gas_cell_size), 0, gas_grid_size.x - 1);
+    int gy = clamp(cell.y / max(1, gas_cell_size), 0, gas_grid_size.y - 1);
+    return ambient_temperature[gy * gas_grid_size.x + gx];
+}
+
+void main() {
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
+        return;
+    }
+
+    int desired_entity = 0;
+    int desired_material = 0;
+    for (int i = 0; i < placeholder_count; ++i) {
+        Placeholder item = placeholders[i];
+        int item_width = max(0, item.width);
+        int item_height = max(0, item.height);
+        if (
+            item.entity_id > 0
+            && item.material_id > 0
+            && is_placeholder_material(item.material_id)
+            && gid.x >= item.buffer_x
+            && gid.y >= item.buffer_y
+            && gid.x < item.buffer_x + item_width
+            && gid.y < item.buffer_y + item_height
+        ) {
+            desired_entity = item.entity_id;
+            desired_material = item.material_id;
+        }
+    }
+
+    int index = cell_index(gid);
+    int current_material = material_id[index];
+    int current_phase = phase[index];
+    int current_entity = entity_id[index];
+    int current_displaced = displaced_material[index];
+    bool current_placeholder = is_placeholder_material(current_material);
+    bool keep_current = (
+        desired_entity > 0
+        && current_entity == desired_entity
+        && current_material > 0
+        && current_placeholder
+    );
+
+    int next_material = current_material;
+    int next_phase = current_phase;
+    int next_flags = flags[index];
+    ivec4 next_timer = timer_pack[index];
+    float next_temperature = temperature[index];
+    float next_integrity = integrity[index];
+    vec2 next_velocity = velocity[index];
+    int next_island = island_id[index];
+    int next_entity = current_entity;
+    int next_displaced = current_displaced;
+
+    if (current_entity > 0 && !keep_current) {
+        next_entity = 0;
+        if (current_placeholder) {
+            if (current_displaced > 0) {
+                next_material = current_displaced;
+                next_phase = phase_liquid;
+                next_flags = 0;
+                next_timer = ivec4(0);
+                next_integrity = base_integrity_for(current_displaced);
+                next_displaced = 0;
+            } else {
+                next_material = 0;
+                next_phase = 0;
+                next_flags = 0;
+                next_timer = ivec4(0);
+                next_temperature = ambient_for_cell(gid);
+                next_integrity = 0.0;
+                next_velocity = vec2(0.0);
+                next_island = 0;
+                next_displaced = 0;
+            }
+        }
+    }
+
+    if (keep_current) {
+        next_entity = desired_entity;
+    } else if (desired_entity > 0 && (next_material == 0 || next_phase == phase_liquid)) {
+        int displaced = (next_material > 0 && next_phase == phase_liquid) ? next_material : 0;
+        int placeholder_phase = default_phase_for(desired_material);
+        float spawn_temperature = spawn_temperature_for(desired_material);
+        next_material = desired_material;
+        next_phase = placeholder_phase;
+        next_flags = 0;
+        next_timer = ivec4(0);
+        next_integrity = base_integrity_for(desired_material);
+        if (!isnan(spawn_temperature)) {
+            next_temperature = max(next_temperature, spawn_temperature);
+        }
+        if (placeholder_phase != phase_falling_island) {
+            next_island = 0;
+        }
+        next_entity = desired_entity;
+        next_displaced = displaced;
+    }
+
+    material_id[index] = next_material;
+    phase[index] = next_phase;
+    flags[index] = next_flags;
+    timer_pack[index] = next_timer;
+    temperature[index] = next_temperature;
+    integrity[index] = next_integrity;
+    velocity[index] = next_velocity;
+    island_id[index] = next_island;
+    entity_id[index] = next_entity;
+    displaced_material[index] = next_displaced;
+}

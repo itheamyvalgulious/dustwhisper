@@ -1,0 +1,77 @@
+#version 430
+layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+uniform ivec2 region_size;
+uniform ivec4 internal_edges;
+uniform ivec4 solve_rect;
+uniform ivec2 world_size;
+uniform int request_capacity;
+
+layout(binding=0) uniform sampler2D eligibility_tex;
+layout(std430, binding=0) buffer RegionFlags {
+    uint region_flags;
+};
+layout(std430, binding=1) buffer DeferredRequestCount {
+    uint request_count;
+};
+layout(std430, binding=2) buffer DeferredRequests {
+    int request_rects[];
+};
+
+bool valid_request(ivec4 rect) {
+    if (rect.x >= rect.z || rect.y >= rect.w) {
+        return false;
+    }
+    if (
+        rect.x == solve_rect.x &&
+        rect.y == solve_rect.y &&
+        rect.z == solve_rect.z &&
+        rect.w == solve_rect.w
+    ) {
+        return false;
+    }
+    if (rect.x == 0 && rect.y == 0 && rect.z == world_size.x && rect.w == world_size.y) {
+        return false;
+    }
+    return true;
+}
+
+void append_request(uint flag, ivec4 rect) {
+    if (!valid_request(rect)) {
+        return;
+    }
+    uint previous = atomicOr(region_flags, flag);
+    if ((previous & flag) != 0u) {
+        return;
+    }
+    uint index = atomicAdd(request_count, 1u);
+    if (index >= uint(max(request_capacity, 0))) {
+        return;
+    }
+    int base = int(index) * 4;
+    request_rects[base + 0] = rect.x;
+    request_rects[base + 1] = rect.y;
+    request_rects[base + 2] = rect.z;
+    request_rects[base + 3] = rect.w;
+}
+
+void main() {
+    ivec2 cell = ivec2(gl_GlobalInvocationID.xy);
+    if (cell.x >= region_size.x || cell.y >= region_size.y) {
+        return;
+    }
+    if (texelFetch(eligibility_tex, cell, 0).x < 0.5) {
+        return;
+    }
+    if (internal_edges.x != 0 && cell.x == 0 && solve_rect.x > 0) {
+        append_request({GPUCollapsePipeline.FORMAL_EXPAND_LEFT}u, ivec4(0, solve_rect.y, solve_rect.z, solve_rect.w));
+    }
+    if (internal_edges.y != 0 && cell.y == 0 && solve_rect.y > 0) {
+        append_request({GPUCollapsePipeline.FORMAL_EXPAND_TOP}u, ivec4(solve_rect.x, 0, solve_rect.z, solve_rect.w));
+    }
+    if (internal_edges.z != 0 && cell.x == region_size.x - 1 && solve_rect.z < world_size.x) {
+        append_request({GPUCollapsePipeline.FORMAL_EXPAND_RIGHT}u, ivec4(solve_rect.x, solve_rect.y, world_size.x, solve_rect.w));
+    }
+    if (internal_edges.w != 0 && cell.y == region_size.y - 1 && solve_rect.w < world_size.y) {
+        append_request({GPUCollapsePipeline.FORMAL_EXPAND_BOTTOM}u, ivec4(solve_rect.x, solve_rect.y, solve_rect.z, world_size.y));
+    }
+}

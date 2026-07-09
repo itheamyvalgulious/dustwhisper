@@ -1,0 +1,20 @@
+#version 430
+layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+uniform ivec2 region_size;
+uniform ivec2 region_origin;
+uniform ivec2 cell_grid_size;
+
+layout(binding=0) uniform sampler2D pending_tex;
+layout(std430, binding=0) writeonly buffer BridgePendingBuffer {
+    int bridge_pending[];
+};
+
+void main() {
+    ivec2 local_cell = ivec2(gl_GlobalInvocationID.xy);
+    if (local_cell.x >= region_size.x || local_cell.y >= region_size.y) {
+        return;
+    }
+    ivec2 world_cell = region_origin + local_cell;
+    int cell_index = world_cell.y * cell_grid_size.x + world_cell.x;
+    bridge_pending[cell_index] = texelFetch(pending_tex, local_cell, 0).x > 0.5 ? 1 : 0;
+}

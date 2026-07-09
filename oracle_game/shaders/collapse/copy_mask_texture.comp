@@ -1,0 +1,15 @@
+#version 430
+layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+uniform ivec2 region_size;
+
+layout(binding=0) uniform sampler2D source_tex;
+layout(r32f, binding=1) writeonly uniform image2D target_img;
+
+void main() {
+    ivec2 cell = ivec2(gl_GlobalInvocationID.xy);
+    if (cell.x >= region_size.x || cell.y >= region_size.y) {
+        return;
+    }
+    float value = texelFetch(source_tex, cell, 0).x > 0.5 ? 1.0 : 0.0;
+    imageStore(target_img, cell, vec4(value, 0.0, 0.0, 0.0));
+}

@@ -1,0 +1,48 @@
+#version 430
+layout(local_size_x={{LOCAL_SIZE}}, local_size_y=1, local_size_z=1) in;
+uniform int runtime_capacity;
+
+layout(std430, binding=0) readonly buffer BridgeIslandRuntimeWords {
+    int runtime_words[];
+};
+layout(std430, binding=1) buffer IslandIds {
+    int island_ids[];
+};
+layout(std430, binding=2) buffer IslandBboxes {
+    ivec4 island_bboxes[];
+};
+layout(std430, binding=3) buffer IslandMotion {
+    vec4 island_motion[];
+};
+layout(std430, binding=4) readonly buffer BridgeIslandRuntimeCount {
+    int runtime_count;
+};
+
+void main() {
+    int gid = int(gl_GlobalInvocationID.x);
+    int count = clamp(runtime_count, 0, max(runtime_capacity, 0));
+    if (gid >= count) {
+        return;
+    }
+    int base = gid * {ISLAND_RUNTIME_DTYPE.itemsize // 4};
+    int island_id = runtime_words[base];
+    if (island_id <= 0) {
+        island_ids[gid] = 0;
+        island_bboxes[gid] = ivec4(0);
+        island_motion[gid] = vec4(0.0);
+        return;
+    }
+    island_ids[gid] = island_id;
+    island_bboxes[gid] = ivec4(
+        runtime_words[base + 1],
+        runtime_words[base + 2],
+        runtime_words[base + 3],
+        runtime_words[base + 4]
+    );
+    island_motion[gid] = vec4(
+        intBitsToFloat(runtime_words[base + 9]),
+        intBitsToFloat(runtime_words[base + 10]) + 0.9,
+        intBitsToFloat(runtime_words[base + 11]),
+        intBitsToFloat(runtime_words[base + 12])
+    );
+}

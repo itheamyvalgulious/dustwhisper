@@ -1,0 +1,165 @@
+#version 430
+layout(local_size_x={{PASS_LOCAL_SIZE}}, local_size_y={{PASS_LOCAL_SIZE}}, local_size_z=1) in;
+uniform ivec2 cell_grid_size;
+uniform ivec2 tile_grid_size;
+uniform int tile_size;
+uniform int active_ttl_reset;
+uniform int phase_liquid;
+uniform int phase_powder;
+layout(binding=0) uniform sampler2D material_in_tex;
+layout(binding=1) uniform sampler2D phase_in_tex;
+layout(binding=2) uniform sampler2D flags_in_tex;
+layout(binding=3) uniform sampler2D timer_in_tex;
+layout(binding=4) uniform sampler2D temp_in_tex;
+layout(binding=5) uniform sampler2D integrity_in_tex;
+layout(binding=6) uniform sampler2D velocity_in_tex;
+layout(binding=7) uniform sampler2D active_tile_tex;
+layout(std430, binding=0) buffer MaterialParams {
+    vec4 material_params[{{MAX_MATERIALS}}];
+};
+layout(std430, binding=1) buffer ActiveTileTTLBuffer {
+    int active_tile_ttl[];
+};
+layout(std430, binding=2) readonly buffer ActiveTileCountBuffer {
+    uint active_tile_count[];
+};
+layout(std430, binding=3) readonly buffer ActiveTileListBuffer {
+    ivec2 active_tile_list[];
+};
+layout(r32f, binding=0) writeonly uniform image2D material_out_img;
+layout(r32f, binding=1) writeonly uniform image2D phase_out_img;
+layout(r32f, binding=2) writeonly uniform image2D flags_out_img;
+layout(rgba32f, binding=3) writeonly uniform image2D timer_out_img;
+layout(r32f, binding=4) writeonly uniform image2D temp_out_img;
+layout(r32f, binding=5) writeonly uniform image2D integrity_out_img;
+layout(rg32f, binding=6) writeonly uniform image2D velocity_out_img;
+
+bool tile_active(ivec2 cell) {
+    ivec2 tile = ivec2(
+        min(tile_grid_size.x - 1, max(0, cell.x / tile_size)),
+        min(tile_grid_size.y - 1, max(0, cell.y / tile_size))
+    );
+    return texelFetch(active_tile_tex, tile, 0).x > 0.5;
+}
+
+void store_state(
+    ivec2 cell,
+    float material,
+    float phase,
+    float flagsv,
+    vec4 timerv,
+    float tempv,
+    float integrityv,
+    vec2 velocityv
+) {
+    imageStore(material_out_img, cell, vec4(material, 0.0, 0.0, 0.0));
+    imageStore(phase_out_img, cell, vec4(phase, 0.0, 0.0, 0.0));
+    imageStore(flags_out_img, cell, vec4(flagsv, 0.0, 0.0, 0.0));
+    imageStore(timer_out_img, cell, timerv);
+    imageStore(temp_out_img, cell, vec4(tempv, 0.0, 0.0, 0.0));
+    imageStore(integrity_out_img, cell, vec4(integrityv, 0.0, 0.0, 0.0));
+    imageStore(velocity_out_img, cell, vec4(velocityv, 0.0, 0.0));
+}
+
+float density_for(float material) {
+    int material_id = clamp(int(material + 0.5), 0, {MAX_MATERIALS - 1});
+    return material_params[material_id].x;
+}
+
+void refresh_changed_cell(ivec2 changed_cell) {
+    if (
+        changed_cell.x < 0
+        || changed_cell.y < 0
+        || changed_cell.x >= cell_grid_size.x
+        || changed_cell.y >= cell_grid_size.y
+    ) {
+        return;
+    }
+    ivec2 changed_tile = ivec2(
+        clamp(changed_cell.x / tile_size, 0, tile_grid_size.x - 1),
+        clamp(changed_cell.y / tile_size, 0, tile_grid_size.y - 1)
+    );
+    active_tile_ttl[changed_tile.y * tile_grid_size.x + changed_tile.x] = active_ttl_reset;
+}
+
+bool active_dispatch_cell(out ivec2 cell) {
+    int groups_per_tile_axis = max(1, (tile_size + {PASS_LOCAL_SIZE - 1}) / {{PASS_LOCAL_SIZE}});
+    int workgroups_per_tile = groups_per_tile_axis * groups_per_tile_axis;
+    uint group_index = gl_WorkGroupID.x;
+    uint active_tile_index = group_index / uint(workgroups_per_tile);
+    if (active_tile_index >= active_tile_count[0]) {
+        return false;
+    }
+    int subtile = int(group_index % uint(workgroups_per_tile));
+    ivec2 subtile_xy = ivec2(subtile % groups_per_tile_axis, subtile / groups_per_tile_axis);
+    ivec2 tile = active_tile_list[int(active_tile_index)];
+    if (tile.x < 0 || tile.y < 0 || tile.x >= tile_grid_size.x || tile.y >= tile_grid_size.y) {
+        return false;
+    }
+    ivec2 tile_origin = tile * tile_size;
+    ivec2 local_cell = subtile_xy * {{PASS_LOCAL_SIZE}} + ivec2(gl_LocalInvocationID.xy);
+    cell = tile_origin + local_cell;
+    ivec2 tile_end = min(tile_origin + ivec2(tile_size), cell_grid_size);
+    return cell.x < tile_end.x && cell.y < tile_end.y;
+}
+
+void main() {
+    ivec2 gid;
+    if (!active_dispatch_cell(gid)) {
+        return;
+    }
+    float material = texelFetch(material_in_tex, gid, 0).x;
+    float phase = texelFetch(phase_in_tex, gid, 0).x;
+    float flagsv = texelFetch(flags_in_tex, gid, 0).x;
+    vec4 timerv = texelFetch(timer_in_tex, gid, 0);
+    float tempv = texelFetch(temp_in_tex, gid, 0).x;
+    float integrityv = texelFetch(integrity_in_tex, gid, 0).x;
+    vec2 velocityv = texelFetch(velocity_in_tex, gid, 0).xy;
+    {
+        if (gid.y + 1 < cell_grid_size.y) {
+            ivec2 below = ivec2(gid.x, gid.y + 1);
+            float below_material = texelFetch(material_in_tex, below, 0).x;
+            float below_phase = texelFetch(phase_in_tex, below, 0).x;
+            if (material > 0.5 && int(phase + 0.5) == phase_powder && below_material > 0.5 && int(below_phase + 0.5) == phase_liquid) {
+                if (density_for(material) > density_for(below_material)) {
+                    store_state(
+                        gid,
+                        below_material,
+                        below_phase,
+                        texelFetch(flags_in_tex, below, 0).x,
+                        texelFetch(timer_in_tex, below, 0),
+                        texelFetch(temp_in_tex, below, 0).x,
+                        texelFetch(integrity_in_tex, below, 0).x,
+                        texelFetch(velocity_in_tex, below, 0).xy
+                    );
+                    refresh_changed_cell(gid);
+                    refresh_changed_cell(below);
+                    return;
+                }
+            }
+        }
+        if (gid.y > 0) {
+            ivec2 above = ivec2(gid.x, gid.y - 1);
+            float above_material = texelFetch(material_in_tex, above, 0).x;
+            float above_phase = texelFetch(phase_in_tex, above, 0).x;
+            if (material > 0.5 && int(phase + 0.5) == phase_liquid && above_material > 0.5 && int(above_phase + 0.5) == phase_powder) {
+                if (density_for(above_material) > density_for(material)) {
+                    store_state(
+                        gid,
+                        above_material,
+                        above_phase,
+                        texelFetch(flags_in_tex, above, 0).x,
+                        texelFetch(timer_in_tex, above, 0),
+                        texelFetch(temp_in_tex, above, 0).x,
+                        texelFetch(integrity_in_tex, above, 0).x,
+                        texelFetch(velocity_in_tex, above, 0).xy
+                    );
+                    refresh_changed_cell(gid);
+                    refresh_changed_cell(above);
+                    return;
+                }
+            }
+        }
+    }
+    store_state(gid, material, phase, flagsv, timerv, tempv, integrityv, velocityv);
+}

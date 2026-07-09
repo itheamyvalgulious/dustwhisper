@@ -1,0 +1,54 @@
+#version 430
+layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+uniform ivec2 region_size;
+uniform int jump;
+layout(binding=0) uniform sampler2D label_in_tex;
+layout(r32f, binding=1) writeonly uniform image2D label_out_img;
+layout(std430, binding=0) buffer ChangeFlagBuffer {
+    uint change_flag;
+};
+
+bool label_line_clear(ivec2 start_cell, ivec2 end_cell) {
+    ivec2 delta = end_cell - start_cell;
+    int steps = max(abs(delta.x), abs(delta.y));
+    if (steps <= 1) {
+        return true;
+    }
+    for (int step_index = 1; step_index < steps; ++step_index) {
+        float t = float(step_index) / float(steps);
+        ivec2 sample_cell = ivec2(round(mix(vec2(start_cell), vec2(end_cell), t)));
+        if (texelFetch(label_in_tex, sample_cell, 0).x < 0.5) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void main() {
+    ivec2 cell = ivec2(gl_GlobalInvocationID.xy);
+    if (cell.x >= region_size.x || cell.y >= region_size.y) {
+        return;
+    }
+    float current = texelFetch(label_in_tex, cell, 0).x;
+    float next_value = current;
+    if (current > 0.5) {
+        for (int axis = 0; axis < 4; ++axis) {
+            ivec2 offset = axis == 0 ? ivec2(-jump, 0) : axis == 1 ? ivec2(jump, 0) : axis == 2 ? ivec2(0, -jump) : ivec2(0, jump);
+            ivec2 sample_cell = cell + offset;
+            if (sample_cell.x < 0 || sample_cell.y < 0 || sample_cell.x >= region_size.x || sample_cell.y >= region_size.y) {
+                continue;
+            }
+            if (!label_line_clear(cell, sample_cell)) {
+                continue;
+            }
+            float sample_label = texelFetch(label_in_tex, sample_cell, 0).x;
+            if (sample_label > 0.5 && sample_label < next_value) {
+                next_value = sample_label;
+            }
+        }
+    }
+    imageStore(label_out_img, cell, vec4(next_value, 0.0, 0.0, 0.0));
+    if (next_value + 0.5 < current) {
+        atomicOr(change_flag, 1u);
+    }
+}

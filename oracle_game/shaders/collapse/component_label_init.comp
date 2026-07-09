@@ -1,0 +1,15 @@
+#version 430
+layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+uniform ivec2 region_size;
+layout(binding=0) uniform sampler2D collapse_mask_tex;
+layout(r32f, binding=1) writeonly uniform image2D label_out_img;
+
+void main() {
+    ivec2 cell = ivec2(gl_GlobalInvocationID.xy);
+    if (cell.x >= region_size.x || cell.y >= region_size.y) {
+        return;
+    }
+    float mask_value = texelFetch(collapse_mask_tex, cell, 0).x;
+    float label = mask_value > 0.5 ? float(cell.y * region_size.x + cell.x + 1) : 0.0;
+    imageStore(label_out_img, cell, vec4(label, 0.0, 0.0, 0.0));
+}

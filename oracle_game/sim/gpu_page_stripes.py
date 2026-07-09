@@ -7,6 +7,7 @@ import numpy as np
 
 from oracle_game.gpu import moderngl, unpack_cell_core
 from oracle_game.sim.gpu_base import GPUPipelineBase
+from oracle_game.sim.shader_loader import build_compute_shader
 from oracle_game.types import Phase
 
 
@@ -617,74 +618,7 @@ class GPUPageStripePipeline(GPUPipelineBase):
         program = self.programs.get(key)
         if program is not None:
             return program
-        program = ctx.compute_shader(
-            f"""
-            #version 430
-            layout(local_size_x={LOCAL_SIZE}, local_size_y=1, local_size_z=1) in;
-            uniform int total_count;
-            uniform ivec2 grid_size;
-            uniform int axis_id;
-            uniform int range_start;
-            uniform int range_span;
-            uniform int falling_island_phase;
-            uniform int placeholder_count;
-            layout(std430, binding=0) buffer CellCore {{
-                uint cell_core[];
-            }};
-            layout(std430, binding=1) buffer IslandValues {{
-                int island_id[];
-            }};
-            layout(std430, binding=2) buffer EntityValues {{
-                int entity_id[];
-            }};
-            layout(std430, binding=3) buffer DisplacedValues {{
-                int displaced_material[];
-            }};
-            layout(std430, binding=4) readonly buffer PlaceholderFlags {{
-                int material_is_placeholder[];
-            }};
-
-            void main() {{
-                int linear = int(gl_GlobalInvocationID.x);
-                if (linear >= total_count) {{
-                    return;
-                }}
-                int x = 0;
-                int y = 0;
-                if (axis_id == 1) {{
-                    y = linear / range_span;
-                    x = range_start + (linear - y * range_span);
-                }} else {{
-                    y = range_start + (linear / grid_size.x);
-                    x = linear % grid_size.x;
-                }}
-                if (x < 0 || x >= grid_size.x || y < 0 || y >= grid_size.y) {{
-                    return;
-                }}
-                int index = y * grid_size.x + x;
-                int word_index = index * 5;
-                uint word0 = cell_core[word_index];
-                int material = int(word0 & 0xFFFFu);
-                int phase = int((word0 >> 16u) & 0xFFu);
-                bool empty_cell = material <= 0;
-                if (empty_cell) {{
-                    phase = 0;
-                    cell_core[word_index] = (word0 & 0xFF00FFFFu) | (uint(phase) << 16u);
-                }}
-                bool placeholder = false;
-                if (material > 0 && material < placeholder_count) {{
-                    placeholder = material_is_placeholder[material] != 0;
-                }}
-                if (empty_cell || !placeholder) {{
-                    entity_id[index] = 0;
-                    displaced_material[index] = 0;
-                }}
-                if (island_id[index] > 0 && (phase != falling_island_phase || material <= 0)) {{
-                    island_id[index] = 0;
-                }}
-            }}
-            """
-        )
+        program = build_compute_shader(ctx, "page_stripes/normalize_bridge.comp", {"LOCAL_SIZE": LOCAL_SIZE})
         self.programs[key] = program
         return program
 
@@ -842,80 +776,7 @@ class GPUPageStripePipeline(GPUPipelineBase):
         if program is not None:
             return program
         scalar_type = "float" if kind == "float" else "int"
-        program = ctx.compute_shader(
-            f"""
-            #version 430
-            layout(local_size_x={LOCAL_SIZE}, local_size_y=1, local_size_z=1) in;
-            uniform int total_count;
-            uniform int ndim;
-            uniform int stripe_axis;
-            uniform int src_axis_offset;
-            uniform int dst_axis_start;
-            uniform int axis_span;
-            uniform ivec3 src_shape;
-            uniform ivec3 dst_shape;
-            layout(std430, binding=0) readonly buffer SourceValues {{
-                {scalar_type} source_values[];
-            }};
-            layout(std430, binding=1) buffer DestValues {{
-                {scalar_type} dest_values[];
-            }};
-
-            int copy_dim(int axis) {{
-                if (axis == stripe_axis) {{
-                    return axis_span;
-                }}
-                if (axis == 0) return src_shape.x;
-                if (axis == 1) return src_shape.y;
-                return src_shape.z;
-            }}
-
-            int flatten_index(ivec3 coord, ivec3 shape) {{
-                if (ndim == 1) {{
-                    return coord.x;
-                }}
-                if (ndim == 2) {{
-                    return coord.x * shape.y + coord.y;
-                }}
-                return (coord.x * shape.y + coord.y) * shape.z + coord.z;
-            }}
-
-            void main() {{
-                int linear = int(gl_GlobalInvocationID.x);
-                if (linear >= total_count) {{
-                    return;
-                }}
-                ivec3 copy_shape = ivec3(copy_dim(0), max(1, copy_dim(1)), max(1, copy_dim(2)));
-                ivec3 coord = ivec3(0);
-                if (ndim == 1) {{
-                    coord.x = linear;
-                }} else if (ndim == 2) {{
-                    coord.x = linear / copy_shape.y;
-                    coord.y = linear - coord.x * copy_shape.y;
-                }} else {{
-                    coord.z = linear % copy_shape.z;
-                    int rem = linear / copy_shape.z;
-                    coord.y = rem % copy_shape.y;
-                    coord.x = rem / copy_shape.y;
-                }}
-                ivec3 src_coord = coord;
-                ivec3 dst_coord = coord;
-                if (stripe_axis == 0) {{
-                    src_coord.x += src_axis_offset;
-                    dst_coord.x += dst_axis_start;
-                }} else if (stripe_axis == 1) {{
-                    src_coord.y += src_axis_offset;
-                    dst_coord.y += dst_axis_start;
-                }} else {{
-                    src_coord.z += src_axis_offset;
-                    dst_coord.z += dst_axis_start;
-                }}
-                int src_index = flatten_index(src_coord, src_shape);
-                int dst_index = flatten_index(dst_coord, dst_shape);
-                dest_values[dst_index] = source_values[src_index];
-            }}
-            """
-        )
+        program = build_compute_shader(ctx, "page_stripes/program.comp", {"LOCAL_SIZE": LOCAL_SIZE, "scalar_type": scalar_type})
         self.programs[key] = program
         return program
 
@@ -924,73 +785,7 @@ class GPUPageStripePipeline(GPUPipelineBase):
         program = self.programs.get(key)
         if program is not None:
             return program
-        program = ctx.compute_shader(
-            f"""
-            #version 430
-            layout(local_size_x={LOCAL_SIZE}, local_size_y=1, local_size_z=1) in;
-            uniform int total_count;
-            uniform ivec2 grid_size;
-            uniform int axis_id;
-            uniform int range_start;
-            uniform int range_span;
-            uniform int falling_island_phase;
-            uniform int placeholder_count;
-            layout(std430, binding=0) readonly buffer MaterialValues {{
-                int material_id[];
-            }};
-            layout(std430, binding=1) buffer PhaseValues {{
-                int phase[];
-            }};
-            layout(std430, binding=2) buffer IslandValues {{
-                int island_id[];
-            }};
-            layout(std430, binding=3) buffer EntityValues {{
-                int entity_id[];
-            }};
-            layout(std430, binding=4) buffer DisplacedValues {{
-                int displaced_material[];
-            }};
-            layout(std430, binding=5) readonly buffer PlaceholderFlags {{
-                int material_is_placeholder[];
-            }};
-
-            void main() {{
-                int linear = int(gl_GlobalInvocationID.x);
-                if (linear >= total_count) {{
-                    return;
-                }}
-                int x = 0;
-                int y = 0;
-                if (axis_id == 1) {{
-                    y = linear / range_span;
-                    x = range_start + (linear - y * range_span);
-                }} else {{
-                    y = range_start + (linear / grid_size.x);
-                    x = linear % grid_size.x;
-                }}
-                if (x < 0 || x >= grid_size.x || y < 0 || y >= grid_size.y) {{
-                    return;
-                }}
-                int index = y * grid_size.x + x;
-                int material = material_id[index];
-                bool empty_cell = material <= 0;
-                if (empty_cell) {{
-                    phase[index] = 0;
-                }}
-                bool placeholder = false;
-                if (material > 0 && material < placeholder_count) {{
-                    placeholder = material_is_placeholder[material] != 0;
-                }}
-                if (empty_cell || !placeholder) {{
-                    entity_id[index] = 0;
-                    displaced_material[index] = 0;
-                }}
-                if (island_id[index] > 0 && (phase[index] != falling_island_phase || material <= 0)) {{
-                    island_id[index] = 0;
-                }}
-            }}
-            """
-        )
+        program = build_compute_shader(ctx, "page_stripes/normalize.comp", {"LOCAL_SIZE": LOCAL_SIZE})
         self.programs[key] = program
         return program
 

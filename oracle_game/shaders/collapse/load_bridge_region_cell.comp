@@ -1,0 +1,45 @@
+#version 430
+layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+uniform ivec2 region_size;
+uniform ivec2 region_origin;
+uniform ivec2 cell_grid_size;
+uniform bool copy_cell_core;
+
+layout(std430, binding=0) readonly buffer BridgeCellCoreBuffer {
+    uint bridge_cell_core[];
+};
+
+layout(r32f, binding=0) writeonly uniform image2D material_img;
+layout(r32f, binding=1) writeonly uniform image2D phase_img;
+layout(r32f, binding=2) writeonly uniform image2D flags_img;
+layout(rgba32f, binding=3) writeonly uniform image2D timer_img;
+layout(r32f, binding=4) writeonly uniform image2D integrity_img;
+layout(r32f, binding=5) writeonly uniform image2D temp_img;
+
+vec4 unpack_timer(uint word) {
+    return vec4(
+        float(word & 0xFFu),
+        float((word >> 8u) & 0xFFu),
+        float((word >> 16u) & 0xFFu),
+        float((word >> 24u) & 0xFFu)
+    );
+}
+
+void main() {
+    ivec2 local_cell = ivec2(gl_GlobalInvocationID.xy);
+    if (local_cell.x >= region_size.x || local_cell.y >= region_size.y) {
+        return;
+    }
+    ivec2 world_cell = region_origin + local_cell;
+    int cell_index = world_cell.y * cell_grid_size.x + world_cell.x;
+    if (copy_cell_core) {
+        int word_index = cell_index * 5;
+        uint word0 = bridge_cell_core[word_index];
+        imageStore(material_img, local_cell, vec4(float(word0 & 0xFFFFu), 0.0, 0.0, 0.0));
+        imageStore(phase_img, local_cell, vec4(float((word0 >> 16u) & 0xFFu), 0.0, 0.0, 0.0));
+        imageStore(flags_img, local_cell, vec4(float((word0 >> 24u) & 0xFFu), 0.0, 0.0, 0.0));
+        imageStore(temp_img, local_cell, vec4(uintBitsToFloat(bridge_cell_core[word_index + 2]), 0.0, 0.0, 0.0));
+        imageStore(timer_img, local_cell, unpack_timer(bridge_cell_core[word_index + 3]));
+        imageStore(integrity_img, local_cell, vec4(float(bridge_cell_core[word_index + 4] & 0xFFFFu), 0.0, 0.0, 0.0));
+    }
+}

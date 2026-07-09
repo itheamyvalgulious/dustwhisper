@@ -1,0 +1,64 @@
+#version 430
+layout(local_size_x={{LOCAL_SIZE}}, local_size_y=1, local_size_z=1) in;
+uniform int total_count;
+uniform ivec2 grid_size;
+uniform int axis_id;
+uniform int range_start;
+uniform int range_span;
+uniform int falling_island_phase;
+uniform int placeholder_count;
+layout(std430, binding=0) buffer CellCore {
+    uint cell_core[];
+};
+layout(std430, binding=1) buffer IslandValues {
+    int island_id[];
+};
+layout(std430, binding=2) buffer EntityValues {
+    int entity_id[];
+};
+layout(std430, binding=3) buffer DisplacedValues {
+    int displaced_material[];
+};
+layout(std430, binding=4) readonly buffer PlaceholderFlags {
+    int material_is_placeholder[];
+};
+
+void main() {
+    int linear = int(gl_GlobalInvocationID.x);
+    if (linear >= total_count) {
+        return;
+    }
+    int x = 0;
+    int y = 0;
+    if (axis_id == 1) {
+        y = linear / range_span;
+        x = range_start + (linear - y * range_span);
+    } else {
+        y = range_start + (linear / grid_size.x);
+        x = linear % grid_size.x;
+    }
+    if (x < 0 || x >= grid_size.x || y < 0 || y >= grid_size.y) {
+        return;
+    }
+    int index = y * grid_size.x + x;
+    int word_index = index * 5;
+    uint word0 = cell_core[word_index];
+    int material = int(word0 & 0xFFFFu);
+    int phase = int((word0 >> 16u) & 0xFFu);
+    bool empty_cell = material <= 0;
+    if (empty_cell) {
+        phase = 0;
+        cell_core[word_index] = (word0 & 0xFF00FFFFu) | (uint(phase) << 16u);
+    }
+    bool placeholder = false;
+    if (material > 0 && material < placeholder_count) {
+        placeholder = material_is_placeholder[material] != 0;
+    }
+    if (empty_cell || !placeholder) {
+        entity_id[index] = 0;
+        displaced_material[index] = 0;
+    }
+    if (island_id[index] > 0 && (phase != falling_island_phase || material <= 0)) {
+        island_id[index] = 0;
+    }
+}

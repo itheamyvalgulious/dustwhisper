@@ -1,0 +1,146 @@
+#version 430
+layout(local_size_x={{POWDER_RESERVATION_LOCAL_SIZE}}, local_size_y=1, local_size_z=1) in;
+uniform ivec2 cell_grid_size;
+uniform ivec2 tile_grid_size;
+uniform int tile_size;
+uniform uint workgroups_per_tile;
+uniform int operation;
+
+struct FallingIslandReservation {
+    int island_id;
+    int bbox_x;
+    int bbox_y;
+    int bbox_z;
+    int bbox_w;
+    float velocity_x;
+    float velocity_y;
+    float subcell_x;
+    float subcell_y;
+    int target_dx;
+    int target_dy;
+    int reserved_dx;
+    int reserved_dy;
+    int resolved_dx;
+    int resolved_dy;
+    int resolve_state;
+};
+
+layout(std430, binding=0) readonly buffer IslandReservations {
+    FallingIslandReservation reservations[];
+};
+layout(std430, binding=1) readonly buffer IslandReservationCount {
+    int reservation_count;
+};
+layout(std430, binding=2) buffer FallingIslandAffectedTileFlags {
+    uint affected_tile_flags[];
+};
+layout(std430, binding=3) buffer ActiveTileCountBuffer {
+    uint active_tile_count[];
+};
+layout(std430, binding=4) buffer ActiveTileListBuffer {
+    ivec2 active_tile_list[];
+};
+layout(std430, binding=5) buffer ActiveTileDispatchArgsBuffer {
+    uint active_tile_dispatch_args[];
+};
+
+int active_reservation_count() {
+    return clamp(reservation_count, 0, cell_grid_size.x * cell_grid_size.y);
+}
+
+bool valid_reservation(FallingIslandReservation reservation) {
+    return reservation.island_id > 0 && reservation.resolve_state != {{ISLAND_RESOLVE_STALE}};
+}
+
+bool moving_reservation(FallingIslandReservation reservation) {
+    return valid_reservation(reservation)
+        && (reservation.resolved_dx != 0 || reservation.resolved_dy != 0);
+}
+
+bool settling_reservation(FallingIslandReservation reservation) {
+    return valid_reservation(reservation)
+        && (reservation.target_dx != 0 || reservation.target_dy != 0)
+        && reservation.resolved_dx == 0
+        && reservation.resolved_dy == 0;
+}
+
+void append_tile(ivec2 tile) {
+    if (tile.x < 0 || tile.y < 0 || tile.x >= tile_grid_size.x || tile.y >= tile_grid_size.y) {
+        return;
+    }
+    int tile_index = tile.y * tile_grid_size.x + tile.x;
+    uint previous = atomicExchange(affected_tile_flags[tile_index], 1u);
+    if (previous != 0u) {
+        return;
+    }
+    uint slot = atomicAdd(active_tile_count[0], 1u);
+    active_tile_list[int(slot)] = tile;
+    atomicMax(active_tile_dispatch_args[0], (slot + 1u) * max(workgroups_per_tile, 1u));
+}
+
+void append_bbox(ivec4 bbox) {
+    int x0 = clamp(min(bbox.x, bbox.z), 0, cell_grid_size.x);
+    int y0 = clamp(min(bbox.y, bbox.w), 0, cell_grid_size.y);
+    int x1 = clamp(max(bbox.x, bbox.z), 0, cell_grid_size.x);
+    int y1 = clamp(max(bbox.y, bbox.w), 0, cell_grid_size.y);
+    if (x1 <= x0 || y1 <= y0) {
+        return;
+    }
+    int tile_x0 = clamp(x0 / tile_size, 0, tile_grid_size.x - 1);
+    int tile_y0 = clamp(y0 / tile_size, 0, tile_grid_size.y - 1);
+    int tile_x1 = clamp((x1 + tile_size - 1) / tile_size, 0, tile_grid_size.x);
+    int tile_y1 = clamp((y1 + tile_size - 1) / tile_size, 0, tile_grid_size.y);
+    for (int tile_y = tile_y0; tile_y < tile_y1; ++tile_y) {
+        for (int tile_x = tile_x0; tile_x < tile_x1; ++tile_x) {
+            append_tile(ivec2(tile_x, tile_y));
+        }
+    }
+}
+
+void main() {
+    int index = int(gl_GlobalInvocationID.x);
+    if (index >= active_reservation_count()) {
+        return;
+    }
+    FallingIslandReservation reservation = reservations[index];
+    ivec4 source_bbox = ivec4(
+        reservation.bbox_x,
+        reservation.bbox_y,
+        reservation.bbox_z,
+        reservation.bbox_w
+    );
+    if (operation == 0) {
+        if (!moving_reservation(reservation)) {
+            return;
+        }
+        append_bbox(source_bbox);
+        append_bbox(source_bbox + ivec4(
+            reservation.resolved_dx,
+            reservation.resolved_dy,
+            reservation.resolved_dx,
+            reservation.resolved_dy
+        ));
+        return;
+    }
+    if (operation == 2) {
+        if (!valid_reservation(reservation)) {
+            return;
+        }
+        ivec4 target_bbox = source_bbox + ivec4(
+            reservation.target_dx,
+            reservation.target_dy,
+            reservation.target_dx,
+            reservation.target_dy
+        );
+        append_bbox(ivec4(
+            min(source_bbox.x, target_bbox.x),
+            min(source_bbox.y, target_bbox.y),
+            max(source_bbox.z, target_bbox.z),
+            max(source_bbox.w, target_bbox.w)
+        ));
+        return;
+    }
+    if (settling_reservation(reservation)) {
+        append_bbox(source_bbox);
+    }
+}

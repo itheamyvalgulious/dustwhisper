@@ -1,0 +1,46 @@
+#version 430
+layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+uniform ivec2 cell_grid_size;
+layout(binding=0) uniform sampler2D label_in_tex;
+layout(r32f, binding=1) writeonly uniform image2D label_out_img;
+layout(std430, binding=0) buffer ComponentChangeFlag {
+    uint component_change_flag;
+};
+
+void main() {
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
+        return;
+    }
+    float current = texelFetch(label_in_tex, gid, 0).x;
+    if (current <= 0.5) {
+        imageStore(label_out_img, gid, vec4(0.0, 0.0, 0.0, 0.0));
+        return;
+    }
+    float next_label = current;
+    ivec2 offsets[4] = ivec2[4](
+        ivec2(-1, 0),
+        ivec2(1, 0),
+        ivec2(0, -1),
+        ivec2(0, 1)
+    );
+    for (int index = 0; index < 4; ++index) {
+        ivec2 sample_cell = gid + offsets[index];
+        if (
+            sample_cell.x < 0
+            || sample_cell.y < 0
+            || sample_cell.x >= cell_grid_size.x
+            || sample_cell.y >= cell_grid_size.y
+        ) {
+            continue;
+        }
+        float candidate = texelFetch(label_in_tex, sample_cell, 0).x;
+        if (candidate > 0.5 && candidate < next_label) {
+            next_label = candidate;
+        }
+    }
+    imageStore(label_out_img, gid, vec4(next_label, 0.0, 0.0, 0.0));
+    if (abs(next_label - current) > 0.5) {
+        atomicOr(component_change_flag, 1u);
+    }
+}

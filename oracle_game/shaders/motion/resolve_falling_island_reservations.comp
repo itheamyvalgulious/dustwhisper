@@ -1,0 +1,264 @@
+#version 430
+layout(local_size_x={{LOCAL_SIZE}}, local_size_y=1, local_size_z=1) in;
+uniform ivec2 cell_grid_size;
+uniform int reservation_count;
+uniform bool use_reservation_count_buffer;
+
+struct FallingIslandReservation {
+    int island_id;
+    int bbox_x;
+    int bbox_y;
+    int bbox_z;
+    int bbox_w;
+    float velocity_x;
+    float velocity_y;
+    float subcell_x;
+    float subcell_y;
+    int target_dx;
+    int target_dy;
+    int reserved_dx;
+    int reserved_dy;
+    int resolved_dx;
+    int resolved_dy;
+    int resolve_state;
+};
+
+layout(std430, binding=0) buffer IslandReservations {
+    FallingIslandReservation reservations[];
+};
+layout(std430, binding=1) buffer MaterialContactParams {
+    vec4 contact_params[{{MAX_MATERIALS}}];
+};
+layout(std430, binding=2) readonly buffer IslandReservationCount {
+    int reservation_count_buffer;
+};
+layout(std430, binding=3) readonly buffer IslandReservationSourceIndex {
+    int reservation_source_index[];
+};
+
+layout(binding=0) uniform sampler2D material_tex;
+layout(binding=1) uniform sampler2D island_id_tex;
+
+int active_reservation_count() {
+    if (use_reservation_count_buffer) {
+        return clamp(reservation_count_buffer, 0, max(reservation_count, 0));
+    }
+    return max(reservation_count, 0);
+}
+
+int cell_index(ivec2 cell) {
+    return cell.y * cell_grid_size.x + cell.x;
+}
+
+ivec4 order_key(FallingIslandReservation reservation) {
+    if (reservation.target_dy > 0) {
+        return ivec4(0, -reservation.bbox_w, reservation.bbox_x, reservation.island_id);
+    }
+    if (reservation.target_dy < 0) {
+        return ivec4(1, reservation.bbox_y, reservation.bbox_x, reservation.island_id);
+    }
+    if (reservation.target_dx > 0) {
+        return ivec4(2, -reservation.bbox_z, reservation.bbox_y, reservation.island_id);
+    }
+    if (reservation.target_dx < 0) {
+        return ivec4(3, reservation.bbox_x, reservation.bbox_y, reservation.island_id);
+    }
+    return ivec4(4, reservation.bbox_y, reservation.bbox_x, reservation.island_id);
+}
+
+bool key_less(ivec4 lhs, ivec4 rhs) {
+    if (lhs.x != rhs.x) {
+        return lhs.x < rhs.x;
+    }
+    if (lhs.y != rhs.y) {
+        return lhs.y < rhs.y;
+    }
+    if (lhs.z != rhs.z) {
+        return lhs.z < rhs.z;
+    }
+    return lhs.w < rhs.w;
+}
+
+bool source_matches(FallingIslandReservation reservation, ivec2 cell) {
+    if (
+        cell.x < reservation.bbox_x
+        || cell.x >= reservation.bbox_z
+        || cell.y < reservation.bbox_y
+        || cell.y >= reservation.bbox_w
+    ) {
+        return false;
+    }
+    int island_id = int(texelFetch(island_id_tex, cell, 0).x + 0.5);
+    int material_id = int(texelFetch(material_tex, cell, 0).x + 0.5);
+    return island_id == reservation.island_id && material_id > 0;
+}
+
+int reservation_source_index_for_cell(ivec2 cell) {
+    if (cell.x < 0 || cell.y < 0 || cell.x >= cell_grid_size.x || cell.y >= cell_grid_size.y) {
+        return -1;
+    }
+    int index = reservation_source_index[cell_index(cell)];
+    int count = active_reservation_count();
+    if (index < 0 || index >= count) {
+        return -1;
+    }
+    if (!source_matches(reservations[index], cell)) {
+        return -1;
+    }
+    return index;
+}
+
+bool reservation_clears_cell(FallingIslandReservation blocker, ivec2 cell) {
+    ivec2 blocker_shift = ivec2(blocker.reserved_dx, blocker.reserved_dy);
+    if (blocker_shift.x == 0 && blocker_shift.y == 0) {
+        return false;
+    }
+    if (!source_matches(blocker, cell)) {
+        return false;
+    }
+    ivec2 shifted_cell = cell + blocker_shift;
+    return shifted_cell.x != cell.x || shifted_cell.y != cell.y;
+}
+
+bool can_shift_delta(FallingIslandReservation reservation, int dx, int dy) {
+    for (int y = reservation.bbox_y; y < reservation.bbox_w; ++y) {
+        for (int x = reservation.bbox_x; x < reservation.bbox_z; ++x) {
+            ivec2 source = ivec2(x, y);
+            if (!source_matches(reservation, source)) {
+                continue;
+            }
+            ivec2 target = source + ivec2(dx, dy);
+            if (target.x < 0 || target.y < 0 || target.x >= cell_grid_size.x || target.y >= cell_grid_size.y) {
+                return false;
+            }
+            int target_material_id = int(texelFetch(material_tex, target, 0).x + 0.5);
+            if (target_material_id == 0) {
+                continue;
+            }
+            if (source_matches(reservation, target)) {
+                continue;
+            }
+            int blocker_index = reservation_source_index_for_cell(target);
+            if (blocker_index >= 0 && reservation_clears_cell(reservations[blocker_index], target)) {
+                continue;
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
+ivec2 resolve_shift(FallingIslandReservation reservation) {
+    ivec2 target_shift = ivec2(reservation.target_dx, reservation.target_dy);
+    if (target_shift.x == 0 && target_shift.y == 0) {
+        return ivec2(0, 0);
+    }
+    ivec2 current = ivec2(0, 0);
+    ivec2 furthest = ivec2(0, 0);
+    int dx = abs(target_shift.x);
+    int dy = -abs(target_shift.y);
+    int sx = current.x < target_shift.x ? 1 : -1;
+    int sy = current.y < target_shift.y ? 1 : -1;
+    int err = dx + dy;
+    while (true) {
+        if (current.x == target_shift.x && current.y == target_shift.y) {
+            break;
+        }
+        int e2 = 2 * err;
+        if (e2 >= dy) {
+            err += dy;
+            current.x += sx;
+        }
+        if (e2 <= dx) {
+            err += dx;
+            current.y += sy;
+        }
+        if (!can_shift_delta(reservation, current.x, current.y)) {
+            break;
+        }
+        furthest = current;
+    }
+    return furthest;
+}
+
+vec2 collision_response(vec2 velocity, ivec2 attempted_delta, ivec2 actual_delta, float friction, float elasticity) {
+    float tangential_scale = max(0.0, 1.0 - clamp(friction, 0.0, 1.0));
+    float bounce = max(0.0, elasticity);
+    float vx = velocity.x;
+    float vy = velocity.y;
+    if (attempted_delta.x != actual_delta.x && attempted_delta.x != 0) {
+        float normal_vx = abs(vx) > 1.0e-6 ? vx : float(attempted_delta.x);
+        vx = -normal_vx * bounce;
+        vy *= tangential_scale;
+    }
+    if (attempted_delta.y != actual_delta.y && attempted_delta.y != 0) {
+        float normal_vy = abs(vy) > 1.0e-6 ? vy : float(attempted_delta.y);
+        vy = -normal_vy * bounce;
+        vx *= tangential_scale;
+    }
+    if (abs(vx) < 1.0e-6) {
+        vx = 0.0;
+    }
+    if (abs(vy) < 1.0e-6) {
+        vy = 0.0;
+    }
+    return vec2(vx, vy);
+}
+
+vec2 island_collision_response(FallingIslandReservation reservation, ivec2 actual_shift) {
+    float friction_sum = 0.0;
+    float elasticity_sum = 0.0;
+    int material_count = 0;
+    for (int y = reservation.bbox_y; y < reservation.bbox_w; ++y) {
+        for (int x = reservation.bbox_x; x < reservation.bbox_z; ++x) {
+            ivec2 source = ivec2(x, y);
+            if (!source_matches(reservation, source)) {
+                continue;
+            }
+            int material_id = clamp(int(texelFetch(material_tex, source, 0).x + 0.5), 0, {MAX_MATERIALS - 1});
+            friction_sum += contact_params[material_id].x;
+            elasticity_sum += contact_params[material_id].y;
+            material_count += 1;
+        }
+    }
+    if (material_count <= 0) {
+        return vec2(reservation.velocity_x, reservation.velocity_y);
+    }
+    float inv_count = 1.0 / float(material_count);
+    return collision_response(
+        vec2(reservation.velocity_x, reservation.velocity_y),
+        ivec2(reservation.target_dx, reservation.target_dy),
+        actual_shift,
+        friction_sum * inv_count,
+        elasticity_sum * inv_count
+    );
+}
+
+void main() {
+    int index = int(gl_GlobalInvocationID.x);
+    int count = active_reservation_count();
+    if (count <= 0 || index < 0 || index >= count) {
+        return;
+    }
+    FallingIslandReservation reservation = reservations[index];
+    ivec2 actual_shift = resolve_shift(reservation);
+    reservations[index].resolved_dx = actual_shift.x;
+    reservations[index].resolved_dy = actual_shift.y;
+    if (actual_shift.x == 0 && actual_shift.y == 0 && reservation.target_dx == 0 && reservation.target_dy == 0) {
+        reservations[index].resolve_state = {{ISLAND_RESOLVE_DIRECT}};
+    } else if (actual_shift.x == 0 && actual_shift.y == 0) {
+        reservations[index].resolve_state = {{ISLAND_RESOLVE_BLOCKED}};
+    } else if (actual_shift.x == reservation.reserved_dx && actual_shift.y == reservation.reserved_dy) {
+        reservations[index].resolve_state = {{ISLAND_RESOLVE_DIRECT}};
+    } else {
+        reservations[index].resolve_state = {{ISLAND_RESOLVE_RERESOLVED}};
+    }
+    if (
+        (actual_shift.x != 0 || actual_shift.y != 0)
+        && (actual_shift.x != reservation.target_dx || actual_shift.y != reservation.target_dy)
+    ) {
+        vec2 response_velocity = island_collision_response(reservation, actual_shift);
+        reservations[index].velocity_x = response_velocity.x;
+        reservations[index].velocity_y = response_velocity.y;
+    }
+}

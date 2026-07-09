@@ -1,0 +1,106 @@
+#version 430
+layout(local_size_x={{LOCAL_SIZE}}, local_size_y=1, local_size_z=1) in;
+uniform int reservation_count;
+uniform bool use_reservation_count_buffer;
+uniform ivec2 cell_grid_size;
+uniform ivec2 paging_origin;
+uniform ivec2 paging_buffer_origin;
+
+struct FallingIslandReservation {
+    int island_id;
+    int bbox_x;
+    int bbox_y;
+    int bbox_z;
+    int bbox_w;
+    float velocity_x;
+    float velocity_y;
+    float subcell_x;
+    float subcell_y;
+    int target_dx;
+    int target_dy;
+    int reserved_dx;
+    int reserved_dy;
+    int resolved_dx;
+    int resolved_dy;
+    int resolve_state;
+};
+
+layout(std430, binding=0) readonly buffer IslandReservations {
+    FallingIslandReservation reservations[];
+};
+layout(std430, binding=1) writeonly buffer IslandRuntimeWords {
+    int runtime_words[];
+};
+layout(std430, binding=2) buffer IslandRuntimeCount {
+    int runtime_count;
+};
+layout(std430, binding=3) readonly buffer IslandReservationCount {
+    int reservation_count_buffer;
+};
+
+int positive_mod(int value, int divisor) {
+    int result = value % divisor;
+    return result < 0 ? result + divisor : result;
+}
+
+bool is_settled(FallingIslandReservation reservation) {
+    return reservation.resolve_state != {{ISLAND_RESOLVE_STALE}}
+        && (reservation.target_dx != 0 || reservation.target_dy != 0)
+        && reservation.resolved_dx == 0
+        && reservation.resolved_dy == 0;
+}
+
+int active_reservation_count() {
+    if (use_reservation_count_buffer) {
+        return clamp(reservation_count_buffer, 0, max(reservation_count, 0));
+    }
+    return max(reservation_count, 0);
+}
+
+void store_runtime_word(int record_index, int word_offset, int value) {
+    runtime_words[record_index * {ISLAND_RUNTIME_DTYPE.itemsize // 4} + word_offset] = value;
+}
+
+void main() {
+    int gid = int(gl_GlobalInvocationID.x);
+    int count = active_reservation_count();
+    if (gid >= count) {
+        return;
+    }
+    FallingIslandReservation reservation = reservations[gid];
+    if (reservation.island_id <= 0 || reservation.resolve_state == {{ISLAND_RESOLVE_STALE}} || is_settled(reservation)) {
+        return;
+    }
+
+    int out_index = atomicAdd(runtime_count, 1);
+    int x0 = reservation.bbox_x + reservation.resolved_dx;
+    int y0 = reservation.bbox_y + reservation.resolved_dy;
+    int x1 = reservation.bbox_z + reservation.resolved_dx;
+    int y1 = reservation.bbox_w + reservation.resolved_dy;
+    int width = max(0, x1 - x0);
+    int height = max(0, y1 - y0);
+    int world_x0 = paging_origin.x + positive_mod(x0 - paging_buffer_origin.x, cell_grid_size.x);
+    int world_y0 = paging_origin.y + positive_mod(y0 - paging_buffer_origin.y, cell_grid_size.y);
+    bool reached_target = (
+        reservation.resolved_dx == reservation.target_dx
+        && reservation.resolved_dy == reservation.target_dy
+    );
+    float velocity_x = reached_target ? reservation.velocity_x * 0.98 : reservation.velocity_x;
+    float velocity_y = reservation.velocity_y;
+    float subcell_x = reached_target ? reservation.subcell_x : 0.0;
+    float subcell_y = reached_target ? reservation.subcell_y : 0.0;
+
+    store_runtime_word(out_index, 0, reservation.island_id);
+    store_runtime_word(out_index, 1, x0);
+    store_runtime_word(out_index, 2, y0);
+    store_runtime_word(out_index, 3, x1);
+    store_runtime_word(out_index, 4, y1);
+    store_runtime_word(out_index, 5, world_x0);
+    store_runtime_word(out_index, 6, world_y0);
+    store_runtime_word(out_index, 7, world_x0 + width);
+    store_runtime_word(out_index, 8, world_y0 + height);
+    store_runtime_word(out_index, 9, floatBitsToInt(velocity_x));
+    store_runtime_word(out_index, 10, floatBitsToInt(velocity_y));
+    store_runtime_word(out_index, 11, floatBitsToInt(subcell_x));
+    store_runtime_word(out_index, 12, floatBitsToInt(subcell_y));
+}

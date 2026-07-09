@@ -1,0 +1,60 @@
+#version 430
+layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+uniform ivec2 region_size;
+uniform ivec2 region_origin;
+uniform int world_width;
+uniform int world_height;
+uniform int material_count;
+uniform int phase_falling_island;
+uniform bool treat_region_boundary_as_support;
+
+layout(binding=0) uniform sampler2D material_tex;
+layout(binding=1) uniform sampler2D phase_tex;
+layout(r32f, binding=2) writeonly uniform image2D structural_img;
+layout(r32f, binding=3) writeonly uniform image2D support_seed_img;
+layout(r32f, binding=4) writeonly uniform image2D behavior_img;
+
+layout(std430, binding=0) buffer MaterialStructural {
+    int material_structural[];
+};
+layout(std430, binding=1) buffer MaterialSupportAnchor {
+    int material_support_anchor[];
+};
+layout(std430, binding=2) buffer MaterialCollapseBehavior {
+    int material_collapse_behavior[];
+};
+
+int safe_material_index(int material_id) {
+    if (material_id < 0 || material_id >= material_count) {
+        return 0;
+    }
+    return material_id;
+}
+
+void main() {
+    ivec2 cell = ivec2(gl_GlobalInvocationID.xy);
+    if (cell.x >= region_size.x || cell.y >= region_size.y) {
+        return;
+    }
+    int material_id = int(texelFetch(material_tex, cell, 0).x + 0.5);
+    int index = safe_material_index(material_id);
+    int phase = int(texelFetch(phase_tex, cell, 0).x + 0.5);
+    bool structural = material_id > 0 && phase != phase_falling_island && material_structural[index] != 0;
+    bool external_region_boundary =
+        treat_region_boundary_as_support
+        && (
+            (cell.x == 0 && region_origin.x > 0)
+            || (cell.x == region_size.x - 1 && region_origin.x + cell.x + 1 < world_width)
+            || (cell.y == 0 && region_origin.y > 0)
+            || (cell.y == region_size.y - 1 && region_origin.y + cell.y + 1 < world_height)
+        );
+    bool support_seed = structural && (
+        material_support_anchor[index] != 0
+        || region_origin.y + cell.y == world_height - 1
+        || external_region_boundary
+    );
+    int behavior = material_id > 0 ? material_collapse_behavior[index] : 0;
+    imageStore(structural_img, cell, vec4(structural ? 1.0 : 0.0, 0.0, 0.0, 0.0));
+    imageStore(support_seed_img, cell, vec4(support_seed ? 1.0 : 0.0, 0.0, 0.0, 0.0));
+    imageStore(behavior_img, cell, vec4(float(behavior), 0.0, 0.0, 0.0));
+}

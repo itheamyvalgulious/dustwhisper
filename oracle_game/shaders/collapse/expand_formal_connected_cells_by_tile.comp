@@ -1,0 +1,282 @@
+#version 430
+layout(
+    local_size_x={{FORMAL_CONNECTED_TILE_LOCAL_SIZE}},
+    local_size_y={{FORMAL_CONNECTED_TILE_LOCAL_SIZE}},
+    local_size_z=1
+) in;
+uniform ivec2 cell_grid_size;
+uniform ivec2 tile_grid_size;
+uniform int tile_size;
+uniform int jump;
+uniform uint jump_generation;
+
+layout(binding=0) uniform sampler2D structural_tex;
+layout(std430, binding=0) buffer ConnectedCurrent {
+    int connected_current[];
+};
+layout(std430, binding=2) readonly buffer ConnectedTiles {
+    int connected_tiles[];
+};
+layout(std430, binding=3) readonly buffer CurrentFrontierTileCount {
+    uint current_frontier_tile_count[];
+};
+layout(std430, binding=4) readonly buffer CurrentFrontierTileList {
+    ivec2 current_frontier_tile_list[];
+};
+layout(std430, binding=5) buffer NextFrontierTileFlags {
+    uint next_frontier_tile_flags[];
+};
+layout(std430, binding=6) buffer NextFrontierTileCount {
+    uint next_frontier_tile_count[];
+};
+layout(std430, binding=7) buffer NextFrontierTileList {
+    ivec2 next_frontier_tile_list[];
+};
+layout(std430, binding=8) buffer NextFrontierDispatchArgs {
+    uint next_frontier_dispatch_args[];
+};
+
+shared int s_structural[{{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}][{{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}];
+shared int s_connected[{{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}][{{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}];
+shared int s_next[{{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}][{{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}];
+shared uint s_changed;
+shared uint s_touch_left;
+shared uint s_touch_right;
+shared uint s_touch_top;
+shared uint s_touch_bottom;
+shared uint s_step_changed;
+shared uint s_jump_changed;
+
+bool in_grid(ivec2 cell) {
+    return cell.x >= 0 && cell.y >= 0 && cell.x < cell_grid_size.x && cell.y < cell_grid_size.y;
+}
+
+bool tile_in_grid(ivec2 tile) {
+    return tile.x >= 0 && tile.y >= 0 && tile.x < tile_grid_size.x && tile.y < tile_grid_size.y;
+}
+
+bool tile_connected_mask(ivec2 tile) {
+    if (!tile_in_grid(tile)) {
+        return false;
+    }
+    int tile_index = tile.y * tile_grid_size.x + tile.x;
+    return connected_tiles[tile_index] != 0;
+}
+
+bool current_connected_global(ivec2 cell) {
+    if (!in_grid(cell)) {
+        return false;
+    }
+    int cell_index = cell.y * cell_grid_size.x + cell.x;
+    return connected_current[cell_index] != 0;
+}
+
+bool structural_connected(ivec2 cell) {
+    return in_grid(cell) && tile_connected_mask(cell / tile_size) && texelFetch(structural_tex, cell, 0).x > 0.5;
+}
+
+bool connected_sample(ivec2 sample_cell) {
+    return structural_connected(sample_cell) && current_connected_global(sample_cell);
+}
+
+void solve_connected_cells(ivec2 local_cell, ivec2 cell, bool local_valid) {
+    int max_steps = max(1, tile_size * tile_size);
+    for (int step = 0; step < {FORMAL_CONNECTED_TILE_LOCAL_SIZE * FORMAL_CONNECTED_TILE_LOCAL_SIZE}; ++step) {
+        if (step >= max_steps) {
+            break;
+        }
+        if (gl_LocalInvocationIndex == 0u) {
+            s_step_changed = 0u;
+        }
+        barrier();
+        int previous_value = s_connected[local_cell.y][local_cell.x];
+        int next_value = previous_value;
+        if (local_valid && s_structural[local_cell.y][local_cell.x] != 0 && next_value == 0) {
+            bool touches_connected = false;
+            if (local_cell.x > 0) {
+                touches_connected = touches_connected || s_connected[local_cell.y][local_cell.x - 1] != 0;
+            } else {
+                touches_connected = touches_connected || connected_sample(cell + ivec2(-1, 0));
+            }
+            if (local_cell.x + 1 < tile_size && local_cell.x + 1 < {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}) {
+                touches_connected = touches_connected || s_connected[local_cell.y][local_cell.x + 1] != 0;
+            } else {
+                touches_connected = touches_connected || connected_sample(cell + ivec2(1, 0));
+            }
+            if (local_cell.y > 0) {
+                touches_connected = touches_connected || s_connected[local_cell.y - 1][local_cell.x] != 0;
+            } else {
+                touches_connected = touches_connected || connected_sample(cell + ivec2(0, -1));
+            }
+            if (local_cell.y + 1 < tile_size && local_cell.y + 1 < {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}) {
+                touches_connected = touches_connected || s_connected[local_cell.y + 1][local_cell.x] != 0;
+            } else {
+                touches_connected = touches_connected || connected_sample(cell + ivec2(0, 1));
+            }
+            next_value = touches_connected ? 1 : 0;
+        }
+        if (local_valid && previous_value == 0 && next_value != 0) {
+            atomicOr(s_step_changed, 1u);
+        }
+        s_next[local_cell.y][local_cell.x] = next_value;
+        barrier();
+        s_connected[local_cell.y][local_cell.x] = s_next[local_cell.y][local_cell.x];
+        barrier();
+        if (s_step_changed == 0u) {
+            break;
+        }
+        barrier();
+    }
+}
+
+bool sample_in_current_tile(ivec2 tile, ivec2 sample_cell) {
+    ivec2 sample_local = sample_cell - tile * tile_size;
+    return
+        sample_local.x >= 0 &&
+        sample_local.y >= 0 &&
+        sample_local.x < tile_size &&
+        sample_local.y < tile_size;
+}
+
+bool connected_line_clear(ivec2 start_cell, ivec2 end_cell) {
+    ivec2 delta = end_cell - start_cell;
+    int steps = max(abs(delta.x), abs(delta.y));
+    if (steps <= 1) {
+        return true;
+    }
+    ivec2 axis_step = ivec2(
+        delta.x == 0 ? 0 : (delta.x > 0 ? 1 : -1),
+        delta.y == 0 ? 0 : (delta.y > 0 ? 1 : -1)
+    );
+    for (int step_index = 1; step_index < steps; ++step_index) {
+        ivec2 sample_cell = start_cell + axis_step * step_index;
+        if (!structural_connected(sample_cell)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void emit_next_frontier_tile(ivec2 tile) {
+    if (!tile_connected_mask(tile)) {
+        return;
+    }
+    int tile_index = tile.y * tile_grid_size.x + tile.x;
+    if (atomicExchange(next_frontier_tile_flags[tile_index], jump_generation) == jump_generation) {
+        return;
+    }
+    uint slot = atomicAdd(next_frontier_tile_count[0], 1u);
+    next_frontier_tile_list[int(slot)] = tile;
+    atomicMax(next_frontier_dispatch_args[0], slot + 1u);
+}
+
+void main() {
+    uint frontier_index = gl_WorkGroupID.x;
+    if (frontier_index >= current_frontier_tile_count[0]) {
+        return;
+    }
+    ivec2 tile = current_frontier_tile_list[int(frontier_index)];
+    if (!tile_connected_mask(tile)) {
+        return;
+    }
+    if (gl_LocalInvocationIndex == 0u) {
+        s_changed = 0u;
+        s_touch_left = 0u;
+        s_touch_right = 0u;
+        s_touch_top = 0u;
+        s_touch_bottom = 0u;
+    }
+    barrier();
+    ivec2 local_cell = ivec2(gl_LocalInvocationID.xy);
+    ivec2 cell = tile * tile_size + local_cell;
+    bool local_valid =
+        local_cell.x < tile_size &&
+        local_cell.y < tile_size &&
+        in_grid(cell);
+    bool structural = local_valid && texelFetch(structural_tex, cell, 0).x > 0.5;
+    bool connected = local_valid && current_connected_global(cell);
+    bool boundary_connected = structural && (
+        (local_cell.x == 0 && connected_sample(cell + ivec2(-1, 0))) ||
+        (local_cell.x + 1 >= tile_size && connected_sample(cell + ivec2(1, 0))) ||
+        (local_cell.y == 0 && connected_sample(cell + ivec2(0, -1))) ||
+        (local_cell.y + 1 >= tile_size && connected_sample(cell + ivec2(0, 1)))
+    );
+    s_structural[local_cell.y][local_cell.x] = structural ? 1 : 0;
+    s_connected[local_cell.y][local_cell.x] = connected || boundary_connected ? 1 : 0;
+    s_next[local_cell.y][local_cell.x] = s_connected[local_cell.y][local_cell.x];
+    barrier();
+
+    solve_connected_cells(local_cell, cell, local_valid);
+
+    if (jump > 1) {
+        if (gl_LocalInvocationIndex == 0u) {
+            s_jump_changed = 0u;
+        }
+        barrier();
+
+        int jump_value = s_connected[local_cell.y][local_cell.x];
+        int previous_jump_value = jump_value;
+        if (local_valid && structural) {
+            for (int axis = 0; axis < 4 && jump_value == 0; ++axis) {
+                ivec2 offset = axis == 0 ? ivec2(-jump, 0) : axis == 1 ? ivec2(jump, 0) : axis == 2 ? ivec2(0, -jump) : ivec2(0, jump);
+                ivec2 sample_cell = cell + offset;
+                if (sample_in_current_tile(tile, sample_cell)) {
+                    continue;
+                }
+                if (!connected_sample(sample_cell)) {
+                    continue;
+                }
+                if (connected_line_clear(sample_cell, cell)) {
+                    jump_value = 1;
+                }
+            }
+        }
+        if (local_valid && previous_jump_value == 0 && jump_value != 0) {
+            s_connected[local_cell.y][local_cell.x] = 1;
+            atomicOr(s_jump_changed, 1u);
+        }
+        barrier();
+        if (s_jump_changed != 0u) {
+            solve_connected_cells(local_cell, cell, local_valid);
+        }
+    }
+
+    if (local_valid) {
+        int cell_index = cell.y * cell_grid_size.x + cell.x;
+        bool final_connected = s_connected[local_cell.y][local_cell.x] != 0;
+        connected_current[cell_index] = final_connected ? 1 : 0;
+        if (final_connected && !connected) {
+            atomicOr(s_changed, 1u);
+            if (local_cell.x == 0) {
+                atomicOr(s_touch_left, 1u);
+            }
+            if (local_cell.x + 1 >= tile_size || local_cell.x + 1 >= {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}) {
+                atomicOr(s_touch_right, 1u);
+            }
+            if (local_cell.y == 0) {
+                atomicOr(s_touch_top, 1u);
+            }
+            if (local_cell.y + 1 >= tile_size || local_cell.y + 1 >= {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}) {
+                atomicOr(s_touch_bottom, 1u);
+            }
+        }
+    }
+    barrier();
+    if (gl_LocalInvocationIndex == 0u) {
+        if (s_changed != 0u) {
+            emit_next_frontier_tile(tile);
+        }
+        if (s_touch_left != 0u) {
+            emit_next_frontier_tile(tile + ivec2(-1, 0));
+        }
+        if (s_touch_right != 0u) {
+            emit_next_frontier_tile(tile + ivec2(1, 0));
+        }
+        if (s_touch_top != 0u) {
+            emit_next_frontier_tile(tile + ivec2(0, -1));
+        }
+        if (s_touch_bottom != 0u) {
+            emit_next_frontier_tile(tile + ivec2(0, 1));
+        }
+    }
+}

@@ -1,0 +1,25 @@
+#version 430
+layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+uniform ivec2 region_size;
+uniform ivec4 seed_rect;
+
+layout(binding=0) uniform sampler2D structural_tex;
+layout(r32f, binding=1) writeonly uniform image2D support_seed_img;
+layout(r32f, binding=2) writeonly uniform image2D support_seed_copy_img;
+
+void main() {
+    ivec2 cell = ivec2(gl_GlobalInvocationID.xy);
+    if (cell.x >= region_size.x || cell.y >= region_size.y) {
+        return;
+    }
+    bool in_seed = (
+        cell.x >= seed_rect.x &&
+        cell.y >= seed_rect.y &&
+        cell.x < seed_rect.z &&
+        cell.y < seed_rect.w
+    );
+    bool seeded = in_seed && texelFetch(structural_tex, cell, 0).x > 0.5;
+    vec4 value = vec4(seeded ? 1.0 : 0.0, 0.0, 0.0, 0.0);
+    imageStore(support_seed_img, cell, value);
+    imageStore(support_seed_copy_img, cell, value);
+}

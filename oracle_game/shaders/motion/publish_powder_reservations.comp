@@ -1,0 +1,38 @@
+#version 430
+layout(local_size_x=256, local_size_y=1, local_size_z=1) in;
+uniform int reservation_capacity;
+
+struct PowderReservation {
+    ivec2 source_xy;
+    ivec2 desired_target_xy;
+    ivec2 reserved_target_xy;
+    ivec2 resolved_target_xy;
+    vec2 velocity_xy;
+    int material_id;
+    int resolve_state;
+};
+
+layout(std430, binding=0) readonly buffer SourceReservations {
+    PowderReservation source_reservations[];
+};
+layout(std430, binding=1) readonly buffer SourceReservationCount {
+    int source_reservation_count;
+};
+layout(std430, binding=2) writeonly buffer DestReservations {
+    PowderReservation dest_reservations[];
+};
+layout(std430, binding=3) writeonly buffer DestReservationCount {
+    int dest_reservation_count;
+};
+
+void main() {
+    int gid = int(gl_GlobalInvocationID.x);
+    int count = clamp(source_reservation_count, 0, reservation_capacity);
+    if (gid == 0) {
+        dest_reservation_count = count;
+    }
+    if (gid >= count) {
+        return;
+    }
+    dest_reservations[gid] = source_reservations[gid];
+}

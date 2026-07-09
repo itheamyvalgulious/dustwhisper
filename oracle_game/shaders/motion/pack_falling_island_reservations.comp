@@ -1,0 +1,85 @@
+#version 430
+layout(local_size_x={{ISLAND_RESERVATION_LINEAR_LOCAL_SIZE}}, local_size_y=1, local_size_z=1) in;
+uniform int island_count;
+uniform bool use_island_count_buffer;
+
+struct FallingIslandReservation {
+    int island_id;
+    int bbox_x;
+    int bbox_y;
+    int bbox_z;
+    int bbox_w;
+    float velocity_x;
+    float velocity_y;
+    float subcell_x;
+    float subcell_y;
+    int target_dx;
+    int target_dy;
+    int reserved_dx;
+    int reserved_dy;
+    int resolved_dx;
+    int resolved_dy;
+    int resolve_state;
+};
+
+layout(std430, binding=0) buffer IslandIds {
+    int island_ids[];
+};
+layout(std430, binding=1) buffer IslandBboxes {
+    ivec4 island_bboxes[];
+};
+layout(std430, binding=2) buffer IslandMotion {
+    vec4 island_motion[];
+};
+layout(std430, binding=3) buffer IslandShifts {
+    ivec4 island_shifts[];
+};
+layout(std430, binding=4) buffer IslandReservationWords {
+    ivec4 reservation_words[];
+};
+layout(std430, binding=5) buffer IslandReservationCount {
+    int reservation_count;
+};
+layout(std430, binding=6) readonly buffer IslandCountBuffer {
+    int island_count_buffer;
+};
+
+int active_island_count() {
+    if (use_island_count_buffer) {
+        return clamp(island_count_buffer, 0, max(island_count, 0));
+    }
+    return max(island_count, 0);
+}
+
+void main() {
+    int gid = int(gl_GlobalInvocationID.x);
+    int count = active_island_count();
+    if (gid == 0) {
+        reservation_count = count;
+    }
+    if (gid >= count) {
+        return;
+    }
+    ivec4 bbox = island_bboxes[gid];
+    vec4 motion = island_motion[gid];
+    ivec4 shifts = island_shifts[gid];
+    int word_base = gid * 4;
+    int resolve_state = {{ISLAND_RESOLVE_BLOCKED}};
+    if (shifts.x != 0 || shifts.y != 0 || (shifts.z == 0 && shifts.w == 0)) {
+        resolve_state = {{ISLAND_RESOLVE_DIRECT}};
+    }
+    reservation_words[word_base] = ivec4(island_ids[gid], bbox.x, bbox.y, bbox.z);
+    reservation_words[word_base + 1] = ivec4(
+        bbox.w,
+        floatBitsToInt(motion.x),
+        floatBitsToInt(motion.y),
+        floatBitsToInt(motion.z)
+    );
+    reservation_words[word_base + 2] = ivec4(
+        floatBitsToInt(motion.w),
+        shifts.z,
+        shifts.w,
+        shifts.x
+    );
+    reservation_words[word_base + 3] = ivec4(shifts.y, shifts.x, shifts.y, resolve_state);
+}
