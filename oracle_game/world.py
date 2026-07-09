@@ -9,8 +9,6 @@ import json
 import threading
 import time
 from typing import Any, Iterable, Sequence
-import zlib
-
 import numpy as np
 
 from oracle_game.active import ActiveRegionTracker
@@ -133,6 +131,42 @@ from oracle_game.world_debug_frame import (
     debug_frame,
 )
 from oracle_game.world_readback_payload import make_readback_payload
+from oracle_game.world_geometry import (
+    _apply_change_stability_drift,
+    _bounded_material_state_for_position,
+    _buffer_bbox_to_world_bbox,
+    _buffer_cell_bounds,
+    _buffer_gas_to_world_position,
+    _buffer_to_world_float_position,
+    _buffer_to_world_position,
+    _capsule_world_cells,
+    _capsule_world_cells_raw,
+    _centered_world_window,
+    _clamped_world_window,
+    _direction_vector,
+    _disk_world_cells,
+    _disk_world_cells_raw,
+    _extract_world_window,
+    _find_nearest_empty_world_position,
+    _force_source_buffer_position,
+    _force_source_world_position,
+    _line_world_cells,
+    _line_world_cells_raw,
+    _matches_direction_filter,
+    _pack_cell_core_world_window,
+    _query_direction_vector,
+    _resolve_entity_anchor,
+    _resolve_legal_world_position,
+    _resolve_terrain_anchor,
+    _terrain_cell_matches,
+    _world_axis_indices,
+    _world_axis_spans,
+    _world_cell_is_empty,
+    _world_cell_is_empty_local,
+    _world_cell_is_solid_local,
+    _world_to_buffer_clamped,
+    _world_to_buffer_float_position,
+)
 
 
 
@@ -10316,83 +10350,25 @@ class WorldEngine:
         return (float(direction[0]), float(direction[1]))
 
     def _disk_world_cells(self, center_world_position: tuple[int, int], radius: int) -> list[tuple[int, int]]:
-        radius = max(0, int(radius))
-        cx, cy = center_world_position
-        cells: list[tuple[int, int]] = []
-        for dy in range(-radius, radius + 1):
-            for dx in range(-radius, radius + 1):
-                if dx * dx + dy * dy > radius * radius:
-                    continue
-                cells.append(self._clamp_world_position(cx + dx, cy + dy))
-        if not cells:
-            cells.append(self._clamp_world_position(cx, cy))
-        return sorted(set(cells))
+        return _disk_world_cells(self, center_world_position, radius)
 
     @staticmethod
     def _disk_world_cells_raw(center_world_position: tuple[int, int], radius: int) -> list[tuple[int, int]]:
-        radius = max(0, int(radius))
-        cx, cy = center_world_position
-        cells: list[tuple[int, int]] = []
-        for dy in range(-radius, radius + 1):
-            for dx in range(-radius, radius + 1):
-                if dx * dx + dy * dy > radius * radius:
-                    continue
-                cells.append((int(cx + dx), int(cy + dy)))
-        if not cells:
-            cells.append((int(cx), int(cy)))
-        return sorted(set(cells))
+        return _disk_world_cells_raw(center_world_position, radius)
 
     def _line_world_cells(
         self,
         start_world_position: tuple[int, int],
         end_world_position: tuple[int, int],
     ) -> list[tuple[int, int]]:
-        x0, y0 = (int(value) for value in start_world_position)
-        x1, y1 = (int(value) for value in end_world_position)
-        dx = abs(x1 - x0)
-        dy = -abs(y1 - y0)
-        sx = 1 if x0 < x1 else -1
-        sy = 1 if y0 < y1 else -1
-        err = dx + dy
-        cells: list[tuple[int, int]] = []
-        while True:
-            cells.append(self._clamp_world_position(x0, y0))
-            if x0 == x1 and y0 == y1:
-                break
-            e2 = 2 * err
-            if e2 >= dy:
-                err += dy
-                x0 += sx
-            if e2 <= dx:
-                err += dx
-                y0 += sy
-        return cells
+        return _line_world_cells(self, start_world_position, end_world_position)
 
     @staticmethod
     def _line_world_cells_raw(
         start_world_position: tuple[int, int],
         end_world_position: tuple[int, int],
     ) -> list[tuple[int, int]]:
-        x0, y0 = (int(value) for value in start_world_position)
-        x1, y1 = (int(value) for value in end_world_position)
-        dx = abs(x1 - x0)
-        dy = -abs(y1 - y0)
-        sx = 1 if x0 < x1 else -1
-        sy = 1 if y0 < y1 else -1
-        err = dx + dy
-        cells: list[tuple[int, int]] = []
-        while True:
-            cells.append((int(x0), int(y0)))
-            if x0 == x1 and y0 == y1:
-                break
-            e2 = 2 * err
-            if e2 >= dy:
-                err += dy
-                x0 += sx
-            if e2 <= dx:
-                err += dx
-                y0 += sy
-        return cells
+        return _line_world_cells_raw(start_world_position, end_world_position)
 
     def _capsule_world_cells(
         self,
@@ -10400,10 +10376,7 @@ class WorldEngine:
         end_world_position: tuple[int, int],
         radius: int,
     ) -> list[tuple[int, int]]:
-        cells: set[tuple[int, int]] = set()
-        for world_position in self._line_world_cells(start_world_position, end_world_position):
-            cells.update(self._disk_world_cells(world_position, radius))
-        return sorted(cells)
+        return _capsule_world_cells(self, start_world_position, end_world_position, radius)
 
     def _capsule_world_cells_raw(
         self,
@@ -10411,18 +10384,11 @@ class WorldEngine:
         end_world_position: tuple[int, int],
         radius: int,
     ) -> list[tuple[int, int]]:
-        cells: set[tuple[int, int]] = set()
-        for world_position in self._line_world_cells_raw(start_world_position, end_world_position):
-            cells.update(self._disk_world_cells_raw(world_position, radius))
-        return sorted(cells)
+        return _capsule_world_cells_raw(self, start_world_position, end_world_position, radius)
 
     @staticmethod
     def _buffer_cell_bounds(cells: list[tuple[int, int]]) -> tuple[int, int, int, int] | None:
-        if not cells:
-            return None
-        xs = [cell[0] for cell in cells]
-        ys = [cell[1] for cell in cells]
-        return (min(xs), min(ys), max(xs) + 1, max(ys) + 1)
+        return _buffer_cell_bounds(cells)
 
     def _apply_change_stability_drift(
         self,
@@ -10432,14 +10398,7 @@ class WorldEngine:
         effective_radius: int,
         stability: float,
     ) -> tuple[int, int]:
-        drift_radius = int(round((1.0 - stability) * max(1, effective_radius + 1)))
-        if drift_radius <= 0:
-            return world_position
-        seed = zlib.crc32(intent_id.encode("utf-8")) & 0xFFFFFFFF
-        span = drift_radius * 2 + 1
-        dx = int(seed % span) - drift_radius
-        dy = int((seed // span) % span) - drift_radius
-        return self._clamp_world_position(world_position[0] + dx, world_position[1] + dy)
+        return _apply_change_stability_drift(self, intent_id, world_position, effective_radius=effective_radius, stability=stability)
 
     def _resolve_legal_world_position(
         self,
@@ -10451,34 +10410,7 @@ class WorldEngine:
         effective_radius: int,
         source_world_position: tuple[int, int] | None,
     ) -> tuple[tuple[int, int] | None, bool, str | None]:
-        if not require_empty:
-            return world_position, False, None
-
-        clamped_world_position = self._clamp_world_position(*world_position)
-        if self._world_cell_is_empty(*clamped_world_position):
-            return clamped_world_position, False, None
-
-        if fallback_mode == "nearest_empty":
-            search_radius = max(0, int(fallback_radius))
-            if search_radius <= 0:
-                search_radius = max(1, int(effective_radius) + 1)
-            empty_world_position = self._find_nearest_empty_world_position(
-                clamped_world_position,
-                radius=search_radius,
-            )
-            if empty_world_position is not None:
-                return empty_world_position, True, "occupied target fell back to nearest empty cell"
-            return None, False, "occupied target had no empty fallback cell"
-
-        if fallback_mode == "source":
-            if source_world_position is None:
-                return None, False, "occupied target requested source fallback without a source position"
-            fallback_world_position = self._clamp_world_position(*source_world_position)
-            if self._world_cell_is_empty(*fallback_world_position):
-                return fallback_world_position, True, "occupied target fell back to source cell"
-            return None, False, "occupied target could not fall back to the source cell"
-
-        return None, False, f"occupied target requested unsupported fallback mode '{fallback_mode}'"
+        return _resolve_legal_world_position(self, world_position, require_empty=require_empty, fallback_mode=fallback_mode, fallback_radius=fallback_radius, effective_radius=effective_radius, source_world_position=source_world_position)
 
     @staticmethod
     def _intent_resolution_status(*, drifted: bool, fallback_applied: bool) -> str:
@@ -10702,38 +10634,7 @@ class WorldEngine:
         *,
         direction_filter: str | None,
     ) -> dict[str, Any] | None:
-        best: tuple[float, int, tuple[int, int], tuple[int, int]] | None = None
-        for entity in self.entity_states.values():
-            if query.anchor_entity_id is not None:
-                if entity.entity_id != int(query.anchor_entity_id):
-                    continue
-            else:
-                if query.source_entity_id is not None and entity.entity_id == int(query.source_entity_id):
-                    continue
-                if not self._entity_matches_anchor_filters(entity, query.anchor_filters):
-                    continue
-            world_position = self._entity_center_world_position(entity)
-            buffer_position = self._world_to_buffer_clamped(*world_position)
-            if direction_filter is not None and not self._matches_direction_filter(
-                source_world_position,
-                world_position,
-                direction_filter,
-                source_entity_id=query.source_entity_id,
-            ):
-                continue
-            distance_sq = self._world_distance_sq(source_world_position, world_position)
-            candidate = (distance_sq, int(entity.entity_id), buffer_position, world_position)
-            if best is None or candidate < best:
-                best = candidate
-        if best is None:
-            return None
-        _, entity_id, buffer_position, world_position = best
-        return {
-            "kind": "entity",
-            "entity_id": entity_id,
-            "buffer_position": buffer_position,
-            "world_position": world_position,
-        }
+        return _resolve_entity_anchor(self, query, source_world_position, direction_filter=direction_filter)
 
     def _resolve_terrain_anchor(
         self,
@@ -10742,33 +10643,7 @@ class WorldEngine:
         *,
         direction_filter: str | None,
     ) -> dict[str, Any] | None:
-        for terrain_filter in terrain_filters:
-            best: tuple[float, tuple[int, int], tuple[int, int]] | None = None
-            for y in range(self.height):
-                for x in range(self.width):
-                    if not self._terrain_cell_matches(x, y, terrain_filter):
-                        continue
-                    world_position = self._buffer_to_world_position((x, y))
-                    if direction_filter is not None and not self._matches_direction_filter(
-                        source_world_position,
-                        world_position,
-                        direction_filter,
-                        source_entity_id=None,
-                    ):
-                        continue
-                    distance_sq = self._world_distance_sq(source_world_position, world_position)
-                    candidate = (distance_sq, (x, y), world_position)
-                    if best is None or candidate < best:
-                        best = candidate
-            if best is not None:
-                _, buffer_position, world_position = best
-                return {
-                    "kind": "terrain",
-                    "entity_id": None,
-                    "buffer_position": buffer_position,
-                    "world_position": world_position,
-                }
-        return None
+        return _resolve_terrain_anchor(self, source_world_position, terrain_filters, direction_filter=direction_filter)
 
     def _entity_matches_anchor_filters(self, entity: EntityState, filters: tuple[str, ...]) -> bool:
         area = max(1, int(entity.width) * int(entity.height))
@@ -10791,84 +10666,7 @@ class WorldEngine:
         return True
 
     def _terrain_cell_matches(self, x: int, y: int, terrain_filter: str) -> bool:
-        material_id, phase = self._material_state_for_position(
-            x,
-            y,
-            blocked_cells=self._resolver_blocked_cells,
-            released_cells=self._resolver_released_cells,
-        )
-        if terrain_filter == "empty":
-            return material_id == 0
-        if terrain_filter == "tree":
-            return self._terrain_tree_cell_matches(x, y, material_id, phase)
-        if terrain_filter in {"liquid", "pool"}:
-            return material_id != 0 and phase == int(Phase.LIQUID)
-        if terrain_filter == "solid":
-            return material_id != 0 and phase != int(Phase.LIQUID)
-        if terrain_filter == "hill":
-            return self._terrain_hill_cell_matches(x, y, material_id, phase)
-        if terrain_filter == "wall":
-            if material_id == 0 or phase == int(Phase.LIQUID):
-                return False
-            above_material, above_phase = (0, 0) if y <= 0 else self._material_state_for_position(
-                x,
-                y - 1,
-                blocked_cells=self._resolver_blocked_cells,
-                released_cells=self._resolver_released_cells,
-            )
-            below_material, below_phase = (0, 0) if y + 1 >= self.height else self._material_state_for_position(
-                x,
-                y + 1,
-                blocked_cells=self._resolver_blocked_cells,
-                released_cells=self._resolver_released_cells,
-            )
-            left_material, _ = (0, 0) if x <= 0 else self._material_state_for_position(
-                x - 1,
-                y,
-                blocked_cells=self._resolver_blocked_cells,
-                released_cells=self._resolver_released_cells,
-            )
-            right_material, _ = (0, 0) if x + 1 >= self.width else self._material_state_for_position(
-                x + 1,
-                y,
-                blocked_cells=self._resolver_blocked_cells,
-                released_cells=self._resolver_released_cells,
-            )
-            vertical_neighbor = (
-                (above_material != 0 and above_phase != int(Phase.LIQUID))
-                or (below_material != 0 and below_phase != int(Phase.LIQUID))
-            )
-            horizontal_edge = (
-                (left_material == 0)
-                or (right_material == 0)
-            )
-            return vertical_neighbor and horizontal_edge
-        if terrain_filter == "hole":
-            if material_id != 0 or y + 1 >= self.height or x == 0 or x + 1 >= self.width:
-                return False
-            below_material, below_phase = self._material_state_for_position(
-                x,
-                y + 1,
-                blocked_cells=self._resolver_blocked_cells,
-                released_cells=self._resolver_released_cells,
-            )
-            left_material, left_phase = self._material_state_for_position(
-                x - 1,
-                y,
-                blocked_cells=self._resolver_blocked_cells,
-                released_cells=self._resolver_released_cells,
-            )
-            right_material, right_phase = self._material_state_for_position(
-                x + 1,
-                y,
-                blocked_cells=self._resolver_blocked_cells,
-                released_cells=self._resolver_released_cells,
-            )
-            below_solid = below_material != 0 and below_phase != int(Phase.LIQUID)
-            left_solid = left_material != 0 and left_phase != int(Phase.LIQUID)
-            right_solid = right_material != 0 and right_phase != int(Phase.LIQUID)
-            return bool(below_solid and left_solid and right_solid)
-        return False
+        return _terrain_cell_matches(self, x, y, terrain_filter)
 
     def _terrain_tree_cell_matches(self, x: int, y: int, material_id: int, phase: int) -> bool:
         if material_id == 0 or phase in {int(Phase.LIQUID), int(Phase.POWDER)}:
@@ -10903,12 +10701,10 @@ class WorldEngine:
         return left_support and right_support
 
     def _world_cell_is_solid_local(self, x: int, y: int) -> bool:
-        material_id, phase = self._bounded_material_state_for_position(x, y)
-        return material_id != 0 and phase != int(Phase.LIQUID)
+        return _world_cell_is_solid_local(self, x, y)
 
     def _world_cell_is_empty_local(self, x: int, y: int) -> bool:
-        material_id, _ = self._bounded_material_state_for_position(x, y)
-        return material_id == 0
+        return _world_cell_is_empty_local(self, x, y)
 
     def _world_cell_material_has_tag(self, x: int, y: int, tag: str) -> bool:
         material_id, _ = self._bounded_material_state_for_position(x, y)
@@ -10923,14 +10719,7 @@ class WorldEngine:
         return material is not None and tag in material.tags
 
     def _bounded_material_state_for_position(self, x: int, y: int) -> tuple[int, int]:
-        if x < 0 or x >= self.width or y < 0 or y >= self.height:
-            return (0, 0)
-        return self._material_state_for_position(
-            x,
-            y,
-            blocked_cells=self._resolver_blocked_cells,
-            released_cells=self._resolver_released_cells,
-        )
+        return _bounded_material_state_for_position(self, x, y)
 
     def _matches_direction_filter(
         self,
@@ -10940,20 +10729,7 @@ class WorldEngine:
         *,
         source_entity_id: int | None,
     ) -> bool:
-        direction = self._direction_vector(direction_name, source_entity_id=source_entity_id)
-        if direction is None:
-            return True
-        delta_x = candidate_world_position[0] - source_world_position[0]
-        delta_y = candidate_world_position[1] - source_world_position[1]
-        if direction[0] < 0:
-            return delta_x < 0
-        if direction[0] > 0:
-            return delta_x > 0
-        if direction[1] < 0:
-            return delta_y < 0
-        if direction[1] > 0:
-            return delta_y > 0
-        return True
+        return _matches_direction_filter(self, source_world_position, candidate_world_position, direction_name, source_entity_id=source_entity_id)
 
     def _query_direction_vector(
         self,
@@ -10961,9 +10737,7 @@ class WorldEngine:
         *,
         source_entity_id: int | None,
     ) -> tuple[int, int] | None:
-        if query.direction is None:
-            return None
-        return self._direction_vector(query.direction, source_entity_id=source_entity_id)
+        return _query_direction_vector(self, query, source_entity_id=source_entity_id)
 
     def _direction_vector(
         self,
@@ -10971,19 +10745,7 @@ class WorldEngine:
         *,
         source_entity_id: int | None,
     ) -> tuple[int, int] | None:
-        direction_key = direction_name.lower()
-        if direction_key in CARDINAL_DIRECTION_VECTORS:
-            return CARDINAL_DIRECTION_VECTORS[direction_key]
-        if direction_key not in {"forward", "backward"}:
-            return None
-        facing_x, facing_y = self._source_facing_vector(source_entity_id)
-        if abs(facing_x) >= abs(facing_y):
-            direction = (1, 0) if facing_x >= 0.0 else (-1, 0)
-        else:
-            direction = (0, 1) if facing_y >= 0.0 else (0, -1)
-        if direction_key == "backward":
-            return (-direction[0], -direction[1])
-        return direction
+        return _direction_vector(self, direction_name, source_entity_id=source_entity_id)
 
     def _source_facing_vector(self, source_entity_id: int | None) -> tuple[float, float]:
         if source_entity_id is not None:
@@ -11010,32 +10772,19 @@ class WorldEngine:
         return self._buffer_to_world_position(self._entity_center_buffer_position(entity))
 
     def _buffer_to_world_position(self, position: tuple[int, int]) -> tuple[int, int]:
-        world_x, world_y = self.paging.buffer_to_world(int(position[0]), int(position[1]))
-        return (int(world_x), int(world_y))
+        return _buffer_to_world_position(self, position)
 
     def _buffer_to_world_float_position(self, position: tuple[float, float]) -> tuple[float, float]:
-        world_x = float(self.paging.origin_x) + ((float(position[0]) - float(self.paging.buffer_origin_x)) % float(self.width))
-        world_y = float(self.paging.origin_y) + ((float(position[1]) - float(self.paging.buffer_origin_y)) % float(self.height))
-        return (float(world_x), float(world_y))
+        return _buffer_to_world_float_position(self, position)
 
     def _world_to_buffer_float_position(self, position: tuple[float, float]) -> tuple[float, float]:
-        buffer_x = (
-            float(position[0]) - float(self.paging.origin_x) + float(self.paging.buffer_origin_x)
-        ) % float(self.width)
-        buffer_y = (
-            float(position[1]) - float(self.paging.origin_y) + float(self.paging.buffer_origin_y)
-        ) % float(self.height)
-        return (float(buffer_x), float(buffer_y))
+        return _world_to_buffer_float_position(self, position)
 
     def _force_source_world_position(self, force_source: ForceSource) -> tuple[float, float]:
-        if force_source.world_x is not None and force_source.world_y is not None:
-            return (float(force_source.world_x), float(force_source.world_y))
-        return self._buffer_to_world_float_position((float(force_source.x), float(force_source.y)))
+        return _force_source_world_position(self, force_source)
 
     def _force_source_buffer_position(self, force_source: ForceSource) -> tuple[float, float]:
-        if force_source.world_x is not None and force_source.world_y is not None:
-            return self._world_to_buffer_float_position((float(force_source.world_x), float(force_source.world_y)))
-        return (float(force_source.x), float(force_source.y))
+        return _force_source_buffer_position(self, force_source)
 
     def _normalize_runtime_force_source(self, force_source: ForceSource) -> ForceSource:
         world_x, world_y = self._force_source_world_position(force_source)
@@ -11049,50 +10798,16 @@ class WorldEngine:
         )
 
     def _buffer_gas_to_world_position(self, position: tuple[int, int]) -> tuple[int, int]:
-        cell_x = int(position[0]) * int(self.gas_cell_size)
-        cell_y = int(position[1]) * int(self.gas_cell_size)
-        world_x, world_y = self._buffer_to_world_position((cell_x, cell_y))
-        return (int(world_x // self.gas_cell_size), int(world_y // self.gas_cell_size))
+        return _buffer_gas_to_world_position(self, position)
 
     def _buffer_bbox_to_world_bbox(self, bbox: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
-        x0, y0, x1, y1 = (int(value) for value in bbox)
-        world_x0, world_y0 = self._buffer_to_world_position((x0, y0))
-        width = max(0, x1 - x0)
-        height = max(0, y1 - y0)
-        return (int(world_x0), int(world_y0), int(world_x0) + width, int(world_y0) + height)
+        return _buffer_bbox_to_world_bbox(self, bbox)
 
     def _clamped_world_window(self, world_x: int, world_y: int, width: int, height: int) -> tuple[int, int, int, int]:
-        min_world_x = int(self.paging.origin_x)
-        min_world_y = int(self.paging.origin_y)
-        max_world_x = min_world_x + self.width
-        max_world_y = min_world_y + self.height
-        clamped_world_x = min_world_x if self.width <= 0 else max(min_world_x, min(max_world_x - 1, int(world_x)))
-        clamped_world_y = min_world_y if self.height <= 0 else max(min_world_y, min(max_world_y - 1, int(world_y)))
-        span_x = max(0, int(width))
-        span_y = max(0, int(height))
-        return (
-            int(clamped_world_x),
-            int(clamped_world_y),
-            int(min(max_world_x, clamped_world_x + span_x)),
-            int(min(max_world_y, clamped_world_y + span_y)),
-        )
+        return _clamped_world_window(self, world_x, world_y, width, height)
 
     def _centered_world_window(self, center_x: int, center_y: int, width: int, height: int) -> tuple[int, int, int, int]:
-        clamped_center_x, clamped_center_y = self._clamp_world_position(center_x, center_y)
-        min_world_x = int(self.paging.origin_x)
-        min_world_y = int(self.paging.origin_y)
-        max_world_x = min_world_x + self.width
-        max_world_y = min_world_y + self.height
-        span_x = max(0, int(width))
-        span_y = max(0, int(height))
-        world_x0 = max(min_world_x, int(clamped_center_x) - span_x // 2)
-        world_y0 = max(min_world_y, int(clamped_center_y) - span_y // 2)
-        return (
-            int(world_x0),
-            int(world_y0),
-            int(min(max_world_x, world_x0 + span_x)),
-            int(min(max_world_y, world_y0 + span_y)),
-        )
+        return _centered_world_window(self, center_x, center_y, width, height)
 
     def _world_axis_spans(
         self,
@@ -11102,62 +10817,10 @@ class WorldEngine:
         axis: str,
         gas_grid: bool = False,
     ) -> list[tuple[int, int]]:
-        span = max(0, int(world_end) - int(world_start))
-        if span <= 0:
-            return []
-        if not gas_grid:
-            if axis == "x":
-                size = self.width
-                origin = int(self.paging.origin_x)
-                buffer_origin = int(self.paging.buffer_origin_x)
-            else:
-                size = self.height
-                origin = int(self.paging.origin_y)
-                buffer_origin = int(self.paging.buffer_origin_y)
-        else:
-            if axis == "x":
-                size = self.gas_width
-                origin = int(self.paging.origin_x) // int(self.gas_cell_size)
-                buffer_origin = int(self.paging.buffer_origin_x) // int(self.gas_cell_size)
-            else:
-                size = self.gas_height
-                origin = int(self.paging.origin_y) // int(self.gas_cell_size)
-                buffer_origin = int(self.paging.buffer_origin_y) // int(self.gas_cell_size)
-        start = (int(world_start) - origin + buffer_origin) % size
-        if span >= size:
-            return [(0, size)]
-        end = (start + span) % size
-        if start < end:
-            return [(int(start), int(end))]
-        spans = [(int(start), int(size))]
-        if end > 0:
-            spans.append((0, int(end)))
-        return spans
+        return _world_axis_spans(self, world_start, world_end, axis=axis, gas_grid=gas_grid)
 
     def _world_axis_indices(self, world_start: int, world_end: int, *, axis: str, gas_grid: bool = False) -> np.ndarray:
-        span = max(0, int(world_end) - int(world_start))
-        if span <= 0:
-            return np.empty((0,), dtype=np.intp)
-        if not gas_grid:
-            if axis == "x":
-                size = self.width
-                origin = int(self.paging.origin_x)
-                buffer_origin = int(self.paging.buffer_origin_x)
-            else:
-                size = self.height
-                origin = int(self.paging.origin_y)
-                buffer_origin = int(self.paging.buffer_origin_y)
-        else:
-            if axis == "x":
-                size = self.gas_width
-                origin = int(self.paging.origin_x) // int(self.gas_cell_size)
-                buffer_origin = int(self.paging.buffer_origin_x) // int(self.gas_cell_size)
-            else:
-                size = self.gas_height
-                origin = int(self.paging.origin_y) // int(self.gas_cell_size)
-                buffer_origin = int(self.paging.buffer_origin_y) // int(self.gas_cell_size)
-        coords = np.arange(int(world_start), int(world_end), dtype=np.int64)
-        return ((coords - origin + buffer_origin) % size).astype(np.intp, copy=False)
+        return _world_axis_indices(self, world_start, world_end, axis=axis, gas_grid=gas_grid)
 
     def _extract_world_window(
         self,
@@ -11171,11 +10834,7 @@ class WorldEngine:
         y_axis: int,
         gas_grid: bool = False,
     ) -> np.ndarray:
-        x_indices = self._world_axis_indices(world_x0, world_x1, axis="x", gas_grid=gas_grid)
-        y_indices = self._world_axis_indices(world_y0, world_y1, axis="y", gas_grid=gas_grid)
-        window = np.take(array, y_indices, axis=y_axis)
-        window = np.take(window, x_indices, axis=x_axis)
-        return np.ascontiguousarray(window)
+        return _extract_world_window(self, array, world_x0, world_y0, world_x1, world_y1, x_axis=x_axis, y_axis=y_axis, gas_grid=gas_grid)
 
     def _world_gas_window_for_cell_world_rect(
         self,
@@ -11196,53 +10855,10 @@ class WorldEngine:
         )
 
     def _pack_cell_core_world_window(self, world_x0: int, world_y0: int, world_x1: int, world_y1: int) -> np.ndarray:
-        material_id = self._extract_world_window(
-            self.material_id,
-            world_x0,
-            world_y0,
-            world_x1,
-            world_y1,
-            x_axis=1,
-            y_axis=0,
-        )
-        phase = self._extract_world_window(self.phase, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0)
-        cell_flags = self._extract_world_window(self.cell_flags, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0)
-        velocity = self._extract_world_window(self.velocity, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0)
-        cell_temperature = self._extract_world_window(
-            self.cell_temperature,
-            world_x0,
-            world_y0,
-            world_x1,
-            world_y1,
-            x_axis=1,
-            y_axis=0,
-        )
-        timer_pack = self._extract_world_window(self.timer_pack, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0)
-        integrity = self._extract_world_window(self.integrity, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0)
-
-        packed = np.zeros((max(0, world_y1 - world_y0), max(0, world_x1 - world_x0), 5), dtype=np.uint32)
-        packed[..., 0] = (
-            material_id.astype(np.uint32)
-            | (phase.astype(np.uint32) << 16)
-            | (cell_flags.astype(np.uint32) << 24)
-        )
-        half = velocity.astype(np.float16)
-        raw_half = half.view(np.uint16)
-        packed[..., 1] = raw_half[..., 0].astype(np.uint32) | (raw_half[..., 1].astype(np.uint32) << 16)
-        packed[..., 2] = cell_temperature.astype(np.float32).view(np.uint32)
-        packed[..., 3] = (
-            timer_pack[..., 0].astype(np.uint32)
-            | (timer_pack[..., 1].astype(np.uint32) << 8)
-            | (timer_pack[..., 2].astype(np.uint32) << 16)
-            | (timer_pack[..., 3].astype(np.uint32) << 24)
-        )
-        packed[..., 4] = np.clip(np.rint(integrity), 0, 65535).astype(np.uint32)
-        return packed
+        return _pack_cell_core_world_window(self, world_x0, world_y0, world_x1, world_y1)
 
     def _world_to_buffer_clamped(self, world_x: int, world_y: int) -> tuple[int, int]:
-        clamped_world_x, clamped_world_y = self._clamp_world_position(world_x, world_y)
-        buffer_x, buffer_y = self.paging.world_to_buffer(clamped_world_x, clamped_world_y)
-        return (int(buffer_x), int(buffer_y))
+        return _world_to_buffer_clamped(self, world_x, world_y)
 
     def _clamp_world_position(self, world_x: int, world_y: int) -> tuple[int, int]:
         min_world_x = int(self.paging.origin_x)
@@ -11260,37 +10876,10 @@ class WorldEngine:
         *,
         radius: int,
     ) -> tuple[int, int] | None:
-        start_world_position = self._clamp_world_position(*start_world_position)
-        if self._world_cell_is_empty(*start_world_position):
-            return start_world_position
-        if radius <= 0:
-            return None
-        for step in range(1, radius + 1):
-            seen: set[tuple[int, int]] = set()
-            for dy in range(-step, step + 1):
-                for dx in range(-step, step + 1):
-                    if max(abs(dx), abs(dy)) != step:
-                        continue
-                    world_position = self._clamp_world_position(
-                        start_world_position[0] + dx,
-                        start_world_position[1] + dy,
-                    )
-                    if world_position in seen:
-                        continue
-                    seen.add(world_position)
-                    if self._world_cell_is_empty(*world_position):
-                        return world_position
-        return None
+        return _find_nearest_empty_world_position(self, start_world_position, radius=radius)
 
     def _world_cell_is_empty(self, world_x: int, world_y: int) -> bool:
-        buffer_x, buffer_y = self._world_to_buffer_clamped(world_x, world_y)
-        material_id, _ = self._material_state_for_position(
-            buffer_x,
-            buffer_y,
-            blocked_cells=self._resolver_blocked_cells,
-            released_cells=self._resolver_released_cells,
-        )
-        return material_id == 0
+        return _world_cell_is_empty(self, world_x, world_y)
 
     @staticmethod
     def _world_distance_sq(left: tuple[int, int], right: tuple[int, int]) -> float:
