@@ -21,19 +21,21 @@ Re-run after each phase:
 - [~] Phase 2 (shader extraction):
   - [x] gpu_merge (295→115), gpu_page_stripes (1073→868), gpu_placeholders (657→346), gpu_gas (1095→591) — fully migrated, < 1000.
   - [x] gpu_motion (9210→3370), gpu_liquid (4775→1540), gpu_collapse (11347→5522) — shaders extracted; STILL > 1000 (remaining is non-shader pipeline Python logic; further split pending).
-  - [ ] gpu_reactions (9675), gpu_heat (2246), gpu_optics (1273), gpu_world_commands (1041) — preamble files, TODO (use `includes`).
-  - Note: compound f-string expressions (`{LOCAL_SIZE-1}`, `{A*B}`, `{Cls.ATTR}`) baked as evaluated literals in some collapse .comp (behavior-identical; derived-marker conversion is a robustness follow-up).
-- [~] Phase 4 (world.py split) — world.py 17279→12093 (geometry extraction in progress):
+  - [x] gpu_reactions (9675→5148), gpu_heat (2246→1056), gpu_optics (1273→635), gpu_world_commands (1041→705) — shaders extracted (includes mechanism for preambles). ALL 10 GPU shader migrations complete; 8 of 10 now < 1000.
+  - Note: compound f-string expressions (`{LOCAL_SIZE-1}`, `{A*B}`, `{Cls.ATTR}`) → derived markers (motion/reactions/heat/optics/world_commands/liquid/placeholders) or baked literals (some collapse .comp — robustness follow-up).
+- [~] Phase 4 (world.py split) — world.py 17279→10819 (7 extractions done):
   - [x] constants → `world_constants.py`
   - [x] `serialize_engine_capabilities` → `world_capabilities/` package (12 modules, each ≤916 lines)
   - [x] `_make_readback_payload` → `world_readback_payload.py`
   - [x] `debug_frame` + 15 frame helpers → `world_debug_frame.py` (502 lines)
-  - [~] geometry bucket → `world_geometry.py` (subagent running; golden `d9e44e209feaedd6`)
-  - [ ] intent-resolution cluster, input coercion, payload serializers (TODO; intent cluster is large/interconnected)
+  - [x] geometry bucket (34 methods) → `world_geometry.py` (679 lines; golden `d9e44e209feaedd6`)
+  - [x] `serialize_*_runtime` (9 methods) → `world_runtime_serializers.py` (489 lines; golden `34f8fec1267d53a2`)
+  - [x] bridge serializers (21 methods) → `world_bridge_serializers.py` (621 lines; golden `7749626c1398fd35`)
+  - [ ] payload serializers (`serialize_*` scattered), intent-resolution cluster (interconnected), input coercion (`_coerce_*`/`_normalize_*`), shadow/sanctioned tables, runtime rebuild, controller-turn, paging API (TODO; same verbatim-move + golden pattern)
 - [x] gpu.py (4465) → `gpu/` package: `_common` (60), `dtypes` (587), `packers` (1186), `readback` (142), `bridge` (2723=GPUBridge), `__init__` (32). All `from oracle_game.gpu import X` paths preserved.
 
 ## Files still > 1000 lines (current)
-world.py (12093), gpu_collapse (5519), gpu_reactions (5148), gpu_motion (3367),
+world.py (10819), gpu_collapse (5519), gpu_reactions (5148), gpu_motion (3367),
 gpu/bridge (2723=GPUBridge class), reactions.py (2011, CPU), rules.py (1578),
 gpu_liquid (1542), enginedemo (1463), motion.py (1413, CPU), gpu/packers (1186),
 http_console (1164), gpu_heat (1056), liquid.py (1007).
