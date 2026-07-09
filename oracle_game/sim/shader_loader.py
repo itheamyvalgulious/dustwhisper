@@ -41,8 +41,11 @@ from typing import Any, Any as _Ctx  # moderngl Context
 # ``oracle_game/shaders/`` — sibling of the ``sim`` package.
 SHADER_ROOT: Path = Path(__file__).resolve().parent.parent / "shaders"
 
-# Matches a ``{{NAME}}`` substitution marker (NAME = A-Z_0-9, at least one char).
-_MARKER_RE = re.compile(r"\{\{([A-Z_][A-Z0-9_]*)\}\}")
+# Matches a ``{{NAME}}`` substitution marker.  NAME may be any identifier
+# (constants are typically UPPER_CASE, but a few shaders are parameterized by
+# a runtime value such as ``scalar_type``).  GLSL itself never contains ``{{``,
+# so this is unambiguous.
+_MARKER_RE = re.compile(r"\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}")
 
 # Cache of raw file text keyed by resolved path; files are immutable at runtime.
 _RAW_CACHE: dict[Path, str] = {}
