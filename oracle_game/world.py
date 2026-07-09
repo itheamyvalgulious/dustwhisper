@@ -556,6 +556,23 @@ from oracle_game.world_internal_helpers import (
     readback_request_status,
     submit_entity_controller_turn,
 )
+from oracle_game.world_backend_gating import (
+    _gpu_active_tile_count,
+    _gpu_context_available,
+    _gpu_pipeline_available,
+    _gpu_realtime_budget_active,
+    _gpu_world_simulation_required,
+    _invalidate_gpu_authoritative_cell_resources,
+    _invalidate_gpu_authoritative_resources,
+    _require_cpu_oracle_backend,
+    _require_gpu_authoritative_resources,
+    _require_gpu_stage,
+    _should_run_formal_collapse_this_frame,
+    _skip_budgeted_gpu_stage,
+    prewarm_formal_connected_collapse,
+    require_gpu_world_backend,
+    use_cpu_oracle_backend,
+)
 from oracle_game.world_intent_helpers import (
     _build_entity_feedback_from_current_state,
     _build_entity_feedback_from_world,
@@ -782,58 +799,31 @@ class WorldEngine:
         self._closed = False
 
     def use_cpu_oracle_backend(self) -> None:
-        self.simulation_backend = "cpu"
+        return use_cpu_oracle_backend(self)
 
     def require_gpu_world_backend(self) -> None:
-        self.simulation_backend = "gpu"
+        return require_gpu_world_backend(self)
 
     def prewarm_formal_connected_collapse(self) -> bool:
-        if self.simulation_backend != "gpu":
-            return False
-        pipeline = self.collapse_solver.gpu_pipeline
-        if not pipeline.available(self):
-            return False
-        pipeline.prewarm_formal_connected_resources(self)
-        return True
+        return prewarm_formal_connected_collapse(self)
 
     def _gpu_context_available(self) -> bool:
-        ctx = self.bridge.ctx
-        return bool(self.bridge.enabled and ctx is not None and getattr(ctx, "version_code", 0) >= 430)
+        return _gpu_context_available(self)
 
     def _gpu_world_simulation_required(self) -> bool:
-        return self.simulation_backend == "gpu"
+        return _gpu_world_simulation_required(self)
 
     def _gpu_realtime_budget_active(self) -> bool:
-        if not (self.gpu_realtime_budget_enabled and self.simulation_backend == "gpu"):
-            return False
-        active_tile_count = self._gpu_active_tile_count()
-        if active_tile_count <= 0:
-            return False
-        estimated_active_cells = active_tile_count * int(self.active.tile_size) * int(self.active.tile_size)
-        return estimated_active_cells >= int(self.gpu_realtime_budget_cell_threshold)
+        return _gpu_realtime_budget_active(self)
 
     def _gpu_active_tile_count(self) -> int:
-        if "active_tile_ttl" in self.bridge.gpu_authoritative_resources:
-            active_meta = self.bridge.shadow_buffers.get("active_meta")
-            if isinstance(active_meta, np.ndarray) and active_meta.size > 0:
-                return int(active_meta[0]["active_tile_count"])
-            return 0
-        active_tile_ttl = np.asarray(self.active.active_tile_ttl, dtype=np.int32)
-        if active_tile_ttl.size <= 0:
-            return 0
-        return int(np.count_nonzero(active_tile_ttl > 0))
+        return _gpu_active_tile_count(self)
 
     def _skip_budgeted_gpu_stage(self, stage: str) -> bool:
-        return False
+        return _skip_budgeted_gpu_stage(self, stage)
 
     def _should_run_formal_collapse_this_frame(self) -> bool:
-        if self.simulation_backend != "gpu":
-            return True
-        interval = max(1, int(getattr(self, "formal_collapse_interval_frames", 1)))
-        if interval <= 1:
-            return True
-        frame_id = max(1, int(getattr(self, "frame_id", 1)))
-        return (frame_id - 1) % interval == 0
+        return _should_run_formal_collapse_this_frame(self)
 
     @contextmanager
     def _profile_pass(self, name: str):
@@ -863,52 +853,22 @@ class WorldEngine:
                 summary["gpu_ms"] = float(summary["gpu_ms"] or 0.0) + elapsed_ms
 
     def _gpu_pipeline_available(self, pipeline: Any, name: str, *, require: bool | None = None) -> bool:
-        if self.simulation_backend == "cpu":
-            return False
-        available = bool(pipeline.available(self))
-        required = self._gpu_world_simulation_required() if require is None else bool(require)
-        if required and not available:
-            raise RuntimeError(f"GPU world simulation requires the {name} GPU pipeline; CPU fallback is disabled")
-        return available
+        return _gpu_pipeline_available(self, pipeline, name, require=require)
 
     def _require_gpu_stage(self, name: str) -> None:
-        if self._gpu_world_simulation_required():
-            raise RuntimeError(f"GPU world simulation requires GPU support for {name}; CPU fallback is disabled")
+        return _require_gpu_stage(self, name)
 
     def _require_gpu_authoritative_resources(self, stage: str, *resource_names: str) -> None:
-        if not (self.simulation_backend == "gpu" and self._world_simulation_frame_active):
-            return
-        missing = [str(name) for name in resource_names if str(name) not in self.bridge.gpu_authoritative_resources]
-        if missing:
-            joined = ", ".join(missing)
-            raise RuntimeError(
-                f"GPU world simulation requires GPU-authoritative {stage} resources: {joined}; "
-                "CPU fallback is disabled"
-            )
+        return _require_gpu_authoritative_resources(self, stage, *resource_names)
 
     def _require_cpu_oracle_backend(self, name: str) -> None:
-        if self.simulation_backend != "cpu":
-            raise RuntimeError(
-                f"{name} CPU oracle path requires simulation_backend='cpu'; CPU fallback is disabled"
-            )
+        return _require_cpu_oracle_backend(self, name)
 
     def _invalidate_gpu_authoritative_resources(self, *resource_names: str) -> None:
-        if self.simulation_backend == "gpu":
-            self.bridge.clear_gpu_authoritative(*resource_names)
-            self._bridge_inputs_prepared = False
-            if not self._world_simulation_frame_active:
-                self._gpu_cpu_dirty_resources.update(str(name) for name in resource_names)
+        return _invalidate_gpu_authoritative_resources(self, *resource_names)
 
     def _invalidate_gpu_authoritative_cell_resources(self) -> None:
-        self._invalidate_gpu_authoritative_resources(
-            "cell_core",
-            "material",
-            "island_id",
-            "entity_id",
-            "placeholder_displaced_material",
-            "collapse_delay_pending",
-            "liquid_flow_intent",
-        )
+        return _invalidate_gpu_authoritative_cell_resources(self)
 
     def bootstrap_defaults(self) -> None:
         payloads = build_default_payloads()
