@@ -8,7 +8,11 @@ if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
 from oracle_game.sim.reactions import REACTION_ACTIVITY_EPSILON, GPUAuthoritativeFullSolveMask
-from oracle_game.sim.utils import expand_bool_mask, tile_mask_to_cell_mask, tile_mask_to_gas_mask
+from oracle_game.sim.utils import expand_bool_mask
+# tile_mask_to_cell_mask / tile_mask_to_gas_mask are referenced through the
+# facade module (imported below) so tests that monkeypatch
+# oracle_game.sim.reactions.tile_mask_to_*_mask can intercept these calls.
+import oracle_game.sim.reactions as _reactions_facade
 
 
 def _solve_masks(
@@ -34,13 +38,13 @@ def _solve_masks(
             and not np.any(solve_tile_mask)
         ):
             solve_tile_mask = np.ones((world.active.tile_height, world.active.tile_width), dtype=np.bool_)
-    solve_cell_mask = tile_mask_to_cell_mask(
+    solve_cell_mask = _reactions_facade.tile_mask_to_cell_mask(
         solve_tile_mask,
         tile_size=world.active.tile_size,
         width=world.width,
         height=world.height,
     )
-    solve_gas_mask = tile_mask_to_gas_mask(
+    solve_gas_mask = _reactions_facade.tile_mask_to_gas_mask(
         solve_tile_mask,
         tile_size=world.active.tile_size,
         gas_cell_size=world.gas_cell_size,

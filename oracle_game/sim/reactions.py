@@ -3,6 +3,9 @@ from __future__ import annotations
 import numpy as np
 
 from oracle_game.sim.gpu_reactions import GPUReactionPipeline
+# Re-exported so tests can monkeypatch oracle_game.sim.reactions.tile_mask_to_*_mask
+# (the reactions_masks bucket references these via this facade module).
+from oracle_game.sim.utils import tile_mask_to_cell_mask, tile_mask_to_gas_mask
 
 
 REACTION_ACTIVITY_EPSILON = 1e-4
