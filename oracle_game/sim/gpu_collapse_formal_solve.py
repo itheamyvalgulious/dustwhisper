@@ -9,6 +9,10 @@ if TYPE_CHECKING:
     from oracle_game.sim.gpu_collapse import GPUCollapseResources
 
 from oracle_game.sim.gpu_collapse_dirty import get_collapse_structure_dirty_tile_bounds
+# _formal_jfa_jumps is a @staticmethod moved to gpu_collapse_formal; call its
+# module function directly (the facade class isn't importable here — it's
+# defined after this bucket is imported).
+from oracle_game.sim.gpu_collapse_formal import _formal_jfa_jumps
 from oracle_game.types import Phase
 
 from oracle_game.sim.gpu_collapse import (
@@ -613,11 +617,11 @@ def _formal_connected_dirty_tile_jump_schedule(pipeline, world: "WorldEngine") -
 
 
 def _formal_connected_dirty_jump_schedule(width: int, height: int) -> tuple[int, ...]:
-    return GPUCollapsePipeline._formal_connected_cell_jump_schedule(width, height)
+    return _formal_connected_cell_jump_schedule(width, height)
 
 
 def _formal_connected_cell_jump_schedule(width: int, height: int) -> tuple[int, ...]:
-    jumps = GPUCollapsePipeline._formal_jfa_jumps(width, height)
+    jumps = _formal_jfa_jumps(width, height)
     cleanup = (1,) * FORMAL_CONNECTED_TILE_REFINE_PASS_COUNT
     round_schedule = jumps + cleanup
     if not round_schedule:

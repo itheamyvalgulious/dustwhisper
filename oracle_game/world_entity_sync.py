@@ -5,6 +5,7 @@ from typing import Any, TYPE_CHECKING
 from copy import deepcopy
 from dataclasses import asdict, replace
 import numpy as np
+from oracle_game.gpu import unpack_cell_core  # _build_entity_feedback unpacks cell-core words
 from oracle_game.types import (
     EntityPlaceholder,
     EntityState,
@@ -13,6 +14,7 @@ from oracle_game.types import (
     ObservationTarget,
     ObservationResult,
     EntityFeedback,
+    EntityCellFeedback,
     ReadbackRequest,
     ReadbackResult,
     ForceSource,
