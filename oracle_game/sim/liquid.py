@@ -5,6 +5,7 @@ import numpy as np
 from oracle_game.sim.gpu_liquid import GPULiquidPipeline
 from oracle_game.sim.utils import expand_bool_mask, tile_mask_to_cell_mask
 from oracle_game.types import Phase
+from oracle_game.sim.cpu_base import material_table_row
 
 
 LIQUID_ACTIVITY_EPSILON = 1e-6
@@ -923,13 +924,8 @@ class LiquidSolver:
         }
 
     def _material_table_row(self, world: "WorldEngine", material_id: int) -> np.void | None:
-        material_table = world.bridge.shadow_typed_tables.get("material_table")
-        if material_table is None or material_id < 0 or material_id >= int(material_table.shape[0]):
-            return None
-        row = material_table[material_id]
-        if int(row["name_hash"]) == 0:
-            return None
-        return row
+        # Delegated to the shared helper (formerly duplicated verbatim here).
+        return material_table_row(world, material_id)
 
     def _material_density(self, world: "WorldEngine", material_id: int) -> float:
         row = self._material_table_row(world, material_id)
