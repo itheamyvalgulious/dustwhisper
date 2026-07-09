@@ -4,6 +4,7 @@ from copy import deepcopy
 from dataclasses import replace
 from typing import Any, TYPE_CHECKING
 
+from oracle_game.world_internal_helpers import _public_resolved_change_intent
 from oracle_game.types import (
     CarrierIntent,
     ChangeIntent,
