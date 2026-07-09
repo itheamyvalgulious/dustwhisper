@@ -25,7 +25,7 @@ int positive_mod(int value, int divisor) {
 }
 
 void store_runtime_word(int record_index, int word_offset, int value) {
-    runtime_words[record_index * {ISLAND_RUNTIME_DTYPE.itemsize // 4} + word_offset] = value;
+    runtime_words[record_index * 13 + word_offset] = value;
 }
 
 void main() {

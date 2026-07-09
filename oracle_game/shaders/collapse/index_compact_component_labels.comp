@@ -1,0 +1,38 @@
+
+            #version 430
+            layout(local_size_x=256, local_size_y=1, local_size_z=1) in;
+            uniform int component_capacity;
+            uniform ivec2 empty_min;
+
+            layout(std430, binding=0) readonly buffer ComponentLabels {
+                int component_labels[];
+            };
+            layout(std430, binding=1) buffer ComponentLabelIndices {
+                uint component_label_indices[];
+            };
+            layout(std430, binding=2) buffer ComponentMetadata {
+                int component_metadata[];
+            };
+            layout(std430, binding=3) readonly buffer ComponentCount {
+                uint component_count;
+            };
+
+            void main() {
+                uint index = gl_GlobalInvocationID.x;
+                uint count = min(component_count, uint(max(component_capacity, 0)));
+                if (index >= count) {
+                    return;
+                }
+                int label = component_labels[index];
+                if (label <= 0 || label > component_capacity) {
+                    return;
+                }
+                component_label_indices[uint(label - 1)] = index + 1u;
+                int base = int(index) * 5;
+                component_metadata[base + 0] = empty_min.x;
+                component_metadata[base + 1] = empty_min.y;
+                component_metadata[base + 2] = 0;
+                component_metadata[base + 3] = 0;
+                component_metadata[base + 4] = 0;
+            }
+            

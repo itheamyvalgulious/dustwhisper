@@ -1,0 +1,17 @@
+
+            #version 430
+            layout(local_size_x=256, local_size_y=1, local_size_z=1) in;
+            uniform int cell_count;
+
+            layout(std430, binding=0) buffer CellBuffer {
+                int values[];
+            };
+
+            void main() {
+                uint index = gl_GlobalInvocationID.x;
+                if (index >= uint(max(cell_count, 0))) {
+                    return;
+                }
+                values[int(index)] = 0;
+            }
+            

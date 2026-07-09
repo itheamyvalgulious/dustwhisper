@@ -1,0 +1,343 @@
+
+            #version 430
+            layout(
+                local_size_x={{FORMAL_CONNECTED_TILE_LOCAL_SIZE}},
+                local_size_y={{FORMAL_CONNECTED_TILE_LOCAL_SIZE}},
+                local_size_z=1
+            ) in;
+            uniform ivec2 cell_grid_size;
+            uniform ivec2 tile_grid_size;
+            uniform int tile_size;
+            uniform int jump;
+            uniform bool refine_local_labels;
+
+            layout(binding=0) uniform sampler2D component_mask_tex;
+            layout(binding=1) uniform sampler2D label_in_tex;
+            layout(r32f, binding=2) writeonly uniform image2D label_out_img;
+
+            layout(std430, binding=0) readonly buffer ConnectedTileMask {
+                int connected_tiles[];
+            };
+            layout(std430, binding=1) readonly buffer ConnectedTileCount {
+                uint connected_tile_count[];
+            };
+            layout(std430, binding=2) readonly buffer ConnectedTileList {
+                ivec2 connected_tile_list[];
+            };
+            layout(std430, binding=3) readonly buffer ConnectedTileRowMasks {
+                uint connected_tile_row_masks[];
+            };
+            layout(std430, binding=4) readonly buffer ConnectedTileColumnMasks {
+                uint connected_tile_column_masks[];
+            };
+
+		            shared int s_component[{{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}][{{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}];
+		            shared int s_label[{{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}][{{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}];
+	            shared int s_next[{{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}][{{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}];
+	            shared uint s_step_changed;
+	            shared uint s_jump_changed;
+
+            bool in_grid(ivec2 cell) {
+                return cell.x >= 0 && cell.y >= 0 && cell.x < cell_grid_size.x && cell.y < cell_grid_size.y;
+            }
+
+            bool tile_in_grid(ivec2 tile) {
+                return tile.x >= 0 && tile.y >= 0 && tile.x < tile_grid_size.x && tile.y < tile_grid_size.y;
+            }
+
+            bool tile_connected_mask(ivec2 tile) {
+                if (!tile_in_grid(tile)) {
+                    return false;
+                }
+                return connected_tiles[tile.y * tile_grid_size.x + tile.x] != 0;
+            }
+
+            bool cell_connected(ivec2 cell) {
+                if (!in_grid(cell)) {
+                    return false;
+                }
+                return tile_connected_mask(cell / tile_size);
+            }
+
+            bool component_connected(ivec2 cell) {
+                return cell_connected(cell) && texelFetch(component_mask_tex, cell, 0).x > 0.5;
+            }
+
+            int label_global(ivec2 cell) {
+                if (!component_connected(cell)) {
+                    return 0;
+                }
+                return int(texelFetch(label_in_tex, cell, 0).x + 0.5);
+            }
+
+	            bool sample_in_current_tile(ivec2 tile, ivec2 sample_cell) {
+	                ivec2 sample_local = sample_cell - tile * tile_size;
+	                return
+	                    sample_local.x >= 0 &&
+	                    sample_local.y >= 0 &&
+	                    sample_local.x < tile_size &&
+	                    sample_local.y < tile_size &&
+	                    sample_local.x < {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}} &&
+	                    sample_local.y < {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}};
+	            }
+
+			            int label_sample(ivec2 sample_cell) {
+			                return label_global(sample_cell);
+			            }
+
+			            int connected_tile_mask_base(ivec2 tile) {
+			                return (tile.y * tile_grid_size.x + tile.x) * {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}};
+			            }
+
+			            uint bit_range_mask(int local_start, int local_end) {
+			                int start_bit = max(0, min(tile_size, local_start));
+			                int end_bit = max(0, min(tile_size, local_end));
+			                if (end_bit <= start_bit) {
+			                    return 0u;
+			                }
+			                uint below_start = start_bit <= 0 ? 0u : ((1u << uint(start_bit)) - 1u);
+			                uint below_end = 0xffffffffu;
+			                if (end_bit < {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}) {
+			                    below_end = (1u << uint(end_bit)) - 1u;
+			                }
+			                return below_end & ~below_start;
+			            }
+
+			            bool row_mask_segment_clear(ivec2 segment_tile, int local_y, int local_x0, int local_x1) {
+			                if (
+			                    !tile_connected_mask(segment_tile) ||
+			                    local_y < 0 ||
+			                    local_y >= tile_size ||
+			                    local_y >= {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}
+			                ) {
+			                    return false;
+			                }
+			                uint required_mask = bit_range_mask(local_x0, local_x1);
+			                if (required_mask == 0u) {
+			                    return true;
+			                }
+			                uint available_mask = connected_tile_row_masks[connected_tile_mask_base(segment_tile) + local_y];
+			                return (available_mask & required_mask) == required_mask;
+			            }
+
+			            bool column_mask_segment_clear(ivec2 segment_tile, int local_x, int local_y0, int local_y1) {
+			                if (
+			                    !tile_connected_mask(segment_tile) ||
+			                    local_x < 0 ||
+			                    local_x >= tile_size ||
+			                    local_x >= {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}
+			                ) {
+			                    return false;
+			                }
+			                uint required_mask = bit_range_mask(local_y0, local_y1);
+			                if (required_mask == 0u) {
+			                    return true;
+			                }
+			                uint available_mask = connected_tile_column_masks[connected_tile_mask_base(segment_tile) + local_x];
+			                return (available_mask & required_mask) == required_mask;
+			            }
+
+			            bool row_masks_line_clear(int y, int x0, int x1) {
+			                if (y < 0 || y >= cell_grid_size.y || x0 < 0 || x1 > cell_grid_size.x) {
+			                    return false;
+			                }
+			                int cursor = x0;
+			                while (cursor < x1) {
+			                    ivec2 segment_tile = ivec2(cursor / tile_size, y / tile_size);
+			                    int segment_end = min(x1, (segment_tile.x + 1) * tile_size);
+			                    if (segment_end <= cursor) {
+			                        return false;
+			                    }
+			                    int local_y = y - segment_tile.y * tile_size;
+			                    int local_x0 = cursor - segment_tile.x * tile_size;
+			                    int local_x1 = segment_end - segment_tile.x * tile_size;
+			                    if (!row_mask_segment_clear(segment_tile, local_y, local_x0, local_x1)) {
+			                        return false;
+			                    }
+			                    cursor = segment_end;
+			                }
+			                return true;
+			            }
+
+			            bool column_masks_line_clear(int x, int y0, int y1) {
+			                if (x < 0 || x >= cell_grid_size.x || y0 < 0 || y1 > cell_grid_size.y) {
+			                    return false;
+			                }
+			                int cursor = y0;
+			                while (cursor < y1) {
+			                    ivec2 segment_tile = ivec2(x / tile_size, cursor / tile_size);
+			                    int segment_end = min(y1, (segment_tile.y + 1) * tile_size);
+			                    if (segment_end <= cursor) {
+			                        return false;
+			                    }
+			                    int local_x = x - segment_tile.x * tile_size;
+			                    int local_y0 = cursor - segment_tile.y * tile_size;
+			                    int local_y1 = segment_end - segment_tile.y * tile_size;
+			                    if (!column_mask_segment_clear(segment_tile, local_x, local_y0, local_y1)) {
+			                        return false;
+			                    }
+			                    cursor = segment_end;
+			                }
+			                return true;
+			            }
+
+			            bool label_line_clear(ivec2 tile, ivec2 start_cell, ivec2 end_cell) {
+			                ivec2 delta = end_cell - start_cell;
+			                if (delta.x != 0 && delta.y != 0) {
+			                    return false;
+			                }
+		                int steps = max(abs(delta.x), abs(delta.y));
+		                if (steps <= 1) {
+		                    return true;
+		                }
+			                if (delta.y == 0) {
+			                    int x0 = min(start_cell.x, end_cell.x) + 1;
+			                    int x1 = max(start_cell.x, end_cell.x);
+			                    return row_masks_line_clear(start_cell.y, x0, x1);
+			                }
+			                int y0 = min(start_cell.y, end_cell.y) + 1;
+			                int y1 = max(start_cell.y, end_cell.y);
+			                return column_masks_line_clear(start_cell.x, y0, y1);
+			            }
+
+	            void solve_label_cells(ivec2 local_cell, ivec2 cell, bool local_valid) {
+	                int max_steps = max(1, tile_size * tile_size);
+	                for (int step = 0; step < 1024; ++step) {
+	                    if (step >= max_steps) {
+	                        break;
+	                    }
+	                    if (gl_LocalInvocationIndex == 0u) {
+	                        s_step_changed = 0u;
+	                    }
+	                    barrier();
+	                    int previous_label = s_label[local_cell.y][local_cell.x];
+	                    int next_label = previous_label;
+	                    if (local_valid && s_component[local_cell.y][local_cell.x] != 0 && next_label > 0) {
+	                        if (local_cell.x > 0) {
+	                            int candidate = s_label[local_cell.y][local_cell.x - 1];
+	                            if (candidate > 0 && candidate < next_label) {
+	                                next_label = candidate;
+	                            }
+	                        } else {
+	                            int candidate = label_global(cell + ivec2(-1, 0));
+	                            if (candidate > 0 && candidate < next_label) {
+	                                next_label = candidate;
+	                            }
+	                        }
+	                        if (local_cell.x + 1 < tile_size && local_cell.x + 1 < {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}) {
+	                            int candidate = s_label[local_cell.y][local_cell.x + 1];
+	                            if (candidate > 0 && candidate < next_label) {
+	                                next_label = candidate;
+	                            }
+	                        } else {
+	                            int candidate = label_global(cell + ivec2(1, 0));
+	                            if (candidate > 0 && candidate < next_label) {
+	                                next_label = candidate;
+	                            }
+	                        }
+	                        if (local_cell.y > 0) {
+	                            int candidate = s_label[local_cell.y - 1][local_cell.x];
+	                            if (candidate > 0 && candidate < next_label) {
+	                                next_label = candidate;
+	                            }
+	                        } else {
+	                            int candidate = label_global(cell + ivec2(0, -1));
+	                            if (candidate > 0 && candidate < next_label) {
+	                                next_label = candidate;
+	                            }
+	                        }
+	                        if (local_cell.y + 1 < tile_size && local_cell.y + 1 < {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}) {
+	                            int candidate = s_label[local_cell.y + 1][local_cell.x];
+	                            if (candidate > 0 && candidate < next_label) {
+	                                next_label = candidate;
+	                            }
+	                        } else {
+	                            int candidate = label_global(cell + ivec2(0, 1));
+	                            if (candidate > 0 && candidate < next_label) {
+	                                next_label = candidate;
+	                            }
+	                        }
+	                    }
+		                    if (local_valid && s_component[local_cell.y][local_cell.x] != 0 && next_label > 0 && next_label < previous_label) {
+		                        atomicOr(s_step_changed, 1u);
+		                    }
+		                    s_next[local_cell.y][local_cell.x] = next_label;
+		                    barrier();
+		                    s_label[local_cell.y][local_cell.x] = s_next[local_cell.y][local_cell.x];
+		                    barrier();
+	                    if (s_step_changed == 0u) {
+	                        break;
+	                    }
+	                    barrier();
+	                }
+	            }
+
+            void main() {
+                uint work_index = gl_WorkGroupID.x;
+                if (work_index >= connected_tile_count[0]) {
+                    return;
+                }
+                ivec2 tile = connected_tile_list[int(work_index)];
+                if (!tile_connected_mask(tile)) {
+                    return;
+                }
+                ivec2 local_cell = ivec2(gl_LocalInvocationID.xy);
+                ivec2 cell = tile * tile_size + local_cell;
+                bool local_valid = !(
+                    local_cell.x >= tile_size ||
+                    local_cell.y >= tile_size ||
+                    !in_grid(cell)
+                );
+                bool component = local_valid && texelFetch(component_mask_tex, cell, 0).x > 0.5;
+                int current_label = component ? int(texelFetch(label_in_tex, cell, 0).x + 0.5) : 0;
+	                s_component[local_cell.y][local_cell.x] = component ? 1 : 0;
+	                s_label[local_cell.y][local_cell.x] = current_label;
+	                s_next[local_cell.y][local_cell.x] = current_label;
+	                barrier();
+
+	                if (refine_local_labels) {
+		                    solve_label_cells(local_cell, cell, local_valid);
+		                }
+
+	                if (jump > 1) {
+	                    if (gl_LocalInvocationIndex == 0u) {
+	                        s_jump_changed = 0u;
+	                    }
+	                    barrier();
+
+	                    int jump_label = s_label[local_cell.y][local_cell.x];
+	                    int previous_jump_label = jump_label;
+	                    if (local_valid && s_component[local_cell.y][local_cell.x] != 0 && jump_label > 0) {
+	                        for (int axis = 0; axis < 4; ++axis) {
+	                            ivec2 offset = axis == 0 ? ivec2(-jump, 0) : axis == 1 ? ivec2(jump, 0) : axis == 2 ? ivec2(0, -jump) : ivec2(0, jump);
+	                            ivec2 sample_cell = cell + offset;
+	                            if (sample_in_current_tile(tile, sample_cell)) {
+	                                continue;
+	                            }
+	                            int candidate = label_sample(sample_cell);
+		                            if (candidate <= 0 || candidate >= jump_label) {
+		                                continue;
+		                            }
+		                            if (label_line_clear(tile, sample_cell, cell)) {
+		                                jump_label = candidate;
+		                            }
+		                        }
+		                    }
+		                    if (local_valid && s_component[local_cell.y][local_cell.x] != 0 && jump_label > 0 && jump_label < previous_jump_label) {
+		                        atomicOr(s_jump_changed, 1u);
+		                    }
+		                    s_next[local_cell.y][local_cell.x] = jump_label;
+		                    barrier();
+		                    s_label[local_cell.y][local_cell.x] = s_next[local_cell.y][local_cell.x];
+		                    barrier();
+	                    if (refine_local_labels && s_jump_changed != 0u) {
+		                        solve_label_cells(local_cell, cell, local_valid);
+		                    }
+	                }
+
+                if (local_valid) {
+                    int final_label = s_component[local_cell.y][local_cell.x] != 0 ? s_label[local_cell.y][local_cell.x] : 0;
+                    imageStore(label_out_img, cell, vec4(float(final_label), 0.0, 0.0, 0.0));
+                }
+            }
+            

@@ -1,0 +1,21 @@
+
+            #version 430
+            layout(local_size_x=1, local_size_y=1, local_size_z=1) in;
+            uniform ivec2 tile_grid_size;
+
+            layout(std430, binding=0) buffer FrontierTileFlags {
+                uint tile_flags[];
+            };
+            layout(std430, binding=1) readonly buffer FrontierTileList {
+                ivec2 tile_list[];
+            };
+
+            void main() {
+                uint work_index = gl_WorkGroupID.x;
+                ivec2 tile = tile_list[int(work_index)];
+                if (tile.x < 0 || tile.y < 0 || tile.x >= tile_grid_size.x || tile.y >= tile_grid_size.y) {
+                    return;
+                }
+                tile_flags[tile.y * tile_grid_size.x + tile.x] = 0u;
+            }
+            

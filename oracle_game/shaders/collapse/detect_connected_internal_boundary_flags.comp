@@ -18,16 +18,16 @@ void main() {
     }
     uint flags = 0u;
     if (internal_edges.x != 0 && cell.x == 0) {
-        flags |= {GPUCollapsePipeline.FORMAL_EXPAND_LEFT}u;
+        flags |= 1u;
     }
     if (internal_edges.y != 0 && cell.y == 0) {
-        flags |= {GPUCollapsePipeline.FORMAL_EXPAND_TOP}u;
+        flags |= 2u;
     }
     if (internal_edges.z != 0 && cell.x == region_size.x - 1) {
-        flags |= {GPUCollapsePipeline.FORMAL_EXPAND_RIGHT}u;
+        flags |= 4u;
     }
     if (internal_edges.w != 0 && cell.y == region_size.y - 1) {
-        flags |= {GPUCollapsePipeline.FORMAL_EXPAND_BOTTOM}u;
+        flags |= 8u;
     }
     if (flags != 0u) {
         atomicOr(region_flags, flags);

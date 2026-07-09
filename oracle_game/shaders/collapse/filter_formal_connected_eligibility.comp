@@ -24,7 +24,7 @@ void main() {
 	                ivec2 tile = ivec2(0);
 	                bool tile_allowed = true;
 	                if (use_tile_mask) {
-	                    int groups_per_tile_axis = max(1, (tile_size + {LOCAL_SIZE - 1}) / {{LOCAL_SIZE}});
+	                    int groups_per_tile_axis = max(1, (tile_size + 7) / {{LOCAL_SIZE}});
 	                    ivec2 group = ivec2(gl_WorkGroupID.xy);
 	                    tile = ivec2(group.x / groups_per_tile_axis, group.y / groups_per_tile_axis);
 	                    if (tile.x >= tile_grid_size.x || tile.y >= tile_grid_size.y) {

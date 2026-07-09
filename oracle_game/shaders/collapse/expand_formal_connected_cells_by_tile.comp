@@ -81,7 +81,7 @@ bool connected_sample(ivec2 sample_cell) {
 
 void solve_connected_cells(ivec2 local_cell, ivec2 cell, bool local_valid) {
     int max_steps = max(1, tile_size * tile_size);
-    for (int step = 0; step < {FORMAL_CONNECTED_TILE_LOCAL_SIZE * FORMAL_CONNECTED_TILE_LOCAL_SIZE}; ++step) {
+    for (int step = 0; step < 1024; ++step) {
         if (step >= max_steps) {
             break;
         }

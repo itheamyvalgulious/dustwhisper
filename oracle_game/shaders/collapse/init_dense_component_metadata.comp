@@ -1,0 +1,23 @@
+
+            #version 430
+            layout(local_size_x=256, local_size_y=1, local_size_z=1) in;
+            uniform int component_capacity;
+            uniform ivec2 empty_min;
+
+            layout(std430, binding=0) buffer ComponentMetadata {
+                int component_metadata[];
+            };
+
+            void main() {
+                int index = int(gl_GlobalInvocationID.x);
+                if (index >= component_capacity) {
+                    return;
+                }
+                int base = index * 5;
+                component_metadata[base + 0] = empty_min.x;
+                component_metadata[base + 1] = empty_min.y;
+                component_metadata[base + 2] = 0;
+                component_metadata[base + 3] = 0;
+                component_metadata[base + 4] = 0;
+            }
+            
