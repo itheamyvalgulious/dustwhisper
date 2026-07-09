@@ -84,7 +84,6 @@ from oracle_game.world_constants import (
     GPU_REALTIME_BUDGET_CELL_THRESHOLD,
     IGNORED_ANCHOR_FILTERS,
     PAIR_REACTION_RULE_SET_NAMES,
-    PUBLIC_WORLD_COMMAND_KINDS,
     REACTION_RULE_SET_NAMES,
     TARGET_QUERY_CELLS_PER_METER,
     TARGET_QUERY_DISTANCE_HINT_CELLS,
@@ -226,6 +225,31 @@ from oracle_game.world_geometry import (
     _world_cell_is_solid_local,
     _world_to_buffer_clamped,
     _world_to_buffer_float_position,
+)
+from oracle_game.world_command_queue import (
+    _public_resolved_carrier_intent,
+    _public_world_command,
+    _resolve_direct_targeted_coords,
+    _resolve_public_world_command,
+    inject_force,
+    inject_gas,
+    inject_light,
+    inject_material,
+    inject_temperature,
+    inject_velocity,
+    preview_carrier_intent,
+    preview_change_intent,
+    preview_observation,
+    preview_readback,
+    preview_target_queries,
+    preview_world_command,
+    queue_command,
+    request_carrier_intent,
+    request_change_intent,
+    request_observation,
+    request_readback,
+    request_world_command,
+    write_material_region,
 )
 from oracle_game.world_paging import (
     _apply_page_stripe,
@@ -1297,7 +1321,7 @@ class WorldEngine:
         self._build_demo_scene()
 
     def queue_command(self, kind: str, **payload: Any) -> None:
-        self.command_queue.append(WorldCommand(kind=kind, payload=deepcopy(payload)))
+        queue_command(self, kind, **payload)
 
     def _resolve_direct_targeted_coords(
         self,
@@ -1310,36 +1334,16 @@ class WorldEngine:
         target_dy: int = 0,
         target_queries: list[TargetQuery | dict[str, Any]] | None = None,
     ) -> tuple[int, int, str | None]:
-        fields = TARGETED_COMMAND_COORD_FIELDS.get(kind)
-        if fields is None:
-            raise ValueError(f"unsupported direct target query kind '{kind}'")
-        x_field, y_field = fields
-        if target_queries is None:
-            if x is None or y is None:
-                raise ValueError(f"{x_field} and {y_field} are required unless target_queries resolve target_query_id")
-            return int(x), int(y), None
-        if target_query_id is None:
-            raise ValueError("target_query_id is required when target_queries are provided")
-        resolved_targets = self._resolve_target_queries(
-            [self._coerce_target_query(query) for query in target_queries]
+        return _resolve_direct_targeted_coords(
+            self,
+            kind,
+            x,
+            y,
+            target_query_id=target_query_id,
+            target_dx=target_dx,
+            target_dy=target_dy,
+            target_queries=target_queries,
         )
-        resolved_commands = self._resolve_targeted_commands(
-            [
-                WorldCommand(
-                    kind=kind,
-                    payload={
-                        "target_query_id": str(target_query_id),
-                        "target_dx": int(target_dx),
-                        "target_dy": int(target_dy),
-                    },
-                )
-            ],
-            resolved_targets,
-        )
-        if not resolved_commands:
-            raise ValueError(f"unable to resolve {kind} target query")
-        payload = resolved_commands[0].payload
-        return int(payload[x_field]), int(payload[y_field]), str(payload.get("resolved_target_query_id", target_query_id))
 
     def inject_material(
         self,
@@ -1354,24 +1358,18 @@ class WorldEngine:
         target_dy: int = 0,
         target_queries: list[TargetQuery | dict[str, Any]] | None = None,
     ) -> None:
-        x, y, resolved_target_query_id = self._resolve_direct_targeted_coords(
-            "inject_material",
+        inject_material(
+            self,
             x,
             y,
+            material,
+            radius,
+            immediate=immediate,
             target_query_id=target_query_id,
             target_dx=target_dx,
             target_dy=target_dy,
             target_queries=target_queries,
         )
-        if immediate:
-            self._apply_grid_world_commands(
-                [WorldCommand(kind="inject_material", payload={"x": int(x), "y": int(y), "material": material, "radius": radius})]
-            )
-        else:
-            payload: dict[str, Any] = {"x": x, "y": y, "material": material, "radius": radius}
-            if resolved_target_query_id is not None:
-                payload["resolved_target_query_id"] = resolved_target_query_id
-            self.queue_command("inject_material", **payload)
 
     def write_material_region(
         self,
@@ -1387,35 +1385,19 @@ class WorldEngine:
         target_dy: int = 0,
         target_queries: list[TargetQuery | dict[str, Any]] | None = None,
     ) -> None:
-        x, y, resolved_target_query_id = self._resolve_direct_targeted_coords(
-            "write_material_region",
+        write_material_region(
+            self,
             x,
             y,
+            width,
+            height,
+            material,
+            immediate=immediate,
             target_query_id=target_query_id,
             target_dx=target_dx,
             target_dy=target_dy,
             target_queries=target_queries,
         )
-        if immediate:
-            self._apply_grid_world_commands(
-                [
-                    WorldCommand(
-                        kind="write_material_region",
-                        payload={"x": int(x), "y": int(y), "width": width, "height": height, "material": material},
-                    )
-                ]
-            )
-        else:
-            payload: dict[str, Any] = {
-                "x": x,
-                "y": y,
-                "width": width,
-                "height": height,
-                "material": material,
-            }
-            if resolved_target_query_id is not None:
-                payload["resolved_target_query_id"] = resolved_target_query_id
-            self.queue_command("write_material_region", **payload)
 
     def inject_temperature(
         self,
@@ -1430,24 +1412,18 @@ class WorldEngine:
         target_dy: int = 0,
         target_queries: list[TargetQuery | dict[str, Any]] | None = None,
     ) -> None:
-        x, y, resolved_target_query_id = self._resolve_direct_targeted_coords(
-            "inject_temperature",
+        inject_temperature(
+            self,
             x,
             y,
+            delta,
+            radius,
+            immediate=immediate,
             target_query_id=target_query_id,
             target_dx=target_dx,
             target_dy=target_dy,
             target_queries=target_queries,
         )
-        if immediate:
-            self._apply_grid_world_commands(
-                [WorldCommand(kind="inject_temperature", payload={"x": int(x), "y": int(y), "delta": delta, "radius": radius})]
-            )
-        else:
-            payload: dict[str, Any] = {"x": x, "y": y, "delta": delta, "radius": radius}
-            if resolved_target_query_id is not None:
-                payload["resolved_target_query_id"] = resolved_target_query_id
-            self.queue_command("inject_temperature", **payload)
 
     def inject_velocity(
         self,
@@ -1464,43 +1440,20 @@ class WorldEngine:
         target_dy: int = 0,
         target_queries: list[TargetQuery | dict[str, Any]] | None = None,
     ) -> None:
-        x, y, resolved_target_query_id = self._resolve_direct_targeted_coords(
-            "inject_velocity",
+        inject_velocity(
+            self,
             x,
             y,
+            velocity,
+            radius,
+            carrier=carrier,
+            mode=mode,
+            immediate=immediate,
             target_query_id=target_query_id,
             target_dx=target_dx,
             target_dy=target_dy,
             target_queries=target_queries,
         )
-        if immediate:
-            self._apply_grid_world_commands(
-                [
-                    WorldCommand(
-                        kind="inject_velocity",
-                        payload={
-                            "x": int(x),
-                            "y": int(y),
-                            "velocity": velocity,
-                            "radius": radius,
-                            "carrier": carrier,
-                            "mode": mode,
-                        },
-                    )
-                ]
-            )
-        else:
-            payload: dict[str, Any] = {
-                "x": x,
-                "y": y,
-                "velocity": velocity,
-                "radius": radius,
-                "carrier": carrier,
-                "mode": mode,
-            }
-            if resolved_target_query_id is not None:
-                payload["resolved_target_query_id"] = resolved_target_query_id
-            self.queue_command("inject_velocity", **payload)
 
     def inject_force(
         self,
@@ -1517,43 +1470,20 @@ class WorldEngine:
         target_dy: int = 0,
         target_queries: list[TargetQuery | dict[str, Any]] | None = None,
     ) -> None:
-        x, y, resolved_target_query_id = self._resolve_direct_targeted_coords(
-            "inject_force",
+        inject_force(
+            self,
             x,
             y,
+            direction,
+            radius,
+            strength,
+            lifetime,
+            immediate=immediate,
             target_query_id=target_query_id,
             target_dx=target_dx,
             target_dy=target_dy,
             target_queries=target_queries,
         )
-        if immediate:
-            world_x = float(x)
-            world_y = float(y)
-            x, y = self._world_to_buffer_clamped(int(x), int(y))
-            self._append_force_source_immediate(
-                ForceSource(
-                    x=float(x),
-                    y=float(y),
-                    direction=(float(direction[0]), float(direction[1])),
-                    radius=float(radius),
-                    strength=float(strength),
-                    lifetime=float(lifetime),
-                    world_x=world_x,
-                    world_y=world_y,
-                )
-            )
-            return
-        payload: dict[str, Any] = {
-            "x": x,
-            "y": y,
-            "direction": direction,
-            "radius": radius,
-            "strength": strength,
-            "lifetime": lifetime,
-        }
-        if resolved_target_query_id is not None:
-            payload["resolved_target_query_id"] = resolved_target_query_id
-        self.queue_command("inject_force", **payload)
 
     def inject_gas(
         self,
@@ -1569,29 +1499,19 @@ class WorldEngine:
         target_dy: int = 0,
         target_queries: list[TargetQuery | dict[str, Any]] | None = None,
     ) -> None:
-        x, y, resolved_target_query_id = self._resolve_direct_targeted_coords(
-            "inject_gas",
+        inject_gas(
+            self,
             x,
             y,
+            species,
+            amount,
+            radius,
+            immediate=immediate,
             target_query_id=target_query_id,
             target_dx=target_dx,
             target_dy=target_dy,
             target_queries=target_queries,
         )
-        if immediate:
-            self._apply_grid_world_commands(
-                [
-                    WorldCommand(
-                        kind="inject_gas",
-                        payload={"x": int(x), "y": int(y), "species": species, "amount": amount, "radius": radius},
-                    )
-                ]
-            )
-        else:
-            payload: dict[str, Any] = {"x": x, "y": y, "species": species, "amount": amount, "radius": radius}
-            if resolved_target_query_id is not None:
-                payload["resolved_target_query_id"] = resolved_target_query_id
-            self.queue_command("inject_gas", **payload)
 
     def request_readback(
         self,
@@ -1609,47 +1529,21 @@ class WorldEngine:
         target_dy: int = 0,
         target_queries: list[TargetQuery | dict[str, Any]] | None = None,
     ) -> int:
-        request = ReadbackRequest(
+        return request_readback(
+            self,
+            center_x,
+            center_y,
+            width,
+            height,
+            channels,
             request_id=request_id,
-            center_x=None if center_x is None else int(center_x),
-            center_y=None if center_y is None else int(center_y),
-            width=int(width),
-            height=int(height),
-            channels=tuple(channels),
             observer_id=observer_id,
             label=label,
-            target_query_id=None if target_query_id is None else str(target_query_id),
-            target_dx=int(target_dx),
-            target_dy=int(target_dy),
+            target_query_id=target_query_id,
+            target_dx=target_dx,
+            target_dy=target_dy,
+            target_queries=target_queries,
         )
-        if target_queries is not None:
-            resolved_targets = self._resolve_target_queries(
-                [self._coerce_target_query(query) for query in target_queries]
-            )
-            resolved_request = self._resolve_readback_request(request, resolved_targets)
-            if resolved_request is None:
-                raise ValueError("unable to resolve readback request target query")
-            request = resolved_request
-        request = self._normalize_readback_request(request)
-        if request.center_x is None or request.center_y is None:
-            raise ValueError("center_x and center_y are required unless target_queries resolve target_query_id")
-        request = self._assign_readback_request_id(request)
-        self.queue_command(
-            "request_readback",
-            request_id=request.request_id,
-            center_x=request.center_x,
-            center_y=request.center_y,
-            width=request.width,
-            height=request.height,
-            channels=request.channels,
-            observer_id=request.observer_id,
-            label=request.label,
-            target_query_id=request.target_query_id,
-            target_dx=int(request.target_dx),
-            target_dy=int(request.target_dy),
-        )
-        assert request.request_id is not None
-        return int(request.request_id)
 
     def preview_readback(
         self,
@@ -1667,31 +1561,21 @@ class WorldEngine:
         target_dy: int = 0,
         target_queries: list[TargetQuery | dict[str, Any]] | None = None,
     ) -> ReadbackRequest:
-        request = ReadbackRequest(
+        return preview_readback(
+            self,
+            center_x,
+            center_y,
+            width,
+            height,
+            channels,
             request_id=request_id,
-            center_x=None if center_x is None else int(center_x),
-            center_y=None if center_y is None else int(center_y),
-            width=int(width),
-            height=int(height),
-            channels=tuple(channels),
             observer_id=observer_id,
             label=label,
-            target_query_id=None if target_query_id is None else str(target_query_id),
-            target_dx=int(target_dx),
-            target_dy=int(target_dy),
+            target_query_id=target_query_id,
+            target_dx=target_dx,
+            target_dy=target_dy,
+            target_queries=target_queries,
         )
-        if target_queries is not None:
-            resolved_targets = self._resolve_target_queries(
-                [self._coerce_target_query(query) for query in target_queries]
-            )
-            resolved_request = self._resolve_readback_request(request, resolved_targets)
-            if resolved_request is None:
-                raise ValueError("unable to resolve readback request target query")
-            request = resolved_request
-        request = self._normalize_readback_request(request)
-        if request.center_x is None or request.center_y is None:
-            raise ValueError("center_x and center_y are required unless target_queries resolve target_query_id")
-        return request
 
     def request_observation(
         self,
@@ -1700,36 +1584,12 @@ class WorldEngine:
         request_id: int | None = None,
         target_queries: list[TargetQuery | dict[str, Any]] | None = None,
     ) -> int:
-        target = self._coerce_observation_target(target)
-        resolved_targets: dict[str, ResolvedTarget] = {}
-        if target_queries is not None:
-            resolved_targets = self._resolve_target_queries(
-                [self._coerce_target_query(query) for query in target_queries]
-            )
-        request = self._build_observation_request(target, resolved_targets)
-        if request is None:
-            if target.target_query_id is not None and target_queries is not None:
-                raise ValueError("unable to resolve observation target query")
-            raise ValueError("unable to resolve observation target")
-        if request_id is not None:
-            request = replace(request, request_id=int(request_id))
-        request = self._assign_readback_request_id(request)
-        self.queue_command(
-            "request_readback",
-            request_id=request.request_id,
-            center_x=request.center_x,
-            center_y=request.center_y,
-            width=request.width,
-            height=request.height,
-            channels=request.channels,
-            observer_id=request.observer_id,
-            label=request.label,
-            target_query_id=request.target_query_id,
-            target_dx=int(request.target_dx),
-            target_dy=int(request.target_dy),
+        return request_observation(
+            self,
+            target,
+            request_id=request_id,
+            target_queries=target_queries,
         )
-        assert request.request_id is not None
-        return int(request.request_id)
 
     def preview_observation(
         self,
@@ -1738,20 +1598,12 @@ class WorldEngine:
         request_id: int | None = None,
         target_queries: list[TargetQuery | dict[str, Any]] | None = None,
     ) -> ReadbackRequest:
-        target = self._coerce_observation_target(target)
-        resolved_targets: dict[str, ResolvedTarget] = {}
-        if target_queries is not None:
-            resolved_targets = self._resolve_target_queries(
-                [self._coerce_target_query(query) for query in target_queries]
-            )
-        request = self._build_observation_request(target, resolved_targets)
-        if request is None:
-            if target.target_query_id is not None and target_queries is not None:
-                raise ValueError("unable to resolve observation target query")
-            raise ValueError("unable to resolve observation target")
-        if request_id is not None:
-            request = replace(request, request_id=int(request_id))
-        return request
+        return preview_observation(
+            self,
+            target,
+            request_id=request_id,
+            target_queries=target_queries,
+        )
 
     def _resolve_public_world_command(
         self,
@@ -1760,88 +1612,15 @@ class WorldEngine:
         target_queries: list[TargetQuery | dict[str, Any]] | None,
         assign_readback_request_id: bool,
     ) -> WorldCommand:
-        command = self._coerce_world_command(command)
-        if command.kind not in PUBLIC_WORLD_COMMAND_KINDS:
-            raise ValueError(f"unsupported public world command kind '{command.kind}'")
-
-        if command.kind == "request_readback":
-            request = self._coerce_readback_request(command.payload)
-            if target_queries is not None:
-                resolved_targets = self._resolve_target_queries(
-                    [self._coerce_target_query(query) for query in target_queries]
-                )
-                resolved_request = self._resolve_readback_request(request, resolved_targets)
-                if resolved_request is None:
-                    raise ValueError("unable to resolve world command target query")
-                request = resolved_request
-            elif request.target_query_id is not None and (request.center_x is None or request.center_y is None):
-                raise ValueError("target_queries are required to resolve world command target_query_id")
-            request = self._normalize_readback_request(request)
-            if request.center_x is None or request.center_y is None:
-                raise ValueError("center_x and center_y are required unless target_queries resolve target_query_id")
-            if assign_readback_request_id:
-                request = self._assign_readback_request_id(request)
-            return WorldCommand(
-                kind="request_readback",
-                payload={
-                    "request_id": request.request_id,
-                    "center_x": request.center_x,
-                    "center_y": request.center_y,
-                    "width": request.width,
-                    "height": request.height,
-                    "channels": request.channels,
-                    "observer_id": request.observer_id,
-                    "label": request.label,
-                    "target_query_id": request.target_query_id,
-                    "target_dx": int(request.target_dx),
-                    "target_dy": int(request.target_dy),
-                },
-            )
-
-        if target_queries is None:
-            if command.payload.get("target_query_id") is not None:
-                raise ValueError("target_queries are required to resolve world command target_query_id")
-            return command
-        resolved_targets = self._resolve_target_queries(
-            [self._coerce_target_query(query) for query in target_queries]
+        return _resolve_public_world_command(
+            self,
+            command,
+            target_queries=target_queries,
+            assign_readback_request_id=assign_readback_request_id,
         )
-        resolved_commands = self._resolve_targeted_commands([command], resolved_targets)
-        if not resolved_commands:
-            raise ValueError("unable to resolve world command target query")
-        return resolved_commands[0]
 
     def _public_world_command(self, command: WorldCommand) -> WorldCommand:
-        payload = deepcopy(command.payload)
-        if command.kind == "sync_entity_states" and isinstance(payload, dict):
-            entities = payload.get("entities")
-            if isinstance(entities, list):
-                payload["entities"] = [
-                    self.serialize_entity_state_input(
-                        entity if isinstance(entity, EntityState) else self._coerce_entity_state(entity)
-                    )
-                    for entity in entities
-                ]
-        elif command.kind == "patch_entity_states" and isinstance(payload, dict):
-            patches = payload.get("patches")
-            if isinstance(patches, list):
-                payload["patches"] = [
-                    self.serialize_entity_state_patch(
-                        patch if isinstance(patch, EntityStatePatch) else self._coerce_entity_state_patch(patch)
-                    )
-                    for patch in patches
-                ]
-        elif command.kind == "sync_entity_placeholders" and isinstance(payload, dict):
-            placeholders = payload.get("placeholders")
-            if isinstance(placeholders, list):
-                payload["placeholders"] = [
-                    self.serialize_entity_placeholder_input(
-                        placeholder
-                        if isinstance(placeholder, EntityPlaceholder)
-                        else self._coerce_entity_placeholder(placeholder)
-                    )
-                    for placeholder in placeholders
-                ]
-        return WorldCommand(kind=command.kind, payload=payload)
+        return _public_world_command(self, command)
 
     def preview_world_command(
         self,
@@ -1849,24 +1628,13 @@ class WorldEngine:
         *,
         target_queries: list[TargetQuery | dict[str, Any]] | None = None,
     ) -> WorldCommand:
-        command = self._coerce_world_command(command)
-        resolved_command = self._resolve_public_world_command(
-            command,
-            target_queries=target_queries,
-            assign_readback_request_id=False,
-        )
-        return self._public_world_command(resolved_command)
+        return preview_world_command(self, command, target_queries=target_queries)
 
     def preview_target_queries(
         self,
         target_queries: list[TargetQuery | dict[str, Any]],
     ) -> dict[str, ResolvedTarget]:
-        return {
-            query_id: self._public_resolved_target(target)
-            for query_id, target in self._resolve_target_queries(
-                [self._coerce_target_query(query) for query in target_queries]
-            ).items()
-        }
+        return preview_target_queries(self, target_queries)
 
     def request_world_command(
         self,
@@ -1874,13 +1642,7 @@ class WorldEngine:
         *,
         target_queries: list[TargetQuery | dict[str, Any]] | None = None,
     ) -> WorldCommand:
-        resolved_command = self._resolve_public_world_command(
-            command,
-            target_queries=target_queries,
-            assign_readback_request_id=True,
-        )
-        self.queue_command(resolved_command.kind, **resolved_command.payload)
-        return self._public_world_command(resolved_command)
+        return request_world_command(self, command, target_queries=target_queries)
 
     def preview_change_intent(
         self,
@@ -1888,13 +1650,7 @@ class WorldEngine:
         *,
         target_queries: list[TargetQuery | dict[str, Any]] | None = None,
     ) -> ResolvedChangeIntent:
-        intent = self._coerce_change_intent(intent)
-        resolved_targets: dict[str, ResolvedTarget] = {}
-        if target_queries is not None:
-            resolved_targets = self._resolve_target_queries(
-                [self._coerce_target_query(query) for query in target_queries]
-            )
-        return self._public_resolved_change_intent(self._resolve_change_intent(intent, resolved_targets))
+        return preview_change_intent(self, intent, target_queries=target_queries)
 
     def request_change_intent(
         self,
@@ -1902,16 +1658,7 @@ class WorldEngine:
         *,
         target_queries: list[TargetQuery | dict[str, Any]] | None = None,
     ) -> ResolvedChangeIntent:
-        intent = self._coerce_change_intent(intent)
-        resolved_targets: dict[str, ResolvedTarget] = {}
-        if target_queries is not None:
-            resolved_targets = self._resolve_target_queries(
-                [self._coerce_target_query(query) for query in target_queries]
-            )
-        resolved_intent = self._resolve_change_intent(intent, resolved_targets)
-        for command in resolved_intent.generated_commands:
-            self.queue_command(command.kind, **command.payload)
-        return self._public_resolved_change_intent(resolved_intent)
+        return request_change_intent(self, intent, target_queries=target_queries)
 
     def preview_carrier_intent(
         self,
@@ -1919,13 +1666,7 @@ class WorldEngine:
         *,
         target_queries: list[TargetQuery | dict[str, Any]] | None = None,
     ) -> ResolvedCarrierIntent:
-        intent = self._coerce_carrier_intent(intent)
-        resolved_targets: dict[str, ResolvedTarget] = {}
-        if target_queries is not None:
-            resolved_targets = self._resolve_target_queries(
-                [self._coerce_target_query(query) for query in target_queries]
-            )
-        return self._public_resolved_carrier_intent(self._resolve_carrier_intent(intent, resolved_targets))
+        return preview_carrier_intent(self, intent, target_queries=target_queries)
 
     def request_carrier_intent(
         self,
@@ -1933,16 +1674,7 @@ class WorldEngine:
         *,
         target_queries: list[TargetQuery | dict[str, Any]] | None = None,
     ) -> ResolvedCarrierIntent:
-        intent = self._coerce_carrier_intent(intent)
-        resolved_targets: dict[str, ResolvedTarget] = {}
-        if target_queries is not None:
-            resolved_targets = self._resolve_target_queries(
-                [self._coerce_target_query(query) for query in target_queries]
-            )
-        resolved_intent = self._resolve_carrier_intent(intent, resolved_targets)
-        for command in resolved_intent.generated_commands:
-            self.queue_command(command.kind, **command.payload)
-        return self._public_resolved_carrier_intent(resolved_intent)
+        return request_carrier_intent(self, intent, target_queries=target_queries)
 
     def preview_frame_input(
         self,
@@ -2274,55 +2006,21 @@ class WorldEngine:
         target_dy: int = 0,
         target_queries: list[TargetQuery | dict[str, Any]] | None = None,
     ) -> None:
-        x, y, resolved_target_query_id = self._resolve_direct_targeted_coords(
-            "inject_light",
+        inject_light(
+            self,
             x,
             y,
+            light_type,
+            strength,
+            radius,
+            direction=direction,
+            spread=spread,
+            immediate=immediate,
             target_query_id=target_query_id,
             target_dx=target_dx,
             target_dy=target_dy,
             target_queries=target_queries,
         )
-        light_id = self._resolve_sanctioned_light_id(light_type)
-        if light_id < 0:
-            raise KeyError(light_type)
-        if radius is not None:
-            resolved_radius = int(radius)
-        else:
-            shadow_default_range = self._shadow_light_default_range(light_id)
-            if shadow_default_range is None:
-                raise KeyError(light_type)
-            resolved_radius = int(shadow_default_range)
-        if immediate:
-            world_origin = (int(x), int(y))
-            x, y = self._world_to_buffer_clamped(int(x), int(y))
-            shadow_light = self._shadow_light_name(light_id)
-            if shadow_light is None:
-                raise KeyError(light_type)
-            self._append_transient_light_emitter_immediate(
-                {
-                    "light_type": shadow_light,
-                    "origin": (int(x), int(y)),
-                    "world_origin": world_origin,
-                    "direction": (float(direction[0]), float(direction[1])),
-                    "spread": float(spread),
-                    "strength": float(strength),
-                    "range_cells": int(resolved_radius),
-                }
-            )
-            return
-        payload: dict[str, Any] = {
-            "x": x,
-            "y": y,
-            "light_type": self._shadow_light_name(light_id),
-            "strength": strength,
-            "radius": resolved_radius,
-            "direction": direction,
-            "spread": spread,
-        }
-        if resolved_target_query_id is not None:
-            payload["resolved_target_query_id"] = resolved_target_query_id
-        self.queue_command("inject_light", **payload)
 
     def focus_paging(self, center_x: int, center_y: int) -> list[PageStripeUpdate]:
         return focus_paging(self, center_x, center_y)
@@ -5813,76 +5511,7 @@ class WorldEngine:
         return resolved, commands
 
     def _public_resolved_carrier_intent(self, intent: ResolvedCarrierIntent) -> ResolvedCarrierIntent:
-        effect_cells: list[tuple[int, int]]
-        if intent.effect_shape == "beam" and intent.source_world_position is not None and intent.impact_world_position is not None:
-            effect_cells = self._capsule_world_cells_raw(
-                tuple(int(value) for value in intent.source_world_position),
-                tuple(int(value) for value in intent.impact_world_position),
-                int(intent.effective_radius),
-            )
-        elif intent.impact_world_position is not None:
-            effect_cells = self._disk_world_cells_raw(
-                tuple(int(value) for value in intent.impact_world_position),
-                int(intent.effective_radius),
-            )
-        else:
-            effect_cells = [self._buffer_to_world_position(cell) for cell in intent.effect_cells]
-        effect_bounds = self._buffer_cell_bounds(effect_cells)
-        generated_commands = [self._public_world_command(command) for command in intent.generated_commands]
-        if intent.kind == "light":
-            origin_world_position = (
-                tuple(int(value) for value in intent.source_world_position)
-                if intent.effect_shape == "beam" and intent.source_world_position is not None
-                else None
-                if intent.impact_world_position is None
-                else tuple(int(value) for value in intent.impact_world_position)
-            )
-            if origin_world_position is not None:
-                for command in generated_commands:
-                    if command.kind == "inject_light":
-                        command.payload["x"] = int(origin_world_position[0])
-                        command.payload["y"] = int(origin_world_position[1])
-        elif intent.kind == "force" and intent.source_world_position is not None:
-            origin_world_position = tuple(int(value) for value in intent.source_world_position)
-            for command in generated_commands:
-                if command.kind == "inject_force":
-                    command.payload["x"] = int(origin_world_position[0])
-                    command.payload["y"] = int(origin_world_position[1])
-        elif intent.kind in {"material", "gas"}:
-            world_cells = (
-                effect_cells
-                if intent.effect_shape == "beam"
-                else []
-                if intent.impact_world_position is None
-                else [tuple(int(value) for value in intent.impact_world_position)]
-            )
-            target_kind = "inject_material" if intent.kind == "material" else "inject_gas"
-            rewritten = iter(world_cells)
-            for command in generated_commands:
-                if command.kind != target_kind:
-                    continue
-                try:
-                    world_cell = next(rewritten)
-                except StopIteration:
-                    break
-                command.payload["x"] = int(world_cell[0])
-                command.payload["y"] = int(world_cell[1])
-        return replace(
-            intent,
-            source_position=(
-                None
-                if intent.source_world_position is None
-                else tuple(int(value) for value in intent.source_world_position)
-            ),
-            impact_position=(
-                None
-                if intent.impact_world_position is None
-                else tuple(int(value) for value in intent.impact_world_position)
-            ),
-            effect_cells=effect_cells,
-            effect_bounds=effect_bounds,
-            generated_commands=generated_commands,
-        )
+        return _public_resolved_carrier_intent(self, intent)
 
     def _resolve_carrier_intent(
         self,
