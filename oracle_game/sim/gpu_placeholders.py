@@ -142,10 +142,10 @@ class GPUPlaceholderPipeline(GPUPipelineBase):
     def _ensure_programs(self, ctx: Any) -> None:
         if self.programs:
             return
-        self.programs["apply_placeholders"] = build_compute_shader(ctx, "placeholders/pass_00.comp", {"PASS_LOCAL_SIZE": PASS_LOCAL_SIZE, "MAX_MATERIALS": MAX_MATERIALS})
-        self.programs["load_bridge_cell"] = build_compute_shader(ctx, "placeholders/pass_01.comp", {"PASS_LOCAL_SIZE": PASS_LOCAL_SIZE, "MAX_MATERIALS": MAX_MATERIALS})
-        self.programs["load_bridge_ambient"] = build_compute_shader(ctx, "placeholders/pass_02.comp", {"PASS_LOCAL_SIZE": PASS_LOCAL_SIZE, "MAX_MATERIALS": MAX_MATERIALS})
-        self.programs["publish_bridge_cell"] = build_compute_shader(ctx, "placeholders/pass_03.comp", {"PASS_LOCAL_SIZE": PASS_LOCAL_SIZE, "MAX_MATERIALS": MAX_MATERIALS})
+        self.programs["apply_placeholders"] = build_compute_shader(ctx, "placeholders/pass_00.comp", {"PASS_LOCAL_SIZE": PASS_LOCAL_SIZE, "MAX_MATERIALS": MAX_MATERIALS, "MAX_MATERIALS_MINUS_1": MAX_MATERIALS - 1})
+        self.programs["load_bridge_cell"] = build_compute_shader(ctx, "placeholders/pass_01.comp", {"PASS_LOCAL_SIZE": PASS_LOCAL_SIZE, "MAX_MATERIALS": MAX_MATERIALS, "MAX_MATERIALS_MINUS_1": MAX_MATERIALS - 1})
+        self.programs["load_bridge_ambient"] = build_compute_shader(ctx, "placeholders/pass_02.comp", {"PASS_LOCAL_SIZE": PASS_LOCAL_SIZE, "MAX_MATERIALS": MAX_MATERIALS, "MAX_MATERIALS_MINUS_1": MAX_MATERIALS - 1})
+        self.programs["publish_bridge_cell"] = build_compute_shader(ctx, "placeholders/pass_03.comp", {"PASS_LOCAL_SIZE": PASS_LOCAL_SIZE, "MAX_MATERIALS": MAX_MATERIALS, "MAX_MATERIALS_MINUS_1": MAX_MATERIALS - 1})
 
     def _pack_placeholder_upload(
         self,

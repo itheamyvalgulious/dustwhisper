@@ -28,10 +28,10 @@ bool boundary_dispatch_cell(out ivec2 cell) {
     int groups_x;
     int groups_y;
     if (seam_axis == 0) {
-        groups_x = max(1, (tile_size * 2 + {PASS_LOCAL_SIZE - 1}) / {{PASS_LOCAL_SIZE}});
-        groups_y = max(1, (tile_size + {PASS_LOCAL_SIZE - 1}) / {{PASS_LOCAL_SIZE}});
+        groups_x = max(1, (tile_size * 2 + {{PASS_LOCAL_SIZE_MINUS_1}}) / {{PASS_LOCAL_SIZE}});
+        groups_y = max(1, (tile_size + {{PASS_LOCAL_SIZE_MINUS_1}}) / {{PASS_LOCAL_SIZE}});
     } else {
-        groups_x = max(1, (tile_size + {PASS_LOCAL_SIZE - 1}) / {{PASS_LOCAL_SIZE}});
+        groups_x = max(1, (tile_size + {{PASS_LOCAL_SIZE_MINUS_1}}) / {{PASS_LOCAL_SIZE}});
         groups_y = 1;
     }
     int workgroups_per_boundary = max(1, groups_x * groups_y);

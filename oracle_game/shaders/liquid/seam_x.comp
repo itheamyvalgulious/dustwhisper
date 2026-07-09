@@ -85,7 +85,7 @@ void store_state(
 }
 
 int liquid_kind_for(float material) {
-    int material_id = clamp(int(material + 0.5), 0, {MAX_MATERIALS - 1});
+    int material_id = clamp(int(material + 0.5), 0, {{MAX_MATERIALS_MINUS_1}});
     return int(material_params[material_id].z + 0.5);
 }
 
@@ -103,7 +103,7 @@ bool is_tile_liquid(ivec2 cell) {
 }
 
 bool is_placeholder_material(float material) {
-    int material_id = clamp(int(material + 0.5), 0, {MAX_MATERIALS - 1});
+    int material_id = clamp(int(material + 0.5), 0, {{MAX_MATERIALS_MINUS_1}});
     return int(material_params[material_id].w + 0.5) == 7;
 }
 
@@ -269,8 +269,8 @@ bool try_apply_horizontal_boundary(ivec2 gid, int boundary_x) {
 }
 
 bool boundary_dispatch_cell(out ivec2 cell, out int boundary_x) {
-    int groups_x = max(1, (TILE_SIZE * 2 + {PASS_LOCAL_SIZE - 1}) / {{PASS_LOCAL_SIZE}});
-    int groups_y = max(1, (TILE_SIZE + {PASS_LOCAL_SIZE - 1}) / {{PASS_LOCAL_SIZE}});
+    int groups_x = max(1, (TILE_SIZE * 2 + {{PASS_LOCAL_SIZE_MINUS_1}}) / {{PASS_LOCAL_SIZE}});
+    int groups_y = max(1, (TILE_SIZE + {{PASS_LOCAL_SIZE_MINUS_1}}) / {{PASS_LOCAL_SIZE}});
     int workgroups_per_boundary = groups_x * groups_y;
     uint group_index = gl_WorkGroupID.x;
     uint boundary_index = group_index / uint(workgroups_per_boundary);

@@ -26,7 +26,7 @@ layout(r32f, binding=5) writeonly uniform image2D integrity_out_img;
 layout(rg32f, binding=6) writeonly uniform image2D velocity_out_img;
 
 bool active_dispatch_cell(out ivec2 cell) {
-    int groups_per_tile_axis = max(1, (tile_size + {PASS_LOCAL_SIZE - 1}) / {{PASS_LOCAL_SIZE}});
+    int groups_per_tile_axis = max(1, (tile_size + {{PASS_LOCAL_SIZE_MINUS_1}}) / {{PASS_LOCAL_SIZE}});
     int workgroups_per_tile = groups_per_tile_axis * groups_per_tile_axis;
     uint group_index = gl_WorkGroupID.x;
     uint active_tile_index = group_index / uint(workgroups_per_tile);

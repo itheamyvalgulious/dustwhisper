@@ -93,12 +93,12 @@ void write_cell(
 }
 
 int liquid_kind_for(float material) {
-    int material_id = clamp(int(material + 0.5), 0, {MAX_MATERIALS - 1});
+    int material_id = clamp(int(material + 0.5), 0, {{MAX_MATERIALS_MINUS_1}});
     return int(material_params[material_id].z + 0.5);
 }
 
 bool is_placeholder_material(float material) {
-    int material_id = clamp(int(material + 0.5), 0, {MAX_MATERIALS - 1});
+    int material_id = clamp(int(material + 0.5), 0, {{MAX_MATERIALS_MINUS_1}});
     return int(material_params[material_id].w + 0.5) == 7;
 }
 

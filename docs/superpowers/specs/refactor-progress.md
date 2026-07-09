@@ -39,5 +39,5 @@ http_console.py (1164), gpu_world_commands (1041), liquid.py (1007).
 ## Per-extraction gates (in addition to snapshot)
 - capabilities golden: `f65d2183375bd352`
 - readback golden: `7062d287b034df0c`
-- debug_frame golden: `b4e60f4b007fe5a0` (DebugView×all + gas views, 96×64, 3 frames) — for the pending debug-frame bucket extraction
+- debug_frame golden: `b4b5996932795cbd` (DebugView×all + gas views, 96×64, 3 frames). NOTE: an earlier value (b4e60f4b007fe5a0) was captured AFTER the buggy liquid migration and reflected broken-liquid behavior; the liquid remnant fix corrected it to this true value.
 - GPU snapshot: `ce71a34376c5010d`

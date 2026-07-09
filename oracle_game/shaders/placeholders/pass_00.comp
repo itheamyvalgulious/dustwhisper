@@ -38,7 +38,7 @@ int cell_index(ivec2 cell) {
 }
 
 int material_slot(int mid) {
-    return clamp(mid, 0, {MAX_MATERIALS - 1});
+    return clamp(mid, 0, {{MAX_MATERIALS_MINUS_1}});
 }
 
 bool is_placeholder_material(int mid) {
