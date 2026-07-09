@@ -1,0 +1,81 @@
+
+            layout(std430, binding=12) readonly buffer TimedCandidateList {
+                uint timed_candidate_list[];
+            };
+            layout(std430, binding=13) readonly buffer TimedCandidateCount {
+                uint timed_candidate_count[];
+            };
+
+            uint linear_thread_index() {
+                return uint(gl_GlobalInvocationID.y) * (uint(gl_NumWorkGroups.x) * uint(gl_WorkGroupSize.x))
+                    + uint(gl_GlobalInvocationID.x);
+            }
+
+            void main() {
+                uint candidate_slot = linear_thread_index();
+                if (candidate_slot >= timed_candidate_count[0]) {
+                    return;
+                }
+                uint cell_index = timed_candidate_list[candidate_slot];
+                ivec2 gid = ivec2(
+                    int(cell_index % uint(cell_grid_size.x)),
+                    int(cell_index / uint(cell_grid_size.x))
+                );
+                float material_value = texelFetch(material_tex, gid, 0).x;
+                float phase_value = texelFetch(phase_tex, gid, 0).x;
+                float temp_value = texelFetch(temp_tex, gid, 0).x;
+                float integrity_value = texelFetch(integrity_tex, gid, 0).x;
+                vec4 timer_value = texelFetch(timer_tex, gid, 0);
+                vec4 deferred_action_lo = vec4(0.0);
+                vec4 deferred_action_hi = vec4(0.0);
+                vec4 deferred_scale_lo = vec4(0.0);
+                vec4 deferred_scale_hi = vec4(0.0);
+                float cell_reset_value = 0.0;
+                float reaction_latched_value = 0.0;
+                int deferred_count = 0;
+                int material_id = clamp_material_id(int(material_value + 0.5));
+                ivec4 slots = material_slots_lo[material_id];
+                vec4 triggers = vec4(0.0);
+                for (int slot_index = 0; slot_index < 4; ++slot_index) {
+                    int timer_count = int(round(timer_value[slot_index]));
+                    if (timer_count <= 0) {
+                        continue;
+                    }
+                    int action_index = slots[slot_index];
+                    if (action_index > 0) {
+                        triggers[slot_index] = float(action_index);
+                    }
+                    timer_value[slot_index] = float(max(0, timer_count - 1));
+                }
+                apply_trigger_vector(
+                    material_value,
+                    phase_value,
+                    temp_value,
+                    integrity_value,
+                    timer_value,
+                    cell_reset_value,
+                    reaction_latched_value,
+                    deferred_action_lo,
+                    deferred_action_hi,
+                    deferred_scale_lo,
+                    deferred_scale_hi,
+                    deferred_count,
+                    gid,
+                    triggers
+                );
+                store_cell_outputs(
+                    gid,
+                    material_value,
+                    phase_value,
+                    temp_value,
+                    integrity_value,
+                    timer_value,
+                    deferred_action_lo,
+                    deferred_action_hi,
+                    deferred_scale_lo,
+                    deferred_scale_hi,
+                    cell_reset_value,
+                    reaction_latched_value
+                );
+            }
+            

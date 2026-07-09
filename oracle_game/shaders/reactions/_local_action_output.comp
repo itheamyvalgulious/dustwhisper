@@ -1,0 +1,75 @@
+
+            layout(r32f, binding=0) writeonly uniform image2D material_out_img;
+            layout(r32f, binding=1) writeonly uniform image2D phase_out_img;
+            layout(r32f, binding=2) writeonly uniform image2D temp_out_img;
+            layout(r32f, binding=3) writeonly uniform image2D integrity_out_img;
+            layout(rgba32f, binding=4) writeonly uniform image2D timer_out_img;
+            layout(rgba32f, binding=5) writeonly uniform image2DArray deferred_lo_img;
+            layout(rgba32f, binding=6) writeonly uniform image2DArray deferred_hi_img;
+            layout(rg32f, binding=7) writeonly uniform image2D cell_meta_out_img;
+            void store_cell_outputs(
+                ivec2 gid,
+                float material_value,
+                float phase_value,
+                float temp_value,
+                float integrity_value,
+                vec4 timer_value,
+                vec4 deferred_action_lo,
+                vec4 deferred_action_hi,
+                vec4 deferred_scale_lo,
+                vec4 deferred_scale_hi,
+                float cell_reset_value,
+                float reaction_latched_value
+            ) {
+                imageStore(material_out_img, gid, vec4(material_value, 0.0, 0.0, 0.0));
+                imageStore(phase_out_img, gid, vec4(phase_value, 0.0, 0.0, 0.0));
+                imageStore(temp_out_img, gid, vec4(temp_value, 0.0, 0.0, 0.0));
+                imageStore(integrity_out_img, gid, vec4(integrity_value, 0.0, 0.0, 0.0));
+                imageStore(timer_out_img, gid, timer_value);
+                imageStore(deferred_lo_img, ivec3(gid, 0), deferred_action_lo);
+                imageStore(deferred_lo_img, ivec3(gid, 1), deferred_scale_lo);
+                imageStore(deferred_hi_img, ivec3(gid, 0), deferred_action_hi);
+                imageStore(deferred_hi_img, ivec3(gid, 1), deferred_scale_hi);
+                imageStore(cell_meta_out_img, gid, vec4(cell_reset_value, reaction_latched_value, 0.0, 0.0));
+            }
+            void apply_trigger_vector(
+                inout float material_value,
+                inout float phase_value,
+                inout float temp_value,
+                inout float integrity_value,
+                inout vec4 timer_value,
+                inout float cell_reset_value,
+                inout float reaction_latched_value,
+                inout vec4 deferred_action_lo,
+                inout vec4 deferred_action_hi,
+                inout vec4 deferred_scale_lo,
+                inout vec4 deferred_scale_hi,
+                inout int deferred_count,
+                ivec2 gid,
+                vec4 triggers
+            ) {
+                for (int slot_index = 0; slot_index < 4; ++slot_index) {
+                    int action_index = int(round(triggers[slot_index]));
+                    if (action_index <= 0) {
+                        continue;
+                    }
+                    apply_action(
+                        material_value,
+                        phase_value,
+                        temp_value,
+                        integrity_value,
+                        timer_value,
+                        cell_reset_value,
+                        reaction_latched_value,
+                        deferred_action_lo,
+                        deferred_action_hi,
+                        deferred_scale_lo,
+                        deferred_scale_hi,
+                        deferred_count,
+                        gid,
+                        action_index,
+                        1.0
+                    );
+                }
+            }
+        

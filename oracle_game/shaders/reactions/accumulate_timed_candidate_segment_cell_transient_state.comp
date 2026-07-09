@@ -1,0 +1,42 @@
+
+            #version 430
+            layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+            uniform ivec2 cell_grid_size;
+            layout(binding=0) uniform sampler2D local_cell_meta_tex;
+            layout(std430, binding=0) readonly buffer TimedCandidateList {
+                uint timed_candidate_list[];
+            };
+            layout(std430, binding=1) readonly buffer TimedCandidateCount {
+                uint timed_candidate_count[];
+            };
+            layout(r32f, binding=0) uniform image2D segment_cell_reset_img;
+            layout(r32f, binding=1) uniform image2D segment_reaction_latched_img;
+
+            uint linear_thread_index() {
+                return uint(gl_GlobalInvocationID.y) * (uint(gl_NumWorkGroups.x) * uint(gl_WorkGroupSize.x))
+                    + uint(gl_GlobalInvocationID.x);
+            }
+
+            void main() {
+                uint candidate_slot = linear_thread_index();
+                if (candidate_slot >= timed_candidate_count[0]) {
+                    return;
+                }
+                uint cell_index = timed_candidate_list[candidate_slot];
+                ivec2 gid = ivec2(
+                    int(cell_index % uint(cell_grid_size.x)),
+                    int(cell_index / uint(cell_grid_size.x))
+                );
+                vec2 meta = texelFetch(local_cell_meta_tex, gid, 0).xy;
+                float current_reset = meta.x;
+                float current_latched = meta.y;
+                float segment_reset = max(imageLoad(segment_cell_reset_img, gid).x, current_reset);
+                float segment_latched = imageLoad(segment_reaction_latched_img, gid).x;
+                if (current_reset > 0.5) {
+                    segment_latched = 0.0;
+                }
+                segment_latched = max(segment_latched, current_latched);
+                imageStore(segment_cell_reset_img, gid, vec4(segment_reset, 0.0, 0.0, 0.0));
+                imageStore(segment_reaction_latched_img, gid, vec4(segment_latched, 0.0, 0.0, 0.0));
+            }
+            

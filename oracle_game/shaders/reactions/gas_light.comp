@@ -1,0 +1,289 @@
+
+            #version 430
+            layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+            uniform ivec2 cell_grid_size;
+            uniform ivec2 gas_grid_size;
+            uniform int gas_cell_size;
+            uniform int gas_count;
+            uniform int rule_count;
+            layout(binding=0) uniform sampler2DArray gas_tex;
+            layout(binding=1) uniform sampler2DArray gas_dose_tex;
+            layout(binding=2) uniform sampler2D active_gas_tex;
+            layout(binding=3) uniform sampler2D ambient_tex;
+            layout(binding=4) uniform sampler2D material_tex;
+            layout(binding=5) uniform sampler2D temp_tex;
+            layout(binding=6) uniform sampler2D flow_velocity_tex;
+            layout(std430, binding=0) buffer RuleI {
+                ivec4 rule_i[{{MAX_RULES}}];
+            };
+            layout(std430, binding=1) buffer RuleF {
+                vec4 rule_f[{{MAX_RULES}}];
+            };
+            layout(std430, binding=2) buffer ActionI {
+                ivec4 action_i[{{MAX_ACTIONS}}];
+            };
+            layout(std430, binding=3) buffer ActionF {
+                vec4 action_f[{{MAX_ACTIONS}}];
+            };
+            layout(std430, binding=4) buffer RuleTags {
+                uvec4 rule_tags[{{MAX_RULES}}];
+            };
+            layout(std430, binding=5) buffer GasTags {
+                uvec4 gas_tags[{{MAX_MATERIALS}}];
+            };
+            layout(std430, binding=6) buffer MaterialParams {
+                vec4 material_params[{{MAX_MATERIALS}}];
+            };
+            layout(std430, binding=14) buffer LightEmitterBuffer {
+                vec4 light_emitters[{{MAX_EMITTED_LIGHTS_TIMES_2}}];
+            };
+            layout(std430, binding=15) buffer ReactionCounters {
+                uint reaction_counts[16];
+            };
+            layout(r32f, binding=0) writeonly uniform image2DArray gas_out_img;
+            layout(r32f, binding=1) writeonly uniform image2D ambient_out_img;
+            layout(rgba32f, binding=2) writeonly uniform image2DArray flow_source_img;
+            layout(rgba32f, binding=3) writeonly uniform image2D emit_cell_lo_img;
+            layout(rgba32f, binding=4) writeonly uniform image2D emit_cell_hi_img;
+            layout(rgba32f, binding=5) writeonly uniform image2D emit_timer_img;
+            layout(rg32f, binding=6) writeonly uniform image2D emit_meta_img;
+            void write_flow_sources(ivec2 cell, ivec4 ai, vec4 af, float scale) {
+                if (ai.w == 0) {
+                    return;
+                }
+                float strength = af.y * max(scale, 0.0);
+                float radius = af.z;
+                if (strength <= 0.0 || radius <= 0.0) {
+                    return;
+                }
+                int direction_id = ai.z;
+                if (direction_id == {{DIRECTION_RIGHT}}) {
+                    imageStore(flow_source_img, ivec3(cell, 0), vec4(1.0, 0.0, radius, strength));
+                } else if (direction_id == {{DIRECTION_LEFT}}) {
+                    imageStore(flow_source_img, ivec3(cell, 0), vec4(-1.0, 0.0, radius, strength));
+                } else if (direction_id == {{DIRECTION_UP}}) {
+                    imageStore(flow_source_img, ivec3(cell, 0), vec4(0.0, -1.0, radius, strength));
+                } else if (direction_id == {{DIRECTION_DOWN}}) {
+                    imageStore(flow_source_img, ivec3(cell, 0), vec4(0.0, 1.0, radius, strength));
+                } else if (direction_id == {{DIRECTION_ALL}} && abs(af.w) > 1.0e-5) {
+                    float flow_sign = af.w > 0.0 ? 1.0 : -1.0;
+                    imageStore(flow_source_img, ivec3(cell, 0), vec4(-flow_sign, 0.0, radius, strength));
+                    imageStore(flow_source_img, ivec3(cell, 1), vec4(flow_sign, 0.0, radius, strength));
+                    imageStore(flow_source_img, ivec3(cell, 2), vec4(0.0, -flow_sign, radius, strength));
+                    imageStore(flow_source_img, ivec3(cell, 3), vec4(0.0, flow_sign, radius, strength));
+                }
+            }
+            void record_gas_action(int action_type) {
+                if (
+                    action_type == {{TYPE_MODIFY_GAS}}
+                    || action_type == {{TYPE_MODIFY_TEMPERATURE}}
+                    || action_type == {{TYPE_EMIT_LIGHT}}
+                    || action_type == {{TYPE_EMIT_MATERIAL}}
+                ) {
+                    atomicAdd(reaction_counts[1], 1u);
+                    atomicAdd(reaction_counts[1 + action_type], 1u);
+                }
+            }
+            ivec2 gas_origin_cell(ivec2 gas_cell) {
+                return ivec2(
+                    min(cell_grid_size.x - 1, gas_cell.x * gas_cell_size + gas_cell_size / 2),
+                    min(cell_grid_size.y - 1, gas_cell.y * gas_cell_size + gas_cell_size / 2)
+                );
+            }
+            vec2 gas_flow_direction(ivec2 gas_cell) {
+                vec2 flow = texelFetch(flow_velocity_tex, gas_cell, 0).xy;
+                float norm = length(flow);
+                if (norm > 1.0e-5) {
+                    return flow / norm;
+                }
+                return vec2(0.0);
+            }
+            vec2 light_direction(ivec2 gas_cell, int direction_id) {
+                if (direction_id == {{DIRECTION_RIGHT}}) {
+                    return vec2(1.0, 0.0);
+                }
+                if (direction_id == {{DIRECTION_LEFT}}) {
+                    return vec2(-1.0, 0.0);
+                }
+                if (direction_id == {{DIRECTION_UP}}) {
+                    return vec2(0.0, -1.0);
+                }
+                if (direction_id == {{DIRECTION_DOWN}}) {
+                    return vec2(0.0, 1.0);
+                }
+                if (direction_id == {{DIRECTION_SPEED}}) {
+                    return gas_flow_direction(gas_cell);
+                }
+                return vec2(0.0);
+            }
+            ivec2 target_for_direction(ivec2 source, ivec2 gas_cell, int direction_id) {
+                if (direction_id == {{DIRECTION_DOWN}}) {
+                    return source + ivec2(0, 1);
+                }
+                if (direction_id == {{DIRECTION_UP}}) {
+                    return source + ivec2(0, -1);
+                }
+                if (direction_id == {{DIRECTION_LEFT}}) {
+                    return source + ivec2(-1, 0);
+                }
+                if (direction_id == {{DIRECTION_RIGHT}}) {
+                    return source + ivec2(1, 0);
+                }
+                if (direction_id == {{DIRECTION_RANDOM}}) {
+                    uint selector = (uint(source.x) * 73856093u) ^ (uint(source.y) * 19349663u);
+                    int dx = int(selector % 3u) - 1;
+                    int dy = int((selector % 9u) / 3u) - 1;
+                    return source + ivec2(dx, dy);
+                }
+                if (direction_id == {{DIRECTION_SPEED}}) {
+                    vec2 flow = texelFetch(flow_velocity_tex, gas_cell, 0).xy;
+                    return source + ivec2(int(sign(flow.x)), int(sign(flow.y)));
+                }
+                return source;
+            }
+            vec2 emitted_velocity(ivec2 source, ivec2 target, ivec4 ai, vec4 af) {
+                int material_id = clamp(ai.y, 0, {{MAX_MATERIALS_MINUS_1}});
+                int phase_id = int(material_params[material_id].y + 0.5);
+                if (phase_id != {{PHASE_POWDER}}) {
+                    return vec2(0.0);
+                }
+                vec2 explicit_velocity = af.xy;
+                if (length(explicit_velocity) > 1.0e-5) {
+                    return explicit_velocity;
+                }
+                vec2 direction = vec2(target - source);
+                float norm = max(1.0e-5, length(direction));
+                return direction / norm * max(0.0, af.z);
+            }
+            void append_light_emitter(ivec2 gas_cell, ivec4 ai, vec4 af, float scale) {
+                if (ai.y < 0) {
+                    return;
+                }
+                uint emitter_index = atomicAdd(reaction_counts[0], 1u);
+                if (emitter_index >= uint({{MAX_EMITTED_LIGHTS}})) {
+                    return;
+                }
+                ivec2 origin = gas_origin_cell(gas_cell);
+                vec2 direction = light_direction(gas_cell, ai.z);
+                uint base_index = emitter_index * 2u;
+                light_emitters[base_index] = vec4(float(origin.x), float(origin.y), direction.x, direction.y);
+                light_emitters[base_index + 1u] = vec4(max(0.1, af.x * scale), af.y, max(0.0, af.z), float(ai.y));
+            }
+            void emit_material(ivec2 gas_cell, ivec4 ai, vec4 af) {
+                int material_id = clamp(ai.y, 0, {{MAX_MATERIALS_MINUS_1}});
+                if (material_id <= 0) {
+                    return;
+                }
+                ivec2 source = gas_origin_cell(gas_cell);
+                ivec2 target = target_for_direction(source, gas_cell, ai.z);
+                if (target.x < 0 || target.y < 0 || target.x >= cell_grid_size.x || target.y >= cell_grid_size.y) {
+                    return;
+                }
+                if (texelFetch(material_tex, target, 0).x > 0.5) {
+                    return;
+                }
+                float target_phase = material_params[material_id].y;
+                float target_integrity = material_params[material_id].x;
+                float current_temp = texelFetch(temp_tex, target, 0).x;
+                float spawn_temp = material_params[material_id].z;
+                float target_temp = current_temp;
+                if (spawn_temp == spawn_temp) {
+                    target_temp = max(current_temp, spawn_temp);
+                }
+                imageStore(emit_cell_lo_img, target, vec4(float(material_id), target_phase, target_temp, target_integrity));
+                imageStore(emit_cell_hi_img, target, vec4(emitted_velocity(source, target, ai, af), 0.0, 0.0));
+                imageStore(emit_timer_img, target, vec4(0.0));
+                imageStore(emit_meta_img, target, vec4(1.0, 0.0, 0.0, 0.0));
+            }
+            bool mask_matches(uint value, uint required) {
+                if (required == 0u) {
+                    return true;
+                }
+                return (value & required) == required;
+            }
+            int best_matching_gas_layer(ivec2 cell, int required_id, uint required_mask) {
+                if (required_id >= 0) {
+                    if (!mask_matches(gas_tags[required_id].y, required_mask)) {
+                        return -1;
+                    }
+                    return required_id;
+                }
+                if (required_mask == 0u) {
+                    return -1;
+                }
+                float best = -1.0;
+                int best_species = -1;
+                for (int species_id = 0; species_id < gas_count; ++species_id) {
+                    if (!mask_matches(gas_tags[species_id].y, required_mask)) {
+                        continue;
+                    }
+                    float candidate = texelFetch(gas_tex, ivec3(cell, species_id), 0).x;
+                    if (candidate > best) {
+                        best = candidate;
+                        best_species = species_id;
+                    }
+                }
+                return best_species;
+            }
+            void main() {
+                ivec3 gid = ivec3(gl_GlobalInvocationID.xyz);
+                if (gid.x >= gas_grid_size.x || gid.y >= gas_grid_size.y || gid.z >= gas_count) {
+                    return;
+                }
+                float gas_value = texelFetch(gas_tex, gid, 0).x;
+                float ambient_value = texelFetch(ambient_tex, gid.xy, 0).x;
+                if (texelFetch(active_gas_tex, gid.xy, 0).x <= 0.5) {
+                    imageStore(gas_out_img, gid, vec4(gas_value, 0.0, 0.0, 0.0));
+                    if (gid.z == 0) {
+                        imageStore(ambient_out_img, gid.xy, vec4(ambient_value, 0.0, 0.0, 0.0));
+                    }
+                    return;
+                }
+                for (int rule_index = 0; rule_index < rule_count; ++rule_index) {
+                    ivec4 ri = rule_i[rule_index];
+                    vec4 rf = rule_f[rule_index];
+                    uvec4 rt = rule_tags[rule_index];
+                    if (ambient_value < rf.x || ambient_value > rf.y) {
+                        continue;
+                    }
+                    int source_species = best_matching_gas_layer(gid.xy, ri.x, rt.y);
+                    float source_value = 0.0;
+                    if (source_species >= 0) {
+                        source_value = texelFetch(gas_tex, ivec3(gid.xy, source_species), 0).x;
+                    }
+                    float dose = texelFetch(gas_dose_tex, ivec3(gid.xy, ri.y), 0).x;
+                    if (source_value >= rf.z && dose >= rf.z) {
+                        float scale = min(source_value, dose) * rf.w;
+                        ivec4 ai = ivec4(0);
+                        vec4 af = vec4(0.0);
+                        if (ri.z >= 0) {
+                            ai = action_i[ri.z];
+                            af = action_f[ri.z];
+                        }
+                        if (ri.z >= 0 && ai.x == {{TYPE_MODIFY_GAS}} && gid.z == ai.y) {
+                            record_gas_action(ai.x);
+                            gas_value = max(0.0, gas_value + af.x * scale);
+                            write_flow_sources(gid.xy, ai, af, scale);
+                        } else if (ri.z >= 0 && ai.x == {{TYPE_MODIFY_TEMPERATURE}} && gid.z == 0) {
+                            record_gas_action(ai.x);
+                            ambient_value += af.x * scale;
+                        } else if (ri.z >= 0 && ai.x == {{TYPE_EMIT_LIGHT}} && gid.z == 0) {
+                            record_gas_action(ai.x);
+                            append_light_emitter(gid.xy, ai, af, scale);
+                        } else if (ri.z >= 0 && ai.x == {{TYPE_EMIT_MATERIAL}} && gid.z == 0) {
+                            record_gas_action(ai.x);
+                            emit_material(gid.xy, ai, af);
+                        }
+                        int consume_policy = int(rt.z);
+                        if ((consume_policy == {{CONSUME_POLICY_RHS}} || consume_policy == {{CONSUME_POLICY_BOTH}})
+                            && gid.z == source_species) {
+                            gas_value = max(0.0, gas_value - scale);
+                        }
+                    }
+                }
+                imageStore(gas_out_img, gid, vec4(gas_value, 0.0, 0.0, 0.0));
+                if (gid.z == 0) {
+                    imageStore(ambient_out_img, gid.xy, vec4(ambient_value, 0.0, 0.0, 0.0));
+                }
+            }
+            

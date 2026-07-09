@@ -1,0 +1,147 @@
+
+            uniform int self_rule_count;
+            layout(std430, binding=12) buffer SelfRuleI {
+                ivec4 self_rule_i[{{MAX_SELF_RULES}}];
+            };
+            layout(std430, binding=13) buffer SelfRuleF {
+                vec4 self_rule_f[{{MAX_SELF_RULES}}];
+            };
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
+                    return;
+                }
+                float material_value = texelFetch(material_tex, gid, 0).x;
+                float phase_value = texelFetch(phase_tex, gid, 0).x;
+                float temp_value = texelFetch(temp_tex, gid, 0).x;
+                float integrity_value = texelFetch(integrity_tex, gid, 0).x;
+                vec4 timer_value = texelFetch(timer_tex, gid, 0);
+                vec4 deferred_action_lo = vec4(0.0);
+                vec4 deferred_action_hi = vec4(0.0);
+                vec4 deferred_scale_lo = vec4(0.0);
+                vec4 deferred_scale_hi = vec4(0.0);
+                float cell_reset_value = 0.0;
+                float reaction_latched_value = 0.0;
+                int deferred_count = 0;
+                if (!solve_active(gid)) {
+                    store_cell_outputs(
+                        gid,
+                        material_value,
+                        phase_value,
+                        temp_value,
+                        integrity_value,
+                        timer_value,
+                        deferred_action_lo,
+                        deferred_action_hi,
+                        deferred_scale_lo,
+                        deferred_scale_hi,
+                        cell_reset_value,
+                        reaction_latched_value
+                    );
+                    return;
+                }
+                int material_id = int(material_value + 0.5);
+                if (material_id <= 0) {
+                    store_cell_outputs(
+                        gid,
+                        material_value,
+                        phase_value,
+                        temp_value,
+                        integrity_value,
+                        timer_value,
+                        deferred_action_lo,
+                        deferred_action_hi,
+                        deferred_scale_lo,
+                        deferred_scale_hi,
+                        cell_reset_value,
+                        reaction_latched_value
+                    );
+                    return;
+                }
+                int phase_id = int(phase_value + 0.5);
+                material_id = clamp_material_id(material_id);
+                vec4 trigger_lo = vec4(0.0);
+                vec4 trigger_hi = vec4(0.0);
+                for (int rule_index = 0; rule_index < self_rule_count; ++rule_index) {
+                    ivec4 ri = self_rule_i[rule_index];
+                    vec4 rf = self_rule_f[rule_index];
+                    if (ri.x != material_id) {
+                        continue;
+                    }
+                    if (ri.z != 0 && ((1 << phase_id) & ri.z) == 0) {
+                        continue;
+                    }
+                    if (temp_value < rf.x || temp_value > rf.y) {
+                        continue;
+                    }
+                    if ((ri.w & 1) != 0 && integrity_value > rf.z) {
+                        continue;
+                    }
+                    if ((ri.w & 2) != 0 && integrity_value < rf.w) {
+                        continue;
+                    }
+                    int slot_index = ri.y;
+                    int action_index = slot_action(material_id, slot_index);
+                    if (action_index <= 0) {
+                        continue;
+                    }
+                    if (slot_index < 4) {
+                        if (timer_value[slot_index] <= 0.5) {
+                            int duration = action_meta[action_index].x;
+                            if (duration > 0) {
+                                timer_value[slot_index] = float(duration);
+                            }
+                            trigger_lo[slot_index] = float(action_index);
+                        }
+                    } else if (slot_index < 8) {
+                        trigger_hi[slot_index - 4] = float(action_index);
+                    }
+                }
+                apply_trigger_vector(
+                    material_value,
+                    phase_value,
+                    temp_value,
+                    integrity_value,
+                    timer_value,
+                    cell_reset_value,
+                    reaction_latched_value,
+                    deferred_action_lo,
+                    deferred_action_hi,
+                    deferred_scale_lo,
+                    deferred_scale_hi,
+                    deferred_count,
+                    gid,
+                    trigger_lo
+                );
+                apply_trigger_vector(
+                    material_value,
+                    phase_value,
+                    temp_value,
+                    integrity_value,
+                    timer_value,
+                    cell_reset_value,
+                    reaction_latched_value,
+                    deferred_action_lo,
+                    deferred_action_hi,
+                    deferred_scale_lo,
+                    deferred_scale_hi,
+                    deferred_count,
+                    gid,
+                    trigger_hi
+                );
+                store_cell_outputs(
+                    gid,
+                    material_value,
+                    phase_value,
+                    temp_value,
+                    integrity_value,
+                    timer_value,
+                    deferred_action_lo,
+                    deferred_action_hi,
+                    deferred_scale_lo,
+                    deferred_scale_hi,
+                    cell_reset_value,
+                    reaction_latched_value
+                );
+            }
+            

@@ -1,0 +1,23 @@
+
+            #version 430
+            layout(local_size_x=1, local_size_y=1, local_size_z=1) in;
+            uniform uvec3 full_group_count;
+            layout(std430, binding={{LIGHT_DOSE_GUARD_DISPATCH_GUARD_BINDING}}) readonly buffer LightDoseGuard {
+                uint light_dose_guard[];
+            };
+            layout(std430, binding={{LIGHT_DOSE_GUARD_DISPATCH_ARGS_BINDING}}) buffer DispatchArgs {
+                uint dispatch_args[];
+            };
+
+            void main() {
+                if (light_dose_guard[0] == 0u) {
+                    dispatch_args[0] = 0u;
+                    dispatch_args[1] = 1u;
+                    dispatch_args[2] = 1u;
+                    return;
+                }
+                dispatch_args[0] = full_group_count.x;
+                dispatch_args[1] = max(full_group_count.y, 1u);
+                dispatch_args[2] = max(full_group_count.z, 1u);
+            }
+            

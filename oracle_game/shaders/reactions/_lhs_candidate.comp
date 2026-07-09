@@ -1,0 +1,16 @@
+
+            const int RULE_CANDIDATE_WORDS = {{RULE_CANDIDATE_WORDS}};
+            const int RULE_CANDIDATE_VECS = {{RULE_CANDIDATE_VECS}};
+            uniform int rule_candidate_word_count;
+            layout(std430, binding=12) buffer RuleLhsCandidateMasks {
+                uvec4 rule_lhs_candidate_masks[{{MAX_MATERIALS_TIMES_RULE_CANDIDATE_VECS}}];
+            };
+            uint lhs_rule_candidate_word(int material_id, int word_index) {
+                if (word_index < 0 || word_index >= RULE_CANDIDATE_WORDS) {
+                    return 0u;
+                }
+                material_id = clamp_material_id(material_id);
+                uvec4 packed_words = rule_lhs_candidate_masks[material_id * RULE_CANDIDATE_VECS + (word_index / 4)];
+                return packed_words[word_index & 3];
+            }
+        

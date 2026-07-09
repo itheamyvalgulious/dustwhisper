@@ -1,0 +1,14 @@
+
+            layout(r32f, binding=1) writeonly uniform image2D active_cell_img;
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
+                    return;
+                }
+                ivec2 tile = ivec2(
+                    min(gid.x / tile_size, tile_grid_size.x - 1),
+                    min(gid.y / tile_size, tile_grid_size.y - 1)
+                );
+                imageStore(active_cell_img, gid, vec4(expanded_tile_active(tile) ? 1.0 : 0.0, 0.0, 0.0, 0.0));
+            }
+            

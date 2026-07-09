@@ -1,0 +1,14 @@
+
+            #version 430
+            layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+            uniform ivec2 cell_grid_size;
+            layout(binding=0) uniform sampler2D velocity_src_tex;
+            layout(rg32f, binding=0) writeonly uniform image2D velocity_dst_img;
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
+                    return;
+                }
+                imageStore(velocity_dst_img, gid, texelFetch(velocity_src_tex, gid, 0));
+            }
+            

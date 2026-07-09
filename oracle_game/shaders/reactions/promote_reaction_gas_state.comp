@@ -1,0 +1,21 @@
+
+            #version 430
+            layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+            uniform ivec2 gas_grid_size;
+            uniform int gas_count;
+            layout(binding=0) uniform sampler2DArray gas_src_tex;
+            layout(binding=1) uniform sampler2D ambient_src_tex;
+            layout(r32f, binding=0) writeonly uniform image2DArray gas_dst_img;
+            layout(r32f, binding=1) writeonly uniform image2D ambient_dst_img;
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                int species = int(gl_GlobalInvocationID.z);
+                if (gid.x >= gas_grid_size.x || gid.y >= gas_grid_size.y || species >= gas_count) {
+                    return;
+                }
+                imageStore(gas_dst_img, ivec3(gid, species), texelFetch(gas_src_tex, ivec3(gid, species), 0));
+                if (species == 0) {
+                    imageStore(ambient_dst_img, gid, texelFetch(ambient_src_tex, gid, 0));
+                }
+            }
+            

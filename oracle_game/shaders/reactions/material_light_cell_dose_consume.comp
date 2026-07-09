@@ -1,0 +1,80 @@
+
+            #version 430
+            layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+            uniform ivec2 cell_grid_size;
+            uniform int light_count;
+            uniform int rule_count;
+            layout(binding=0) uniform sampler2DArray cell_dose_tex;
+            layout(binding=1) uniform sampler2D material_tex;
+            layout(binding=2) uniform sampler2D phase_tex;
+            layout(binding=3) uniform sampler2D temp_tex;
+            layout(binding=4) uniform sampler2D active_cell_tex;
+            layout(std430, binding=0) buffer MaterialLightRuleI {
+                ivec4 material_light_rule_i[{{MAX_RULES}}];
+            };
+            layout(std430, binding=1) buffer MaterialLightRuleF {
+                vec4 material_light_rule_f[{{MAX_RULES}}];
+            };
+            layout(std430, binding=2) buffer MaterialLightRuleTags {
+                uvec4 material_light_rule_tags[{{MAX_RULES}}];
+            };
+            layout(std430, binding=3) buffer MaterialTags {
+                uvec4 material_tags[{{MAX_MATERIALS}}];
+            };
+            layout(r32f, binding=5) writeonly uniform image2DArray cell_dose_out_img;
+
+            bool mask_matches(uint value, uint required) {
+                return required == 0u || (value & required) == required;
+            }
+
+            bool material_cell_matches_rule(ivec2 cell, ivec4 ri, vec4 rf, uvec4 rt) {
+                if (texelFetch(active_cell_tex, cell, 0).x <= 0.5) {
+                    return false;
+                }
+                int material_id = int(texelFetch(material_tex, cell, 0).x + 0.5);
+                if (material_id <= 0) {
+                    return false;
+                }
+                if (ri.x >= 0 && material_id != ri.x) {
+                    return false;
+                }
+                int clamped_material = clamp(material_id, 0, {{MAX_MATERIALS_MINUS_1}});
+                if (!mask_matches(material_tags[clamped_material].z, rt.x)) {
+                    return false;
+                }
+                int phase_id = int(texelFetch(phase_tex, cell, 0).x + 0.5);
+                int phase_mask = int(rt.z);
+                if (phase_mask != 0 && ((1 << phase_id) & phase_mask) == 0) {
+                    return false;
+                }
+                float temp_value = texelFetch(temp_tex, cell, 0).x;
+                return temp_value >= rf.x && temp_value <= rf.y;
+            }
+
+            void main() {
+                ivec3 gid = ivec3(gl_GlobalInvocationID.xyz);
+                if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y || gid.z >= light_count) {
+                    return;
+                }
+                ivec2 cell = gid.xy;
+                int layer = gid.z;
+                float dose = texelFetch(cell_dose_tex, gid, 0).x;
+                for (int rule_index = 0; rule_index < rule_count; ++rule_index) {
+                    ivec4 ri = material_light_rule_i[rule_index];
+                    vec4 rf = material_light_rule_f[rule_index];
+                    uvec4 rt = material_light_rule_tags[rule_index];
+                    int consume_policy = int(rt.w);
+                    if (consume_policy != {{CONSUME_POLICY_RHS}} && consume_policy != {{CONSUME_POLICY_BOTH}}) {
+                        continue;
+                    }
+                    if (ri.y != layer || dose < rf.z) {
+                        continue;
+                    }
+                    if (!material_cell_matches_rule(cell, ri, rf, rt)) {
+                        continue;
+                    }
+                    dose = max(0.0, dose - dose * max(rf.w, 0.0));
+                }
+                imageStore(cell_dose_out_img, gid, vec4(dose, 0.0, 0.0, 0.0));
+            }
+            

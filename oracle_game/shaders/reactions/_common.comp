@@ -1,0 +1,419 @@
+
+            #version 430
+            layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+            uniform ivec2 cell_grid_size;
+            uniform int rule_count;
+            uniform int gas_cell_size;
+            uniform int gas_count;
+            uniform ivec2 gas_grid_size;
+            uniform int random_target_count;
+            uniform bool direct_gas_delta_enabled;
+            uniform uint direct_modify_gas_layer_mask;
+            layout(binding=0) uniform sampler2D material_tex;
+            layout(binding=1) uniform sampler2D phase_tex;
+            layout(binding=2) uniform sampler2D temp_tex;
+            layout(binding=3) uniform sampler2D integrity_tex;
+            layout(binding=4) uniform sampler2DArray gas_tex;
+            layout(binding=5) uniform sampler2DArray dose_tex;
+            layout(binding=6) uniform sampler2D timer_tex;
+            layout(binding=7) uniform sampler2D active_cell_tex;
+            layout(binding=8) uniform sampler2D velocity_tex;
+            layout(std430, binding=0) buffer MaterialParams {
+                vec4 material_params[{{MAX_MATERIALS}}];
+            };
+            layout(std430, binding=1) buffer ActionI {
+                ivec4 action_i[{{MAX_ACTIONS}}];
+            };
+            layout(std430, binding=2) buffer ActionF {
+                vec4 action_f[{{MAX_ACTIONS}}];
+            };
+            
+            layout(std430, binding=3) buffer RuleI {
+                ivec4 rule_i[{{MAX_RULES}}];
+            };
+            layout(std430, binding=4) buffer RuleF {
+                vec4 rule_f[{{MAX_RULES}}];
+            };
+            layout(std430, binding=5) buffer RuleTags {
+                uvec4 rule_tags[{{MAX_RULES}}];
+            };
+        
+            layout(std430, binding=6) buffer MaterialTags {
+                uvec4 material_tags[{{MAX_MATERIALS}}];
+            };
+            layout(std430, binding=7) buffer GasTags {
+                uvec4 gas_tags[{{MAX_MATERIALS}}];
+            };
+            layout(std430, binding=8) buffer MaterialSlotsLo {
+                ivec4 material_slots_lo[{{MAX_MATERIALS}}];
+            };
+            layout(std430, binding=9) buffer MaterialSlotsHi {
+                ivec4 material_slots_hi[{{MAX_MATERIALS}}];
+            };
+            layout(std430, binding=10) buffer ActionMeta {
+                ivec4 action_meta[{{MAX_ACTIONS}}];
+            };
+            layout(std430, binding=11) buffer RandomTargets {
+                int random_targets[{{MAX_MATERIALS}}];
+            };
+            layout(std430, binding=14) buffer LightEmitterBuffer {
+                vec4 light_emitters[{{MAX_EMITTED_LIGHTS_TIMES_2}}];
+            };
+            layout(std430, binding=15) buffer ReactionCounters {
+                uint reaction_counts[16];
+            };
+            // DIRECT_GAS_DELTA_STORAGE_BEGIN
+            layout(std430, binding=13) buffer DirectGasDelta {
+                int direct_gas_delta[];
+            };
+            // DIRECT_GAS_DELTA_STORAGE_END
+            const uint CONSUME_POLICY_LHS_ID = {{CONSUME_POLICY_LHS}}u;
+            const uint CONSUME_POLICY_RHS_ID = {{CONSUME_POLICY_RHS}}u;
+            const uint CONSUME_POLICY_BOTH_ID = {{CONSUME_POLICY_BOTH}}u;
+            bool mask_matches(uint value, uint required) {
+                return required == 0u || (value & required) == required;
+            }
+            int clamp_material_id(int material_id) {
+                return clamp(material_id, 0, {{MAX_MATERIALS_MINUS_1}});
+            }
+            int slot_action(int material_id, int slot_index) {
+                if (slot_index < 0) {
+                    return -1;
+                }
+                material_id = clamp_material_id(material_id);
+                if (slot_index < 4) {
+                    return material_slots_lo[material_id][slot_index];
+                }
+                if (slot_index < 8) {
+                    return material_slots_hi[material_id][slot_index - 4];
+                }
+                return -1;
+            }
+            bool match_material_selector(int material_id, int required_id, uint required_mask) {
+                if (material_id <= 0) {
+                    return false;
+                }
+                if (required_id >= 0 && material_id != required_id) {
+                    return false;
+                }
+                material_id = clamp_material_id(material_id);
+                if (!mask_matches(material_tags[material_id].x, required_mask)) {
+                    return false;
+                }
+                return required_id >= 0 || required_mask != 0u;
+            }
+            bool solve_active(ivec2 cell) {
+                return texelFetch(active_cell_tex, cell, 0).x > 0.5;
+            }
+            void append_deferred(
+                inout vec4 deferred_action_lo,
+                inout vec4 deferred_action_hi,
+                inout vec4 deferred_scale_lo,
+                inout vec4 deferred_scale_hi,
+                inout int deferred_count,
+                int action_index,
+                float scale
+            ) {
+                if (deferred_count >= 8) {
+                    return;
+                }
+                if (deferred_count < 4) {
+                    deferred_action_lo[deferred_count] = float(action_index);
+                    deferred_scale_lo[deferred_count] = scale;
+                } else {
+                    int hi_index = deferred_count - 4;
+                    deferred_action_hi[hi_index] = float(action_index);
+                    deferred_scale_hi[hi_index] = scale;
+                }
+                deferred_count += 1;
+            }
+            // DIRECT_GAS_DELTA_FUNCTIONS_BEGIN
+            bool direct_gas_layer_enabled(int layer) {
+                if (layer < 0 || layer >= gas_count) {
+                    return false;
+                }
+                if (layer >= 31) {
+                    return true;
+                }
+                return (direct_modify_gas_layer_mask & (1u << uint(layer))) != 0u;
+            }
+            int direct_gas_delta_index(ivec2 gas_cell, int layer) {
+                return (layer * gas_grid_size.y + gas_cell.y) * gas_grid_size.x + gas_cell.x;
+            }
+            bool apply_direct_gas_delta(ivec2 gid, ivec4 ai, vec4 af, float scale, inout int deferred_count) {
+                if (!direct_gas_delta_enabled || ai.x != {{TYPE_MODIFY_GAS}} || !direct_gas_layer_enabled(ai.y)) {
+                    return false;
+                }
+                ivec2 gas_cell = ivec2(
+                    min(gas_grid_size.x - 1, max(0, gid.x / gas_cell_size)),
+                    min(gas_grid_size.y - 1, max(0, gid.y / gas_cell_size))
+                );
+                float delta = af.x * scale;
+                int fixed_delta = int(round(clamp(
+                    delta * float({{GAS_DELTA_FIXED_SCALE}}),
+                    -2147483000.0,
+                    2147483000.0
+                )));
+                if (fixed_delta != 0) {
+                    atomicAdd(direct_gas_delta[direct_gas_delta_index(gas_cell, ai.y)], fixed_delta);
+                }
+                atomicAdd(reaction_counts[1], 1u);
+                atomicAdd(reaction_counts[1 + {{TYPE_MODIFY_GAS}}], 1u);
+                return true;
+            }
+            // DIRECT_GAS_DELTA_FUNCTIONS_END
+            vec2 light_direction(ivec2 gid, int direction_id) {
+                if (direction_id == {{DIRECTION_RIGHT}}) {
+                    return vec2(1.0, 0.0);
+                }
+                if (direction_id == {{DIRECTION_LEFT}}) {
+                    return vec2(-1.0, 0.0);
+                }
+                if (direction_id == {{DIRECTION_UP}}) {
+                    return vec2(0.0, -1.0);
+                }
+                if (direction_id == {{DIRECTION_DOWN}}) {
+                    return vec2(0.0, 1.0);
+                }
+                if (direction_id == {{DIRECTION_SPEED}}) {
+                    vec2 velocity = texelFetch(velocity_tex, gid, 0).xy;
+                    float norm = length(velocity);
+                    if (norm > 1.0e-5) {
+                        return velocity / norm;
+                    }
+                }
+                return vec2(0.0, 0.0);
+            }
+            void append_light_emitter(ivec2 gid, ivec4 ai, vec4 af, float scale) {
+                if (ai.y < 0) {
+                    return;
+                }
+                uint emitter_index = atomicAdd(reaction_counts[0], 1u);
+                if (emitter_index >= uint({{MAX_EMITTED_LIGHTS}})) {
+                    return;
+                }
+                vec2 direction = light_direction(gid, ai.z);
+                uint base_index = emitter_index * 2u;
+                light_emitters[base_index] = vec4(float(gid.x), float(gid.y), direction.x, direction.y);
+                light_emitters[base_index + 1u] = vec4(
+                    max(0.1, af.x * scale),
+                    af.y,
+                    max(0.0, af.z),
+                    float(ai.y)
+                );
+            }
+            void record_gpu_local_action(int action_type) {
+                if (
+                    action_type == {{TYPE_HARM}}
+                    || action_type == {{TYPE_MODIFY_TEMPERATURE}}
+                    || action_type == {{TYPE_CONVERT_MATERIAL}}
+                    || action_type == {{TYPE_EMIT_LIGHT}}
+                ) {
+                    atomicAdd(reaction_counts[1], 1u);
+                    atomicAdd(reaction_counts[1 + action_type], 1u);
+                }
+            }
+            void apply_action(
+                inout float material_value,
+                inout float phase_value,
+                inout float temp_value,
+                inout float integrity_value,
+                inout vec4 timer_value,
+                inout float cell_reset_value,
+                inout float reaction_latched_value,
+                inout vec4 deferred_action_lo,
+                inout vec4 deferred_action_hi,
+                inout vec4 deferred_scale_lo,
+                inout vec4 deferred_scale_hi,
+                inout int deferred_count,
+                ivec2 gid,
+                int action_index,
+                float scale
+            ) {
+                if (action_index <= 0 || action_index >= {{MAX_ACTIONS}}) {
+                    return;
+                }
+                ivec4 ai = action_i[action_index];
+                vec4 af = action_f[action_index];
+                record_gpu_local_action(ai.x);
+                reaction_latched_value = 1.0;
+                if (ai.x == {{TYPE_HARM}}) {
+                    float next_integrity = integrity_value - af.y * scale;
+                    if (af.y < 0.0) {
+                        float base_integrity = material_params[int(material_value + 0.5)].x;
+                        next_integrity = min(base_integrity, next_integrity);
+                    }
+                    if (next_integrity <= 0.0) {
+                        cell_reset_value = 1.0;
+                        reaction_latched_value = 0.0;
+                        material_value = 0.0;
+                        phase_value = 0.0;
+                        integrity_value = 0.0;
+                        timer_value = vec4(0.0);
+                    } else {
+                        integrity_value = next_integrity;
+                    }
+                } else if (ai.x == {{TYPE_MODIFY_TEMPERATURE}}) {
+                    temp_value += af.x * scale;
+                } else if (ai.x == {{TYPE_CONVERT_MATERIAL}}) {
+                    float harm_scale = scale;
+                    if ((ai.z & {{ACTION_FLAG_ALLOW_SUBUNIT_SCALE}}) == 0) {
+                        harm_scale = max(1.0, scale);
+                    }
+                    integrity_value -= af.z * harm_scale;
+                    if (integrity_value <= af.w) {
+                        int target_material = ai.y;
+                        if ((ai.z & 1) != 0 && random_target_count > 0) {
+                            uint selector_bits = (uint(gid.x) * 73856093u) ^ (uint(gid.y) * 19349663u);
+                            int selector = int(selector_bits % uint(random_target_count));
+                            target_material = random_targets[selector];
+                            int current_material = int(material_value + 0.5);
+                            if (target_material == current_material || target_material <= 0) {
+                                for (int offset = 1; offset < random_target_count; ++offset) {
+                                    int alternative = random_targets[(selector + offset) % random_target_count];
+                                    if (alternative > 0 && alternative != current_material) {
+                                        target_material = alternative;
+                                        break;
+                                    }
+                                }
+                                if (target_material == current_material) {
+                                    target_material = 0;
+                                }
+                            }
+                        }
+                        cell_reset_value = 1.0;
+                        reaction_latched_value = 0.0;
+                        timer_value = vec4(0.0);
+                        if (target_material <= 0) {
+                            material_value = 0.0;
+                            phase_value = 0.0;
+                            integrity_value = 0.0;
+                        } else {
+                            material_value = float(target_material);
+                            phase_value = material_params[target_material].y;
+                            integrity_value = material_params[target_material].x;
+                            float spawn_temp = material_params[target_material].z;
+                            if (spawn_temp == spawn_temp) {
+                                temp_value = max(temp_value, spawn_temp);
+                            }
+                        }
+                    }
+                } else if (ai.x == {{TYPE_MODIFY_GAS}}) {
+                    if (!apply_direct_gas_delta(gid, ai, af, scale, deferred_count)) {
+                        append_deferred(
+                            deferred_action_lo,
+                            deferred_action_hi,
+                            deferred_scale_lo,
+                            deferred_scale_hi,
+                            deferred_count,
+                            action_index,
+                            scale
+                        );
+                    } else if (ai.w != 0) {
+                        append_deferred(
+                            deferred_action_lo,
+                            deferred_action_hi,
+                            deferred_scale_lo,
+                            deferred_scale_hi,
+                            deferred_count,
+                            action_index,
+                            scale
+                        );
+                    }
+                } else if (ai.x == {{TYPE_EMIT_LIGHT}}) {
+                    append_light_emitter(gid, ai, af, scale);
+                } else if (ai.x == {{TYPE_EMIT_MATERIAL}}) {
+                    append_deferred(
+                        deferred_action_lo,
+                        deferred_action_hi,
+                        deferred_scale_lo,
+                        deferred_scale_hi,
+                        deferred_count,
+                        action_index,
+                        scale
+                    );
+                } else if (ai.x == {{TYPE_DEFERRED}}) {
+                    append_deferred(
+                        deferred_action_lo,
+                        deferred_action_hi,
+                        deferred_scale_lo,
+                        deferred_scale_hi,
+                        deferred_count,
+                        action_index,
+                        scale
+                    );
+                }
+            }
+            void apply_slot_trigger(
+                inout float material_value,
+                inout float phase_value,
+                inout float temp_value,
+                inout float integrity_value,
+                inout vec4 timer_value,
+                inout float cell_reset_value,
+                inout float reaction_latched_value,
+                inout vec4 deferred_action_lo,
+                inout vec4 deferred_action_hi,
+                inout vec4 deferred_scale_lo,
+                inout vec4 deferred_scale_hi,
+                inout int deferred_count,
+                ivec2 gid,
+                int slot_index,
+                float scale
+            ) {
+                int material_id = int(material_value + 0.5);
+                if (material_id <= 0) {
+                    return;
+                }
+                int action_index = slot_action(material_id, slot_index);
+                if (action_index <= 0) {
+                    return;
+                }
+                if (slot_index < 4 && timer_value[slot_index] <= 0.5) {
+                    int duration = action_meta[action_index].x;
+                    if (duration > 0) {
+                        timer_value[slot_index] = float(duration);
+                    }
+                }
+                apply_action(
+                    material_value,
+                    phase_value,
+                    temp_value,
+                    integrity_value,
+                    timer_value,
+                    cell_reset_value,
+                    reaction_latched_value,
+                    deferred_action_lo,
+                    deferred_action_hi,
+                    deferred_scale_lo,
+                    deferred_scale_hi,
+                    deferred_count,
+                    gid,
+                    action_index,
+                    scale
+                );
+            }
+            void consume_current_material(
+                inout float material_value,
+                inout float phase_value,
+                inout float integrity_value,
+                inout vec4 timer_value,
+                inout float cell_reset_value,
+                inout float reaction_latched_value,
+                float scale
+            ) {
+                int material_id = int(material_value + 0.5);
+                if (material_id <= 0 || scale <= 0.0) {
+                    return;
+                }
+                integrity_value = max(0.0, integrity_value - scale);
+                if (integrity_value <= 1e-6) {
+                    cell_reset_value = 1.0;
+                    reaction_latched_value = 0.0;
+                    material_value = 0.0;
+                    phase_value = 0.0;
+                    integrity_value = 0.0;
+                    timer_value = vec4(0.0);
+                }
+            }
+        

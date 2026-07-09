@@ -1,0 +1,153 @@
+
+            layout(r32f, binding=0) writeonly uniform image2D material_out_img;
+            layout(r32f, binding=1) writeonly uniform image2D phase_out_img;
+            layout(r32f, binding=2) writeonly uniform image2D temp_out_img;
+            layout(r32f, binding=3) writeonly uniform image2D integrity_out_img;
+            layout(rgba32f, binding=4) writeonly uniform image2D timer_out_img;
+            layout(rgba32f, binding=5) writeonly uniform image2DArray deferred_lo_img;
+            layout(rgba32f, binding=6) writeonly uniform image2DArray deferred_hi_img;
+            layout(rg32f, binding=7) writeonly uniform image2D cell_meta_out_img;
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
+                    return;
+                }
+                float material_value = texelFetch(material_tex, gid, 0).x;
+                float phase_value = texelFetch(phase_tex, gid, 0).x;
+                float temp_value = texelFetch(temp_tex, gid, 0).x;
+                float integrity_value = texelFetch(integrity_tex, gid, 0).x;
+                vec4 timer_value = texelFetch(timer_tex, gid, 0);
+                vec4 deferred_action_lo = vec4(0.0);
+                vec4 deferred_action_hi = vec4(0.0);
+                vec4 deferred_scale_lo = vec4(0.0);
+                vec4 deferred_scale_hi = vec4(0.0);
+                float cell_reset_value = 0.0;
+                float reaction_latched_value = 0.0;
+                int deferred_count = 0;
+                if (!solve_active(gid)) {
+                    imageStore(material_out_img, gid, vec4(material_value, 0.0, 0.0, 0.0));
+                    imageStore(phase_out_img, gid, vec4(phase_value, 0.0, 0.0, 0.0));
+                    imageStore(temp_out_img, gid, vec4(temp_value, 0.0, 0.0, 0.0));
+                    imageStore(integrity_out_img, gid, vec4(integrity_value, 0.0, 0.0, 0.0));
+                    imageStore(timer_out_img, gid, timer_value);
+                    imageStore(deferred_lo_img, ivec3(gid, 0), deferred_action_lo);
+                    imageStore(deferred_lo_img, ivec3(gid, 1), deferred_scale_lo);
+                    imageStore(deferred_hi_img, ivec3(gid, 0), deferred_action_hi);
+                    imageStore(deferred_hi_img, ivec3(gid, 1), deferred_scale_hi);
+                    imageStore(cell_meta_out_img, gid, vec4(0.0, 0.0, 0.0, 0.0));
+                    return;
+                }
+                ivec2 gas_cell = ivec2(
+                    min(gid.x / gas_cell_size, textureSize(gas_tex, 0).x - 1),
+                    min(gid.y / gas_cell_size, textureSize(gas_tex, 0).y - 1)
+                );
+                int material_id = int(material_value + 0.5);
+                if (material_id > 0) {
+                    int phase_id = int(phase_value + 0.5);
+                    uint material_reaction_tags = material_tags[clamp_material_id(material_id)].y;
+                    for (int word_index = 0; word_index < rule_candidate_word_count; ++word_index) {
+                        uint candidate_bits = lhs_rule_candidate_word(material_id, word_index);
+                        while (candidate_bits != 0u) {
+                            int bit_index = findLSB(candidate_bits);
+                            int rule_index = word_index * 32 + bit_index;
+                            candidate_bits &= candidate_bits - 1u;
+                            if (rule_index >= rule_count) {
+                                continue;
+                            }
+                            ivec4 ri = rule_i[rule_index];
+                            vec4 rf = rule_f[rule_index];
+                            uvec4 rt = rule_tags[rule_index];
+                            if (ri.x >= 0 && material_id != ri.x) {
+                                continue;
+                            }
+                            if (!mask_matches(material_reaction_tags, rt.x)) {
+                                continue;
+                            }
+                            int phase_mask = int(rt.z);
+                            float rule_scale = rf.w;
+                            if (phase_mask != 0 && ((1 << phase_id) & phase_mask) == 0) {
+                                continue;
+                            }
+                            if (temp_value < rf.x || temp_value > rf.y) {
+                                continue;
+                            }
+                            float concentration = 0.0;
+                            if (ri.y >= 0) {
+                                if (mask_matches(gas_tags[ri.y].x, rt.y)) {
+                                    concentration = texelFetch(gas_tex, ivec3(gas_cell, ri.y), 0).x;
+                                }
+                            } else if (rt.y != 0u) {
+                                for (int species_id = 0; species_id < gas_count; ++species_id) {
+                                    if (!mask_matches(gas_tags[species_id].x, rt.y)) {
+                                        continue;
+                                    }
+                                    concentration = max(concentration, texelFetch(gas_tex, ivec3(gas_cell, species_id), 0).x);
+                                }
+                            } else {
+                                continue;
+                            }
+                            if (concentration >= rf.z) {
+                                if (ri.w >= 0) {
+                                    apply_slot_trigger(
+                                        material_value,
+                                        phase_value,
+                                        temp_value,
+                                        integrity_value,
+                                        timer_value,
+                                        cell_reset_value,
+                                        reaction_latched_value,
+                                        deferred_action_lo,
+                                        deferred_action_hi,
+                                        deferred_scale_lo,
+                                        deferred_scale_hi,
+                                        deferred_count,
+                                        gid,
+                                        ri.w,
+                                        concentration * rule_scale
+                                    );
+                                } else if (ri.z >= 0) {
+                                    apply_action(
+                                        material_value,
+                                        phase_value,
+                                        temp_value,
+                                        integrity_value,
+                                        timer_value,
+                                        cell_reset_value,
+                                        reaction_latched_value,
+                                        deferred_action_lo,
+                                        deferred_action_hi,
+                                        deferred_scale_lo,
+                                        deferred_scale_hi,
+                                        deferred_count,
+                                        gid,
+                                        ri.z,
+                                        concentration * rule_scale
+                                    );
+                                }
+                                if (rt.w == CONSUME_POLICY_LHS_ID || rt.w == CONSUME_POLICY_BOTH_ID) {
+                                    consume_current_material(
+                                        material_value,
+                                        phase_value,
+                                        integrity_value,
+                                        timer_value,
+                                        cell_reset_value,
+                                        reaction_latched_value,
+                                        concentration * rule_scale
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                imageStore(material_out_img, gid, vec4(material_value, 0.0, 0.0, 0.0));
+                imageStore(phase_out_img, gid, vec4(phase_value, 0.0, 0.0, 0.0));
+                imageStore(temp_out_img, gid, vec4(temp_value, 0.0, 0.0, 0.0));
+                imageStore(integrity_out_img, gid, vec4(integrity_value, 0.0, 0.0, 0.0));
+                imageStore(timer_out_img, gid, timer_value);
+                imageStore(deferred_lo_img, ivec3(gid, 0), deferred_action_lo);
+                imageStore(deferred_lo_img, ivec3(gid, 1), deferred_scale_lo);
+                imageStore(deferred_hi_img, ivec3(gid, 0), deferred_action_hi);
+                imageStore(deferred_hi_img, ivec3(gid, 1), deferred_scale_hi);
+                imageStore(cell_meta_out_img, gid, vec4(cell_reset_value, reaction_latched_value, 0.0, 0.0));
+            }
+            

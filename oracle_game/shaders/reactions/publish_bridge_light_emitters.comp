@@ -1,0 +1,28 @@
+
+            #version 430
+            layout(local_size_x=256, local_size_y=1, local_size_z=1) in;
+            uniform uint emitter_vec4_count;
+            uniform uint counter_count;
+            layout(std430, binding=0) readonly buffer SourceEmitterBuffer {
+                vec4 src_emitters[];
+            };
+            layout(std430, binding=1) readonly buffer SourceCounterBuffer {
+                uint src_counts[];
+            };
+            layout(std430, binding=2) writeonly buffer BridgeEmitterBuffer {
+                vec4 bridge_emitters[];
+            };
+            layout(std430, binding=3) writeonly buffer BridgeCounterBuffer {
+                uint bridge_counts[];
+            };
+            void main() {
+                uint index = gl_GlobalInvocationID.x;
+                uint valid_emitter_vec4_count = min(emitter_vec4_count, min(src_counts[0], uint({{MAX_EMITTED_LIGHTS}})) * 2u);
+                if (index < valid_emitter_vec4_count) {
+                    bridge_emitters[index] = src_emitters[index];
+                }
+                if (index < counter_count) {
+                    bridge_counts[index] = src_counts[index];
+                }
+            }
+            

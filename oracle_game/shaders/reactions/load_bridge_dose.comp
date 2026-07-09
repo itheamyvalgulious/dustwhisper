@@ -1,0 +1,38 @@
+
+            #version 430
+            layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+            uniform ivec2 cell_grid_size;
+            uniform ivec2 gas_grid_size;
+            uniform int light_count;
+            uniform bool copy_cell_dose;
+            uniform bool copy_gas_dose;
+            layout(std430, binding=0) readonly buffer BridgeCellDoseBuffer {
+                float bridge_cell_dose[];
+            };
+            layout(std430, binding=1) readonly buffer BridgeGasDoseBuffer {
+                float bridge_gas_dose[];
+            };
+            layout(r32f, binding=0) writeonly uniform image2DArray cell_dose_ping_img;
+            layout(r32f, binding=1) writeonly uniform image2DArray cell_dose_pong_img;
+            layout(r32f, binding=2) writeonly uniform image2DArray gas_dose_ping_img;
+            layout(r32f, binding=3) writeonly uniform image2DArray gas_dose_pong_img;
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                int light = int(gl_GlobalInvocationID.z);
+                if (light >= light_count) {
+                    return;
+                }
+                if (copy_cell_dose && gid.x < cell_grid_size.x && gid.y < cell_grid_size.y) {
+                    int cell_index = (light * cell_grid_size.y + gid.y) * cell_grid_size.x + gid.x;
+                    float value = bridge_cell_dose[cell_index];
+                    imageStore(cell_dose_ping_img, ivec3(gid, light), vec4(value, 0.0, 0.0, 0.0));
+                    imageStore(cell_dose_pong_img, ivec3(gid, light), vec4(value, 0.0, 0.0, 0.0));
+                }
+                if (copy_gas_dose && gid.x < gas_grid_size.x && gid.y < gas_grid_size.y) {
+                    int gas_index = (light * gas_grid_size.y + gid.y) * gas_grid_size.x + gid.x;
+                    float value = bridge_gas_dose[gas_index];
+                    imageStore(gas_dose_ping_img, ivec3(gid, light), vec4(value, 0.0, 0.0, 0.0));
+                    imageStore(gas_dose_pong_img, ivec3(gid, light), vec4(value, 0.0, 0.0, 0.0));
+                }
+            }
+            

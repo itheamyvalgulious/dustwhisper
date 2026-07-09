@@ -1,0 +1,29 @@
+
+            #version 430
+            layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+            uniform ivec2 cell_grid_size;
+            layout(std430, binding=0) readonly buffer BridgeCellCoreBuffer {
+                uint bridge_cell_core[];
+            };
+            layout(rg32f, binding=0) writeonly uniform image2D velocity_img;
+            layout(rgba32f, binding=1) writeonly uniform image2D timer_img;
+            vec4 unpack_timer(uint word) {
+                return vec4(
+                    float(word & 0xFFu),
+                    float((word >> 8u) & 0xFFu),
+                    float((word >> 16u) & 0xFFu),
+                    float((word >> 24u) & 0xFFu)
+                );
+            }
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
+                    return;
+                }
+                int word_index = (gid.y * cell_grid_size.x + gid.x) * 5;
+                vec2 velocity = unpackHalf2x16(bridge_cell_core[word_index + 1]);
+                vec4 timer = unpack_timer(bridge_cell_core[word_index + 3]);
+                imageStore(velocity_img, gid, vec4(velocity, 0.0, 0.0));
+                imageStore(timer_img, gid, timer);
+            }
+            
