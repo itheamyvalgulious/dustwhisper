@@ -935,9 +935,7 @@ class WorldEngine:
 
     _merged_material_optics_table_payload = _merged_material_optics_table_payload
 
-    @staticmethod
-    def _coerce_enum(enum_type: type[Any], value: Any) -> Any:
-        return _coerce_enum(enum_type, value)
+    _coerce_enum = staticmethod(_coerce_enum)
 
     _coerce_material_def = _coerce_material_def
 
@@ -945,9 +943,7 @@ class WorldEngine:
 
     _coerce_light_type_def = _coerce_light_type_def
 
-    @staticmethod
-    def _canonical_material_input_name(name: str | None) -> str | None:
-        return _canonical_material_input_name(name)
+    _canonical_material_input_name = staticmethod(_canonical_material_input_name)
 
     _coerce_material_optics_def = _coerce_material_optics_def
 
@@ -971,24 +967,9 @@ class WorldEngine:
     def _payload_name_set(payload: Iterable[dict[str, Any]], field: str = "name") -> set[str]:
         return _payload_name_set(payload, field=field)
 
-    @staticmethod
-    def _validate_named_reference(valid_names: set[str], reference: str | None) -> None:
-        return _validate_named_reference(valid_names, reference)
+    _validate_named_reference = staticmethod(_validate_named_reference)
 
-    @staticmethod
-    def _validate_unique_identity_fields(
-        payload: Iterable[dict[str, Any]],
-        *,
-        id_field: str,
-        name_field: str = "name",
-        allow_zero_id: bool,
-    ) -> None:
-        return _validate_unique_identity_fields(
-            payload,
-            id_field=id_field,
-            name_field=name_field,
-            allow_zero_id=allow_zero_id,
-        )
+    _validate_unique_identity_fields = staticmethod(_validate_unique_identity_fields)
 
     _validate_material_table_payload = _validate_material_table_payload
 
@@ -1055,9 +1036,7 @@ class WorldEngine:
 
     _coerce_readback_request = _coerce_readback_request
 
-    @staticmethod
-    def _normalize_readback_channels(channels: Any) -> tuple[str, ...]:
-        return _normalize_readback_channels(channels)
+    _normalize_readback_channels = staticmethod(_normalize_readback_channels)
 
     _normalize_readback_request = _normalize_readback_request
 
@@ -1188,9 +1167,7 @@ class WorldEngine:
 
     serialize_bridge_runtime = serialize_bridge_runtime
 
-    @staticmethod
-    def _serialize_bridge_resource_summary(name: str, array: np.ndarray) -> dict[str, Any]:
-        return _serialize_bridge_resource_summary(name, array)
+    _serialize_bridge_resource_summary = staticmethod(_serialize_bridge_resource_summary)
 
     serialize_bridge_resources = serialize_bridge_resources
 
@@ -1243,9 +1220,7 @@ class WorldEngine:
 
     _coerce_page_store_key = _coerce_page_store_key
 
-    @staticmethod
-    def _page_store_key_lookup_update(key: StoredStripeKey) -> PageStripeUpdate:
-        return _page_store_key_lookup_update(key)
+    _page_store_key_lookup_update = staticmethod(_page_store_key_lookup_update)
 
     _coerce_page_stripe_payload = _coerce_page_stripe_payload
 
@@ -1333,9 +1308,7 @@ class WorldEngine:
     def _contextualize_page_stripe_update(self, update: PageStripeUpdate) -> PageStripeUpdate:
         return _contextualize_page_stripe_update(self, update)
 
-    @staticmethod
-    def _page_store_key(update: PageStripeUpdate) -> tuple[str, int, int, int, int]:
-        return _page_store_key(update)
+    _page_store_key = staticmethod(_page_store_key)
 
     def _preview_apply_paging_updates(
         self,
@@ -1345,28 +1318,9 @@ class WorldEngine:
 
     _preview_bridge_placeholder_dirty_rects = _preview_bridge_placeholder_dirty_rects
 
-    @staticmethod
-    def _serialize_bridge_readback_request_stages(
-        requests: list[ReadbackRequest],
-        *,
-        stage: str | None = None,
-        reserved_request_ids: set[int] | None = None,
-        observation_request_ids: set[int] | None = None,
-    ) -> list[dict[str, Any]]:
-        return _serialize_bridge_readback_request_stages(
-            requests,
-            stage=stage,
-            reserved_request_ids=reserved_request_ids,
-            observation_request_ids=observation_request_ids,
-        )
+    _serialize_bridge_readback_request_stages = staticmethod(_serialize_bridge_readback_request_stages)
 
-    @staticmethod
-    def _serialize_bridge_index_stages(
-        values: Sequence[Any],
-        *,
-        stage: str,
-    ) -> list[dict[str, Any]]:
-        return _serialize_bridge_index_stages(values, stage=stage)
+    _serialize_bridge_index_stages = staticmethod(_serialize_bridge_index_stages)
 
     _serialize_preview_bridge_frame_snapshot = _serialize_preview_bridge_frame_snapshot
 
@@ -1382,15 +1336,7 @@ class WorldEngine:
     ) -> list[tuple[int, int, int, int]]:
         return _prune_page_stripe_regions(self, regions, update)
 
-    @staticmethod
-    def _subtract_page_stripe_range_from_region(
-        region: tuple[int, int, int, int],
-        *,
-        axis: str,
-        start: int,
-        end: int,
-    ) -> list[tuple[int, int, int, int]]:
-        return _subtract_page_stripe_range_from_region(region, axis=axis, start=start, end=end)
+    _subtract_page_stripe_range_from_region = staticmethod(_subtract_page_stripe_range_from_region)
 
     close = close
 
@@ -1483,24 +1429,13 @@ class WorldEngine:
 
     _serialize_bridge_ndarray = _serialize_bridge_ndarray
 
-    @staticmethod
-    def _bridge_row_count(array: np.ndarray) -> int:
-        return _bridge_row_count(array)
+    _bridge_row_count = staticmethod(_bridge_row_count)
 
     @classmethod
     def _normalize_bridge_slice_bounds(cls, array: np.ndarray, *, offset: int = 0, limit: int | None = None) -> tuple[int, int]:
         return _normalize_bridge_slice_bounds(array, offset=offset, limit=limit)
 
-    @staticmethod
-    def _normalize_bridge_window_bounds(
-        array: np.ndarray,
-        *,
-        x: int = 0,
-        y: int = 0,
-        w: int | None = None,
-        h: int | None = None,
-    ) -> tuple[int, int, int, int]:
-        return _normalize_bridge_window_bounds(array, x=x, y=y, w=w, h=h)
+    _normalize_bridge_window_bounds = staticmethod(_normalize_bridge_window_bounds)
 
     def _clamped_gas_window(self, gas_x: int, gas_y: int, width: int, height: int) -> tuple[int, int, int, int]:
         return _clamped_gas_window(self, gas_x, gas_y, width, height)
@@ -1527,21 +1462,13 @@ class WorldEngine:
 
     serialize_bridge_shadow_buffer_gas_window = serialize_bridge_shadow_buffer_gas_window
 
-    @staticmethod
-    def _decode_bridge_uploaded_command(meta_record: np.ndarray, payload_bytes: np.ndarray) -> dict[str, Any]:
-        return _decode_bridge_uploaded_command(meta_record, payload_bytes)
+    _decode_bridge_uploaded_command = staticmethod(_decode_bridge_uploaded_command)
 
-    @staticmethod
-    def _decode_bridge_uploaded_label(meta_record: np.ndarray, label_bytes: np.ndarray) -> str:
-        return _decode_bridge_uploaded_label(meta_record, label_bytes)
+    _decode_bridge_uploaded_label = staticmethod(_decode_bridge_uploaded_label)
 
-    @staticmethod
-    def _decode_bridge_uploaded_page_stripe_section(section_record: np.ndarray, payload_bytes: np.ndarray) -> np.ndarray:
-        return _decode_bridge_uploaded_page_stripe_section(section_record, payload_bytes)
+    _decode_bridge_uploaded_page_stripe_section = staticmethod(_decode_bridge_uploaded_page_stripe_section)
 
-    @staticmethod
-    def _set_nested_payload_value(payload: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
-        return _set_nested_payload_value(payload, path, value)
+    _set_nested_payload_value = staticmethod(_set_nested_payload_value)
 
     serialize_bridge_upload_snapshot = serialize_bridge_upload_snapshot
 
@@ -1595,33 +1522,21 @@ class WorldEngine:
 
     serialize_world_command = serialize_world_command
 
-    @staticmethod
-    def serialize_entity_placeholder_input(placeholder: EntityPlaceholder) -> dict[str, Any]:
-        return serialize_entity_placeholder_input(placeholder)
+    serialize_entity_placeholder_input = staticmethod(serialize_entity_placeholder_input)
 
-    @staticmethod
-    def serialize_target_query_input(query: TargetQuery) -> dict[str, Any]:
-        return serialize_target_query_input(query)
+    serialize_target_query_input = staticmethod(serialize_target_query_input)
 
-    @staticmethod
-    def serialize_page_stripe_update(update: PageStripeUpdate) -> dict[str, Any]:
-        return serialize_page_stripe_update(update)
+    serialize_page_stripe_update = staticmethod(serialize_page_stripe_update)
 
-    @staticmethod
-    def serialize_page_store_key(key: StoredStripeKey) -> dict[str, Any]:
-        return serialize_page_store_key(key)
+    serialize_page_store_key = staticmethod(serialize_page_store_key)
 
     @classmethod
     def serialize_page_stripe_payload(cls, payload: dict[str, Any]) -> dict[str, Any]:
         return serialize_page_stripe_payload(cls, payload)
 
-    @staticmethod
-    def serialize_change_intent_input(intent: ChangeIntent) -> dict[str, Any]:
-        return serialize_change_intent_input(intent)
+    serialize_change_intent_input = staticmethod(serialize_change_intent_input)
 
-    @staticmethod
-    def serialize_carrier_intent_input(intent: CarrierIntent) -> dict[str, Any]:
-        return serialize_carrier_intent_input(intent)
+    serialize_carrier_intent_input = staticmethod(serialize_carrier_intent_input)
 
     serialize_frame_input = serialize_frame_input
 
@@ -1637,19 +1552,13 @@ class WorldEngine:
 
     serialize_observation_result = serialize_observation_result
 
-    @staticmethod
-    def serialize_entity_observation_spec(spec: EntityObservationSpec) -> dict[str, Any]:
-        return serialize_entity_observation_spec(spec)
+    serialize_entity_observation_spec = staticmethod(serialize_entity_observation_spec)
 
     serialize_entity_state_patch = serialize_entity_state_patch
 
-    @staticmethod
-    def serialize_observation_target(target: ObservationTarget) -> dict[str, Any]:
-        return serialize_observation_target(target)
+    serialize_observation_target = staticmethod(serialize_observation_target)
 
-    @staticmethod
-    def serialize_entity_state_input(entity: EntityState) -> dict[str, Any]:
-        return serialize_entity_state_input(entity)
+    serialize_entity_state_input = staticmethod(serialize_entity_state_input)
 
     serialize_entity_state = serialize_entity_state
 
@@ -1859,29 +1768,11 @@ class WorldEngine:
     def _set_reaction_rules_payload(self, rules_payload: dict[str, list[dict[str, Any]]]) -> None:
         return _set_reaction_rules_payload(self, rules_payload)
 
-    @staticmethod
-    def _remap_reaction_payload_result_actions(
-        rules_payload: dict[str, list[dict[str, Any]]],
-        *,
-        deleted_action_index: int,
-    ) -> None:
-        return _remap_reaction_payload_result_actions(rules_payload, deleted_action_index=deleted_action_index)
+    _remap_reaction_payload_result_actions = staticmethod(_remap_reaction_payload_result_actions)
 
-    @staticmethod
-    def _remap_material_payload_reaction_slots(
-        materials_payload: list[dict[str, Any]],
-        *,
-        deleted_action_index: int,
-    ) -> None:
-        return _remap_material_payload_reaction_slots(materials_payload, deleted_action_index=deleted_action_index)
+    _remap_material_payload_reaction_slots = staticmethod(_remap_material_payload_reaction_slots)
 
-    @staticmethod
-    def _clamp_material_payload_reaction_slots(
-        materials_payload: list[dict[str, Any]],
-        *,
-        action_count: int,
-    ) -> None:
-        return _clamp_material_payload_reaction_slots(materials_payload, action_count=action_count)
+    _clamp_material_payload_reaction_slots = staticmethod(_clamp_material_payload_reaction_slots)
 
     _shadow_reaction_rule = _shadow_reaction_rule
 
@@ -1936,47 +1827,29 @@ class WorldEngine:
 
     _resolve_intent_source_positions = _resolve_intent_source_positions
 
-    @staticmethod
-    def _normalized_world_direction(
-        source_world_position: tuple[int, int],
-        target_world_position: tuple[int, int],
-    ) -> tuple[float, float] | None:
-        return _normalized_world_direction(source_world_position, target_world_position)
+    _normalized_world_direction = staticmethod(_normalized_world_direction)
 
     _disk_world_cells = _disk_world_cells
 
-    @staticmethod
-    def _disk_world_cells_raw(center_world_position: tuple[int, int], radius: int) -> list[tuple[int, int]]:
-        return _disk_world_cells_raw(center_world_position, radius)
+    _disk_world_cells_raw = staticmethod(_disk_world_cells_raw)
 
     _line_world_cells = _line_world_cells
 
-    @staticmethod
-    def _line_world_cells_raw(
-        start_world_position: tuple[int, int],
-        end_world_position: tuple[int, int],
-    ) -> list[tuple[int, int]]:
-        return _line_world_cells_raw(start_world_position, end_world_position)
+    _line_world_cells_raw = staticmethod(_line_world_cells_raw)
 
     _capsule_world_cells = _capsule_world_cells
 
     _capsule_world_cells_raw = _capsule_world_cells_raw
 
-    @staticmethod
-    def _buffer_cell_bounds(cells: list[tuple[int, int]]) -> tuple[int, int, int, int] | None:
-        return _buffer_cell_bounds(cells)
+    _buffer_cell_bounds = staticmethod(_buffer_cell_bounds)
 
     _apply_change_stability_drift = _apply_change_stability_drift
 
     _resolve_legal_world_position = _resolve_legal_world_position
 
-    @staticmethod
-    def _intent_resolution_status(*, drifted: bool, fallback_applied: bool) -> str:
-        return _intent_resolution_status(drifted=drifted, fallback_applied=fallback_applied)
+    _intent_resolution_status = staticmethod(_intent_resolution_status)
 
-    @staticmethod
-    def _combine_resolution_notes(*notes: str | None) -> str | None:
-        return _combine_resolution_notes(*notes)
+    _combine_resolution_notes = staticmethod(_combine_resolution_notes)
 
     _resolve_targeted_commands = _resolve_targeted_commands
 
@@ -1984,9 +1857,7 @@ class WorldEngine:
 
     _resolve_target_query_distance_cells = _resolve_target_query_distance_cells
 
-    @staticmethod
-    def _distance_meters_to_cells(distance_meters: float) -> int:
-        return _distance_meters_to_cells(distance_meters)
+    _distance_meters_to_cells = staticmethod(_distance_meters_to_cells)
 
     _resolve_query_source_position = _resolve_query_source_position
 
@@ -2064,9 +1935,7 @@ class WorldEngine:
 
     _world_cell_is_empty = _world_cell_is_empty
 
-    @staticmethod
-    def _world_distance_sq(left: tuple[int, int], right: tuple[int, int]) -> float:
-        return _world_distance_sq(left, right)
+    _world_distance_sq = staticmethod(_world_distance_sq)
 
     _entity_placeholder_bbox = _entity_placeholder_bbox
 
