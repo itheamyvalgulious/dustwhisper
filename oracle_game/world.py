@@ -8,28 +8,15 @@ import time
 from typing import Any, Iterable, Sequence
 import numpy as np
 
-from oracle_game.active import ActiveRegionTracker
 from oracle_game.gpu import (
-    GPUBridge, GPUBufferReadbackSource, GPUCellCoreWindowReadbackSource,
+    GPUBufferReadbackSource, GPUCellCoreWindowReadbackSource,
     GPUGasWindowReadbackSource, GPUReadbackSegment, GPUSegmentedBufferReadbackSource,
     GPUSegmentedCellCoreWindowReadbackSource, GPUSegmentedTextureReadbackSource,
     GPUTextureReadbackSource
 )
 from oracle_game.readback_contract import READBACK_ALLOWED_CHANNELS
-from oracle_game.page_store import InMemoryPageStore, PageStore, StoredStripeKey
-from oracle_game.paging import RingPagingWindow
-from oracle_game.rules import RuleBook, build_default_payloads
-from oracle_game.sim.collapse import CollapseSolver
-from oracle_game.sim.gas import GasSolver
-from oracle_game.sim.heat import HeatSolver
-from oracle_game.sim.liquid import LiquidSolver
-from oracle_game.sim.motion import MotionSolver
-from oracle_game.sim.optics import OpticsSolver
-from oracle_game.sim.gpu_placeholders import GPUPlaceholderPipeline
-from oracle_game.sim.gpu_page_stripes import GPUPageStripePipeline
-from oracle_game.sim.gpu_world_commands import GPUWorldCommandPipeline
-from oracle_game.sim.reactions import ReactionSolver
-from oracle_game.sim.gpu_merge import GPUMergePipeline
+from oracle_game.page_store import PageStore, StoredStripeKey
+from oracle_game.rules import build_default_payloads
 from oracle_game.types import (
     CarrierIntent, CarrierIntent, ChangeIntent, DebugView, EntityCellFeedback,
     EntityFeedback, EntityObservationSpec, EntityPlaceholder, EntityStatePatch, EntityState,
@@ -42,9 +29,9 @@ from oracle_game.types import (
 
 from oracle_game.world_constants import (
     BASE_MATERIAL_RUNTIME_ALIASES, ENTITY_STATE_PATCH_METADATA_FIELDS,
-    GPU_REALTIME_BUDGET_CELL_THRESHOLD, TARGET_QUERY_DISTANCE_HINT_CELLS,
-    UNSET_CONTROLLER_STATE
+    TARGET_QUERY_DISTANCE_HINT_CELLS, UNSET_CONTROLLER_STATE
 )
+from oracle_game.world_engine_init import _init_world_engine
 from oracle_game.world_capabilities import serialize_engine_capabilities
 from oracle_game.world_payload_serializers import (
     _infer_readback_payload_coord_space, _serialize_cpu_visible_entity_placeholders,
@@ -301,183 +288,17 @@ class WorldEngine:
         page_store: PageStore | None = None,
         simulation_backend: str = "gpu",
     ) -> None:
-        simulation_backend = str(simulation_backend).lower()
-        if simulation_backend not in {"gpu", "cpu"}:
-            raise ValueError("simulation_backend must be one of: gpu, cpu")
-        self.simulation_backend = simulation_backend
-        self._world_simulation_frame_active = False
-        self.width = width
-        self.height = height
-        self.gas_cell_size = gas_cell_size
-        self.gas_width = max(1, (width + gas_cell_size - 1) // gas_cell_size)
-        self.gas_height = max(1, (height + gas_cell_size - 1) // gas_cell_size)
-        self.paging = RingPagingWindow(width, height, active_width or width // 2, active_height or height // 2)
-        self.active = ActiveRegionTracker(width, height)
-        self.rulebook = RuleBook()
-        self.bridge = (
-            GPUBridge(create_standalone=False)
-            if simulation_backend == "cpu" and gpu_context is None
-            else GPUBridge(ctx=gpu_context)
+        _init_world_engine(
+            self,
+            width=width,
+            height=height,
+            active_width=active_width,
+            active_height=active_height,
+            gas_cell_size=gas_cell_size,
+            gpu_context=gpu_context,
+            page_store=page_store,
+            simulation_backend=simulation_backend,
         )
-        if simulation_backend == "gpu" and not self._gpu_context_available():
-            raise RuntimeError("GPU world simulation requires a ModernGL 4.3+ context; CPU fallback is disabled")
-        self.page_store = InMemoryPageStore() if page_store is None else page_store
-        self.frame_id = 0
-        self.state_lock = threading.RLock()
-        self.command_queue: deque[WorldCommand] = deque()
-        self.pending_frame_inputs: deque[WorldFrameInput] = deque()
-        self.completed_frame_outputs: deque[WorldFrameOutput] = deque()
-        self.canceled_frame_submission_ids: set[int] = set()
-        self.next_frame_submission_id = 1
-        self.next_readback_request_id = 1
-        self.pending_readbacks: list[ReadbackRequest] = []
-        self.inflight_readbacks: list[ReadbackRequest] = []
-        self.completed_readbacks: deque[ReadbackResult] = deque()
-        self.canceled_readback_request_ids: set[int] = set()
-        self.last_entity_observation_consume_snapshot: dict[str, Any] = {
-            "frame_id": 0,
-            "consumed": 0,
-            "consumed_readbacks": [],
-            "observations": {},
-            "entity_feedback": {},
-        }
-        self.controller_state_snapshot: Any = None
-        self.bootstrap_log: list[str] = []
-        self.bridge_frame_commands: list[WorldCommand] = []
-        self.bridge_frame_readback_requests: list[ReadbackRequest] = []
-        self.bridge_frame_placeholders: list[EntityPlaceholder] = []
-        self.bridge_frame_placeholder_dirty_rects: list[tuple[int, int, int, int]] = []
-        self._pending_placeholder_dirty_rects: list[tuple[int, int, int, int]] = []
-        self.bridge_frame_paging_updates: list[PageStripeUpdate] = []
-        self.bridge_frame_page_stripes: list[tuple[PageStripeUpdate, dict[str, Any]]] = []
-        self._bridge_inputs_prepared = False
-        self._gpu_cpu_dirty_resources: set[str] = set()
-        self._resolver_blocked_cells: set[tuple[int, int]] | None = None
-        self._resolver_released_cells: set[tuple[int, int]] | None = None
-        self.force_sources: list[ForceSource] = []
-        self.persistent_emitters: list[dict[str, object]] = []
-        self.emitters: list[dict[str, object]] = []
-        self._formal_gpu_frame_has_light_dose: bool | None = None
-        self._gpu_optics_outputs_clear = False
-        self.gpu_realtime_budget_enabled = True
-        self.gpu_realtime_budget_cell_threshold = GPU_REALTIME_BUDGET_CELL_THRESHOLD
-        self.profile_passes_enabled = False
-        self.profile_passes_sync = False
-        self.last_pass_profile: dict[str, Any] = {"passes": [], "summary": {}, "skipped_stages": []}
-        self.last_skipped_gpu_stages: list[str] = []
-        self.formal_collapse_interval_frames = 4
-        self.collapse_dirty_regions: list[tuple[int, int, int, int]] = []
-        self.collapse_deferred_regions: list[tuple[int, int, int, int]] = []
-        self._gpu_collapse_structure_dirty_tiles_pending = False
-        self._gpu_collapse_structure_dirty_tiles_deferred = False
-        self.islands: dict[int, object] = {}
-        self.entity_states: dict[int, EntityState] = {}
-        self.entity_placeholders: dict[int, set[tuple[int, int]]] = {}
-        self.next_island_id = 1
-
-        self.material_id = np.zeros((height, width), dtype=np.int32)
-        self.phase = np.zeros((height, width), dtype=np.uint8)
-        self.cell_flags = np.zeros((height, width), dtype=np.uint8)
-        self.velocity = np.zeros((height, width, 2), dtype=np.float32)
-        self.cell_temperature = np.full((height, width), 20.0, dtype=np.float32)
-        self.timer_pack = np.zeros((height, width, 4), dtype=np.uint8)
-        self.integrity = np.zeros((height, width), dtype=np.float32)
-        self.island_id = np.zeros((height, width), dtype=np.int32)
-        self.entity_id = np.zeros((height, width), dtype=np.int32)
-        self.placeholder_displaced_material = np.zeros((height, width), dtype=np.int32)
-        self.collapse_delay_pending = np.zeros((height, width), dtype=np.bool_)
-
-        self.flow_velocity = np.zeros((self.gas_height, self.gas_width, 2), dtype=np.float32)
-        self.ambient_temperature = np.full((self.gas_height, self.gas_width), 20.0, dtype=np.float32)
-        self.pressure_ping = np.zeros((self.gas_height, self.gas_width), dtype=np.float32)
-        self.gas_concentration = np.zeros((1, self.gas_height, self.gas_width), dtype=np.float32)
-        self.visible_illumination = np.zeros((height, width, 3), dtype=np.float32)
-        self.cell_optical_dose = np.zeros((1, height, width), dtype=np.float32)
-        self.gas_optical_dose = np.zeros((1, self.gas_height, self.gas_width), dtype=np.float32)
-        self.default_debug_view = DebugView.MATERIAL
-
-        self.material_density = np.zeros(1, dtype=np.float32)
-        self.material_base_color = np.zeros((1, 3), dtype=np.float32)
-        self.material_gravity = np.zeros(1, dtype=np.float32)
-        self.material_wind = np.zeros(1, dtype=np.float32)
-        self.material_drag = np.zeros(1, dtype=np.float32)
-        self.material_friction = np.zeros(1, dtype=np.float32)
-        self.material_elasticity = np.zeros(1, dtype=np.float32)
-        self.material_max_dda_step = np.zeros(1, dtype=np.int32)
-        self.material_default_phase = np.zeros(1, dtype=np.uint8)
-        self.material_base_integrity = np.zeros(1, dtype=np.float32)
-        self.material_spawn_temperature = np.full(1, np.nan, dtype=np.float32)
-        self.material_reaction_slots = np.full((1, 8), -1, dtype=np.int32)
-        self.material_material_tag_mask = np.zeros(1, dtype=np.uint32)
-        self.material_gas_tag_mask = np.zeros(1, dtype=np.uint32)
-        self.material_light_tag_mask = np.zeros(1, dtype=np.uint32)
-        self.material_powder_solver_kind = np.zeros(1, dtype=np.uint8)
-        self.material_liquid_solver_kind = np.zeros(1, dtype=np.uint8)
-        self.material_falling_island_break_kind = np.zeros(1, dtype=np.uint8)
-        self.material_heat_capacity = np.zeros(1, dtype=np.float32)
-        self.material_conductivity = np.zeros(1, dtype=np.float32)
-        self.material_ambient_exchange = np.zeros(1, dtype=np.float32)
-        self.material_is_structural = np.zeros(1, dtype=np.bool_)
-        self.material_is_support_anchor = np.zeros(1, dtype=np.bool_)
-        self.material_is_plant = np.zeros(1, dtype=np.bool_)
-        self.material_is_placeholder = np.zeros(1, dtype=np.bool_)
-        self.material_collapse_behavior = np.zeros(1, dtype=np.uint8)
-        self.material_collapse_generation_id = np.zeros(1, dtype=np.int32)
-        self.material_powder_generation_id = np.zeros(1, dtype=np.int32)
-        self.material_name_by_id: list[str] = [""]
-        self.tag_bits_by_name: dict[str, int] = {}
-        self.random_convert_material_ids: list[int] = []
-        self.placeholder_material_id = 0
-
-        self.gas_material_reaction_tag_mask = np.zeros(1, dtype=np.uint32)
-        self.gas_light_reaction_tag_mask = np.zeros(1, dtype=np.uint32)
-        self.gas_density_factor = np.zeros(1, dtype=np.float32)
-        self.gas_condense_material_id = np.zeros(1, dtype=np.int32)
-        self.gas_name_by_id: list[str] = []
-        self.air_gas_species_id = -1
-
-        self.light_default_range = np.zeros(1, dtype=np.int32)
-        self.light_dose_channel = np.zeros(1, dtype=np.int32)
-        self.light_color = np.zeros((1, 3), dtype=np.float32)
-        self.light_name_by_id: list[str] = [""]
-        self._stable_shadow_payloads: dict[str, Any] = {}
-
-        self.gas_solver = GasSolver()
-        self.heat_solver = HeatSolver()
-        self.collapse_solver = CollapseSolver()
-        self.motion_solver = MotionSolver()
-        self.liquid_solver = LiquidSolver()
-        self.optics_solver = OpticsSolver()
-        self.reaction_solver = ReactionSolver()
-        self.merge_pipeline = GPUMergePipeline()
-        self.placeholder_pipeline = GPUPlaceholderPipeline()
-        self.page_stripe_pipeline = GPUPageStripePipeline()
-        self.grid_command_pipeline = GPUWorldCommandPipeline()
-
-        self.bootstrap_defaults()
-        self.reset_world()
-        self.bridge.sync_world(self)
-        if self.simulation_backend == "gpu":
-            self.bridge.mark_gpu_authoritative(
-                "cell_core",
-                "material",
-                "island_id",
-                "entity_id",
-                "placeholder_displaced_material",
-                "collapse_delay_pending",
-                "gas_concentration",
-                "ambient_temperature",
-                "flow_velocity",
-                "pressure_ping",
-                "visible_illumination",
-                "cell_optical_dose",
-                "gas_optical_dose",
-                "active_meta",
-                "active_tile_ttl",
-                "active_chunk_mask",
-            )
-            self._gpu_cpu_dirty_resources.clear()
-        self._closed = False
 
     use_cpu_oracle_backend = use_cpu_oracle_backend
 
