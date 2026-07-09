@@ -26,10 +26,9 @@ from oracle_game.gpu import (
 from oracle_game.readback_contract import READBACK_ALLOWED_CHANNELS
 from oracle_game.page_store import InMemoryPageStore, PageStore, StoredStripeKey
 from oracle_game.paging import RingPagingWindow
-from oracle_game.rules import RuleBook, build_default_optics_entries, build_default_payloads
+from oracle_game.rules import RuleBook, build_default_payloads
 from oracle_game.sim.collapse import CollapseSolver
 from oracle_game.sim.gas import GasSolver
-from oracle_game.sim.gpu_collapse_dirty import clear_collapse_structure_dirty_tile_mask
 from oracle_game.sim.heat import HeatSolver
 from oracle_game.sim.liquid import LiquidSolver
 from oracle_game.sim.motion import MotionSolver
@@ -63,7 +62,6 @@ from oracle_game.types import (
     PairReactionRule,
     Phase,
     ReactionAction,
-    ReactionType,
     ReadbackRequest,
     ReadbackResult,
     ResolvedCarrierIntent,
@@ -290,6 +288,24 @@ from oracle_game.world_frame_io import (
     _prepare_bridge_frame_inputs,
     _needs_pre_simulation_bridge_sync,
     _clear_bridge_frame_inputs,
+)
+from oracle_game.world_table_api import (
+    delete_reaction_action,
+    delete_reaction_rule,
+    patch_gas,
+    patch_light,
+    patch_material,
+    patch_material_optics,
+    patch_reaction_action,
+    patch_reaction_rule,
+    replace_reaction_table,
+    reset_world,
+    update_gas_species_table,
+    update_light_type_table,
+    update_material_optics_table,
+    update_material_table,
+    update_reaction_table,
+    _reset_world_state,
 )
 from oracle_game.world_paging import (
     _apply_page_stripe,
@@ -1093,110 +1109,16 @@ class WorldEngine:
         return max(max_light_id, max_dose_channel) + 1
 
     def update_material_table(self, materials: list[MaterialDef | dict[str, Any]], *, immediate: bool = True) -> None:
-        materials = [self._coerce_material_def(material) for material in materials]
-        if not immediate:
-            self.queue_command("update_material_table", materials=[asdict(material) for material in materials])
-            return
-        merged_payload = self._merged_material_table_payload(materials)
-        self._validate_material_table_payload(merged_payload)
-        self.rulebook.materials_by_name.clear()
-        self.rulebook.materials_by_id.clear()
-        self.rulebook.update_materials(self._coerce_material_def(item) for item in merged_payload)
-        self.rulebook.optics.clear()
-        self.rulebook.update_optics(
-            build_default_optics_entries(
-                self.rulebook.materials_by_id.values(),
-                self.rulebook.lights_by_id.values(),
-                existing=self._material_optics_snapshot_map(),
-            )
-        )
-        self.tag_bits_by_name = deepcopy(self.rulebook.tag_bits)
-        self._rebuild_material_property_arrays()
-        optics_payload = self._material_optics_table_snapshot_payload()
-        self._set_stable_shadow_payload("materials", merged_payload)
-        self._set_stable_shadow_payload("optics", optics_payload)
-        self.bridge.upload_table("materials", merged_payload)
-        self.bridge.upload_table("optics", optics_payload)
-        self.bridge.sync_rule_tables(self)
-        self.bootstrap_log.append("update_material_table")
-        self.bridge.ensure_world_resources(self)
+        update_material_table(self, materials, immediate=immediate)
 
     def update_gas_species_table(self, gases: list[GasSpeciesDef | dict[str, Any]], *, immediate: bool = True) -> None:
-        gases = [self._coerce_gas_species_def(gas) for gas in gases]
-        if not immediate:
-            self.queue_command("update_gas_species_table", gases=[asdict(gas) for gas in gases])
-            return
-        merged_payload = self._merged_gas_species_table_payload(gases)
-        self._validate_gas_species_payload(merged_payload)
-        self.rulebook.gases_by_name.clear()
-        self.rulebook.gases_by_id.clear()
-        self.rulebook.update_gases(self._coerce_gas_species_def(item) for item in merged_payload)
-        self._rebuild_gas_property_arrays()
-        previous = self.gas_concentration
-        gas_count = self._gas_field_count()
-        self.gas_concentration = np.zeros((gas_count, self.gas_height, self.gas_width), dtype=np.float32)
-        count = min(previous.shape[0], self.gas_concentration.shape[0])
-        self.gas_concentration[:count] = previous[:count]
-        if 0 <= self.air_gas_species_id < self.gas_concentration.shape[0]:
-            self.gas_concentration[self.air_gas_species_id] = np.maximum(
-                self.gas_concentration[self.air_gas_species_id], 1.0
-            )
-        self._set_stable_shadow_payload("gases", merged_payload)
-        self.bridge.upload_table("gases", merged_payload)
-        self.bridge.sync_rule_tables(self)
-        self.bootstrap_log.append("update_gas_species_table")
-        self.bridge.ensure_world_resources(self)
+        update_gas_species_table(self, gases, immediate=immediate)
 
     def update_light_type_table(self, lights: list[LightTypeDef | dict[str, Any]], *, immediate: bool = True) -> None:
-        lights = [self._coerce_light_type_def(light) for light in lights]
-        if not immediate:
-            self.queue_command("update_light_type_table", lights=[asdict(light) for light in lights])
-            return
-        merged_payload = self._merged_light_type_table_payload(lights)
-        self._validate_light_type_payload(merged_payload)
-        self.rulebook.lights_by_name.clear()
-        self.rulebook.lights_by_id.clear()
-        self.rulebook.update_lights(self._coerce_light_type_def(item) for item in merged_payload)
-        self.rulebook.optics.clear()
-        self.rulebook.update_optics(
-            build_default_optics_entries(
-                self.rulebook.materials_by_id.values(),
-                self.rulebook.lights_by_id.values(),
-                existing=self._material_optics_snapshot_map(),
-            )
-        )
-        self._rebuild_light_property_arrays()
-        previous_cell_dose = self.cell_optical_dose
-        previous_gas_dose = self.gas_optical_dose
-        light_count = self._light_field_count()
-        self.cell_optical_dose = np.zeros((light_count, self.height, self.width), dtype=np.float32)
-        self.gas_optical_dose = np.zeros((light_count, self.gas_height, self.gas_width), dtype=np.float32)
-        cell_count = min(previous_cell_dose.shape[0], self.cell_optical_dose.shape[0])
-        gas_count = min(previous_gas_dose.shape[0], self.gas_optical_dose.shape[0])
-        self.cell_optical_dose[:cell_count] = previous_cell_dose[:cell_count]
-        self.gas_optical_dose[:gas_count] = previous_gas_dose[:gas_count]
-        optics_payload = self._material_optics_table_snapshot_payload()
-        self._set_stable_shadow_payload("lights", merged_payload)
-        self._set_stable_shadow_payload("optics", optics_payload)
-        self.bridge.upload_table("lights", merged_payload)
-        self.bridge.upload_table("optics", optics_payload)
-        self.bridge.sync_rule_tables(self)
-        self.bootstrap_log.append("update_light_type_table")
-        self.bridge.ensure_world_resources(self)
+        update_light_type_table(self, lights, immediate=immediate)
 
     def update_material_optics_table(self, optics: list[MaterialOpticsDef | dict[str, Any]], *, immediate: bool = True) -> None:
-        optics = [self._coerce_material_optics_def(entry) for entry in optics]
-        if not immediate:
-            self.queue_command("update_material_optics_table", optics=[asdict(entry) for entry in optics])
-            return
-        merged_payload = self._merged_material_optics_table_payload(optics)
-        self._validate_material_optics_payload(merged_payload)
-        self.rulebook.optics.clear()
-        self.rulebook.update_optics(self._coerce_material_optics_def(item) for item in merged_payload)
-        self._set_stable_shadow_payload("optics", merged_payload)
-        self.bridge.upload_table("optics", merged_payload)
-        self.bridge.sync_rule_tables(self)
-        self.bootstrap_log.append("update_material_optics_table")
+        update_material_optics_table(self, optics, immediate=immediate)
 
     def update_reaction_table(
         self,
@@ -1205,43 +1127,7 @@ class WorldEngine:
         *,
         immediate: bool = True,
     ) -> None:
-        actions = [self._coerce_reaction_action(action) for action in actions]
-        rules = self._coerce_reaction_rules(rules)
-        if not immediate:
-            self.queue_command(
-                "update_reaction_table",
-                actions=[asdict(action) for action in actions],
-                rules={name: [asdict(rule) for rule in entries] for name, entries in rules.items()},
-            )
-            return
-        merged_payload = self._merged_reaction_table_payload(actions, rules)
-        self._validate_reaction_payload(merged_payload)
-        self.rulebook.reaction_actions = [ReactionAction(ReactionType.NONE)] + [
-            self._coerce_reaction_action(action) for action in merged_payload["actions"]
-        ]
-        merged_rules = merged_payload["rules"]
-        self.rulebook.material_material_rules = [
-            self._coerce_pair_reaction_rule(rule) for rule in merged_rules["material_material"]
-        ]
-        self.rulebook.material_gas_rules = [
-            self._coerce_pair_reaction_rule(rule) for rule in merged_rules["material_gas"]
-        ]
-        self.rulebook.material_light_rules = [
-            self._coerce_pair_reaction_rule(rule) for rule in merged_rules["material_light"]
-        ]
-        self.rulebook.gas_gas_rules = [
-            self._coerce_pair_reaction_rule(rule) for rule in merged_rules["gas_gas"]
-        ]
-        self.rulebook.gas_light_rules = [
-            self._coerce_pair_reaction_rule(rule) for rule in merged_rules["gas_light"]
-        ]
-        self.rulebook.self_rules = [
-            self._coerce_self_reaction_rule(rule) for rule in merged_rules["self_rules"]
-        ]
-        self._set_stable_shadow_payload("reactions", merged_payload)
-        self.bridge.upload_table("reactions", merged_payload)
-        self.bridge.sync_rule_tables(self)
-        self.bootstrap_log.append("update_reaction_table")
+        update_reaction_table(self, actions, rules, immediate=immediate)
 
     def replace_reaction_table(
         self,
@@ -1250,50 +1136,10 @@ class WorldEngine:
         *,
         immediate: bool = True,
     ) -> None:
-        actions = [self._coerce_reaction_action(action) for action in actions]
-        rules = self._coerce_reaction_rules(rules)
-        if not immediate:
-            self.queue_command(
-                "replace_reaction_table",
-                actions=[asdict(action) for action in actions],
-                rules={name: [asdict(rule) for rule in entries] for name, entries in rules.items()},
-            )
-            return
-        replacement_payload = {
-            "actions": [asdict(action) for action in actions],
-            "rules": {name: [asdict(rule) for rule in entries] for name, entries in rules.items()},
-        }
-        self._validate_reaction_payload(replacement_payload)
-        materials_payload = self._shadow_material_payload()
-        self._clamp_material_payload_reaction_slots(
-            materials_payload,
-            action_count=len(replacement_payload["actions"]) + 1,
-        )
-        self.rulebook.reaction_actions = [ReactionAction(ReactionType.NONE)] + list(actions)
-        self.rulebook.material_material_rules = list(rules["material_material"])
-        self.rulebook.material_gas_rules = list(rules["material_gas"])
-        self.rulebook.material_light_rules = list(rules["material_light"])
-        self.rulebook.gas_gas_rules = list(rules["gas_gas"])
-        self.rulebook.gas_light_rules = list(rules["gas_light"])
-        self.rulebook.self_rules = list(rules["self_rules"])
-        self.rulebook.materials_by_name.clear()
-        self.rulebook.materials_by_id.clear()
-        self.rulebook.update_materials(self._coerce_material_def(item) for item in materials_payload)
-        self.tag_bits_by_name = deepcopy(self.rulebook.tag_bits)
-        self._rebuild_material_property_arrays()
-        reaction_payload = self._reaction_table_snapshot_payload()
-        self._set_stable_shadow_payload("materials", materials_payload)
-        self._set_stable_shadow_payload("reactions", reaction_payload)
-        self.bridge.upload_table("materials", materials_payload)
-        self.bridge.upload_table("reactions", reaction_payload)
-        self.bridge.sync_rule_tables(self)
-        self.bootstrap_log.append("replace_reaction_table")
+        replace_reaction_table(self, actions, rules, immediate=immediate)
 
     def reset_world(self, *, immediate: bool = True) -> None:
-        if not immediate:
-            self.queue_command("reset_world")
-            return
-        self._reset_world_state(reset_bridge_frame_inputs=True, keep_command_log=False)
+        reset_world(self, immediate=immediate)
 
     def _reset_world_state(
         self,
@@ -1301,64 +1147,7 @@ class WorldEngine:
         reset_bridge_frame_inputs: bool,
         keep_command_log: bool,
     ) -> None:
-        self.material_id.fill(0)
-        self.phase.fill(0)
-        self.cell_flags.fill(0)
-        self.velocity.fill(0.0)
-        self.cell_temperature.fill(20.0)
-        self.timer_pack.fill(0)
-        self.integrity.fill(0.0)
-        self.island_id.fill(0)
-        self.entity_id.fill(0)
-        self.placeholder_displaced_material.fill(0)
-        self.collapse_delay_pending.fill(False)
-        self.flow_velocity.fill(0.0)
-        self.ambient_temperature.fill(20.0)
-        self.pressure_ping.fill(0.0)
-        self.gas_concentration.fill(0.0)
-        if 0 <= self.air_gas_species_id < self.gas_concentration.shape[0]:
-            self.gas_concentration[self.air_gas_species_id] = 1.0
-        self.visible_illumination.fill(0.0)
-        self.cell_optical_dose.fill(0.0)
-        self.gas_optical_dose.fill(0.0)
-        self.force_sources.clear()
-        self.persistent_emitters.clear()
-        self.emitters.clear()
-        self.collapse_dirty_regions.clear()
-        self.collapse_deferred_regions.clear()
-        clear_collapse_structure_dirty_tile_mask(self)
-        self.islands.clear()
-        self.entity_states.clear()
-        self.entity_placeholders.clear()
-        self.pending_frame_inputs.clear()
-        self.completed_frame_outputs.clear()
-        self.canceled_frame_submission_ids.clear()
-        self.next_frame_submission_id = 1
-        self.next_readback_request_id = 1
-        self.pending_readbacks.clear()
-        self.inflight_readbacks.clear()
-        self.completed_readbacks.clear()
-        self.canceled_readback_request_ids.clear()
-        self.last_entity_observation_consume_snapshot = {
-            "frame_id": int(self.frame_id),
-            "consumed": 0,
-            "consumed_readbacks": [],
-            "observations": {},
-            "entity_feedback": {},
-        }
-        self.controller_state_snapshot = None
-        self.gas_solver.reset_runtime_state(self)
-        self.heat_solver.reset_runtime_state(self)
-        self.liquid_solver.reset_runtime_state(self)
-        self.reaction_solver.reset_runtime_state(self)
-        self.collapse_solver.reset_runtime_state(self)
-        self.optics_solver.reset_runtime_state(self)
-        self.motion_solver.reset_runtime_state()
-        if reset_bridge_frame_inputs:
-            self._clear_bridge_frame_inputs(keep_commands=keep_command_log, prepared=False)
-        self.page_store.clear()
-        self.next_island_id = 1
-        self._build_demo_scene()
+        _reset_world_state(self, reset_bridge_frame_inputs=reset_bridge_frame_inputs, keep_command_log=keep_command_log)
 
     def queue_command(self, kind: str, **payload: Any) -> None:
         queue_command(self, kind, **payload)
@@ -2010,60 +1799,13 @@ class WorldEngine:
         set_emitters(self, emitters, immediate=immediate)
 
     def patch_material(self, name: str, *, immediate: bool = True, **fields: Any) -> None:
-        if not immediate:
-            self.queue_command(
-                "patch_material",
-                name=str(self._canonical_material_input_name(name)),
-                fields=self._normalize_material_patch_fields(fields),
-            )
-            return
-        material_id = self._resolve_sanctioned_material_id(name)
-        if material_id <= 0:
-            raise KeyError(name)
-        material = self._shadow_material_def(material_id)
-        if material is None:
-            raise KeyError(name)
-        patch_fields = dict(fields)
-        patch_fields.setdefault("name", self._shadow_material_name(material_id))
-        patch_fields.setdefault("material_id", int(material_id))
-        updated = self._coerce_material_def(asdict(replace(material, **patch_fields)))
-        self.update_material_table([updated])
+        patch_material(self, name, immediate=immediate, **fields)
 
     def patch_light(self, name: str, *, immediate: bool = True, **fields: Any) -> None:
-        if not immediate:
-            self.queue_command("patch_light", name=name, fields=fields)
-            return
-        light_id = self._resolve_sanctioned_light_id(name)
-        if light_id < 0:
-            raise KeyError(name)
-        light = self._shadow_light_type_def(light_id)
-        if light is None:
-            raise KeyError(name)
-        patch_fields = dict(fields)
-        patch_fields.setdefault("name", self._shadow_light_name(light_id))
-        patch_fields.setdefault("light_type_id", int(light_id))
-        updated = self._coerce_light_type_def(asdict(replace(light, **patch_fields)))
-        self.update_light_type_table([updated])
+        patch_light(self, name, immediate=immediate, **fields)
 
     def patch_gas(self, name: str, *, immediate: bool = True, **fields: Any) -> None:
-        if not immediate:
-            self.queue_command(
-                "patch_gas",
-                name=name,
-                fields=self._normalize_gas_patch_fields(fields),
-            )
-            return
-        species_id = self._resolve_sanctioned_gas_id(name)
-        if species_id < 0:
-            raise KeyError(name)
-        gas = self._shadow_gas_species_def(species_id)
-        if gas is None:
-            raise KeyError(name)
-        patch_fields = dict(fields)
-        patch_fields.setdefault("name", self._shadow_gas_name(species_id))
-        patch_fields.setdefault("species_id", int(species_id))
-        updated = self._coerce_gas_species_def(asdict(replace(gas, **patch_fields)))
-        self.update_gas_species_table([updated])
+        patch_gas(self, name, immediate=immediate, **fields)
 
     def patch_material_optics(
         self,
@@ -2073,67 +1815,10 @@ class WorldEngine:
         immediate: bool = True,
         **fields: Any,
     ) -> None:
-        if not immediate:
-            self.queue_command(
-                "patch_material_optics",
-                material_name=str(self._canonical_material_input_name(material_name)),
-                light_type=light_type,
-                fields=self._normalize_material_optics_patch_fields(fields),
-            )
-            return
-        material_id = self._resolve_sanctioned_material_id(material_name)
-        if material_id <= 0:
-            raise KeyError(material_name)
-        light_id = self._resolve_sanctioned_light_id(light_type)
-        if light_id < 0:
-            raise KeyError(light_type)
-        canonical_material_name = self._shadow_material_name(material_id)
-        canonical_light_type = self._shadow_light_name(light_id)
-        if canonical_material_name is None or canonical_light_type is None:
-            raise KeyError((material_name, light_type))
-        optics = self._shadow_material_optics_def(canonical_material_name, canonical_light_type)
-        if optics is None:
-            raise KeyError((material_name, light_type))
-        patch_fields = dict(fields)
-        patch_fields.setdefault("material_name", canonical_material_name)
-        patch_fields.setdefault("light_type", canonical_light_type)
-        updated = self._coerce_material_optics_def(asdict(replace(optics, **patch_fields)))
-        self.update_material_optics_table([updated])
+        patch_material_optics(self, material_name, light_type, immediate=immediate, **fields)
 
     def patch_reaction_action(self, index: int, *, immediate: bool = True, **fields: Any) -> None:
-        if not immediate:
-            self.queue_command(
-                "patch_reaction_action",
-                index=index,
-                fields=self._normalize_reaction_action_patch_fields(fields),
-            )
-            return
-        if index <= 0:
-            raise ValueError("reaction action 0 is reserved")
-        if index >= len(self.rulebook.reaction_actions):
-            raise IndexError(index)
-        action = self._shadow_reaction_action(index)
-        if action is None:
-            raise IndexError(index)
-        updated = self._coerce_reaction_action(asdict(replace(action, **fields)))
-        reactions_payload = self._shadow_reaction_payload()
-        if index == 0:
-            self.rulebook.reaction_actions = [updated] + [
-                self._coerce_reaction_action(item) for item in reactions_payload["actions"]
-            ]
-            self._validate_reaction_payload(reactions_payload)
-            self._set_stable_shadow_payload("reactions", reactions_payload)
-            self.bridge.upload_table("reactions", reactions_payload)
-            self.bridge.sync_rule_tables(self)
-            return
-        reactions_payload["actions"][index - 1] = asdict(updated)
-        self._validate_reaction_payload(reactions_payload)
-        self.rulebook.reaction_actions = [self.rulebook.reaction_actions[0]] + [
-            self._coerce_reaction_action(item) for item in reactions_payload["actions"]
-        ]
-        self._set_stable_shadow_payload("reactions", reactions_payload)
-        self.bridge.upload_table("reactions", reactions_payload)
-        self.bridge.sync_rule_tables(self)
+        patch_reaction_action(self, index, immediate=immediate, **fields)
 
     def patch_reaction_rule(
         self,
@@ -2143,80 +1828,13 @@ class WorldEngine:
         immediate: bool = True,
         **fields: Any,
     ) -> None:
-        rule_set = str(rule_set)
-        if rule_set not in REACTION_RULE_SET_NAMES:
-            raise KeyError(rule_set)
-        if not immediate:
-            self.queue_command(
-                "patch_reaction_rule",
-                rule_set=rule_set,
-                index=index,
-                fields=self._normalize_reaction_rule_patch_fields(fields),
-            )
-            return
-        rule = self._shadow_reaction_rule(rule_set, index)
-        if rule is None:
-            raise IndexError(index)
-        if rule_set == "self_rules":
-            updated = self._coerce_self_reaction_rule(asdict(replace(rule, **fields)))
-        else:
-            updated = self._coerce_pair_reaction_rule(asdict(replace(rule, **fields)))
-        reactions_payload = self._shadow_reaction_payload()
-        reactions_payload["rules"][rule_set][index] = asdict(updated)
-        self._validate_reaction_payload(reactions_payload)
-        self._set_reaction_rule_list(rule_set, reactions_payload["rules"][rule_set])
-        self._set_stable_shadow_payload("reactions", reactions_payload)
-        self.bridge.upload_table("reactions", reactions_payload)
-        self.bridge.sync_rule_tables(self)
+        patch_reaction_rule(self, rule_set, index, immediate=immediate, **fields)
 
     def delete_reaction_action(self, index: int, *, immediate: bool = True) -> None:
-        if not immediate:
-            self.queue_command("delete_reaction_action", index=index)
-            return
-        if index <= 0:
-            raise ValueError("reaction action 0 is reserved")
-        if index >= len(self.rulebook.reaction_actions):
-            raise IndexError(index)
-        reactions_payload = self._shadow_reaction_payload()
-        actions_payload = reactions_payload["actions"]
-        if index > len(actions_payload):
-            raise IndexError(index)
-        materials_payload = self._shadow_material_payload()
-        del actions_payload[index - 1]
-        self._remap_reaction_payload_result_actions(reactions_payload["rules"], deleted_action_index=index)
-        self._remap_material_payload_reaction_slots(materials_payload, deleted_action_index=index)
-        self.rulebook.reaction_actions = [self.rulebook.reaction_actions[0]] + [
-            self._coerce_reaction_action(item) for item in actions_payload
-        ]
-        self._set_reaction_rules_payload(reactions_payload["rules"])
-        self.rulebook.materials_by_name.clear()
-        self.rulebook.materials_by_id.clear()
-        self.rulebook.update_materials(self._coerce_material_def(item) for item in materials_payload)
-        self.tag_bits_by_name = deepcopy(self.rulebook.tag_bits)
-        self._rebuild_material_property_arrays()
-        self._set_stable_shadow_payload("materials", materials_payload)
-        self._set_stable_shadow_payload("reactions", reactions_payload)
-        self.bridge.upload_table("materials", materials_payload)
-        self.bridge.upload_table("reactions", reactions_payload)
-        self.bridge.sync_rule_tables(self)
-        self.bridge.ensure_world_resources(self)
+        delete_reaction_action(self, index, immediate=immediate)
 
     def delete_reaction_rule(self, rule_set: str, index: int, *, immediate: bool = True) -> None:
-        rule_set = str(rule_set)
-        if rule_set not in REACTION_RULE_SET_NAMES:
-            raise KeyError(rule_set)
-        if not immediate:
-            self.queue_command("delete_reaction_rule", rule_set=rule_set, index=index)
-            return
-        rules_list = self._reaction_rule_list(rule_set)
-        if index < 0 or index >= len(rules_list):
-            raise IndexError(index)
-        reactions_payload = self._shadow_reaction_payload()
-        del reactions_payload["rules"][rule_set][index]
-        self._set_reaction_rule_list(rule_set, reactions_payload["rules"][rule_set])
-        self._set_stable_shadow_payload("reactions", reactions_payload)
-        self.bridge.upload_table("reactions", reactions_payload)
-        self.bridge.sync_rule_tables(self)
+        delete_reaction_rule(self, rule_set, index, immediate=immediate)
 
     def step(self, dt: float = 1.0 / 60.0, substeps: int = 1) -> None:
         for _ in range(max(1, substeps)):
