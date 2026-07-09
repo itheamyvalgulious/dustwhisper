@@ -1,0 +1,214 @@
+            uniform uint max_emitters;
+            uniform int dose_channel_count;
+            layout(std430, binding=1) readonly buffer EmitterBuffer {
+                vec4 emitters[];
+            };
+            layout(std430, binding=2) readonly buffer EmitterCounterBuffer {
+                uint emitter_counts[];
+            };
+            layout(std430, binding=4) readonly buffer LightBuffer {
+                vec4 light_params[{{LIGHT_PARAM_COUNT}}];
+            };
+            layout(std430, binding=0) buffer LightDoseGuard {
+                uint light_dose_guard[];
+            };
+            layout(std430, binding=5) buffer CellDoseAccum {
+                uint cell_dose_accum[];
+            };
+            layout(std430, binding=6) buffer GasDoseAccum {
+                uint gas_dose_accum[];
+            };
+            layout(std430, binding=7) buffer IllumAccum {
+                uint illum_accum[];
+            };
+            const float CELL_ACCUM_SCALE = {{CELL_ACCUM_SCALE}};
+            const float GAS_ACCUM_SCALE = {{GAS_ACCUM_SCALE}};
+            const float ILLUM_ACCUM_SCALE = {{ILLUM_ACCUM_SCALE}};
+            const float UINT_ACCUM_MAX = 4294967295.0;
+            uint quantize_accum(float value, float scale) {
+                return uint(clamp(value * scale + 0.5, 0.0, UINT_ACCUM_MAX));
+            }
+            bool deposit_light(ivec2 cell, int dose_channel, float energy, float absorbed) {
+                bool deposited_dose = false;
+                if (solve_cell_active(cell)) {
+                    int cell_index = (dose_channel * cell_grid_size.y + cell.y) * cell_grid_size.x + cell.x;
+                    atomicAdd(illum_accum[cell_index], quantize_accum(energy, ILLUM_ACCUM_SCALE));
+                    if (absorbed > 0.0) {
+                        atomicAdd(cell_dose_accum[cell_index], quantize_accum(absorbed, CELL_ACCUM_SCALE));
+                        deposited_dose = true;
+                    }
+                }
+                ivec2 gas_cell = {{GAS_CELL_COMPUTE}};
+                if (solve_gas_active(gas_cell)) {
+                    int gas_index = (dose_channel * gas_grid_size.y + gas_cell.y) * gas_grid_size.x + gas_cell.x;
+                    atomicAdd(gas_dose_accum[gas_index], quantize_accum(energy * 0.08, GAS_ACCUM_SCALE));
+                    deposited_dose = true;
+                }
+                return deposited_dose;
+            }
+            const float SCATTER_ROT_COS = 0.8253356149096783;
+            const float SCATTER_ROT_SIN = 0.5646424733950354;
+            const float REFRACT_ROT_COS = 0.9800665778412416;
+            const float REFRACT_ROT_SIN = -0.1986693307950612;
+            vec2 rotate_unit(vec2 unit_dir, float rot_cos, float rot_sin) {
+                return vec2(
+                    unit_dir.x * rot_cos - unit_dir.y * rot_sin,
+                    unit_dir.x * rot_sin + unit_dir.y * rot_cos
+                );
+            }
+            vec2 rotate_normalized(vec2 direction, float rot_cos, float rot_sin) {
+                return rotate_unit(normalize(direction), rot_cos, rot_sin);
+            }
+            vec2 ray_direction(vec2 direction, float spread, int ray_index, out int ray_count) {
+                if (abs(direction.x) < 1.0e-5 && abs(direction.y) < 1.0e-5) {
+                    ray_count = 8;
+                    if (ray_index == 0) {
+                        return vec2(1.0, 0.0);
+                    }
+                    if (ray_index == 1) {
+                        return vec2(-1.0, 0.0);
+                    }
+                    if (ray_index == 2) {
+                        return vec2(0.0, 1.0);
+                    }
+                    if (ray_index == 3) {
+                        return vec2(0.0, -1.0);
+                    }
+                    if (ray_index == 4) {
+                        return vec2(0.707, 0.707);
+                    }
+                    if (ray_index == 5) {
+                        return vec2(-0.707, 0.707);
+                    }
+                    if (ray_index == 6) {
+                        return vec2(0.707, -0.707);
+                    }
+                    return vec2(-0.707, -0.707);
+                }
+                ray_count = 3;
+                vec2 base_dir = normalize(direction);
+                if (ray_index == 1) {
+                    return base_dir;
+                }
+                float spread_cos = cos(spread);
+                float spread_sin = sin(spread);
+                if (ray_index == 0) {
+                    return rotate_unit(base_dir, spread_cos, -spread_sin);
+                }
+                return rotate_unit(base_dir, spread_cos, spread_sin);
+            }
+            bool trace_single_ray(
+                vec2 origin,
+                vec2 ray_dir,
+                float strength,
+                int range_cells,
+                int light_id,
+                int dose_channel,
+                int max_bounce
+            ) {
+                bool any_deposit = false;
+                vec4 stack_pos_dir[{{MAX_RAY_STACK}}];
+                vec2 stack_energy_bounce[{{MAX_RAY_STACK}}];
+                int stack_count = 1;
+                stack_pos_dir[0] = vec4(origin + vec2(0.5), ray_dir);
+                stack_energy_bounce[0] = vec2(strength, 0.0);
+                while (stack_count > 0) {
+                    stack_count -= 1;
+                    vec4 ray = stack_pos_dir[stack_count];
+                    vec2 pos = ray.xy;
+                    vec2 dir = ray.zw;
+                    float energy = stack_energy_bounce[stack_count].x;
+                    int bounce = int(stack_energy_bounce[stack_count].y + 0.5);
+                    if (energy <= 0.02 || bounce > max_bounce) {
+                        continue;
+                    }
+                    for (int step_index = 0; step_index < range_cells; ++step_index) {
+                        if (energy <= 0.02) {
+                            break;
+                        }
+                        pos += dir;
+                        ivec2 cell = ivec2(pos);
+                        if (cell.x < 0 || cell.y < 0 || cell.x >= cell_grid_size.x || cell.y >= cell_grid_size.y) {
+                            break;
+                        }
+                        int material_id = material_id_at(cell);
+                        vec4 opt = vec4(0.0);
+                        float absorbed = 0.0;
+                        if (material_id != 0) {
+                            opt = optics_at(material_id, light_id);
+                            absorbed = energy * opt.x;
+                        }
+                        if (deposit_light(cell, dose_channel, energy, absorbed)) {
+                            any_deposit = true;
+                        }
+                        if (material_id == 0) {
+                            energy *= 0.97;
+                        } else {
+                            float scattered = energy * opt.y;
+                            float refracted = energy * opt.z;
+                            float remaining = max(0.0, energy - absorbed - scattered * 0.5 - refracted * 0.25);
+                            if (bounce < max_bounce) {
+                                if (scattered >= 0.05 && stack_count < {{MAX_RAY_STACK}}) {
+                                    vec2 scatter_dir = rotate_normalized(dir, SCATTER_ROT_COS, SCATTER_ROT_SIN);
+                                    stack_pos_dir[stack_count] = vec4(pos, scatter_dir);
+                                    stack_energy_bounce[stack_count] = vec2(scattered * 0.75, float(bounce + 1));
+                                    stack_count += 1;
+                                }
+                                if (refracted >= 0.05 && stack_count < {{MAX_RAY_STACK}}) {
+                                    vec2 refract_dir = rotate_normalized(dir, REFRACT_ROT_COS, REFRACT_ROT_SIN);
+                                    stack_pos_dir[stack_count] = vec4(pos, refract_dir);
+                                    stack_energy_bounce[stack_count] = vec2(refracted * 0.8, float(bounce + 1));
+                                    stack_count += 1;
+                                }
+                            }
+                            energy = remaining;
+                        }
+                    }
+                }
+                return any_deposit;
+            }
+            void main() {
+                uint lane = gl_GlobalInvocationID.x;
+                uint emitter_index = lane / 8u;
+                int ray_index = int(lane - emitter_index * 8u);
+                uint emitter_count = min(emitter_counts[0], max_emitters);
+                if (emitter_index >= emitter_count) {
+                    return;
+                }
+                uint base_index = emitter_index * 2u;
+                vec4 origin_dir = emitters[base_index];
+                vec4 emitter_meta = emitters[base_index + 1u];
+                int light_id = int(emitter_meta.w + 0.5);
+                if (light_id < 0 || light_id >= {{MAX_LIGHTS}}) {
+                    return;
+                }
+                vec4 light_color = light_params[light_id];
+                vec4 light_meta = light_params[{{MAX_LIGHTS}} + light_id];
+                int dose_channel = int(light_color.w + 0.5);
+                int max_bounce = max(0, int(light_meta.z + 0.5));
+                int default_range = max(0, int(light_meta.w + 0.5));
+                int range_cells = int(emitter_meta.y + 0.5);
+                if (range_cells <= 0) {
+                    range_cells = default_range;
+                }
+                if (range_cells <= 0 || dose_channel < 0 || dose_channel >= dose_channel_count) {
+                    return;
+                }
+                int ray_count = 0;
+                vec2 ray_dir = ray_direction(origin_dir.zw, max(0.0, emitter_meta.z), ray_index, ray_count);
+                if (ray_index >= ray_count) {
+                    return;
+                }
+                if (trace_single_ray(
+                    origin_dir.xy,
+                    ray_dir,
+                    max(0.1, emitter_meta.x),
+                    range_cells,
+                    light_id,
+                    dose_channel,
+                    max_bounce
+                )) {
+                    atomicExchange(light_dose_guard[0], 1u);
+                }
+            }
+            

@@ -1,0 +1,28 @@
+            layout(r32f, binding=4) writeonly uniform image2D active_gas_img;
+            bool gas_cell_has_active_tile(ivec2 gas_cell) {
+                int x0 = gas_cell.x * gas_cell_size;
+                int y0 = gas_cell.y * gas_cell_size;
+                int x1 = min(cell_grid_size.x, x0 + gas_cell_size);
+                int y1 = min(cell_grid_size.y, y0 + gas_cell_size);
+                int tile_x0 = max(0, x0 / tile_size);
+                int tile_y0 = max(0, y0 / tile_size);
+                int tile_x1 = min(tile_grid_size.x, (x1 + tile_size - 1) / tile_size);
+                int tile_y1 = min(tile_grid_size.y, (y1 + tile_size - 1) / tile_size);
+                for (int tile_y = tile_y0 - expansion_radius; tile_y < tile_y1 + expansion_radius; ++tile_y) {
+                    for (int tile_x = tile_x0 - expansion_radius; tile_x < tile_x1 + expansion_radius; ++tile_x) {
+                        if (source_tile_active(ivec2(tile_x, tile_y))) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                if (gid.x >= gas_grid_size.x || gid.y >= gas_grid_size.y) {
+                    return;
+                }
+                bool is_active = force_all_active || gas_cell_has_active_tile(gid) || emitter_reaches_gas_cell(gid);
+                imageStore(active_gas_img, gid, vec4(is_active ? 1.0 : 0.0, 0.0, 0.0, 0.0));
+            }
+            

@@ -1,0 +1,63 @@
+
+            #version 430
+            layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+            uniform ivec2 cell_grid_size;
+            uniform ivec2 gas_grid_size;
+            uniform ivec2 tile_grid_size;
+            uniform int gas_cell_size;
+            uniform int tile_size;
+            uniform int expansion_radius;
+            uniform bool force_all_active;
+            layout(std430, binding=0) readonly buffer ActiveTileTTLBuffer {
+                int active_tile_ttl[];
+            };
+            layout(std430, binding=1) readonly buffer EmitterBuffer {
+                vec4 emitters[];
+            };
+            layout(std430, binding=2) readonly buffer EmitterCounterBuffer {
+                uint emitter_counts[];
+            };
+            layout(std430, binding=3) readonly buffer LightBuffer {
+                vec4 light_params[{{LIGHT_PARAM_COUNT}}];
+            };
+            bool source_tile_active(ivec2 tile) {
+                if (tile.x < 0 || tile.y < 0 || tile.x >= tile_grid_size.x || tile.y >= tile_grid_size.y) {
+                    return false;
+                }
+                int index = tile.y * tile_grid_size.x + tile.x;
+                return active_tile_ttl[index] > 0;
+            }
+            bool expanded_tile_active(ivec2 tile) {
+                for (int source_y = tile.y - expansion_radius; source_y <= tile.y + expansion_radius; ++source_y) {
+                    for (int source_x = tile.x - expansion_radius; source_x <= tile.x + expansion_radius; ++source_x) {
+                        if (source_tile_active(ivec2(source_x, source_y))) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }
+            bool emitter_reaches_cell(ivec2 cell) {
+                uint count = min(emitter_counts[0], uint({{MAX_EMITTERS}}));
+                for (uint emitter_index = 0u; emitter_index < count; ++emitter_index) {
+                    vec4 origin_direction = emitters[emitter_index * 2u];
+                    vec4 params = emitters[emitter_index * 2u + 1u];
+                    int light_id = int(params.w + 0.5);
+                    int max_bounce = 0;
+                    if (light_id >= 0 && light_id < {{MAX_LIGHTS}}) {
+                        max_bounce = max(0, int(light_params[{{MAX_LIGHTS}} + light_id].z + 0.5));
+                    }
+                    float reach = max(0.0, params.y) * float(max_bounce + 1) + float(tile_size * expansion_radius);
+                    vec2 delta = abs(vec2(cell) - origin_direction.xy);
+                    if (delta.x <= reach && delta.y <= reach) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            bool emitter_reaches_gas_cell(ivec2 gas_cell) {
+                ivec2 cell0 = gas_cell * gas_cell_size;
+                ivec2 cell1 = min(cell_grid_size - ivec2(1), cell0 + ivec2(max(gas_cell_size - 1, 0)));
+                return emitter_reaches_cell(cell0) || emitter_reaches_cell(cell1);
+            }
+        

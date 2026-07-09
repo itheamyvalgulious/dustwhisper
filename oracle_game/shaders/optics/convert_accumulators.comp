@@ -1,0 +1,50 @@
+
+            #version 430
+            layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+            uniform ivec2 cell_grid_size;
+            uniform ivec2 gas_grid_size;
+            uniform int dose_channel_count;
+            layout(std430, binding=0) readonly buffer CellDoseAccum {
+                uint cell_dose_accum[];
+            };
+            layout(std430, binding=1) readonly buffer GasDoseAccum {
+                uint gas_dose_accum[];
+            };
+            layout(std430, binding=2) readonly buffer IllumAccum {
+                uint illum_accum[];
+            };
+            layout(r32f, binding=3) writeonly uniform image2DArray cell_dose_img;
+            layout(r32f, binding=4) writeonly uniform image2DArray gas_dose_img;
+            layout(r32f, binding=5) writeonly uniform image2DArray illum_layer_img;
+            const float CELL_ACCUM_INV_SCALE = {{CELL_ACCUM_INV_SCALE}};
+            const float GAS_ACCUM_INV_SCALE = {{GAS_ACCUM_INV_SCALE}};
+            const float ILLUM_ACCUM_INV_SCALE = {{ILLUM_ACCUM_INV_SCALE}};
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                int channel = int(gl_GlobalInvocationID.z);
+                if (channel >= dose_channel_count) {
+                    return;
+                }
+                if (gid.x < cell_grid_size.x && gid.y < cell_grid_size.y) {
+                    int cell_index = (channel * cell_grid_size.y + gid.y) * cell_grid_size.x + gid.x;
+                    imageStore(
+                        cell_dose_img,
+                        ivec3(gid, channel),
+                        vec4(float(cell_dose_accum[cell_index]) * CELL_ACCUM_INV_SCALE, 0.0, 0.0, 0.0)
+                    );
+                    imageStore(
+                        illum_layer_img,
+                        ivec3(gid, channel),
+                        vec4(float(illum_accum[cell_index]) * ILLUM_ACCUM_INV_SCALE, 0.0, 0.0, 0.0)
+                    );
+                }
+                if (gid.x < gas_grid_size.x && gid.y < gas_grid_size.y) {
+                    int gas_index = (channel * gas_grid_size.y + gid.y) * gas_grid_size.x + gid.x;
+                    imageStore(
+                        gas_dose_img,
+                        ivec3(gid, channel),
+                        vec4(float(gas_dose_accum[gas_index]) * GAS_ACCUM_INV_SCALE, 0.0, 0.0, 0.0)
+                    );
+                }
+            }
+            

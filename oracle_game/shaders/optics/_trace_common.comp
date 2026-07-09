@@ -1,0 +1,25 @@
+
+            #version 430
+            layout(local_size_x={{RAY_LOCAL_SIZE}}, local_size_y=1, local_size_z=1) in;
+            uniform ivec2 cell_grid_size;
+            uniform ivec2 gas_grid_size;
+            uniform int gas_cell_size;
+            layout(binding=0) uniform sampler2D material_tex;
+            layout(binding={{ACTIVE_CELL_TEXTURE_UNIT}}) uniform sampler2D active_cell_tex;
+            layout(binding={{ACTIVE_GAS_TEXTURE_UNIT}}) uniform sampler2D active_gas_tex;
+            layout(std430, binding=3) readonly buffer OpticsBuffer {
+                vec4 optics_params[{{OPTICS_PARAMS_COUNT}}];
+            };
+            int material_id_at(ivec2 cell) {
+                return int(texelFetch(material_tex, cell, 0).x + 0.5);
+            }
+            vec4 optics_at(int material_id, int light_id) {
+                return optics_params[material_id * {{MAX_LIGHTS}} + light_id];
+            }
+            bool solve_cell_active(ivec2 cell) {
+                return texelFetch(active_cell_tex, cell, 0).x > 0.5;
+            }
+            bool solve_gas_active(ivec2 gas_cell) {
+                return texelFetch(active_gas_tex, gas_cell, 0).x > 0.5;
+            }
+        
