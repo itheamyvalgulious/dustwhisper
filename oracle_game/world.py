@@ -827,32 +827,23 @@ class WorldEngine:
             self._gpu_cpu_dirty_resources.clear()
         self._closed = False
 
-    def use_cpu_oracle_backend(self) -> None:
-        return use_cpu_oracle_backend(self)
+    use_cpu_oracle_backend = use_cpu_oracle_backend
 
-    def require_gpu_world_backend(self) -> None:
-        return require_gpu_world_backend(self)
+    require_gpu_world_backend = require_gpu_world_backend
 
-    def prewarm_formal_connected_collapse(self) -> bool:
-        return prewarm_formal_connected_collapse(self)
+    prewarm_formal_connected_collapse = prewarm_formal_connected_collapse
 
-    def _gpu_context_available(self) -> bool:
-        return _gpu_context_available(self)
+    _gpu_context_available = _gpu_context_available
 
-    def _gpu_world_simulation_required(self) -> bool:
-        return _gpu_world_simulation_required(self)
+    _gpu_world_simulation_required = _gpu_world_simulation_required
 
-    def _gpu_realtime_budget_active(self) -> bool:
-        return _gpu_realtime_budget_active(self)
+    _gpu_realtime_budget_active = _gpu_realtime_budget_active
 
-    def _gpu_active_tile_count(self) -> int:
-        return _gpu_active_tile_count(self)
+    _gpu_active_tile_count = _gpu_active_tile_count
 
-    def _skip_budgeted_gpu_stage(self, stage: str) -> bool:
-        return _skip_budgeted_gpu_stage(self, stage)
+    _skip_budgeted_gpu_stage = _skip_budgeted_gpu_stage
 
-    def _should_run_formal_collapse_this_frame(self) -> bool:
-        return _should_run_formal_collapse_this_frame(self)
+    _should_run_formal_collapse_this_frame = _should_run_formal_collapse_this_frame
 
     @contextmanager
     def _profile_pass(self, name: str):
@@ -881,23 +872,19 @@ class WorldEngine:
             if ctx is not None:
                 summary["gpu_ms"] = float(summary["gpu_ms"] or 0.0) + elapsed_ms
 
-    def _gpu_pipeline_available(self, pipeline: Any, name: str, *, require: bool | None = None) -> bool:
-        return _gpu_pipeline_available(self, pipeline, name, require=require)
+    _gpu_pipeline_available = _gpu_pipeline_available
 
-    def _require_gpu_stage(self, name: str) -> None:
-        return _require_gpu_stage(self, name)
+    _require_gpu_stage = _require_gpu_stage
 
     def _require_gpu_authoritative_resources(self, stage: str, *resource_names: str) -> None:
         return _require_gpu_authoritative_resources(self, stage, *resource_names)
 
-    def _require_cpu_oracle_backend(self, name: str) -> None:
-        return _require_cpu_oracle_backend(self, name)
+    _require_cpu_oracle_backend = _require_cpu_oracle_backend
 
     def _invalidate_gpu_authoritative_resources(self, *resource_names: str) -> None:
         return _invalidate_gpu_authoritative_resources(self, *resource_names)
 
-    def _invalidate_gpu_authoritative_cell_resources(self) -> None:
-        return _invalidate_gpu_authoritative_cell_resources(self)
+    _invalidate_gpu_authoritative_cell_resources = _invalidate_gpu_authoritative_cell_resources
 
     def bootstrap_defaults(self) -> None:
         payloads = build_default_payloads()
@@ -1056,8 +1043,7 @@ class WorldEngine:
 
     _coerce_world_frame_input = _coerce_world_frame_input
 
-    def _gas_field_count(self) -> int:
-        return _gas_field_count(self)
+    _gas_field_count = _gas_field_count
 
     _light_field_count = _light_field_count
 
@@ -1199,8 +1185,7 @@ class WorldEngine:
 
     store_page_stripe = store_page_stripe
 
-    def capture_page_stripe_to_store(self, update: PageStripeUpdate) -> dict[str, Any]:
-        return capture_page_stripe_to_store(self, update)
+    capture_page_stripe_to_store = capture_page_stripe_to_store
 
     load_page_stripe = load_page_stripe
 
@@ -1256,11 +1241,9 @@ class WorldEngine:
 
     simulation_backend_report = simulation_backend_report
 
-    def poll_readbacks(self, request_id: int | None = None) -> ReadbackResult | None:
-        return poll_readbacks(self, request_id)
+    poll_readbacks = poll_readbacks
 
-    def poll_all_readbacks(self, *, current_frame_id: int | None = None) -> list[ReadbackResult]:
-        return poll_all_readbacks(self, current_frame_id=current_frame_id)
+    poll_all_readbacks = poll_all_readbacks
 
     consume_entity_observation_results = consume_entity_observation_results
 
@@ -1305,16 +1288,11 @@ class WorldEngine:
 
     _restore_preview_runtime_state = _restore_preview_runtime_state
 
-    def _contextualize_page_stripe_update(self, update: PageStripeUpdate) -> PageStripeUpdate:
-        return _contextualize_page_stripe_update(self, update)
+    _contextualize_page_stripe_update = _contextualize_page_stripe_update
 
     _page_store_key = staticmethod(_page_store_key)
 
-    def _preview_apply_paging_updates(
-        self,
-        updates: list[PageStripeUpdate],
-    ) -> list[tuple[PageStripeUpdate, dict[str, Any]]]:
-        return _preview_apply_paging_updates(self, updates)
+    _preview_apply_paging_updates = _preview_apply_paging_updates
 
     _preview_bridge_placeholder_dirty_rects = _preview_bridge_placeholder_dirty_rects
 
@@ -1326,15 +1304,9 @@ class WorldEngine:
 
     _queue_loaded_collapse_pending_regions = _queue_loaded_collapse_pending_regions
 
-    def _clear_saved_page_stripe_runtime_state(self, update: PageStripeUpdate) -> None:
-        return _clear_saved_page_stripe_runtime_state(self, update)
+    _clear_saved_page_stripe_runtime_state = _clear_saved_page_stripe_runtime_state
 
-    def _prune_page_stripe_regions(
-        self,
-        regions: Iterable[tuple[int, int, int, int]],
-        update: PageStripeUpdate,
-    ) -> list[tuple[int, int, int, int]]:
-        return _prune_page_stripe_regions(self, regions, update)
+    _prune_page_stripe_regions = _prune_page_stripe_regions
 
     _subtract_page_stripe_range_from_region = staticmethod(_subtract_page_stripe_range_from_region)
 
@@ -1361,11 +1333,9 @@ class WorldEngine:
 
     sample_ambient_to_cells = sample_ambient_to_cells
 
-    def ambient_temperature_at_cell(self, x: int, y: int) -> float:
-        return ambient_temperature_at_cell(self, x, y)
+    ambient_temperature_at_cell = ambient_temperature_at_cell
 
-    def ambient_temperature_region(self, x0: int, y0: int, x1: int, y1: int) -> np.ndarray:
-        return ambient_temperature_region(self, x0, y0, x1, y1)
+    ambient_temperature_region = ambient_temperature_region
 
     sample_flow_to_cells = sample_flow_to_cells
 
@@ -1437,8 +1407,7 @@ class WorldEngine:
 
     _normalize_bridge_window_bounds = staticmethod(_normalize_bridge_window_bounds)
 
-    def _clamped_gas_window(self, gas_x: int, gas_y: int, width: int, height: int) -> tuple[int, int, int, int]:
-        return _clamped_gas_window(self, gas_x, gas_y, width, height)
+    _clamped_gas_window = _clamped_gas_window
 
     _bridge_shadow_buffer_coord_space = _bridge_shadow_buffer_coord_space
 
@@ -1660,8 +1629,7 @@ class WorldEngine:
     def _make_readback_payload(self, request: ReadbackRequest) -> dict[str, Any]:
         return make_readback_payload(self, request)
 
-    def _gas_window_for_cell_rect(self, x0: int, y0: int, x1: int, y1: int) -> tuple[int, int, int, int]:
-        return _gas_window_for_cell_rect(self, x0, y0, x1, y1)
+    _gas_window_for_cell_rect = _gas_window_for_cell_rect
 
     _apply_page_stripe = _apply_page_stripe
 
@@ -1675,8 +1643,7 @@ class WorldEngine:
 
     _needs_pre_simulation_bridge_sync = _needs_pre_simulation_bridge_sync
 
-    def _sync_pre_simulation_bridge_without_debug_upload(self) -> None:
-        return _sync_pre_simulation_bridge_without_debug_upload(self)
+    _sync_pre_simulation_bridge_without_debug_upload = _sync_pre_simulation_bridge_without_debug_upload
 
     _clear_bridge_frame_inputs = _clear_bridge_frame_inputs
 
@@ -1686,20 +1653,15 @@ class WorldEngine:
 
     _sync_entity_placeholders = _sync_entity_placeholders
 
-    def _sync_force_sources(self, force_sources: list[ForceSource]) -> None:
-        return _sync_force_sources(self, force_sources)
+    _sync_force_sources = _sync_force_sources
 
-    def _append_force_source_immediate(self, force_source: ForceSource) -> None:
-        return _append_force_source_immediate(self, force_source)
+    _append_force_source_immediate = _append_force_source_immediate
 
-    def _sync_persistent_emitters(self, emitters: list[dict[str, object]]) -> None:
-        return _sync_persistent_emitters(self, emitters)
+    _sync_persistent_emitters = _sync_persistent_emitters
 
-    def _append_transient_light_emitter_immediate(self, emitter: dict[str, object]) -> None:
-        return _append_transient_light_emitter_immediate(self, emitter)
+    _append_transient_light_emitter_immediate = _append_transient_light_emitter_immediate
 
-    def _record_bridge_page_stripe(self, update: PageStripeUpdate, payload: dict[str, Any]) -> None:
-        return _record_bridge_page_stripe(self, update, payload)
+    _record_bridge_page_stripe = _record_bridge_page_stripe
 
     _release_entity_placeholder_cell = _release_entity_placeholder_cell
 
@@ -1753,8 +1715,7 @@ class WorldEngine:
 
     _shadow_material_is_placeholder = _shadow_material_is_placeholder
 
-    def _material_placeholder_mask(self, material_id: np.ndarray) -> np.ndarray:
-        return _material_placeholder_mask(self, material_id)
+    _material_placeholder_mask = _material_placeholder_mask
 
     _shadow_material_is_plant = _shadow_material_is_plant
 
@@ -1762,11 +1723,9 @@ class WorldEngine:
 
     _reaction_rule_list = _reaction_rule_list
 
-    def _set_reaction_rule_list(self, rule_set: str, entries: list[dict[str, Any]] | list[PairReactionRule] | list[SelfReactionRule]) -> None:
-        return _set_reaction_rule_list(self, rule_set, entries)
+    _set_reaction_rule_list = _set_reaction_rule_list
 
-    def _set_reaction_rules_payload(self, rules_payload: dict[str, list[dict[str, Any]]]) -> None:
-        return _set_reaction_rules_payload(self, rules_payload)
+    _set_reaction_rules_payload = _set_reaction_rules_payload
 
     _remap_reaction_payload_result_actions = staticmethod(_remap_reaction_payload_result_actions)
 
@@ -1778,8 +1737,7 @@ class WorldEngine:
 
     _occupy_entity_placeholder_cell = _occupy_entity_placeholder_cell
 
-    def _mirror_occupy_entity_placeholder_cell(self, x: int, y: int, placeholder: EntityPlaceholder) -> bool:
-        return _mirror_occupy_entity_placeholder_cell(self, x, y, placeholder)
+    _mirror_occupy_entity_placeholder_cell = _mirror_occupy_entity_placeholder_cell
 
     _frame_entities_to_placeholders_and_observations = _frame_entities_to_placeholders_and_observations
 
@@ -1951,33 +1909,15 @@ class WorldEngine:
 
     _build_entity_feedback_from_state = _build_entity_feedback_from_state
 
-    def _capture_stripe_array(
-        self,
-        array: np.ndarray,
-        update: PageStripeUpdate,
-        *,
-        stripe_axis: int,
-        ranges: list[tuple[int, int]] | None = None,
-    ) -> np.ndarray:
-        return _capture_stripe_array(self, array, update, stripe_axis=stripe_axis, ranges=ranges)
+    _capture_stripe_array = _capture_stripe_array
 
-    def _write_stripe_array(
-        self,
-        array: np.ndarray,
-        update: PageStripeUpdate,
-        values: np.ndarray,
-        *,
-        stripe_axis: int,
-        ranges: list[tuple[int, int]] | None = None,
-    ) -> None:
-        return _write_stripe_array(self, array, update, values, stripe_axis=stripe_axis, ranges=ranges)
+    _write_stripe_array = _write_stripe_array
 
     _default_page_stripe_payload = _default_page_stripe_payload
 
     _stripe_buffer_ranges = _stripe_buffer_ranges
 
-    def _mark_loaded_page_stripe_active(self, update: PageStripeUpdate) -> None:
-        return _mark_loaded_page_stripe_active(self, update)
+    _mark_loaded_page_stripe_active = _mark_loaded_page_stripe_active
 
     _rebuild_sparse_runtime_indexes = _rebuild_sparse_runtime_indexes
 
