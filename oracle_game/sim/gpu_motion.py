@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
 from dataclasses import dataclass
-import time
 from typing import Any
 
 import numpy as np
 
 from oracle_game.gpu import ISLAND_RUNTIME_DTYPE, pack_island_runtime_upload
+from oracle_game.sim.gpu_base import GPUPipelineBase
 from oracle_game.types import Phase
 
 
@@ -137,7 +136,7 @@ class GPUMotionResources:
     material_params_signature: tuple[int, int] | None = None
 
 
-class GPUMotionPipeline:
+class GPUMotionPipeline(GPUPipelineBase):
     def __init__(self) -> None:
         self.resources: GPUMotionResources | None = None
         self.programs: dict[str, Any] = {}
@@ -158,36 +157,9 @@ class GPUMotionPipeline:
     def _reset_pass_profile(self) -> None:
         self.last_pass_profile = {"passes": [], "summary": {}}
 
-    def reset_pass_profile(self) -> None:
-        self._reset_pass_profile()
-
-    @contextmanager
-    def _profile_pass(self, world: "WorldEngine", name: str):
-        if not self._profile_enabled(world):
-            yield
-            return
-        ctx = world.bridge.ctx if bool(getattr(world, "profile_passes_sync", False)) else None
-        if ctx is not None:
-            ctx.finish()
-        start = time.perf_counter()
-        try:
-            yield
-        finally:
-            if ctx is not None:
-                ctx.finish()
-            elapsed_ms = (time.perf_counter() - start) * 1000.0
-            entry = {"name": str(name), "cpu_ms": elapsed_ms, "gpu_ms": elapsed_ms if ctx is not None else None}
-            self.last_pass_profile["passes"].append(entry)
-            summary = self.last_pass_profile["summary"].setdefault(str(name), {"count": 0, "cpu_ms": 0.0, "gpu_ms": None})
-            summary["count"] += 1
-            summary["cpu_ms"] += elapsed_ms
-            if ctx is not None:
-                summary["gpu_ms"] = float(summary["gpu_ms"] or 0.0) + elapsed_ms
-
-    def available(self, world: "WorldEngine") -> bool:
-        if getattr(world, "simulation_backend", "gpu") == "cpu":
-            return False
-        return bool(world.bridge.enabled and world.bridge.ctx is not None and world.bridge.ctx.version_code >= 430)
+    # ``reset_pass_profile`` inherited from GPUPipelineBase.
+    # ``_profile_pass`` inherited from GPUPipelineBase.
+    # ``available`` inherited from GPUPipelineBase.
 
     def step(self, world: "WorldEngine", dt: float, *, solve_tile_mask: np.ndarray) -> np.ndarray:
         ctx = world.bridge.ctx
@@ -6562,11 +6534,7 @@ class GPUMotionPipeline:
         resources.material_falling_params.write(falling.reshape((MAX_MATERIALS * 2, 4)).tobytes())
         resources.material_params_signature = table_signature
 
-    def _formal_gpu_frame(self, world: "WorldEngine") -> bool:
-        return (
-            getattr(world, "simulation_backend", "") == "gpu"
-            and bool(getattr(world, "_world_simulation_frame_active", False))
-        )
+    # ``_formal_gpu_frame`` inherited from GPUPipelineBase.
 
     def _bridge_authoritative_cell_blockers(self, world: "WorldEngine") -> bool:
         authoritative = world.bridge.gpu_authoritative_resources
@@ -7127,13 +7095,15 @@ class GPUMotionPipeline:
         resources.entity_id_tex, resources.entity_id_out_tex = resources.entity_id_out_tex, resources.entity_id_tex
         resources.displaced_tex, resources.displaced_out_tex = resources.displaced_out_tex, resources.displaced_tex
 
-    def _sync_compute_writes(self, ctx: Any) -> None:
-        ctx.memory_barrier(
-            getattr(ctx, "SHADER_STORAGE_BARRIER_BIT", 0)
-            | getattr(ctx, "SHADER_IMAGE_ACCESS_BARRIER_BIT", 0)
-            | getattr(ctx, "TEXTURE_FETCH_BARRIER_BIT", 0)
-            | getattr(ctx, "COMMAND_BARRIER_BIT", 0)
-            | getattr(ctx, "BUFFER_UPDATE_BARRIER_BIT", 0)
+    def _barrier_bits(self) -> tuple[str, ...]:
+        # motion uses indirect dispatch + buffer updates in addition to the
+        # default image/texture/storage sync.
+        return (
+            "SHADER_STORAGE_BARRIER_BIT",
+            "SHADER_IMAGE_ACCESS_BARRIER_BIT",
+            "TEXTURE_FETCH_BARRIER_BIT",
+            "COMMAND_BARRIER_BIT",
+            "BUFFER_UPDATE_BARRIER_BIT",
         )
 
     def _run_active_tile_indirect(

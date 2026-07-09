@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
 from dataclasses import dataclass
-import time
 from typing import Any
 
 import numpy as np
 
 from oracle_game.gpu import typed_material_id
+from oracle_game.sim.gpu_base import GPUPipelineBase
 from oracle_game.types import Phase
 
 TILE_SIZE = 32
@@ -57,7 +56,7 @@ class GPULiquidResources:
     material_params_signature: tuple[int, int] | None = None
 
 
-class GPULiquidPipeline:
+class GPULiquidPipeline(GPUPipelineBase):
     def __init__(self) -> None:
         self.resources: GPULiquidResources | None = None
         self.programs: dict[str, Any] = {}
@@ -70,40 +69,11 @@ class GPULiquidPipeline:
         self.last_pass_profile: dict[str, Any] = {"passes": [], "summary": {}}
         self._placeholder_claim_epoch = 1
 
-    def available(self, world: "WorldEngine") -> bool:
-        if getattr(world, "simulation_backend", "gpu") == "cpu":
-            return False
-        return bool(world.bridge.enabled and world.bridge.ctx is not None and world.bridge.ctx.version_code >= 430)
+    # ``available`` inherited from GPUPipelineBase.
 
-    def reset_pass_profile(self) -> None:
-        self.last_pass_profile = {"passes": [], "summary": {}}
+    # ``reset_pass_profile`` inherited from GPUPipelineBase.
 
-    @contextmanager
-    def _profile_pass(self, world: "WorldEngine", name: str):
-        profile = self.last_pass_profile if bool(getattr(world, "profile_passes_enabled", False)) else None
-        ctx = world.bridge.ctx if bool(getattr(world, "profile_passes_sync", False)) else None
-        if profile is not None and ctx is not None:
-            ctx.finish()
-        start = time.perf_counter() if profile is not None else 0.0
-        try:
-            yield
-        finally:
-            if profile is None:
-                return
-            if ctx is not None:
-                ctx.finish()
-            elapsed_ms = (time.perf_counter() - start) * 1000.0
-            entry = {
-                "name": str(name),
-                "cpu_ms": elapsed_ms,
-                "gpu_ms": elapsed_ms if ctx is not None else None,
-            }
-            profile["passes"].append(entry)
-            summary = profile["summary"].setdefault(str(name), {"count": 0, "cpu_ms": 0.0, "gpu_ms": None})
-            summary["count"] += 1
-            summary["cpu_ms"] += elapsed_ms
-            if ctx is not None:
-                summary["gpu_ms"] = float(summary["gpu_ms"] or 0.0) + elapsed_ms
+    # ``_profile_pass`` inherited from GPUPipelineBase.
 
     def step(
         self,
@@ -3911,11 +3881,7 @@ class GPULiquidPipeline:
             resources.material_params.write(params.tobytes())
             resources.material_params_signature = table_signature
 
-    def _formal_gpu_frame(self, world: "WorldEngine") -> bool:
-        return (
-            getattr(world, "simulation_backend", "") == "gpu"
-            and bool(getattr(world, "_world_simulation_frame_active", False))
-        )
+    # ``_formal_gpu_frame`` inherited from GPUPipelineBase.
 
     def _active_scheduler_gpu_authoritative(self, world: "WorldEngine") -> bool:
         authoritative = world.bridge.gpu_authoritative_resources
@@ -4796,12 +4762,14 @@ class GPULiquidPipeline:
             np.frombuffer(resources.entity_out.read(), dtype="f4").reshape((world.height, world.width))
         ).astype(np.int32)
 
-    def _sync_compute_writes(self, ctx: Any) -> None:
-        ctx.memory_barrier(
-            ctx.SHADER_IMAGE_ACCESS_BARRIER_BIT
-            | ctx.TEXTURE_FETCH_BARRIER_BIT
-            | getattr(ctx, "FRAMEBUFFER_BARRIER_BIT", 0)
-            | getattr(ctx, "SHADER_STORAGE_BARRIER_BIT", 0)
-            | getattr(ctx, "COMMAND_BARRIER_BIT", 0)
-            | getattr(ctx, "BUFFER_UPDATE_BARRIER_BIT", 0),
+    def _barrier_bits(self) -> tuple[str, ...]:
+        # liquid touches the framebuffer (visible illumination publish) and
+        # uses indirect/buffer-update paths alongside the default sync.
+        return (
+            "SHADER_IMAGE_ACCESS_BARRIER_BIT",
+            "TEXTURE_FETCH_BARRIER_BIT",
+            "FRAMEBUFFER_BARRIER_BIT",
+            "SHADER_STORAGE_BARRIER_BIT",
+            "COMMAND_BARRIER_BIT",
+            "BUFFER_UPDATE_BARRIER_BIT",
         )

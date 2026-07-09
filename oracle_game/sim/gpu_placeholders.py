@@ -6,6 +6,7 @@ from typing import Any
 import numpy as np
 
 from oracle_game.gpu import PLACEHOLDER_DTYPE, RENDER_GROUP_IDS, typed_material_id
+from oracle_game.sim.gpu_base import GPUPipelineBase
 from oracle_game.types import EntityPlaceholder, Phase
 
 
@@ -33,17 +34,15 @@ class GPUPlaceholderResources:
     material_params_signature: tuple[int, int] | None = None
 
 
-class GPUPlaceholderPipeline:
+class GPUPlaceholderPipeline(GPUPipelineBase):
     def __init__(self) -> None:
         self.resources: GPUPlaceholderResources | None = None
         self.programs: dict[str, Any] = {}
         self.last_backend = "idle"
         self.last_cpu_mirror_downloaded = False
 
-    def available(self, world: "WorldEngine") -> bool:
-        if getattr(world, "simulation_backend", "gpu") == "cpu":
-            return False
-        return bool(world.bridge.enabled and world.bridge.ctx is not None and world.bridge.ctx.version_code >= 430)
+    # ``available`` is inherited from :class:`GPUPipelineBase` (formerly inlined
+    # here verbatim — no ``moderngl is not None`` fallback guard was present).
 
     def apply(self, world: "WorldEngine", placeholders: list[EntityPlaceholder]) -> None:
         ctx = world.bridge.ctx
@@ -537,11 +536,7 @@ class GPUPlaceholderPipeline:
         resources.material_params.write(params.tobytes())
         resources.material_params_signature = signature
 
-    def _formal_gpu_frame(self, world: "WorldEngine") -> bool:
-        return (
-            getattr(world, "simulation_backend", "") == "gpu"
-            and bool(getattr(world, "_world_simulation_frame_active", False))
-        )
+    # ``_formal_gpu_frame`` is inherited from :class:`GPUPipelineBase`.
 
     def _load_authoritative_bridge_inputs(self, world: "WorldEngine", resources: GPUPlaceholderResources) -> None:
         if not self._formal_gpu_frame(world):
@@ -634,12 +629,9 @@ class GPUPlaceholderPipeline:
             "placeholder_displaced_material",
         )
 
-    def _sync_compute_writes(self, ctx: Any) -> None:
-        ctx.memory_barrier(
-            getattr(ctx, "SHADER_STORAGE_BARRIER_BIT", 0)
-            | getattr(ctx, "SHADER_IMAGE_ACCESS_BARRIER_BIT", 0)
-            | getattr(ctx, "TEXTURE_FETCH_BARRIER_BIT", 0)
-        )
+    # ``_sync_compute_writes`` is inherited from :class:`GPUPipelineBase`
+    # (default ``_barrier_bits`` matches the three bits formerly inlined here:
+    # SHADER_IMAGE_ACCESS / TEXTURE_FETCH / SHADER_STORAGE).
 
     def _download_outputs(self, world: "WorldEngine", resources: GPUPlaceholderResources) -> None:
         world.material_id[:] = np.frombuffer(resources.material.read(), dtype=np.int32).reshape((world.height, world.width))

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from contextlib import contextmanager
 from typing import Any
-import time
 
 import numpy as np
 
 from oracle_game.gpu import typed_light_id
+from oracle_game.sim.gpu_base import GPUPipelineBase
 
 
 LOCAL_SIZE = 8
@@ -45,7 +44,7 @@ class GPUOpticsResources:
     optics_buffer_signature: tuple[int, int, int, int, int] | None = None
 
 
-class GPUOpticsPipeline:
+class GPUOpticsPipeline(GPUPipelineBase):
     def __init__(self) -> None:
         self.resources: GPUOpticsResources | None = None
         self.programs: dict[str, Any] = {}
@@ -53,42 +52,11 @@ class GPUOpticsPipeline:
         self.last_cpu_active_upload_skipped = False
         self.last_pass_profile: dict[str, Any] = {"passes": [], "summary": {}}
 
-    def _profile_enabled(self, world: "WorldEngine") -> bool:
-        return bool(getattr(world, "profile_passes_enabled", False))
-
-    def _reset_pass_profile(self) -> None:
-        self.last_pass_profile = {"passes": [], "summary": {}}
-
-    def reset_pass_profile(self) -> None:
-        self._reset_pass_profile()
-
-    @contextmanager
-    def _profile_pass(self, world: "WorldEngine", name: str):
-        if not self._profile_enabled(world):
-            yield
-            return
-        ctx = world.bridge.ctx if bool(getattr(world, "profile_passes_sync", False)) else None
-        if ctx is not None:
-            ctx.finish()
-        start = time.perf_counter()
-        try:
-            yield
-        finally:
-            if ctx is not None:
-                ctx.finish()
-            elapsed_ms = (time.perf_counter() - start) * 1000.0
-            entry = {"name": str(name), "cpu_ms": elapsed_ms, "gpu_ms": elapsed_ms if ctx is not None else None}
-            self.last_pass_profile["passes"].append(entry)
-            summary = self.last_pass_profile["summary"].setdefault(str(name), {"count": 0, "cpu_ms": 0.0, "gpu_ms": None})
-            summary["count"] += 1
-            summary["cpu_ms"] += elapsed_ms
-            if ctx is not None:
-                summary["gpu_ms"] = float(summary["gpu_ms"] or 0.0) + elapsed_ms
-
-    def available(self, world: "WorldEngine") -> bool:
-        if getattr(world, "simulation_backend", "gpu") == "cpu":
-            return False
-        return bool(world.bridge.enabled and world.bridge.ctx is not None and world.bridge.ctx.version_code >= 430)
+    # ``available`` / ``reset_pass_profile`` / ``_profile_pass`` are inherited
+    # from :class:`GPUPipelineBase` (formerly inlined here verbatim). The
+    # ``_profile_enabled`` / ``_reset_pass_profile`` private helpers that only
+    # supported those inlined bodies were dead once inheritance took over and
+    # are removed as part of the same consolidation.
 
     def step(
         self,
@@ -209,11 +177,7 @@ class GPUOpticsPipeline:
         )
         return self.resources
 
-    def _formal_gpu_frame(self, world: "WorldEngine") -> bool:
-        return (
-            getattr(world, "simulation_backend", "") == "gpu"
-            and bool(getattr(world, "_world_simulation_frame_active", False))
-        )
+    # ``_formal_gpu_frame`` is inherited from :class:`GPUPipelineBase`.
 
     def _trace_force_all_active(self, world: "WorldEngine") -> bool:
         authoritative = world.bridge.gpu_authoritative_resources
@@ -1136,11 +1100,7 @@ class GPUOpticsPipeline:
             )
         self._sync_compute_writes(bridge.ctx)
 
-    def _set_uniform_if_present(self, program: Any, name: str, value: Any) -> None:
-        try:
-            program[name].value = value
-        except KeyError:
-            return
+    # ``_set_uniform_if_present`` is inherited from :class:`GPUPipelineBase`.
 
     def _bridge_material_authoritative(self, world: "WorldEngine") -> bool:
         return (
@@ -1308,9 +1268,6 @@ class GPUOpticsPipeline:
         )
         self.last_cpu_mirror_downloaded = False
 
-    def _sync_compute_writes(self, ctx: Any) -> None:
-        ctx.memory_barrier(
-            ctx.SHADER_IMAGE_ACCESS_BARRIER_BIT
-            | ctx.TEXTURE_FETCH_BARRIER_BIT
-            | getattr(ctx, "SHADER_STORAGE_BARRIER_BIT", 0),
-        )
+    # ``_sync_compute_writes`` is inherited from :class:`GPUPipelineBase`;
+    # the default ``_barrier_bits`` covers exactly the three bits this method
+    # used inline (SHADER_IMAGE_ACCESS / TEXTURE_FETCH / SHADER_STORAGE).

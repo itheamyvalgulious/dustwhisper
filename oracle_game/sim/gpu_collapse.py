@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
 from dataclasses import dataclass
-import time
 from typing import Any
 
 import numpy as np
 
+from oracle_game.sim.gpu_base import GPUPipelineBase
 from oracle_game.gpu import ISLAND_RUNTIME_DTYPE
 from oracle_game.sim.gpu_collapse_dirty import (
     clear_collapse_structure_dirty_tile_queue_on_gpu,
@@ -92,7 +91,7 @@ class GPUCollapseResources:
     material_spawn_temperature: Any
 
 
-class GPUCollapsePipeline:
+class GPUCollapsePipeline(GPUPipelineBase):
     FORMAL_EXPAND_LEFT = 1
     FORMAL_EXPAND_TOP = 2
     FORMAL_EXPAND_RIGHT = 4
@@ -113,36 +112,9 @@ class GPUCollapsePipeline:
     def _profile_enabled(self, world: "WorldEngine") -> bool:
         return bool(getattr(world, "profile_passes_enabled", False))
 
-    def reset_pass_profile(self) -> None:
-        self.last_pass_profile = {"passes": [], "summary": {}}
-
-    @contextmanager
-    def _profile_pass(self, world: "WorldEngine", name: str):
-        if not self._profile_enabled(world):
-            yield
-            return
-        ctx = world.bridge.ctx if bool(getattr(world, "profile_passes_sync", False)) else None
-        if ctx is not None:
-            ctx.finish()
-        start = time.perf_counter()
-        try:
-            yield
-        finally:
-            if ctx is not None:
-                ctx.finish()
-            elapsed_ms = (time.perf_counter() - start) * 1000.0
-            entry = {"name": str(name), "cpu_ms": elapsed_ms, "gpu_ms": elapsed_ms if ctx is not None else None}
-            self.last_pass_profile["passes"].append(entry)
-            summary = self.last_pass_profile["summary"].setdefault(str(name), {"count": 0, "cpu_ms": 0.0, "gpu_ms": None})
-            summary["count"] += 1
-            summary["cpu_ms"] += elapsed_ms
-            if ctx is not None:
-                summary["gpu_ms"] = float(summary["gpu_ms"] or 0.0) + elapsed_ms
-
-    def available(self, world: "WorldEngine") -> bool:
-        if getattr(world, "simulation_backend", "gpu") == "cpu":
-            return False
-        return bool(world.bridge.enabled and world.bridge.ctx is not None and world.bridge.ctx.version_code >= 430)
+    # ``reset_pass_profile`` inherited from GPUPipelineBase.
+    # ``_profile_pass`` inherited from GPUPipelineBase.
+    # ``available`` inherited from GPUPipelineBase.
 
     def prewarm_formal_connected_resources(self, world: "WorldEngine") -> None:
         ctx = world.bridge.ctx
@@ -10702,11 +10674,7 @@ class GPUCollapsePipeline:
             resources.displaced_tex.write(world.placeholder_displaced_material[ys, xs].astype("f4").tobytes())
         self._load_authoritative_bridge_region_inputs(world, resources, x0, y0, width, height)
 
-    def _formal_gpu_frame(self, world: "WorldEngine") -> bool:
-        return (
-            getattr(world, "simulation_backend", "") == "gpu"
-            and bool(getattr(world, "_world_simulation_frame_active", False))
-        )
+    # ``_formal_gpu_frame`` inherited from GPUPipelineBase.
 
     def _load_authoritative_bridge_region_inputs(
         self,
@@ -11258,12 +11226,14 @@ class GPUCollapsePipeline:
             "placeholder_displaced_material",
         )
 
-    def _sync_compute_writes(self, ctx: Any) -> None:
-        ctx.memory_barrier(
-            getattr(ctx, "SHADER_STORAGE_BARRIER_BIT", 0)
-            | getattr(ctx, "SHADER_IMAGE_ACCESS_BARRIER_BIT", 0)
-            | getattr(ctx, "TEXTURE_FETCH_BARRIER_BIT", 0)
-            | getattr(ctx, "COMMAND_BARRIER_BIT", 0)
+    def _barrier_bits(self) -> tuple[str, ...]:
+        # collapse uses indirect dispatch in addition to the default
+        # image/texture/storage sync.
+        return (
+            "SHADER_STORAGE_BARRIER_BIT",
+            "SHADER_IMAGE_ACCESS_BARRIER_BIT",
+            "TEXTURE_FETCH_BARRIER_BIT",
+            "COMMAND_BARRIER_BIT",
         )
 
     def _download_region_state(

@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 
 from oracle_game.gpu import CONSUME_POLICY_IDS, DIRECTION_IDS, typed_material_id
+from oracle_game.sim.gpu_base import GPUPipelineBase
 from oracle_game.sim.gpu_collapse_dirty import (
     COLLAPSE_STRUCTURE_DIRTY_TILE_COUNT_BUFFER,
     COLLAPSE_STRUCTURE_DIRTY_TILE_DISPATCH_ARGS_BUFFER,
@@ -216,7 +217,7 @@ class GPUReactionResources:
     random_targets_signature: tuple[int, int, int] | None = None
 
 
-class GPUReactionPipeline:
+class GPUReactionPipeline(GPUPipelineBase):
     def __init__(self) -> None:
         self.resources: GPUReactionResources | None = None
         self.programs: dict[str, Any] = {}
@@ -248,13 +249,7 @@ class GPUReactionPipeline:
         self._formal_cell_state_role_key: tuple[object, ...] | None = None
         self._formal_cell_state_read_role: str = "ping"
 
-    def available(self, world: "WorldEngine") -> bool:
-        if getattr(world, "simulation_backend", "gpu") == "cpu":
-            return False
-        return bool(world.bridge.enabled and world.bridge.ctx is not None and world.bridge.ctx.version_code >= 430)
-
-    def reset_pass_profile(self) -> None:
-        self.last_pass_profile = {"passes": [], "summary": {}}
+    # ``available`` and ``reset_pass_profile`` are inherited from GPUPipelineBase.
 
     def _record_profile_pass(
         self,
@@ -276,21 +271,9 @@ class GPUReactionPipeline:
         if gpu_timed:
             summary["gpu_ms"] = float(summary["gpu_ms"] or 0.0) + elapsed_ms
 
-    @contextmanager
-    def _profile_pass(self, world: "WorldEngine", name: str):
-        profile = self.last_pass_profile if bool(getattr(world, "profile_passes_enabled", False)) else None
-        ctx = world.bridge.ctx if bool(getattr(world, "profile_passes_sync", False)) else None
-        if profile is not None and ctx is not None:
-            ctx.finish()
-        start = time.perf_counter() if profile is not None else 0.0
-        try:
-            yield
-        finally:
-            if profile is not None:
-                if ctx is not None:
-                    ctx.finish()
-                elapsed_ms = (time.perf_counter() - start) * 1000.0
-                self._record_profile_pass(profile, name, elapsed_ms, gpu_timed=ctx is not None)
+    # ``_profile_pass`` is inherited from GPUPipelineBase (it records identical
+    # entries inline; ``_record_profile_pass`` is retained for
+    # ``_profile_scoped_pass`` below).
 
     def _upload_state_profile_scope(self, reaction_group: str | None) -> str | None:
         if reaction_group is None:
@@ -1216,11 +1199,7 @@ class GPUReactionPipeline:
         self.last_cpu_mirror_downloaded = True
         return True
 
-    def _formal_gpu_frame(self, world: "WorldEngine") -> bool:
-        return (
-            getattr(world, "simulation_backend", "") == "gpu"
-            and bool(getattr(world, "_world_simulation_frame_active", False))
-        )
+    # ``_formal_gpu_frame`` is inherited from GPUPipelineBase.
 
     def _active_scheduler_gpu_authoritative(self, world: "WorldEngine") -> bool:
         return (
@@ -9674,11 +9653,10 @@ class GPUReactionPipeline:
                 return True
         return False
 
-    def _set_uniform_if_present(self, program: Any, name: str, value: Any) -> None:
-        try:
-            program[name].value = value
-        except KeyError:
-            return
+    # ``_set_uniform_if_present`` is inherited from GPUPipelineBase.
+    # ``_sync_compute_writes`` / ``_sync_storage_and_indirect_writes`` are kept
+    # as overrides: reactions uses a narrower barrier bit set (image-access |
+    # texture-fetch, no shader-storage) and a nullable-ctx guard.
 
     def _sync_storage_and_indirect_writes(self, ctx: Any | None) -> None:
         if ctx is None:

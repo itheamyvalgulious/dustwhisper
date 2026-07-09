@@ -6,19 +6,22 @@ from typing import Any
 import numpy as np
 
 from oracle_game.gpu import moderngl, unpack_cell_core
+from oracle_game.sim.gpu_base import GPUPipelineBase
 from oracle_game.types import Phase
 
 
 LOCAL_SIZE = 128
 
 
-class GPUPageStripePipeline:
+class GPUPageStripePipeline(GPUPipelineBase):
     def __init__(self) -> None:
         self.programs: dict[str, Any] = {}
         self.last_backend = "idle"
         self.last_cpu_mirror_downloaded = False
 
     def available(self, world: "WorldEngine") -> bool:
+        # Override: this pipeline may run on a standalone (non-bridge) context,
+        # so it also accepts ``moderngl`` being importable as a fallback.
         if getattr(world, "simulation_backend", "gpu") == "cpu":
             return False
         ctx = world.bridge.ctx
@@ -428,11 +431,7 @@ class GPUPageStripePipeline:
                 except Exception:
                     pass
 
-    def _formal_gpu_frame(self, world: "WorldEngine") -> bool:
-        return (
-            getattr(world, "simulation_backend", "") == "gpu"
-            and bool(getattr(world, "_world_simulation_frame_active", False))
-        )
+    # ``_formal_gpu_frame`` is inherited from :class:`GPUPipelineBase`.
 
     def _apply_bridge(self, world: "WorldEngine", update: "PageStripeUpdate", payload: dict[str, Any]) -> None:
         bridge = world.bridge
@@ -834,12 +833,8 @@ class GPUPageStripePipeline:
             return np.empty(tuple(shape), dtype=source.dtype)
         return np.ascontiguousarray(np.concatenate(parts, axis=stripe_axis))
 
-    def _sync_compute_writes(self, ctx: Any) -> None:
-        ctx.memory_barrier(
-            getattr(ctx, "SHADER_STORAGE_BARRIER_BIT", 0)
-            | getattr(ctx, "SHADER_IMAGE_ACCESS_BARRIER_BIT", 0)
-            | getattr(ctx, "TEXTURE_FETCH_BARRIER_BIT", 0)
-        )
+    # ``_sync_compute_writes`` is inherited from :class:`GPUPipelineBase`
+    # (default barrier bits match: image access + texture fetch + shader storage).
 
     def _program(self, ctx: Any, kind: str) -> Any:
         key = f"{id(ctx)}:{kind}"
