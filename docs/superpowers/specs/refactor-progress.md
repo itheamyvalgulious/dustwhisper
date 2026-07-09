@@ -23,21 +23,30 @@ Re-run after each phase:
   - [x] gpu_motion (9210→3370), gpu_liquid (4775→1540), gpu_collapse (11347→5522) — shaders extracted; STILL > 1000 (remaining is non-shader pipeline Python logic; further split pending).
   - [ ] gpu_reactions (9675), gpu_heat (2246), gpu_optics (1273), gpu_world_commands (1041) — preamble files, TODO (use `includes`).
   - Note: compound f-string expressions (`{LOCAL_SIZE-1}`, `{A*B}`, `{Cls.ATTR}`) baked as evaluated literals in some collapse .comp (behavior-identical; derived-marker conversion is a robustness follow-up).
-- [~] Phase 4 (world.py split) — world.py 17279→12488:
+- [~] Phase 4 (world.py split) — world.py 17279→12093 (geometry extraction in progress):
   - [x] constants → `world_constants.py`
   - [x] `serialize_engine_capabilities` → `world_capabilities/` package (12 modules, each ≤916 lines)
   - [x] `_make_readback_payload` → `world_readback_payload.py`
-  - [ ] geometry bucket, intent-resolution cluster, input coercion, debug-frame, payload serializers (TODO)
+  - [x] `debug_frame` + 15 frame helpers → `world_debug_frame.py` (502 lines)
+  - [~] geometry bucket → `world_geometry.py` (subagent running; golden `d9e44e209feaedd6`)
+  - [ ] intent-resolution cluster, input coercion, payload serializers (TODO; intent cluster is large/interconnected)
+- [x] gpu.py (4465) → `gpu/` package: `_common` (60), `dtypes` (587), `packers` (1186), `readback` (142), `bridge` (2723=GPUBridge), `__init__` (32). All `from oracle_game.gpu import X` paths preserved.
 
 ## Files still > 1000 lines (current)
-world.py (12488), gpu_reactions (9675), gpu_collapse (5522), gpu.py (4465),
-gpu_motion (3370), gpu_heat (2246), reactions.py (2011), rules.py (1578),
-gpu_liquid (1540), enginedemo.py (1463), motion.py (1413), gpu_optics (1273),
-http_console.py (1164), gpu_world_commands (1041), liquid.py (1007).
-(Total down from 78245 to ~58129.)
+world.py (12093), gpu_collapse (5519), gpu_reactions (5148), gpu_motion (3367),
+gpu/bridge (2723=GPUBridge class), reactions.py (2011, CPU), rules.py (1578),
+gpu_liquid (1542), enginedemo (1463), motion.py (1413, CPU), gpu/packers (1186),
+http_console (1164), gpu_heat (1056), liquid.py (1007).
+(Total: ~51800 lines, down from 78245. ~26500 lines extracted to .glsl files +
+focused modules.) Remaining work: world.py more extractions; pipeline LOGIC
+splits (gpu_collapse/reactions/motion/liquid/heat — non-shader Python); CPU
+solver splits (reactions/motion/liquid); rules _build_materials split;
+enginedemo/http_console splits; EngineConfig; types/ split; package reorg
+(cpu/, gpu/ done-partial, engine/); Solver base + stage registry (Phase 3).
 
 ## Per-extraction gates (in addition to snapshot)
 - capabilities golden: `f65d2183375bd352`
 - readback golden: `7062d287b034df0c`
 - debug_frame golden: `b4b5996932795cbd` (DebugView×all + gas views, 96×64, 3 frames). NOTE: an earlier value (b4e60f4b007fe5a0) was captured AFTER the buggy liquid migration and reflected broken-liquid behavior; the liquid remnant fix corrected it to this true value.
+- geometry golden: `d9e44e209feaedd6` (7 coord methods on a 96×64 populated world)
 - GPU snapshot: `ce71a34376c5010d`
