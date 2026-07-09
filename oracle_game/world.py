@@ -848,17 +848,13 @@ class WorldEngine:
         self.update_material_optics_table(payloads["optics"])
         self.update_reaction_table(payloads["actions"], payloads["rules"])
 
-    def _material_table_snapshot_payload(self) -> list[dict[str, Any]]:
-        return _material_table_snapshot_payload(self)
+    _material_table_snapshot_payload = _material_table_snapshot_payload
 
-    def _gas_species_table_snapshot_payload(self) -> list[dict[str, Any]]:
-        return _gas_species_table_snapshot_payload(self)
+    _gas_species_table_snapshot_payload = _gas_species_table_snapshot_payload
 
-    def _light_type_table_snapshot_payload(self) -> list[dict[str, Any]]:
-        return _light_type_table_snapshot_payload(self)
+    _light_type_table_snapshot_payload = _light_type_table_snapshot_payload
 
-    def _material_optics_table_snapshot_payload(self) -> list[dict[str, Any]]:
-        return _material_optics_table_snapshot_payload(self)
+    _material_optics_table_snapshot_payload = _material_optics_table_snapshot_payload
 
     def _material_optics_snapshot_map(self) -> dict[tuple[str, str], MaterialOpticsDef]:
         payload = self._stable_shadow_payload("optics", self._material_optics_table_snapshot_payload)
@@ -868,80 +864,55 @@ class WorldEngine:
             snapshot[(entry.material_name, entry.light_type)] = entry
         return snapshot
 
-    def _reaction_table_snapshot_payload(self) -> dict[str, object]:
-        return _reaction_table_snapshot_payload(self)
+    _reaction_table_snapshot_payload = _reaction_table_snapshot_payload
 
-    def _stable_shadow_payload(self, name: str, snapshot_factory: Callable[[], Any]) -> Any:
-        return _stable_shadow_payload(self, name, snapshot_factory)
+    _stable_shadow_payload = _stable_shadow_payload
 
-    def _set_stable_shadow_payload(self, name: str, payload: Any) -> None:
-        return _set_stable_shadow_payload(self, name, payload)
+    _set_stable_shadow_payload = _set_stable_shadow_payload
 
-    def _shadow_has_table_payload(self, name: str) -> bool:
-        return _shadow_has_table_payload(self, name)
+    _shadow_has_table_payload = _shadow_has_table_payload
 
-    def _merged_reaction_table_payload(
-        self,
-        actions: list[ReactionAction],
-        rules: dict[str, list[object]],
-    ) -> dict[str, object]:
-        return _merged_reaction_table_payload(self, actions, rules)
+    _merged_reaction_table_payload = _merged_reaction_table_payload
 
-    def _merged_material_table_payload(self, materials: list[MaterialDef]) -> list[dict[str, Any]]:
-        return _merged_material_table_payload(self, materials)
+    _merged_material_table_payload = _merged_material_table_payload
 
-    def _merged_gas_species_table_payload(self, gases: list[GasSpeciesDef]) -> list[dict[str, Any]]:
-        return _merged_gas_species_table_payload(self, gases)
+    _merged_gas_species_table_payload = _merged_gas_species_table_payload
 
-    def _merged_light_type_table_payload(self, lights: list[LightTypeDef]) -> list[dict[str, Any]]:
-        return _merged_light_type_table_payload(self, lights)
+    _merged_light_type_table_payload = _merged_light_type_table_payload
 
-    def _merged_material_optics_table_payload(self, optics: list[MaterialOpticsDef]) -> list[dict[str, Any]]:
-        return _merged_material_optics_table_payload(self, optics)
+    _merged_material_optics_table_payload = _merged_material_optics_table_payload
 
     @staticmethod
     def _coerce_enum(enum_type: type[Any], value: Any) -> Any:
         return _coerce_enum(enum_type, value)
 
-    def _coerce_material_def(self, material: MaterialDef | dict[str, Any]) -> MaterialDef:
-        return _coerce_material_def(self, material)
+    _coerce_material_def = _coerce_material_def
 
-    def _coerce_gas_species_def(self, gas: GasSpeciesDef | dict[str, Any]) -> GasSpeciesDef:
-        return _coerce_gas_species_def(self, gas)
+    _coerce_gas_species_def = _coerce_gas_species_def
 
-    def _coerce_light_type_def(self, light: LightTypeDef | dict[str, Any]) -> LightTypeDef:
-        return _coerce_light_type_def(self, light)
+    _coerce_light_type_def = _coerce_light_type_def
 
     @staticmethod
     def _canonical_material_input_name(name: str | None) -> str | None:
         return _canonical_material_input_name(name)
 
-    def _coerce_material_optics_def(self, optics: MaterialOpticsDef | dict[str, Any]) -> MaterialOpticsDef:
-        return _coerce_material_optics_def(self, optics)
+    _coerce_material_optics_def = _coerce_material_optics_def
 
-    def _coerce_reaction_action(self, action: ReactionAction | dict[str, Any]) -> ReactionAction:
-        return _coerce_reaction_action(self, action)
+    _coerce_reaction_action = _coerce_reaction_action
 
-    def _coerce_pair_reaction_rule(self, rule: PairReactionRule | dict[str, Any]) -> PairReactionRule:
-        return _coerce_pair_reaction_rule(self, rule)
+    _coerce_pair_reaction_rule = _coerce_pair_reaction_rule
 
-    def _coerce_self_reaction_rule(self, rule: SelfReactionRule | dict[str, Any]) -> SelfReactionRule:
-        return _coerce_self_reaction_rule(self, rule)
+    _coerce_self_reaction_rule = _coerce_self_reaction_rule
 
-    def _coerce_reaction_rules(self, rules: dict[str, object]) -> dict[str, list[object]]:
-        return _coerce_reaction_rules(self, rules)
+    _coerce_reaction_rules = _coerce_reaction_rules
 
-    def _shadow_material_payload(self) -> list[dict[str, Any]]:
-        return _shadow_material_payload(self)
+    _shadow_material_payload = _shadow_material_payload
 
-    def _shadow_gas_species_payload(self) -> list[dict[str, Any]]:
-        return _shadow_gas_species_payload(self)
+    _shadow_gas_species_payload = _shadow_gas_species_payload
 
-    def _shadow_light_type_payload(self) -> list[dict[str, Any]]:
-        return _shadow_light_type_payload(self)
+    _shadow_light_type_payload = _shadow_light_type_payload
 
-    def _shadow_reaction_payload(self) -> dict[str, Any]:
-        return _shadow_reaction_payload(self)
+    _shadow_reaction_payload = _shadow_reaction_payload
 
     @staticmethod
     def _payload_name_set(payload: Iterable[dict[str, Any]], field: str = "name") -> set[str]:
@@ -966,137 +937,82 @@ class WorldEngine:
             allow_zero_id=allow_zero_id,
         )
 
-    def _validate_material_table_payload(self, materials_payload: list[dict[str, Any]]) -> None:
-        return _validate_material_table_payload(self, materials_payload)
+    _validate_material_table_payload = _validate_material_table_payload
 
-    def _validate_gas_species_payload(self, gases_payload: list[dict[str, Any]]) -> None:
-        return _validate_gas_species_payload(self, gases_payload)
+    _validate_gas_species_payload = _validate_gas_species_payload
 
-    def _validate_light_type_payload(self, lights_payload: list[dict[str, Any]]) -> None:
-        return _validate_light_type_payload(self, lights_payload)
+    _validate_light_type_payload = _validate_light_type_payload
 
-    def _validate_material_optics_payload(self, optics_payload: list[dict[str, Any]]) -> None:
-        return _validate_material_optics_payload(self, optics_payload)
+    _validate_material_optics_payload = _validate_material_optics_payload
 
-    def _validate_reaction_payload(self, reactions_payload: dict[str, Any]) -> None:
-        return _validate_reaction_payload(self, reactions_payload)
+    _validate_reaction_payload = _validate_reaction_payload
 
-    def _normalize_material_patch_fields(self, fields: dict[str, Any]) -> dict[str, Any]:
-        return _normalize_material_patch_fields(self, fields)
+    _normalize_material_patch_fields = _normalize_material_patch_fields
 
-    def _normalize_gas_patch_fields(self, fields: dict[str, Any]) -> dict[str, Any]:
-        return _normalize_gas_patch_fields(self, fields)
+    _normalize_gas_patch_fields = _normalize_gas_patch_fields
 
-    def _normalize_material_optics_patch_fields(self, fields: dict[str, Any]) -> dict[str, Any]:
-        return _normalize_material_optics_patch_fields(self, fields)
+    _normalize_material_optics_patch_fields = _normalize_material_optics_patch_fields
 
-    def _normalize_reaction_action_patch_fields(self, fields: dict[str, Any]) -> dict[str, Any]:
-        return _normalize_reaction_action_patch_fields(self, fields)
+    _normalize_reaction_action_patch_fields = _normalize_reaction_action_patch_fields
 
-    def _normalize_reaction_rule_patch_fields(self, fields: dict[str, Any]) -> dict[str, Any]:
-        return _normalize_reaction_rule_patch_fields(self, fields)
+    _normalize_reaction_rule_patch_fields = _normalize_reaction_rule_patch_fields
 
-    def _coerce_force_source(self, force_source: ForceSource | dict[str, Any]) -> ForceSource:
-        return _coerce_force_source(self, force_source)
+    _coerce_force_source = _coerce_force_source
 
-    def _public_force_source_input(self, force_source: ForceSource | dict[str, Any]) -> ForceSource:
-        return _public_force_source_input(self, force_source)
+    _public_force_source_input = _public_force_source_input
 
-    def _frame_force_source_input(self, force_source: ForceSource | dict[str, Any]) -> ForceSource:
-        return _frame_force_source_input(self, force_source)
+    _frame_force_source_input = _frame_force_source_input
 
     def _coerce_emitter(self, emitter: dict[str, Any]) -> dict[str, object]:
         return _coerce_emitter(self, emitter)
 
-    def _frame_emitter_input(self, emitter: dict[str, Any]) -> dict[str, object]:
-        return _frame_emitter_input(self, emitter)
+    _frame_emitter_input = _frame_emitter_input
 
-    def _coerce_entity_placeholder(self, placeholder: EntityPlaceholder | dict[str, Any]) -> EntityPlaceholder:
-        return _coerce_entity_placeholder(self, placeholder)
+    _coerce_entity_placeholder = _coerce_entity_placeholder
 
-    def _public_entity_placeholder_input(
-        self,
-        placeholder: EntityPlaceholder | dict[str, Any],
-    ) -> EntityPlaceholder:
-        return _public_entity_placeholder_input(self, placeholder)
+    _public_entity_placeholder_input = _public_entity_placeholder_input
 
-    def _frame_entity_placeholder_input(
-        self,
-        placeholder: EntityPlaceholder | dict[str, Any],
-    ) -> EntityPlaceholder:
-        return _frame_entity_placeholder_input(self, placeholder)
+    _frame_entity_placeholder_input = _frame_entity_placeholder_input
 
-    def _coerce_entity_state(self, entity: EntityState | dict[str, Any]) -> EntityState:
-        return _coerce_entity_state(self, entity)
+    _coerce_entity_state = _coerce_entity_state
 
-    def _public_entity_state_input(self, entity: EntityState | dict[str, Any]) -> EntityState:
-        return _public_entity_state_input(self, entity)
+    _public_entity_state_input = _public_entity_state_input
 
-    def _frame_entity_state_input(self, entity: EntityState | dict[str, Any]) -> EntityState:
-        return _frame_entity_state_input(self, entity)
+    _frame_entity_state_input = _frame_entity_state_input
 
-    def _coerce_entity_observation_spec(
-        self,
-        spec: EntityObservationSpec | dict[str, Any],
-    ) -> EntityObservationSpec:
-        return _coerce_entity_observation_spec(self, spec)
+    _coerce_entity_observation_spec = _coerce_entity_observation_spec
 
-    def _normalize_entity_state_patch_fields(self, fields: dict[str, Any]) -> dict[str, Any]:
-        return _normalize_entity_state_patch_fields(self, fields)
+    _normalize_entity_state_patch_fields = _normalize_entity_state_patch_fields
 
-    def _public_entity_state_patch_input(
-        self,
-        patch: EntityStatePatch | dict[str, Any],
-    ) -> EntityStatePatch:
-        return _public_entity_state_patch_input(self, patch)
+    _public_entity_state_patch_input = _public_entity_state_patch_input
 
-    def _controller_turn_entity_input(self, entity: EntityState | dict[str, Any]) -> EntityState:
-        return _controller_turn_entity_input(self, entity)
+    _controller_turn_entity_input = _controller_turn_entity_input
 
-    def _frame_entity_state_patch_input(
-        self,
-        patch: EntityStatePatch | dict[str, Any],
-    ) -> EntityStatePatch:
-        return _frame_entity_state_patch_input(self, patch)
+    _frame_entity_state_patch_input = _frame_entity_state_patch_input
 
-    def _coerce_entity_state_patch(self, patch: EntityStatePatch | dict[str, Any]) -> EntityStatePatch:
-        return _coerce_entity_state_patch(self, patch)
+    _coerce_entity_state_patch = _coerce_entity_state_patch
 
-    def _coerce_observation_target(self, target: ObservationTarget | dict[str, Any]) -> ObservationTarget:
-        return _coerce_observation_target(self, target)
+    _coerce_observation_target = _coerce_observation_target
 
-    def _coerce_target_query(self, query: TargetQuery | dict[str, Any]) -> TargetQuery:
-        return _coerce_target_query(self, query)
+    _coerce_target_query = _coerce_target_query
 
-    def _coerce_change_intent(self, intent: ChangeIntent | dict[str, Any]) -> ChangeIntent:
-        return _coerce_change_intent(self, intent)
+    _coerce_change_intent = _coerce_change_intent
 
-    def _coerce_carrier_intent(self, intent: CarrierIntent | dict[str, Any]) -> CarrierIntent:
-        return _coerce_carrier_intent(self, intent)
+    _coerce_carrier_intent = _coerce_carrier_intent
 
-    def _coerce_readback_request(self, request: ReadbackRequest | dict[str, Any]) -> ReadbackRequest:
-        return _coerce_readback_request(self, request)
+    _coerce_readback_request = _coerce_readback_request
 
     @staticmethod
     def _normalize_readback_channels(channels: Any) -> tuple[str, ...]:
         return _normalize_readback_channels(channels)
 
-    def _normalize_readback_request(self, request: ReadbackRequest) -> ReadbackRequest:
-        return _normalize_readback_request(self, request)
+    _normalize_readback_request = _normalize_readback_request
 
-    def _assign_readback_request_id(self, request: ReadbackRequest) -> ReadbackRequest:
-        return _assign_readback_request_id(self, request)
+    _assign_readback_request_id = _assign_readback_request_id
 
-    def _assign_preview_readback_request_ids(
-        self,
-        requests: list[ReadbackRequest],
-        *,
-        next_request_id: int | None = None,
-    ) -> tuple[list[ReadbackRequest], int]:
-        return _assign_preview_readback_request_ids(self, requests, next_request_id=next_request_id)
+    _assign_preview_readback_request_ids = _assign_preview_readback_request_ids
 
-    def _coerce_world_command(self, command: WorldCommand | dict[str, Any]) -> WorldCommand:
-        return _coerce_world_command(self, command)
+    _coerce_world_command = _coerce_world_command
 
     @classmethod
     def _coerce_json_value(cls, value: Any) -> Any:
@@ -1106,8 +1022,7 @@ class WorldEngine:
     def _normalize_json_payload_value(cls, value: Any) -> Any:
         return _normalize_json_payload_value(value)
 
-    def _coerce_world_frame_input(self, frame_input: WorldFrameInput | dict[str, Any]) -> WorldFrameInput:
-        return _coerce_world_frame_input(self, frame_input)
+    _coerce_world_frame_input = _coerce_world_frame_input
 
     def _gas_field_count(self) -> int:
         return max(self.rulebook.gases_by_id, default=-1) + 1
@@ -1117,427 +1032,73 @@ class WorldEngine:
         max_dose_channel = max((int(light.dose_channel_id) for light in self.rulebook.lights_by_id.values()), default=-1)
         return max(max_light_id, max_dose_channel) + 1
 
-    def update_material_table(self, materials: list[MaterialDef | dict[str, Any]], *, immediate: bool = True) -> None:
-        update_material_table(self, materials, immediate=immediate)
+    update_material_table = update_material_table
 
-    def update_gas_species_table(self, gases: list[GasSpeciesDef | dict[str, Any]], *, immediate: bool = True) -> None:
-        update_gas_species_table(self, gases, immediate=immediate)
+    update_gas_species_table = update_gas_species_table
 
-    def update_light_type_table(self, lights: list[LightTypeDef | dict[str, Any]], *, immediate: bool = True) -> None:
-        update_light_type_table(self, lights, immediate=immediate)
+    update_light_type_table = update_light_type_table
 
-    def update_material_optics_table(self, optics: list[MaterialOpticsDef | dict[str, Any]], *, immediate: bool = True) -> None:
-        update_material_optics_table(self, optics, immediate=immediate)
+    update_material_optics_table = update_material_optics_table
 
-    def update_reaction_table(
-        self,
-        actions: list[ReactionAction | dict[str, Any]],
-        rules: dict[str, object],
-        *,
-        immediate: bool = True,
-    ) -> None:
-        update_reaction_table(self, actions, rules, immediate=immediate)
+    update_reaction_table = update_reaction_table
 
-    def replace_reaction_table(
-        self,
-        actions: list[ReactionAction | dict[str, Any]],
-        rules: dict[str, object],
-        *,
-        immediate: bool = True,
-    ) -> None:
-        replace_reaction_table(self, actions, rules, immediate=immediate)
+    replace_reaction_table = replace_reaction_table
 
-    def reset_world(self, *, immediate: bool = True) -> None:
-        reset_world(self, immediate=immediate)
+    reset_world = reset_world
 
-    def _reset_world_state(
-        self,
-        *,
-        reset_bridge_frame_inputs: bool,
-        keep_command_log: bool,
-    ) -> None:
-        _reset_world_state(self, reset_bridge_frame_inputs=reset_bridge_frame_inputs, keep_command_log=keep_command_log)
+    _reset_world_state = _reset_world_state
 
-    def queue_command(self, kind: str, **payload: Any) -> None:
-        queue_command(self, kind, **payload)
+    queue_command = queue_command
 
-    def _resolve_direct_targeted_coords(
-        self,
-        kind: str,
-        x: int | None,
-        y: int | None,
-        *,
-        target_query_id: str | None = None,
-        target_dx: int = 0,
-        target_dy: int = 0,
-        target_queries: list[TargetQuery | dict[str, Any]] | None = None,
-    ) -> tuple[int, int, str | None]:
-        return _resolve_direct_targeted_coords(
-            self,
-            kind,
-            x,
-            y,
-            target_query_id=target_query_id,
-            target_dx=target_dx,
-            target_dy=target_dy,
-            target_queries=target_queries,
-        )
+    _resolve_direct_targeted_coords = _resolve_direct_targeted_coords
 
-    def inject_material(
-        self,
-        x: int | None,
-        y: int | None,
-        material: str,
-        radius: int = 2,
-        *,
-        immediate: bool = False,
-        target_query_id: str | None = None,
-        target_dx: int = 0,
-        target_dy: int = 0,
-        target_queries: list[TargetQuery | dict[str, Any]] | None = None,
-    ) -> None:
-        inject_material(
-            self,
-            x,
-            y,
-            material,
-            radius,
-            immediate=immediate,
-            target_query_id=target_query_id,
-            target_dx=target_dx,
-            target_dy=target_dy,
-            target_queries=target_queries,
-        )
+    inject_material = inject_material
 
-    def write_material_region(
-        self,
-        x: int | None,
-        y: int | None,
-        width: int,
-        height: int,
-        material: str,
-        *,
-        immediate: bool = False,
-        target_query_id: str | None = None,
-        target_dx: int = 0,
-        target_dy: int = 0,
-        target_queries: list[TargetQuery | dict[str, Any]] | None = None,
-    ) -> None:
-        write_material_region(
-            self,
-            x,
-            y,
-            width,
-            height,
-            material,
-            immediate=immediate,
-            target_query_id=target_query_id,
-            target_dx=target_dx,
-            target_dy=target_dy,
-            target_queries=target_queries,
-        )
+    write_material_region = write_material_region
 
-    def inject_temperature(
-        self,
-        x: int | None,
-        y: int | None,
-        delta: float,
-        radius: int = 2,
-        *,
-        immediate: bool = False,
-        target_query_id: str | None = None,
-        target_dx: int = 0,
-        target_dy: int = 0,
-        target_queries: list[TargetQuery | dict[str, Any]] | None = None,
-    ) -> None:
-        inject_temperature(
-            self,
-            x,
-            y,
-            delta,
-            radius,
-            immediate=immediate,
-            target_query_id=target_query_id,
-            target_dx=target_dx,
-            target_dy=target_dy,
-            target_queries=target_queries,
-        )
+    inject_temperature = inject_temperature
 
-    def inject_velocity(
-        self,
-        x: int | None,
-        y: int | None,
-        velocity: tuple[float, float],
-        radius: int = 2,
-        *,
-        carrier: str = "cell",
-        mode: str = "add",
-        immediate: bool = False,
-        target_query_id: str | None = None,
-        target_dx: int = 0,
-        target_dy: int = 0,
-        target_queries: list[TargetQuery | dict[str, Any]] | None = None,
-    ) -> None:
-        inject_velocity(
-            self,
-            x,
-            y,
-            velocity,
-            radius,
-            carrier=carrier,
-            mode=mode,
-            immediate=immediate,
-            target_query_id=target_query_id,
-            target_dx=target_dx,
-            target_dy=target_dy,
-            target_queries=target_queries,
-        )
+    inject_velocity = inject_velocity
 
-    def inject_force(
-        self,
-        x: int | None,
-        y: int | None,
-        direction: tuple[float, float],
-        radius: float,
-        strength: float,
-        lifetime: float = 0.5,
-        *,
-        immediate: bool = False,
-        target_query_id: str | None = None,
-        target_dx: int = 0,
-        target_dy: int = 0,
-        target_queries: list[TargetQuery | dict[str, Any]] | None = None,
-    ) -> None:
-        inject_force(
-            self,
-            x,
-            y,
-            direction,
-            radius,
-            strength,
-            lifetime,
-            immediate=immediate,
-            target_query_id=target_query_id,
-            target_dx=target_dx,
-            target_dy=target_dy,
-            target_queries=target_queries,
-        )
+    inject_force = inject_force
 
-    def inject_gas(
-        self,
-        x: int | None,
-        y: int | None,
-        species: str,
-        amount: float,
-        radius: int = 1,
-        *,
-        immediate: bool = False,
-        target_query_id: str | None = None,
-        target_dx: int = 0,
-        target_dy: int = 0,
-        target_queries: list[TargetQuery | dict[str, Any]] | None = None,
-    ) -> None:
-        inject_gas(
-            self,
-            x,
-            y,
-            species,
-            amount,
-            radius,
-            immediate=immediate,
-            target_query_id=target_query_id,
-            target_dx=target_dx,
-            target_dy=target_dy,
-            target_queries=target_queries,
-        )
+    inject_gas = inject_gas
 
-    def request_readback(
-        self,
-        center_x: int | None,
-        center_y: int | None,
-        width: int,
-        height: int,
-        channels: tuple[str, ...],
-        *,
-        request_id: int | None = None,
-        observer_id: int | None = None,
-        label: str | None = None,
-        target_query_id: str | None = None,
-        target_dx: int = 0,
-        target_dy: int = 0,
-        target_queries: list[TargetQuery | dict[str, Any]] | None = None,
-    ) -> int:
-        return request_readback(
-            self,
-            center_x,
-            center_y,
-            width,
-            height,
-            channels,
-            request_id=request_id,
-            observer_id=observer_id,
-            label=label,
-            target_query_id=target_query_id,
-            target_dx=target_dx,
-            target_dy=target_dy,
-            target_queries=target_queries,
-        )
+    request_readback = request_readback
 
-    def preview_readback(
-        self,
-        center_x: int | None,
-        center_y: int | None,
-        width: int,
-        height: int,
-        channels: tuple[str, ...],
-        *,
-        request_id: int | None = None,
-        observer_id: int | None = None,
-        label: str | None = None,
-        target_query_id: str | None = None,
-        target_dx: int = 0,
-        target_dy: int = 0,
-        target_queries: list[TargetQuery | dict[str, Any]] | None = None,
-    ) -> ReadbackRequest:
-        return preview_readback(
-            self,
-            center_x,
-            center_y,
-            width,
-            height,
-            channels,
-            request_id=request_id,
-            observer_id=observer_id,
-            label=label,
-            target_query_id=target_query_id,
-            target_dx=target_dx,
-            target_dy=target_dy,
-            target_queries=target_queries,
-        )
+    preview_readback = preview_readback
 
-    def request_observation(
-        self,
-        target: ObservationTarget | dict[str, Any],
-        *,
-        request_id: int | None = None,
-        target_queries: list[TargetQuery | dict[str, Any]] | None = None,
-    ) -> int:
-        return request_observation(
-            self,
-            target,
-            request_id=request_id,
-            target_queries=target_queries,
-        )
+    request_observation = request_observation
 
-    def preview_observation(
-        self,
-        target: ObservationTarget | dict[str, Any],
-        *,
-        request_id: int | None = None,
-        target_queries: list[TargetQuery | dict[str, Any]] | None = None,
-    ) -> ReadbackRequest:
-        return preview_observation(
-            self,
-            target,
-            request_id=request_id,
-            target_queries=target_queries,
-        )
+    preview_observation = preview_observation
 
-    def _resolve_public_world_command(
-        self,
-        command: WorldCommand | dict[str, Any],
-        *,
-        target_queries: list[TargetQuery | dict[str, Any]] | None,
-        assign_readback_request_id: bool,
-    ) -> WorldCommand:
-        return _resolve_public_world_command(
-            self,
-            command,
-            target_queries=target_queries,
-            assign_readback_request_id=assign_readback_request_id,
-        )
+    _resolve_public_world_command = _resolve_public_world_command
 
-    def _public_world_command(self, command: WorldCommand) -> WorldCommand:
-        return _public_world_command(self, command)
+    _public_world_command = _public_world_command
 
-    def preview_world_command(
-        self,
-        command: WorldCommand | dict[str, Any],
-        *,
-        target_queries: list[TargetQuery | dict[str, Any]] | None = None,
-    ) -> WorldCommand:
-        return preview_world_command(self, command, target_queries=target_queries)
+    preview_world_command = preview_world_command
 
-    def preview_target_queries(
-        self,
-        target_queries: list[TargetQuery | dict[str, Any]],
-    ) -> dict[str, ResolvedTarget]:
-        return preview_target_queries(self, target_queries)
+    preview_target_queries = preview_target_queries
 
-    def request_world_command(
-        self,
-        command: WorldCommand | dict[str, Any],
-        *,
-        target_queries: list[TargetQuery | dict[str, Any]] | None = None,
-    ) -> WorldCommand:
-        return request_world_command(self, command, target_queries=target_queries)
+    request_world_command = request_world_command
 
-    def preview_change_intent(
-        self,
-        intent: ChangeIntent | dict[str, Any],
-        *,
-        target_queries: list[TargetQuery | dict[str, Any]] | None = None,
-    ) -> ResolvedChangeIntent:
-        return preview_change_intent(self, intent, target_queries=target_queries)
+    preview_change_intent = preview_change_intent
 
-    def request_change_intent(
-        self,
-        intent: ChangeIntent | dict[str, Any],
-        *,
-        target_queries: list[TargetQuery | dict[str, Any]] | None = None,
-    ) -> ResolvedChangeIntent:
-        return request_change_intent(self, intent, target_queries=target_queries)
+    request_change_intent = request_change_intent
 
-    def preview_carrier_intent(
-        self,
-        intent: CarrierIntent | dict[str, Any],
-        *,
-        target_queries: list[TargetQuery | dict[str, Any]] | None = None,
-    ) -> ResolvedCarrierIntent:
-        return preview_carrier_intent(self, intent, target_queries=target_queries)
+    preview_carrier_intent = preview_carrier_intent
 
-    def request_carrier_intent(
-        self,
-        intent: CarrierIntent | dict[str, Any],
-        *,
-        target_queries: list[TargetQuery | dict[str, Any]] | None = None,
-    ) -> ResolvedCarrierIntent:
-        return request_carrier_intent(self, intent, target_queries=target_queries)
+    request_carrier_intent = request_carrier_intent
 
-    def preview_frame_input(
-        self,
-        frame_input: WorldFrameInput | dict[str, Any],
-        *,
-        reserved_readback_request_ids: set[int] | None = None,
-    ) -> WorldFramePreview:
-        return preview_frame_input(self, frame_input, reserved_readback_request_ids=reserved_readback_request_ids)
+    preview_frame_input = preview_frame_input
 
-    def submit_frame_input(self, frame_input: WorldFrameInput | dict[str, Any]) -> int:
-        return submit_frame_input(self, frame_input)
+    submit_frame_input = submit_frame_input
 
-    def request_frame_input(self, frame_input: WorldFrameInput | dict[str, Any]) -> dict[str, Any]:
-        return request_frame_input(self, frame_input)
+    request_frame_input = request_frame_input
 
-    def request_frame_cycle(
-        self,
-        frame_input: WorldFrameInput | dict[str, Any] | None = None,
-        *,
-        apply_frame: bool = True,
-    ) -> dict[str, Any]:
-        return request_frame_cycle(self, frame_input, apply_frame=apply_frame)
+    request_frame_cycle = request_frame_cycle
 
-    def pending_frame_submission_ids(self) -> list[int]:
-        return pending_frame_submission_ids(self)
+    pending_frame_submission_ids = pending_frame_submission_ids
 
     def _pending_frame_input(self, submission_id: int) -> WorldFrameInput:
         for frame_input in reversed(self.pending_frame_inputs):
@@ -1553,8 +1114,7 @@ class WorldEngine:
             if request.request_id is not None
         ]
 
-    def cancel_frame_submission(self, submission_id: int) -> bool:
-        return cancel_frame_submission(self, submission_id)
+    cancel_frame_submission = cancel_frame_submission
 
     def cancel_all_pending_frame_submissions(self) -> list[int]:
         canceled = self.pending_frame_submission_ids()
@@ -1566,33 +1126,25 @@ class WorldEngine:
         self.canceled_readback_request_ids.update(canceled_readback_ids)
         return canceled
 
-    def cancel_readback_request(self, request_id: int) -> bool:
-        return cancel_readback_request(self, request_id)
+    cancel_readback_request = cancel_readback_request
 
-    def poll_frame_output(self, submission_id: int | None = None) -> WorldFrameOutput | None:
-        return poll_frame_output(self, submission_id)
+    poll_frame_output = poll_frame_output
 
-    def poll_all_frame_outputs(self) -> list[WorldFrameOutput]:
-        return poll_all_frame_outputs(self)
+    poll_all_frame_outputs = poll_all_frame_outputs
 
-    def serialize_pending_commands(self) -> dict[str, Any]:
-        return serialize_pending_commands(self)
+    serialize_pending_commands = serialize_pending_commands
 
-    def serialize_readback_state(self) -> dict[str, Any]:
-        return serialize_readback_state(self)
+    serialize_readback_state = serialize_readback_state
 
-    def serialize_bridge_runtime(self) -> dict[str, Any]:
-        return serialize_bridge_runtime(self)
+    serialize_bridge_runtime = serialize_bridge_runtime
 
     @staticmethod
     def _serialize_bridge_resource_summary(name: str, array: np.ndarray) -> dict[str, Any]:
         return _serialize_bridge_resource_summary(name, array)
 
-    def serialize_bridge_resources(self) -> dict[str, Any]:
-        return serialize_bridge_resources(self)
+    serialize_bridge_resources = serialize_bridge_resources
 
-    def serialize_ready_readbacks(self) -> dict[str, Any]:
-        return serialize_ready_readbacks(self)
+    serialize_ready_readbacks = serialize_ready_readbacks
 
     def readback_request_status(self, request_id: int) -> str:
         if any(
@@ -1615,133 +1167,50 @@ class WorldEngine:
             return "canceled"
         return "missing"
 
-    def serialize_frame_state(self) -> dict[str, Any]:
-        return serialize_frame_state(self)
+    serialize_frame_state = serialize_frame_state
 
-    def serialize_pending_frame_inputs(self) -> dict[str, Any]:
-        return serialize_pending_frame_inputs(self)
+    serialize_pending_frame_inputs = serialize_pending_frame_inputs
 
-    def serialize_pending_frame_detail(self, frame_input: WorldFrameInput) -> dict[str, Any]:
-        return serialize_pending_frame_detail(self, frame_input)
+    serialize_pending_frame_detail = serialize_pending_frame_detail
 
-    def serialize_ready_frame_outputs(self) -> dict[str, Any]:
-        return serialize_ready_frame_outputs(self)
+    serialize_ready_frame_outputs = serialize_ready_frame_outputs
 
-    def frame_submission_status(self, submission_id: int) -> str:
-        return frame_submission_status(self, submission_id)
+    frame_submission_status = frame_submission_status
 
-    def inject_light(
-        self,
-        x: int | None,
-        y: int | None,
-        light_type: str,
-        strength: float,
-        radius: int | None = None,
-        *,
-        direction: tuple[float, float] = (0.0, 0.0),
-        spread: float = 0.25,
-        immediate: bool = False,
-        target_query_id: str | None = None,
-        target_dx: int = 0,
-        target_dy: int = 0,
-        target_queries: list[TargetQuery | dict[str, Any]] | None = None,
-    ) -> None:
-        inject_light(
-            self,
-            x,
-            y,
-            light_type,
-            strength,
-            radius,
-            direction=direction,
-            spread=spread,
-            immediate=immediate,
-            target_query_id=target_query_id,
-            target_dx=target_dx,
-            target_dy=target_dy,
-            target_queries=target_queries,
-        )
+    inject_light = inject_light
 
-    def focus_paging(self, center_x: int, center_y: int) -> list[PageStripeUpdate]:
-        return focus_paging(self, center_x, center_y)
+    focus_paging = focus_paging
 
-    def advance_paging(
-        self,
-        center_x: int | None,
-        center_y: int | None,
-        *,
-        immediate: bool = False,
-        target_query_id: str | None = None,
-        target_dx: int = 0,
-        target_dy: int = 0,
-        target_queries: list[TargetQuery | dict[str, Any]] | None = None,
-    ) -> list[PageStripeUpdate]:
-        return advance_paging(
-            self,
-            center_x,
-            center_y,
-            immediate=immediate,
-            target_query_id=target_query_id,
-            target_dx=target_dx,
-            target_dy=target_dy,
-            target_queries=target_queries,
-        )
+    advance_paging = advance_paging
 
-    def capture_page_stripe(self, update: PageStripeUpdate) -> dict[str, Any]:
-        return capture_page_stripe(self, update)
+    capture_page_stripe = capture_page_stripe
 
-    def _capture_page_stripe_cpu_snapshot(self, update: PageStripeUpdate) -> dict[str, Any]:
-        return _capture_page_stripe_cpu_snapshot(self, update)
+    _capture_page_stripe_cpu_snapshot = _capture_page_stripe_cpu_snapshot
 
-    def apply_page_stripe(
-        self,
-        update: PageStripeUpdate,
-        payload: dict[str, Any],
-        *,
-        immediate: bool = False,
-    ) -> None:
-        return apply_page_stripe(self, update, payload, immediate=immediate)
+    apply_page_stripe = apply_page_stripe
 
-    def store_page_stripe(self, update: PageStripeUpdate, payload: dict[str, Any]) -> dict[str, Any]:
-        return store_page_stripe(self, update, payload)
+    store_page_stripe = store_page_stripe
 
     def capture_page_stripe_to_store(self, update: PageStripeUpdate) -> dict[str, Any]:
         return self.store_page_stripe(update, self.capture_page_stripe(update))
 
-    def load_page_stripe(self, update: PageStripeUpdate) -> dict[str, Any] | None:
-        return load_page_stripe(self, update)
+    load_page_stripe = load_page_stripe
 
-    def apply_stored_page_stripe(
-        self,
-        update: PageStripeUpdate,
-        *,
-        immediate: bool = False,
-    ) -> dict[str, Any] | None:
-        return apply_stored_page_stripe(self, update, immediate=immediate)
+    apply_stored_page_stripe = apply_stored_page_stripe
 
-    def page_store_has_stripe(self, update: PageStripeUpdate) -> bool:
-        return page_store_has_stripe(self, update)
+    page_store_has_stripe = page_store_has_stripe
 
-    def list_page_store_stripe_keys(self) -> list[StoredStripeKey] | None:
-        return list_page_store_stripe_keys(self)
+    list_page_store_stripe_keys = list_page_store_stripe_keys
 
-    def export_page_store_entries(self) -> dict[str, Any]:
-        return export_page_store_entries(self)
+    export_page_store_entries = export_page_store_entries
 
-    def import_page_store_entries(self, entries: Iterable[dict[str, Any]], *, clear: bool = False) -> dict[str, int]:
-        return import_page_store_entries(self, entries, clear=clear)
+    import_page_store_entries = import_page_store_entries
 
-    def clear_page_store(self) -> int:
-        return clear_page_store(self)
+    clear_page_store = clear_page_store
 
-    def serialize_page_store_state(self) -> dict[str, Any]:
-        return serialize_page_store_state(self)
+    serialize_page_store_state = serialize_page_store_state
 
-    def _coerce_page_store_key(
-        self,
-        key: StoredStripeKey | PageStripeUpdate | dict[str, Any],
-    ) -> StoredStripeKey:
-        return _coerce_page_store_key(self, key)
+    _coerce_page_store_key = _coerce_page_store_key
 
     @staticmethod
     def _page_store_key_lookup_update(key: StoredStripeKey) -> PageStripeUpdate:
@@ -1756,94 +1225,35 @@ class WorldEngine:
             cross_world_end=int(getattr(key, "cross_world_end", 0)),
         )
 
-    def _coerce_page_stripe_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return _coerce_page_stripe_payload(self, payload)
+    _coerce_page_stripe_payload = _coerce_page_stripe_payload
 
-    def sync_entity_placeholders(
-        self,
-        placeholders: list[EntityPlaceholder],
-        *,
-        immediate: bool = False,
-    ) -> None:
-        sync_entity_placeholders(self, placeholders, immediate=immediate)
+    sync_entity_placeholders = sync_entity_placeholders
 
-    def sync_entity_states(
-        self,
-        entities: list[EntityState | dict[str, Any]],
-        *,
-        immediate: bool = False,
-    ) -> None:
-        sync_entity_states(self, entities, immediate=immediate)
+    sync_entity_states = sync_entity_states
 
-    def patch_entity_states(
-        self,
-        patches: list[EntityStatePatch | dict[str, Any]],
-        *,
-        immediate: bool = False,
-    ) -> None:
-        patch_entity_states(self, patches, immediate=immediate)
+    patch_entity_states = patch_entity_states
 
-    def sync_entity_observation_specs(
-        self,
-        observations: list[EntityObservationSpec | dict[str, Any]],
-        *,
-        immediate: bool = False,
-    ) -> None:
-        sync_entity_observation_specs(self, observations, immediate=immediate)
+    sync_entity_observation_specs = sync_entity_observation_specs
 
-    def set_force_sources(
-        self,
-        force_sources: list[ForceSource | dict[str, Any]],
-        *,
-        immediate: bool = False,
-    ) -> None:
-        set_force_sources(self, force_sources, immediate=immediate)
+    set_force_sources = set_force_sources
 
-    def set_emitters(
-        self,
-        emitters: list[dict[str, Any]],
-        *,
-        immediate: bool = False,
-    ) -> None:
-        set_emitters(self, emitters, immediate=immediate)
+    set_emitters = set_emitters
 
-    def patch_material(self, name: str, *, immediate: bool = True, **fields: Any) -> None:
-        patch_material(self, name, immediate=immediate, **fields)
+    patch_material = patch_material
 
-    def patch_light(self, name: str, *, immediate: bool = True, **fields: Any) -> None:
-        patch_light(self, name, immediate=immediate, **fields)
+    patch_light = patch_light
 
-    def patch_gas(self, name: str, *, immediate: bool = True, **fields: Any) -> None:
-        patch_gas(self, name, immediate=immediate, **fields)
+    patch_gas = patch_gas
 
-    def patch_material_optics(
-        self,
-        material_name: str,
-        light_type: str,
-        *,
-        immediate: bool = True,
-        **fields: Any,
-    ) -> None:
-        patch_material_optics(self, material_name, light_type, immediate=immediate, **fields)
+    patch_material_optics = patch_material_optics
 
-    def patch_reaction_action(self, index: int, *, immediate: bool = True, **fields: Any) -> None:
-        patch_reaction_action(self, index, immediate=immediate, **fields)
+    patch_reaction_action = patch_reaction_action
 
-    def patch_reaction_rule(
-        self,
-        rule_set: str,
-        index: int,
-        *,
-        immediate: bool = True,
-        **fields: Any,
-    ) -> None:
-        patch_reaction_rule(self, rule_set, index, immediate=immediate, **fields)
+    patch_reaction_rule = patch_reaction_rule
 
-    def delete_reaction_action(self, index: int, *, immediate: bool = True) -> None:
-        delete_reaction_action(self, index, immediate=immediate)
+    delete_reaction_action = delete_reaction_action
 
-    def delete_reaction_rule(self, rule_set: str, index: int, *, immediate: bool = True) -> None:
-        delete_reaction_rule(self, rule_set, index, immediate=immediate)
+    delete_reaction_rule = delete_reaction_rule
 
     def step(self, dt: float = 1.0 / 60.0, substeps: int = 1) -> None:
         for _ in range(max(1, substeps)):
@@ -1905,94 +1315,21 @@ class WorldEngine:
             results.append(self.completed_readbacks.popleft())
         return results
 
-    def consume_entity_observation_results(
-        self,
-        *,
-        current_frame_id: int | None = None,
-    ) -> dict[str, Any]:
-        return consume_entity_observation_results(self, current_frame_id=current_frame_id)
+    consume_entity_observation_results = consume_entity_observation_results
 
-    def run_entity_controller_turn(
-        self,
-        *,
-        controller_state: Any = None,
-        controller_state_provided: bool = False,
-        focus_center: tuple[int, int] | None = None,
-        entities: list[EntityState | dict[str, Any]] | None = None,
-        entity_placeholders: list[EntityPlaceholder | dict[str, Any]] | None = None,
-        patches: list[EntityStatePatch | dict[str, Any]] | None = None,
-        observation_specs: list[EntityObservationSpec | dict[str, Any]] | None = None,
-        force_sources: list[ForceSource | dict[str, Any]] | None = None,
-        emitters: list[dict[str, Any]] | None = None,
-        target_queries: list[TargetQuery | dict[str, Any]] | None = None,
-        change_intents: list[ChangeIntent | dict[str, Any]] | None = None,
-        carrier_intents: list[CarrierIntent | dict[str, Any]] | None = None,
-        observation_targets: list[ObservationTarget | dict[str, Any]] | None = None,
-        readback_requests: list[ReadbackRequest | dict[str, Any]] | None = None,
-        commands: list[WorldCommand | dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        return run_entity_controller_turn(self, controller_state=controller_state, controller_state_provided=controller_state_provided, focus_center=focus_center, entities=entities, entity_placeholders=entity_placeholders, patches=patches, observation_specs=observation_specs, force_sources=force_sources, emitters=emitters, target_queries=target_queries, change_intents=change_intents, carrier_intents=carrier_intents, observation_targets=observation_targets, readback_requests=readback_requests, commands=commands)
+    run_entity_controller_turn = run_entity_controller_turn
 
-    def set_controller_state(self, controller_state: Any = None) -> dict[str, Any]:
-        return set_controller_state(self, controller_state=controller_state)
+    set_controller_state = set_controller_state
 
-    def serialize_controller_state(self) -> dict[str, Any]:
-        return serialize_controller_state(self)
+    serialize_controller_state = serialize_controller_state
 
-    def _build_preview_controller_turn_entities(
-        self,
-        *,
-        entities: list[EntityState | dict[str, Any]] | None,
-        patches: list[EntityStatePatch | dict[str, Any]] | None,
-        observation_specs: list[EntityObservationSpec | dict[str, Any]] | None,
-    ) -> list[EntityState] | None:
-        return _build_preview_controller_turn_entities(self, entities=entities, patches=patches, observation_specs=observation_specs)
+    _build_preview_controller_turn_entities = _build_preview_controller_turn_entities
 
-    def _preview_consume_entity_observation_results(self) -> dict[str, Any]:
-        return _preview_consume_entity_observation_results(self)
+    _preview_consume_entity_observation_results = _preview_consume_entity_observation_results
 
-    def controller_turn_to_frame_input(
-        self,
-        *,
-        controller_state: Any = None,
-        controller_state_provided: bool = False,
-        focus_center: tuple[int, int] | None = None,
-        entities: list[EntityState | dict[str, Any]] | None = None,
-        entity_placeholders: list[EntityPlaceholder | dict[str, Any]] | None = None,
-        patches: list[EntityStatePatch | dict[str, Any]] | None = None,
-        observation_specs: list[EntityObservationSpec | dict[str, Any]] | None = None,
-        force_sources: list[ForceSource | dict[str, Any]] | None = None,
-        emitters: list[dict[str, Any]] | None = None,
-        target_queries: list[TargetQuery | dict[str, Any]] | None = None,
-        change_intents: list[ChangeIntent | dict[str, Any]] | None = None,
-        carrier_intents: list[CarrierIntent | dict[str, Any]] | None = None,
-        observation_targets: list[ObservationTarget | dict[str, Any]] | None = None,
-        readback_requests: list[ReadbackRequest | dict[str, Any]] | None = None,
-        commands: list[WorldCommand | dict[str, Any]] | None = None,
-    ) -> WorldFrameInput:
-        return controller_turn_to_frame_input(self, controller_state=controller_state, controller_state_provided=controller_state_provided, focus_center=focus_center, entities=entities, entity_placeholders=entity_placeholders, patches=patches, observation_specs=observation_specs, force_sources=force_sources, emitters=emitters, target_queries=target_queries, change_intents=change_intents, carrier_intents=carrier_intents, observation_targets=observation_targets, readback_requests=readback_requests, commands=commands)
+    controller_turn_to_frame_input = controller_turn_to_frame_input
 
-    def preview_entity_controller_turn(
-        self,
-        *,
-        controller_state: Any = None,
-        controller_state_provided: bool = False,
-        focus_center: tuple[int, int] | None = None,
-        entities: list[EntityState | dict[str, Any]] | None = None,
-        entity_placeholders: list[EntityPlaceholder | dict[str, Any]] | None = None,
-        patches: list[EntityStatePatch | dict[str, Any]] | None = None,
-        observation_specs: list[EntityObservationSpec | dict[str, Any]] | None = None,
-        force_sources: list[ForceSource | dict[str, Any]] | None = None,
-        emitters: list[dict[str, Any]] | None = None,
-        target_queries: list[TargetQuery | dict[str, Any]] | None = None,
-        change_intents: list[ChangeIntent | dict[str, Any]] | None = None,
-        carrier_intents: list[CarrierIntent | dict[str, Any]] | None = None,
-        observation_targets: list[ObservationTarget | dict[str, Any]] | None = None,
-        readback_requests: list[ReadbackRequest | dict[str, Any]] | None = None,
-        commands: list[WorldCommand | dict[str, Any]] | None = None,
-        reserved_readback_request_ids: set[int] | None = None,
-    ) -> dict[str, Any]:
-        return preview_entity_controller_turn(self, controller_state=controller_state, controller_state_provided=controller_state_provided, focus_center=focus_center, entities=entities, entity_placeholders=entity_placeholders, patches=patches, observation_specs=observation_specs, force_sources=force_sources, emitters=emitters, target_queries=target_queries, change_intents=change_intents, carrier_intents=carrier_intents, observation_targets=observation_targets, readback_requests=readback_requests, commands=commands, reserved_readback_request_ids=reserved_readback_request_ids)
+    preview_entity_controller_turn = preview_entity_controller_turn
 
     def submit_entity_controller_turn(
         self,
@@ -2032,70 +1369,11 @@ class WorldEngine:
         )
         return self.submit_frame_input(frame_input)
 
-    def request_entity_controller_turn(
-        self,
-        *,
-        controller_state: Any = None,
-        controller_state_provided: bool = False,
-        focus_center: tuple[int, int] | None = None,
-        entities: list[EntityState | dict[str, Any]] | None = None,
-        entity_placeholders: list[EntityPlaceholder | dict[str, Any]] | None = None,
-        patches: list[EntityStatePatch | dict[str, Any]] | None = None,
-        observation_specs: list[EntityObservationSpec | dict[str, Any]] | None = None,
-        force_sources: list[ForceSource | dict[str, Any]] | None = None,
-        emitters: list[dict[str, Any]] | None = None,
-        target_queries: list[TargetQuery | dict[str, Any]] | None = None,
-        change_intents: list[ChangeIntent | dict[str, Any]] | None = None,
-        carrier_intents: list[CarrierIntent | dict[str, Any]] | None = None,
-        observation_targets: list[ObservationTarget | dict[str, Any]] | None = None,
-        readback_requests: list[ReadbackRequest | dict[str, Any]] | None = None,
-        commands: list[WorldCommand | dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        return request_entity_controller_turn(self, controller_state=controller_state, controller_state_provided=controller_state_provided, focus_center=focus_center, entities=entities, entity_placeholders=entity_placeholders, patches=patches, observation_specs=observation_specs, force_sources=force_sources, emitters=emitters, target_queries=target_queries, change_intents=change_intents, carrier_intents=carrier_intents, observation_targets=observation_targets, readback_requests=readback_requests, commands=commands)
+    request_entity_controller_turn = request_entity_controller_turn
 
-    def request_entity_controller_cycle(
-        self,
-        *,
-        apply_turn: bool = True,
-        controller_state: Any = None,
-        controller_state_provided: bool = False,
-        focus_center: tuple[int, int] | None = None,
-        entities: list[EntityState | dict[str, Any]] | None = None,
-        entity_placeholders: list[EntityPlaceholder | dict[str, Any]] | None = None,
-        patches: list[EntityStatePatch | dict[str, Any]] | None = None,
-        observation_specs: list[EntityObservationSpec | dict[str, Any]] | None = None,
-        force_sources: list[ForceSource | dict[str, Any]] | None = None,
-        emitters: list[dict[str, Any]] | None = None,
-        target_queries: list[TargetQuery | dict[str, Any]] | None = None,
-        change_intents: list[ChangeIntent | dict[str, Any]] | None = None,
-        carrier_intents: list[CarrierIntent | dict[str, Any]] | None = None,
-        observation_targets: list[ObservationTarget | dict[str, Any]] | None = None,
-        readback_requests: list[ReadbackRequest | dict[str, Any]] | None = None,
-        commands: list[WorldCommand | dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        return request_entity_controller_cycle(self, apply_turn=apply_turn, controller_state=controller_state, controller_state_provided=controller_state_provided, focus_center=focus_center, entities=entities, entity_placeholders=entity_placeholders, patches=patches, observation_specs=observation_specs, force_sources=force_sources, emitters=emitters, target_queries=target_queries, change_intents=change_intents, carrier_intents=carrier_intents, observation_targets=observation_targets, readback_requests=readback_requests, commands=commands)
+    request_entity_controller_cycle = request_entity_controller_cycle
 
-    def run_entity_controller_cycle(
-        self,
-        *,
-        apply_turn: bool = True,
-        controller_state: Any = None,
-        controller_state_provided: bool = False,
-        focus_center: tuple[int, int] | None = None,
-        entities: list[EntityState | dict[str, Any]] | None = None,
-        entity_placeholders: list[EntityPlaceholder | dict[str, Any]] | None = None,
-        patches: list[EntityStatePatch | dict[str, Any]] | None = None,
-        observation_specs: list[EntityObservationSpec | dict[str, Any]] | None = None,
-        force_sources: list[ForceSource | dict[str, Any]] | None = None,
-        emitters: list[dict[str, Any]] | None = None,
-        target_queries: list[TargetQuery | dict[str, Any]] | None = None,
-        change_intents: list[ChangeIntent | dict[str, Any]] | None = None,
-        carrier_intents: list[CarrierIntent | dict[str, Any]] | None = None,
-        observation_targets: list[ObservationTarget | dict[str, Any]] | None = None,
-        readback_requests: list[ReadbackRequest | dict[str, Any]] | None = None,
-        commands: list[WorldCommand | dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        return run_entity_controller_cycle(self, apply_turn=apply_turn, controller_state=controller_state, controller_state_provided=controller_state_provided, focus_center=focus_center, entities=entities, entity_placeholders=entity_placeholders, patches=patches, observation_specs=observation_specs, force_sources=force_sources, emitters=emitters, target_queries=target_queries, change_intents=change_intents, carrier_intents=carrier_intents, observation_targets=observation_targets, readback_requests=readback_requests, commands=commands)
+    run_entity_controller_cycle = run_entity_controller_cycle
 
 
     def run_cpu_frame(
@@ -2385,35 +1663,9 @@ class WorldEngine:
             for target, request in observation_pairs
         ]
 
-    def _apply_frame_input(
-        self,
-        frame_input: WorldFrameInput,
-    ) -> tuple[
-        Any,
-        list[PageStripeUpdate],
-        dict[str, ResolvedTarget],
-        dict[str, ResolvedChangeIntent],
-        dict[str, ResolvedCarrierIntent],
-        list[dict[str, Any]],
-        list[dict[str, Any]],
-        int,
-        int,
-        int,
-        int,
-    ]:
-        return _apply_frame_input(self, frame_input)
+    _apply_frame_input = _apply_frame_input
 
-    def _prepare_preview_frame_context(
-        self,
-        frame_input: WorldFrameInput,
-    ) -> tuple[
-        list[PageStripeUpdate],
-        list[tuple[PageStripeUpdate, dict[str, Any]]],
-        list[ObservationTarget],
-        list[EntityPlaceholder],
-        int,
-    ]:
-        return _prepare_preview_frame_context(self, frame_input)
+    _prepare_preview_frame_context = _prepare_preview_frame_context
 
     def _snapshot_preview_runtime_state(self) -> dict[str, Any]:
         return {
@@ -2589,22 +1841,9 @@ class WorldEngine:
     ) -> list[dict[str, Any]]:
         return _serialize_bridge_index_stages(values, stage=stage)
 
-    def _serialize_preview_bridge_frame_snapshot(
-        self,
-        *,
-        current_entity_placeholders: dict[int, set[tuple[int, int]]],
-        resolved_commands: list[WorldCommand],
-        observation_requests: list[ReadbackRequest],
-        readback_requests: list[ReadbackRequest],
-        placeholder_inputs: list[EntityPlaceholder],
-        paging_updates: list[PageStripeUpdate],
-        page_stripes: list[tuple[PageStripeUpdate, dict[str, Any]]],
-        reserved_readback_request_ids: set[int] | None = None,
-    ) -> dict[str, Any]:
-        return _serialize_preview_bridge_frame_snapshot(self, current_entity_placeholders=current_entity_placeholders, resolved_commands=resolved_commands, observation_requests=observation_requests, readback_requests=readback_requests, placeholder_inputs=placeholder_inputs, paging_updates=paging_updates, page_stripes=page_stripes, reserved_readback_request_ids=reserved_readback_request_ids)
+    _serialize_preview_bridge_frame_snapshot = _serialize_preview_bridge_frame_snapshot
 
-    def _queue_loaded_collapse_pending_regions(self, update: PageStripeUpdate) -> None:
-        _queue_loaded_collapse_pending_regions(self, update)
+    _queue_loaded_collapse_pending_regions = _queue_loaded_collapse_pending_regions
 
     def _clear_saved_page_stripe_runtime_state(self, update: PageStripeUpdate) -> None:
         if update.kind != "save":
@@ -2664,11 +1903,9 @@ class WorldEngine:
         except Exception:
             pass
 
-    def material_by_id(self, material_id: int) -> MaterialDef:
-        return material_by_id(self, material_id)
+    material_by_id = material_by_id
 
-    def allocate_island_id(self) -> int:
-        return allocate_island_id(self)
+    allocate_island_id = allocate_island_id
 
     def _refresh_island_records_for_ids(self, island_ids: Iterable[int]) -> None:
         touched = {int(island_id) for island_id in island_ids if int(island_id) > 0}
@@ -2705,8 +1942,7 @@ class WorldEngine:
             )
         self.next_island_id = max(int(self.next_island_id), max(self.islands, default=0) + 1, 1)
 
-    def in_bounds(self, x: int, y: int) -> bool:
-        return in_bounds(self, x, y)
+    in_bounds = in_bounds
 
     def cell_xy_to_gas(self, x: int, y: int) -> tuple[int, int]:
         """Map a cell-space (x, y) pair onto the lower-resolution gas grid."""
@@ -2716,8 +1952,7 @@ class WorldEngine:
         """Map a cell-space (y, x) pair onto the lower-resolution gas grid."""
         return self.cell_xy_to_gas(x, y)
 
-    def sample_ambient_to_cells(self) -> np.ndarray:
-        return sample_ambient_to_cells(self)
+    sample_ambient_to_cells = sample_ambient_to_cells
 
     def ambient_temperature_at_cell(self, x: int, y: int) -> float:
         gy, gx = self.cell_xy_to_gas(x, y)
@@ -2739,8 +1974,7 @@ class WorldEngine:
         local_x0 = x0 - gx0 * self.gas_cell_size
         return np.ascontiguousarray(repeated[local_y0 : local_y0 + (y1 - y0), local_x0 : local_x0 + (x1 - x0)])
 
-    def sample_flow_to_cells(self) -> np.ndarray:
-        return sample_flow_to_cells(self)
+    sample_flow_to_cells = sample_flow_to_cells
 
     def downsample_cells_to_gas(self, field: np.ndarray) -> np.ndarray:
         result = np.zeros((self.gas_height, self.gas_width), dtype=np.float32)
@@ -2752,101 +1986,63 @@ class WorldEngine:
                 result[gy, gx] = float(block.mean()) if block.size else 0.0
         return result
 
-    def add_gas_from_cells(self, mask: np.ndarray, species: str, amount: float) -> None:
-        return add_gas_from_cells(self, mask, species, amount)
+    add_gas_from_cells = add_gas_from_cells
 
-    def set_cell_by_id(self, x: int, y: int, material_id: int, *, phase: Phase | None = None, mark_dirty: bool = True) -> None:
-        return set_cell_by_id(self, x, y, material_id, phase=phase, mark_dirty=mark_dirty)
+    set_cell_by_id = set_cell_by_id
 
-    def _inject_velocity_immediate(
-        self,
-        x: int,
-        y: int,
-        velocity: tuple[float, float],
-        radius: int,
-        *,
-        carrier: str,
-        mode: str,
-    ) -> None:
-        return _inject_velocity_immediate(self, x, y, velocity, radius, carrier=carrier, mode=mode)
+    _inject_velocity_immediate = _inject_velocity_immediate
 
-    def _inject_temperature_immediate(self, x: int, y: int, delta: float, radius: int) -> None:
-        return _inject_temperature_immediate(self, x, y, delta, radius)
+    _inject_temperature_immediate = _inject_temperature_immediate
 
-    def _inject_gas_immediate(self, x: int, y: int, species: str, amount: float, radius: int) -> None:
-        return _inject_gas_immediate(self, x, y, species, amount, radius)
+    _inject_gas_immediate = _inject_gas_immediate
 
-    def set_cell(self, x: int, y: int, material_name: str, *, phase: Phase | None = None, mark_dirty: bool = True) -> None:
-        return set_cell(self, x, y, material_name, phase=phase, mark_dirty=mark_dirty)
+    set_cell = set_cell
 
-    def clear_cell(self, x: int, y: int, *, mark_dirty: bool = True) -> None:
-        return clear_cell(self, x, y, mark_dirty=mark_dirty)
+    clear_cell = clear_cell
 
-    def clear_cells(self, mask: np.ndarray, *, mark_dirty: bool = True) -> None:
-        return clear_cells(self, mask, mark_dirty=mark_dirty)
+    clear_cells = clear_cells
 
-    def set_material_by_mask(self, mask: np.ndarray, material_name: str, *, phase: Phase | None = None, mark_dirty: bool = True) -> None:
-        return set_material_by_mask(self, mask, material_name, phase=phase, mark_dirty=mark_dirty)
+    set_material_by_mask = set_material_by_mask
 
-    def swap_cells(self, x0: int, y0: int, x1: int, y1: int) -> None:
-        return swap_cells(self, x0, y0, x1, y1)
+    swap_cells = swap_cells
 
-    def clear_cell_region(self, x0: int, y0: int, x1: int, y1: int, *, mark_dirty: bool = True) -> None:
-        return clear_cell_region(self, x0, y0, x1, y1, mark_dirty=mark_dirty)
+    clear_cell_region = clear_cell_region
 
-    def serialize_local_cells(self, x: int, y: int, width: int, height: int) -> dict[str, Any]:
-        return serialize_local_cells(self, x, y, width, height)
+    serialize_local_cells = serialize_local_cells
 
-    def serialize_temperature_window(self, x: int, y: int, width: int, height: int) -> dict[str, Any]:
-        return serialize_temperature_window(self, x, y, width, height)
+    serialize_temperature_window = serialize_temperature_window
 
-    def serialize_gas(self, species: str) -> list[list[float]]:
-        return serialize_gas(self, species)
+    serialize_gas = serialize_gas
 
-    def serialize_pressure(self) -> list[list[float]]:
-        return serialize_pressure(self)
+    serialize_pressure = serialize_pressure
 
-    def serialize_velocity(self) -> list[list[list[float]]]:
-        return serialize_velocity(self)
+    serialize_velocity = serialize_velocity
 
-    def serialize_visible_illumination(self) -> list[list[list[float]]]:
-        return serialize_visible_illumination(self)
+    serialize_visible_illumination = serialize_visible_illumination
 
-    def serialize_gas_runtime(self) -> dict[str, Any]:
-        return serialize_gas_runtime(self)
+    serialize_gas_runtime = serialize_gas_runtime
 
-    def serialize_heat_runtime(self) -> dict[str, Any]:
-        return serialize_heat_runtime(self)
+    serialize_heat_runtime = serialize_heat_runtime
 
-    def serialize_liquid_runtime(self) -> dict[str, Any]:
-        return serialize_liquid_runtime(self)
+    serialize_liquid_runtime = serialize_liquid_runtime
 
-    def serialize_reaction_runtime(self) -> dict[str, Any]:
-        return serialize_reaction_runtime(self)
+    serialize_reaction_runtime = serialize_reaction_runtime
 
-    def serialize_collapse_runtime(self, *, allow_gpu_sync_readback: bool = False) -> dict[str, Any]:
-        return serialize_collapse_runtime(self, allow_gpu_sync_readback=allow_gpu_sync_readback)
+    serialize_collapse_runtime = serialize_collapse_runtime
 
-    def serialize_optics_runtime(self) -> dict[str, Any]:
-        return serialize_optics_runtime(self)
+    serialize_optics_runtime = serialize_optics_runtime
 
-    def serialize_active_runtime(self) -> dict[str, Any]:
-        return serialize_active_runtime(self)
+    serialize_active_runtime = serialize_active_runtime
 
-    def serialize_motion_runtime(self) -> dict[str, Any]:
-        return serialize_motion_runtime(self)
+    serialize_motion_runtime = serialize_motion_runtime
 
-    def serialize_paging_state(self) -> dict[str, Any]:
-        return serialize_paging_state(self)
+    serialize_paging_state = serialize_paging_state
 
-    def serialize_engine_capabilities(self) -> dict[str, Any]:
-        return serialize_engine_capabilities(self)
+    serialize_engine_capabilities = serialize_engine_capabilities
 
-    def serialize_material_table(self) -> list[dict[str, Any]]:
-        return serialize_material_table(self)
+    serialize_material_table = serialize_material_table
 
-    def _serialize_bridge_ndarray(self, name: str, array: np.ndarray) -> dict[str, Any]:
-        return _serialize_bridge_ndarray(self, name, array)
+    _serialize_bridge_ndarray = _serialize_bridge_ndarray
 
     @staticmethod
     def _bridge_row_count(array: np.ndarray) -> int:
@@ -2913,94 +2109,25 @@ class WorldEngine:
             return "gas"
         return None
 
-    def _serialize_bridge_ndarray_slice(
-        self,
-        name: str,
-        array: np.ndarray,
-        *,
-        offset: int = 0,
-        limit: int | None = None,
-    ) -> dict[str, Any]:
-        return _serialize_bridge_ndarray_slice(self, name, array, offset=offset, limit=limit)
+    _serialize_bridge_ndarray_slice = _serialize_bridge_ndarray_slice
 
-    def _serialize_bridge_ndarray_window(
-        self,
-        name: str,
-        array: np.ndarray,
-        *,
-        x: int = 0,
-        y: int = 0,
-        w: int | None = None,
-        h: int | None = None,
-    ) -> dict[str, Any]:
-        return _serialize_bridge_ndarray_window(self, name, array, x=x, y=y, w=w, h=h)
+    _serialize_bridge_ndarray_window = _serialize_bridge_ndarray_window
 
-    def _serialize_bridge_spatial_window_payload(
-        self,
-        name: str,
-        array: np.ndarray,
-        *,
-        coord_space: str,
-        window_origin: tuple[int, int],
-        requested_size: tuple[int, int],
-        window_size: tuple[int, int],
-        window: np.ndarray,
-    ) -> dict[str, Any]:
-        return _serialize_bridge_spatial_window_payload(
-            self,
-            name,
-            array,
-            coord_space=coord_space,
-            window_origin=window_origin,
-            requested_size=requested_size,
-            window_size=window_size,
-            window=window,
-        )
+    _serialize_bridge_spatial_window_payload = _serialize_bridge_spatial_window_payload
 
-    def serialize_bridge_typed_table(self, name: str) -> dict[str, Any]:
-        return serialize_bridge_typed_table(self, name)
+    serialize_bridge_typed_table = serialize_bridge_typed_table
 
-    def serialize_bridge_typed_table_slice(self, name: str, *, offset: int = 0, limit: int | None = None) -> dict[str, Any]:
-        return serialize_bridge_typed_table_slice(self, name, offset=offset, limit=limit)
+    serialize_bridge_typed_table_slice = serialize_bridge_typed_table_slice
 
-    def serialize_bridge_shadow_buffer(self, name: str) -> dict[str, Any]:
-        return serialize_bridge_shadow_buffer(self, name)
+    serialize_bridge_shadow_buffer = serialize_bridge_shadow_buffer
 
-    def serialize_bridge_shadow_buffer_slice(self, name: str, *, offset: int = 0, limit: int | None = None) -> dict[str, Any]:
-        return serialize_bridge_shadow_buffer_slice(self, name, offset=offset, limit=limit)
+    serialize_bridge_shadow_buffer_slice = serialize_bridge_shadow_buffer_slice
 
-    def serialize_bridge_shadow_buffer_window(
-        self,
-        name: str,
-        *,
-        x: int = 0,
-        y: int = 0,
-        w: int | None = None,
-        h: int | None = None,
-    ) -> dict[str, Any]:
-        return serialize_bridge_shadow_buffer_window(self, name, x=x, y=y, w=w, h=h)
+    serialize_bridge_shadow_buffer_window = serialize_bridge_shadow_buffer_window
 
-    def serialize_bridge_shadow_buffer_world_window(
-        self,
-        name: str,
-        *,
-        x: int = 0,
-        y: int = 0,
-        w: int | None = None,
-        h: int | None = None,
-    ) -> dict[str, Any]:
-        return serialize_bridge_shadow_buffer_world_window(self, name, x=x, y=y, w=w, h=h)
+    serialize_bridge_shadow_buffer_world_window = serialize_bridge_shadow_buffer_world_window
 
-    def serialize_bridge_shadow_buffer_gas_window(
-        self,
-        name: str,
-        *,
-        x: int = 0,
-        y: int = 0,
-        w: int | None = None,
-        h: int | None = None,
-    ) -> dict[str, Any]:
-        return serialize_bridge_shadow_buffer_gas_window(self, name, x=x, y=y, w=w, h=h)
+    serialize_bridge_shadow_buffer_gas_window = serialize_bridge_shadow_buffer_gas_window
 
     @staticmethod
     def _decode_bridge_uploaded_command(meta_record: np.ndarray, payload_bytes: np.ndarray) -> dict[str, Any]:
@@ -3025,73 +2152,39 @@ class WorldEngine:
             cursor = child
         cursor[path[-1]] = value
 
-    def serialize_bridge_upload_snapshot(self) -> dict[str, Any]:
-        return serialize_bridge_upload_snapshot(self)
+    serialize_bridge_upload_snapshot = serialize_bridge_upload_snapshot
 
-    def serialize_bridge_frame_snapshot(self) -> dict[str, Any]:
-        return serialize_bridge_frame_snapshot(self)
+    serialize_bridge_frame_snapshot = serialize_bridge_frame_snapshot
 
-    def _serialize_force_source_record(self, force_source: ForceSource) -> dict[str, Any]:
-        return _serialize_force_source_record(self, force_source)
+    _serialize_force_source_record = _serialize_force_source_record
 
-    def serialize_force_sources(self) -> list[dict[str, Any]]:
-        return serialize_force_sources(self)
+    serialize_force_sources = serialize_force_sources
 
-    def _serialize_emitter_record(self, emitter: dict[str, object]) -> dict[str, object]:
-        return _serialize_emitter_record(self, emitter)
+    _serialize_emitter_record = _serialize_emitter_record
 
-    def serialize_emitters(self) -> dict[str, list[dict[str, object]]]:
-        return serialize_emitters(self)
+    serialize_emitters = serialize_emitters
 
-    def serialize_gas_species_table(self) -> list[dict[str, Any]]:
-        return serialize_gas_species_table(self)
+    serialize_gas_species_table = serialize_gas_species_table
 
-    def serialize_light_type_table(self) -> list[dict[str, Any]]:
-        return serialize_light_type_table(self)
+    serialize_light_type_table = serialize_light_type_table
 
-    def serialize_material_optics_table(self) -> list[dict[str, Any]]:
-        return serialize_material_optics_table(self)
+    serialize_material_optics_table = serialize_material_optics_table
 
-    def serialize_reaction_table(self) -> dict[str, object]:
-        return serialize_reaction_table(self)
+    serialize_reaction_table = serialize_reaction_table
 
-    def serialize_optics(
-        self,
-        x: int = 0,
-        y: int = 0,
-        width: int | None = None,
-        height: int | None = None,
-        *,
-        light_type: str | None = None,
-    ) -> dict[str, Any]:
-        return serialize_optics(self, x, y, width, height, light_type=light_type)
+    serialize_optics = serialize_optics
 
-    def serialize_readback_request(self, request: ReadbackRequest) -> dict[str, Any]:
-        return serialize_readback_request(self, request)
+    serialize_readback_request = serialize_readback_request
 
-    def _infer_readback_payload_coord_space(
-        self,
-        path: tuple[str, ...],
-        *,
-        resource_name: str | None = None,
-    ) -> str | None:
-        return _infer_readback_payload_coord_space(self, path, resource_name=resource_name)
+    _infer_readback_payload_coord_space = _infer_readback_payload_coord_space
 
-    def _serialize_readback_source_descriptor(self, path: tuple[str, ...], value: Any) -> Any:
-        return _serialize_readback_source_descriptor(self, path, value)
+    _serialize_readback_source_descriptor = _serialize_readback_source_descriptor
 
-    def _serialize_readback_plan_for_request(self, request: ReadbackRequest) -> dict[str, Any]:
-        return _serialize_readback_plan_for_request(self, request)
+    _serialize_readback_plan_for_request = _serialize_readback_plan_for_request
 
-    def _serialize_readback_plans_for_requests(self, requests: list[ReadbackRequest]) -> list[dict[str, Any]]:
-        return _serialize_readback_plans_for_requests(self, requests)
+    _serialize_readback_plans_for_requests = _serialize_readback_plans_for_requests
 
-    def _serialize_observation_plan_for_target_request(
-        self,
-        target: ObservationTarget,
-        request: ReadbackRequest,
-    ) -> dict[str, Any]:
-        return _serialize_observation_plan_for_target_request(self, target, request)
+    _serialize_observation_plan_for_target_request = _serialize_observation_plan_for_target_request
 
     def _build_observation_request_pairs(
         self,
@@ -3105,35 +2198,11 @@ class WorldEngine:
                 pairs.append((target, request))
         return pairs
 
-    def serialize_readback_plan(
-        self,
-        center_x: int | None,
-        center_y: int | None,
-        width: int,
-        height: int,
-        channels: tuple[str, ...],
-        *,
-        request_id: int | None = None,
-        observer_id: int | None = None,
-        label: str | None = None,
-        target_query_id: str | None = None,
-        target_dx: int = 0,
-        target_dy: int = 0,
-        target_queries: list[TargetQuery | dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        return serialize_readback_plan(self, center_x, center_y, width, height, channels, request_id=request_id, observer_id=observer_id, label=label, target_query_id=target_query_id, target_dx=target_dx, target_dy=target_dy, target_queries=target_queries)
+    serialize_readback_plan = serialize_readback_plan
 
-    def serialize_observation_plan(
-        self,
-        target: ObservationTarget | dict[str, Any],
-        *,
-        request_id: int | None = None,
-        target_queries: list[TargetQuery | dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        return serialize_observation_plan(self, target, request_id=request_id, target_queries=target_queries)
+    serialize_observation_plan = serialize_observation_plan
 
-    def serialize_world_command(self, command: WorldCommand) -> dict[str, Any]:
-        return serialize_world_command(self, command)
+    serialize_world_command = serialize_world_command
 
     @staticmethod
     def serialize_entity_placeholder_input(placeholder: EntityPlaceholder) -> dict[str, Any]:
@@ -3163,33 +2232,25 @@ class WorldEngine:
     def serialize_carrier_intent_input(intent: CarrierIntent) -> dict[str, Any]:
         return serialize_carrier_intent_input(intent)
 
-    def serialize_frame_input(self, frame_input: WorldFrameInput) -> dict[str, Any]:
-        return serialize_frame_input(self, frame_input)
+    serialize_frame_input = serialize_frame_input
 
-    def _serialize_readback_payload(self, payload: Any) -> Any:
-        return _serialize_readback_payload(self, payload)
+    _serialize_readback_payload = _serialize_readback_payload
 
-    def serialize_readback_result(self, result: ReadbackResult) -> dict[str, Any]:
-        return serialize_readback_result(self, result)
+    serialize_readback_result = serialize_readback_result
 
-    def serialize_resolved_target(self, target: ResolvedTarget) -> dict[str, Any]:
-        return serialize_resolved_target(self, target)
+    serialize_resolved_target = serialize_resolved_target
 
-    def serialize_resolved_change_intent(self, intent: ResolvedChangeIntent) -> dict[str, Any]:
-        return serialize_resolved_change_intent(self, intent)
+    serialize_resolved_change_intent = serialize_resolved_change_intent
 
-    def serialize_resolved_carrier_intent(self, intent: ResolvedCarrierIntent) -> dict[str, Any]:
-        return serialize_resolved_carrier_intent(self, intent)
+    serialize_resolved_carrier_intent = serialize_resolved_carrier_intent
 
-    def serialize_observation_result(self, result: ObservationResult) -> dict[str, Any]:
-        return serialize_observation_result(self, result)
+    serialize_observation_result = serialize_observation_result
 
     @staticmethod
     def serialize_entity_observation_spec(spec: EntityObservationSpec) -> dict[str, Any]:
         return serialize_entity_observation_spec(spec)
 
-    def serialize_entity_state_patch(self, patch: EntityStatePatch) -> dict[str, Any]:
-        return serialize_entity_state_patch(self, patch)
+    serialize_entity_state_patch = serialize_entity_state_patch
 
     @staticmethod
     def serialize_observation_target(target: ObservationTarget) -> dict[str, Any]:
@@ -3199,14 +2260,11 @@ class WorldEngine:
     def serialize_entity_state_input(entity: EntityState) -> dict[str, Any]:
         return serialize_entity_state_input(entity)
 
-    def serialize_entity_state(self, entity: EntityState) -> dict[str, Any]:
-        return serialize_entity_state(self, entity)
+    serialize_entity_state = serialize_entity_state
 
-    def serialize_entity_states(self) -> dict[str, Any]:
-        return serialize_entity_states(self)
+    serialize_entity_states = serialize_entity_states
 
-    def serialize_entity_observation_state(self) -> dict[str, Any]:
-        return serialize_entity_observation_state(self)
+    serialize_entity_observation_state = serialize_entity_observation_state
 
     def _current_cell_state_snapshot(self, *, allow_gpu_sync_readback: bool = False) -> dict[str, np.ndarray]:
         if (
@@ -3290,23 +2348,17 @@ class WorldEngine:
             or "placeholder_displaced_material" in authoritative
         )
 
-    def serialize_entity_placeholders(self, *, allow_gpu_sync_readback: bool = False) -> dict[str, Any]:
-        return serialize_entity_placeholders(self, allow_gpu_sync_readback=allow_gpu_sync_readback)
+    serialize_entity_placeholders = serialize_entity_placeholders
 
-    def serialize_entity_placeholder_index_snapshot(self) -> dict[str, Any]:
-        return serialize_entity_placeholder_index_snapshot(self)
+    serialize_entity_placeholder_index_snapshot = serialize_entity_placeholder_index_snapshot
 
-    def serialize_entity_feedback_snapshot(self, *, allow_gpu_sync_readback: bool = False) -> dict[str, Any]:
-        return serialize_entity_feedback_snapshot(self, allow_gpu_sync_readback=allow_gpu_sync_readback)
+    serialize_entity_feedback_snapshot = serialize_entity_feedback_snapshot
 
-    def serialize_consumed_entity_feedback_snapshot(self) -> dict[str, Any]:
-        return serialize_consumed_entity_feedback_snapshot(self)
+    serialize_consumed_entity_feedback_snapshot = serialize_consumed_entity_feedback_snapshot
 
-    def _serialize_cpu_visible_entity_placeholders(self) -> dict[str, Any]:
-        return _serialize_cpu_visible_entity_placeholders(self)
+    _serialize_cpu_visible_entity_placeholders = _serialize_cpu_visible_entity_placeholders
 
-    def serialize_entity_feedback(self, feedback: EntityFeedback) -> dict[str, Any]:
-        return serialize_entity_feedback(self, feedback)
+    serialize_entity_feedback = serialize_entity_feedback
 
     def _store_entity_observation_consume_snapshot(
         self,
@@ -3332,95 +2384,52 @@ class WorldEngine:
         self.last_entity_observation_consume_snapshot = snapshot
         return deepcopy(snapshot)
 
-    def serialize_entity_observation_consume_state(self) -> dict[str, Any]:
-        return serialize_entity_observation_consume_state(self)
+    serialize_entity_observation_consume_state = serialize_entity_observation_consume_state
 
-    def serialize_frame_output(self, output: WorldFrameOutput) -> dict[str, Any]:
-        return serialize_frame_output(self, output)
+    serialize_frame_output = serialize_frame_output
 
-    def serialize_frame_preview(self, preview: WorldFramePreview) -> dict[str, Any]:
-        return serialize_frame_preview(self, preview)
+    serialize_frame_preview = serialize_frame_preview
 
-    def serialize_debug_frame(
-        self,
-        view: DebugView | str,
-        *,
-        gas_species: str | None = None,
-        light_type: str | None = None,
-    ) -> dict[str, Any]:
-        return serialize_debug_frame(self, view, gas_species=gas_species, light_type=light_type)
+    serialize_debug_frame = serialize_debug_frame
 
-    def debug_frame(
-        self,
-        view: DebugView,
-        *,
-        gas_species: str | None = None,
-        light_type: str | None = None,
-    ) -> np.ndarray:
-        return debug_frame(self, view, gas_species=gas_species, light_type=light_type)
+    debug_frame = debug_frame
 
-    def _material_frame(self) -> np.ndarray:
-        return _material_frame(self)
+    _material_frame = _material_frame
 
-    def _temperature_frame(self) -> np.ndarray:
-        return _temperature_frame(self)
+    _temperature_frame = _temperature_frame
 
-    def _pressure_frame(self) -> np.ndarray:
-        return _pressure_frame(self)
+    _pressure_frame = _pressure_frame
 
-    def _vector_field_frame(self, vectors: np.ndarray) -> np.ndarray:
-        return _vector_field_frame(self, vectors)
+    _vector_field_frame = _vector_field_frame
 
-    def _active_frame(self) -> np.ndarray:
-        return _active_frame(self)
+    _active_frame = _active_frame
 
-    def _motion_frame(self) -> np.ndarray:
-        return _motion_frame(self)
+    _motion_frame = _motion_frame
 
-    def _heat_frame(self) -> np.ndarray:
-        return _heat_frame(self)
+    _heat_frame = _heat_frame
 
-    def _liquid_frame(self) -> np.ndarray:
-        return _liquid_frame(self)
+    _liquid_frame = _liquid_frame
 
-    def _reaction_frame(self) -> np.ndarray:
-        return _reaction_frame(self)
+    _reaction_frame = _reaction_frame
 
-    def _collapse_frame(self) -> np.ndarray:
-        return _collapse_frame(self)
+    _collapse_frame = _collapse_frame
 
-    def _optics_frame(self, *, light_type: str | None = None) -> np.ndarray:
-        return _optics_frame(self, light_type=light_type)
+    _optics_frame = _optics_frame
 
-    def _optics_dose_frame(self, *, light_type: str | None = None) -> np.ndarray:
-        return _optics_dose_frame(self, light_type=light_type)
+    _optics_dose_frame = _optics_dose_frame
 
-    def _gas_frame(self, gas_species: str) -> np.ndarray:
-        return _gas_frame(self, gas_species)
+    _gas_frame = _gas_frame
 
-    def _accumulate_debug_point(self, frame: np.ndarray, x: int, y: int, color: np.ndarray) -> None:
-        return _accumulate_debug_point(self, frame, x, y, color)
+    _accumulate_debug_point = _accumulate_debug_point
 
-    def _draw_debug_bbox_outline(
-        self,
-        frame: np.ndarray,
-        bbox: tuple[int, int, int, int],
-        color: np.ndarray,
-    ) -> None:
-        return _draw_debug_bbox_outline(self, frame, bbox, color)
+    _draw_debug_bbox_outline = _draw_debug_bbox_outline
 
 
-    def _apply_grid_world_commands(self, commands: list[WorldCommand]) -> None:
-        _apply_grid_world_commands(self, commands)
+    _apply_grid_world_commands = _apply_grid_world_commands
 
-    def _apply_grid_world_command_cpu(self, command: WorldCommand) -> None:
-        _apply_grid_world_command_cpu(self, command)
+    _apply_grid_world_command_cpu = _apply_grid_world_command_cpu
 
-    def _grid_world_command_runtime_regions(
-        self,
-        command: WorldCommand,
-    ) -> tuple[tuple[int, int, int, int, int] | None, tuple[int, int, int, int] | None]:
-        return _grid_world_command_runtime_regions(self, command)
+    _grid_world_command_runtime_regions = _grid_world_command_runtime_regions
 
     def _mark_grid_world_command_runtime_regions(self, command: WorldCommand) -> None:
         active_rect, collapse_rect = self._grid_world_command_runtime_regions(command)
@@ -3430,8 +2439,7 @@ class WorldEngine:
         if collapse_rect is not None:
             self._mark_collapse_dirty_rect(*collapse_rect)
 
-    def _apply_commands(self) -> None:
-        _apply_commands(self)
+    _apply_commands = _apply_commands
 
     def _finish_readbacks(self, *, world_synced: bool = False) -> None:
         normalized_requests = [self._assign_readback_request_id(self._normalize_readback_request(request)) for request in self.pending_readbacks]
@@ -3492,18 +2500,11 @@ class WorldEngine:
         gy1 = min(self.gas_height, max(gy0, (y1 + self.gas_cell_size - 1) // self.gas_cell_size))
         return (gx0, gy0, gx1, gy1)
 
-    def _apply_page_stripe(self, update: PageStripeUpdate, payload: dict[str, Any]) -> None:
-        return _apply_page_stripe(self, update, payload)
+    _apply_page_stripe = _apply_page_stripe
 
-    def _apply_page_stripe_dense_cpu(self, update: PageStripeUpdate, payload: dict[str, Any]) -> None:
-        return _apply_page_stripe_dense_cpu(self, update, payload)
+    _apply_page_stripe_dense_cpu = _apply_page_stripe_dense_cpu
 
-    def _queue_loaded_collapse_pending_regions_from_payload(
-        self,
-        update: PageStripeUpdate,
-        payload: dict[str, Any],
-    ) -> None:
-        _queue_loaded_collapse_pending_regions_from_payload(self, update, payload)
+    _queue_loaded_collapse_pending_regions_from_payload = _queue_loaded_collapse_pending_regions_from_payload
 
     def _advance_paging(self, center_x: int, center_y: int) -> list[PageStripeUpdate]:
         force_sources = [
@@ -3532,11 +2533,9 @@ class WorldEngine:
             self._sync_force_sources(force_sources)
         return updates
 
-    def _prepare_bridge_frame_inputs(self) -> None:
-        return _prepare_bridge_frame_inputs(self)
+    _prepare_bridge_frame_inputs = _prepare_bridge_frame_inputs
 
-    def _needs_pre_simulation_bridge_sync(self, *, frame_input: WorldFrameInput | None) -> bool:
-        return _needs_pre_simulation_bridge_sync(self, frame_input=frame_input)
+    _needs_pre_simulation_bridge_sync = _needs_pre_simulation_bridge_sync
 
     def _sync_pre_simulation_bridge_without_debug_upload(self) -> None:
         try:
@@ -3546,8 +2545,7 @@ class WorldEngine:
                 raise
             self.bridge.sync_world(self)
 
-    def _clear_bridge_frame_inputs(self, *, keep_commands: bool, prepared: bool) -> None:
-        return _clear_bridge_frame_inputs(self, keep_commands=keep_commands, prepared=prepared)
+    _clear_bridge_frame_inputs = _clear_bridge_frame_inputs
 
     def _mark_active_rect_runtime(
         self,
@@ -3580,8 +2578,7 @@ class WorldEngine:
         if self.simulation_backend == "gpu":
             self._invalidate_gpu_authoritative_resources("active_meta", "active_tile_ttl", "active_chunk_mask")
 
-    def _sync_entity_placeholders(self, placeholders: list[EntityPlaceholder]) -> None:
-        _sync_entity_placeholders(self, placeholders)
+    _sync_entity_placeholders = _sync_entity_placeholders
 
     def _sync_force_sources(self, force_sources: list[ForceSource]) -> None:
         self.force_sources = [
@@ -3644,8 +2641,7 @@ class WorldEngine:
     def _record_bridge_page_stripe(self, update: PageStripeUpdate, payload: dict[str, Any]) -> None:
         self.bridge_frame_page_stripes.append((PageStripeUpdate(**asdict(update)), deepcopy(payload)))
 
-    def _release_entity_placeholder_cell(self, x: int, y: int, entity_id: int) -> None:
-        _release_entity_placeholder_cell(self, x, y, entity_id)
+    _release_entity_placeholder_cell = _release_entity_placeholder_cell
 
     def _mirror_release_entity_placeholder_cell(self, x: int, y: int, entity_id: int) -> None:
         if not self.in_bounds(x, y):
@@ -3670,77 +2666,53 @@ class WorldEngine:
             return
         self.clear_cell(x, y, mark_dirty=False)
 
-    def _resolve_sanctioned_material_id(self, name: str) -> int:
-        return _resolve_sanctioned_material_id(self, name)
+    _resolve_sanctioned_material_id = _resolve_sanctioned_material_id
 
-    def _shadow_material_id_by_name(self, name: str | None) -> int:
-        return _shadow_material_id_by_name(self, name)
+    _shadow_material_id_by_name = _shadow_material_id_by_name
 
-    def _resolve_sanctioned_placeholder_material_id(self, name: str) -> int:
-        return _resolve_sanctioned_placeholder_material_id(self, name)
+    _resolve_sanctioned_placeholder_material_id = _resolve_sanctioned_placeholder_material_id
 
-    def _resolve_sanctioned_light_id(self, name: str) -> int:
-        return _resolve_sanctioned_light_id(self, name)
+    _resolve_sanctioned_light_id = _resolve_sanctioned_light_id
 
-    def _resolve_sanctioned_gas_id(self, name: str) -> int:
-        return _resolve_sanctioned_gas_id(self, name)
+    _resolve_sanctioned_gas_id = _resolve_sanctioned_gas_id
 
-    def _shadow_material_row_valid(self, material_id: int) -> bool:
-        return _shadow_material_row_valid(self, material_id)
+    _shadow_material_row_valid = _shadow_material_row_valid
 
-    def _shadow_gas_row_valid(self, species_id: int) -> bool:
-        return _shadow_gas_row_valid(self, species_id)
+    _shadow_gas_row_valid = _shadow_gas_row_valid
 
-    def _shadow_light_row_valid(self, light_id: int) -> bool:
-        return _shadow_light_row_valid(self, light_id)
+    _shadow_light_row_valid = _shadow_light_row_valid
 
-    def _shadow_material_def(self, material_id: int) -> MaterialDef | None:
-        return _shadow_material_def(self, material_id)
+    _shadow_material_def = _shadow_material_def
 
-    def _shadow_light_type_def(self, light_id: int) -> LightTypeDef | None:
-        return _shadow_light_type_def(self, light_id)
+    _shadow_light_type_def = _shadow_light_type_def
 
-    def _shadow_gas_species_def(self, species_id: int) -> GasSpeciesDef | None:
-        return _shadow_gas_species_def(self, species_id)
+    _shadow_gas_species_def = _shadow_gas_species_def
 
-    def _shadow_material_optics_def(self, material_name: str, light_type: str) -> MaterialOpticsDef | None:
-        return _shadow_material_optics_def(self, material_name, light_type)
+    _shadow_material_optics_def = _shadow_material_optics_def
 
-    def _shadow_material_name(self, material_id: int) -> str | None:
-        return _shadow_material_name(self, material_id)
+    _shadow_material_name = _shadow_material_name
 
-    def _shadow_gas_name(self, species_id: int) -> str | None:
-        return _shadow_gas_name(self, species_id)
+    _shadow_gas_name = _shadow_gas_name
 
-    def _shadow_light_name(self, light_id: int) -> str | None:
-        return _shadow_light_name(self, light_id)
+    _shadow_light_name = _shadow_light_name
 
-    def _shadow_light_default_range(self, light_id: int) -> int | None:
-        return _shadow_light_default_range(self, light_id)
+    _shadow_light_default_range = _shadow_light_default_range
 
-    def _shadow_light_dose_channel(self, light_id: int) -> int | None:
-        return _shadow_light_dose_channel(self, light_id)
+    _shadow_light_dose_channel = _shadow_light_dose_channel
 
-    def _shadow_light_color(self, light_id: int) -> np.ndarray | None:
-        return _shadow_light_color(self, light_id)
+    _shadow_light_color = _shadow_light_color
 
-    def _shadow_light_name_and_range(self, light_id: int) -> tuple[str, int] | None:
-        return _shadow_light_name_and_range(self, light_id)
+    _shadow_light_name_and_range = _shadow_light_name_and_range
 
-    def _shadow_material_default_phase(self, material_id: int) -> int | None:
-        return _shadow_material_default_phase(self, material_id)
+    _shadow_material_default_phase = _shadow_material_default_phase
 
-    def _shadow_material_base_integrity(self, material_id: int) -> float | None:
-        return _shadow_material_base_integrity(self, material_id)
+    _shadow_material_base_integrity = _shadow_material_base_integrity
 
-    def _shadow_material_spawn_temperature(self, material_id: int) -> float | None:
-        return _shadow_material_spawn_temperature(self, material_id)
+    _shadow_material_spawn_temperature = _shadow_material_spawn_temperature
 
-    def _shadow_condense_target_material_id(self, species_id: int) -> int:
-        return _shadow_condense_target_material_id(self, species_id)
+    _shadow_condense_target_material_id = _shadow_condense_target_material_id
 
-    def _shadow_material_is_placeholder(self, material_id: int) -> bool:
-        return _shadow_material_is_placeholder(self, material_id)
+    _shadow_material_is_placeholder = _shadow_material_is_placeholder
 
     def _material_placeholder_mask(self, material_id: np.ndarray) -> np.ndarray:
         ids = np.asarray(material_id, dtype=np.int64)
@@ -3750,14 +2722,11 @@ class WorldEngine:
             mask[valid] = self.material_is_placeholder[ids[valid]]
         return mask
 
-    def _shadow_material_is_plant(self, material_id: int) -> bool:
-        return _shadow_material_is_plant(self, material_id)
+    _shadow_material_is_plant = _shadow_material_is_plant
 
-    def _shadow_reaction_action(self, index: int) -> ReactionAction | None:
-        return _shadow_reaction_action(self, index)
+    _shadow_reaction_action = _shadow_reaction_action
 
-    def _reaction_rule_list(self, rule_set: str) -> list[PairReactionRule] | list[SelfReactionRule]:
-        return _reaction_rule_list(self, rule_set)
+    _reaction_rule_list = _reaction_rule_list
 
     def _set_reaction_rule_list(self, rule_set: str, entries: list[dict[str, Any]] | list[PairReactionRule] | list[SelfReactionRule]) -> None:
         normalized = str(rule_set)
@@ -3841,11 +2810,9 @@ class WorldEngine:
                 clamped_slots.extend([-1] * (8 - len(clamped_slots)))
             material["reaction_slots"] = tuple(clamped_slots)
 
-    def _shadow_reaction_rule(self, rule_set: str, index: int) -> PairReactionRule | SelfReactionRule | None:
-        return _shadow_reaction_rule(self, rule_set, index)
+    _shadow_reaction_rule = _shadow_reaction_rule
 
-    def _occupy_entity_placeholder_cell(self, x: int, y: int, placeholder: EntityPlaceholder) -> bool:
-        return _occupy_entity_placeholder_cell(self, x, y, placeholder)
+    _occupy_entity_placeholder_cell = _occupy_entity_placeholder_cell
 
     def _mirror_occupy_entity_placeholder_cell(self, x: int, y: int, placeholder: EntityPlaceholder) -> bool:
         if not self.in_bounds(x, y):
@@ -3861,11 +2828,7 @@ class WorldEngine:
         self._mark_active_rect_runtime(max(0, x - 1), max(0, y - 1), min(self.width, x + 2), min(self.height, y + 2))
         return True
 
-    def _frame_entities_to_placeholders_and_observations(
-        self,
-        entities: list[EntityState],
-    ) -> tuple[list[EntityPlaceholder], list[ObservationTarget]]:
-        return _frame_entities_to_placeholders_and_observations(self, entities)
+    _frame_entities_to_placeholders_and_observations = _frame_entities_to_placeholders_and_observations
 
     def _runtime_entities_to_immediate_observation_targets(
         self,
@@ -3900,11 +2863,9 @@ class WorldEngine:
             )
         return targets
 
-    def _sync_entity_states(self, entities: list[EntityState]) -> tuple[list[EntityPlaceholder], list[ObservationTarget]]:
-        return _sync_entity_states(self, entities)
+    _sync_entity_states = _sync_entity_states
 
-    def _sync_entity_observation_specs(self, observations: list[EntityObservationSpec]) -> None:
-        _sync_entity_observation_specs(self, observations)
+    _sync_entity_observation_specs = _sync_entity_observation_specs
 
     def _patch_entity_states(self, patches: list[EntityStatePatch]) -> None:
         next_entity_states = dict(self.entity_states)
@@ -3928,11 +2889,7 @@ class WorldEngine:
         placeholders, _ = self._frame_entities_to_placeholders_and_observations(list(self.entity_states.values()))
         self._sync_entity_placeholders(placeholders)
 
-    def _build_preview_entity_placeholders(
-        self,
-        placeholders: list[EntityPlaceholder],
-    ) -> tuple[dict[int, set[tuple[int, int]]], set[tuple[int, int]], set[tuple[int, int]]]:
-        return _build_preview_entity_placeholders(self, placeholders)
+    _build_preview_entity_placeholders = _build_preview_entity_placeholders
 
     def _preview_can_occupy_placeholder_cell(
         self,
@@ -3979,12 +2936,7 @@ class WorldEngine:
     ) -> list[ReadbackRequest]:
         return [request for _, request in self._build_observation_request_pairs(targets, resolved_targets)]
 
-    def _build_observation_request(
-        self,
-        target: ObservationTarget,
-        resolved_targets: dict[str, ResolvedTarget],
-    ) -> ReadbackRequest | None:
-        return _build_observation_request(self, target, resolved_targets)
+    _build_observation_request = _build_observation_request
 
     def _resolve_readback_requests(
         self,
@@ -3998,15 +2950,9 @@ class WorldEngine:
                 resolved.append(concrete)
         return resolved
 
-    def _resolve_readback_request(
-        self,
-        request: ReadbackRequest,
-        resolved_targets: dict[str, ResolvedTarget],
-    ) -> ReadbackRequest | None:
-        return _resolve_readback_request(self, request, resolved_targets)
+    _resolve_readback_request = _resolve_readback_request
 
-    def _resolve_target_queries(self, queries: list[TargetQuery]) -> dict[str, ResolvedTarget]:
-        return _resolve_target_queries(self, queries)
+    _resolve_target_queries = _resolve_target_queries
 
     def _resolve_change_intents(
         self,
@@ -4085,29 +3031,13 @@ class WorldEngine:
             commands.extend(WorldCommand(kind=command.kind, payload=deepcopy(command.payload)) for command in resolved_intent.generated_commands)
         return resolved, commands
 
-    def _public_resolved_carrier_intent(self, intent: ResolvedCarrierIntent) -> ResolvedCarrierIntent:
-        return _public_resolved_carrier_intent(self, intent)
+    _public_resolved_carrier_intent = _public_resolved_carrier_intent
 
-    def _resolve_carrier_intent(
-        self,
-        intent: CarrierIntent,
-        resolved_targets: dict[str, ResolvedTarget],
-    ) -> ResolvedCarrierIntent:
-        return _resolve_carrier_intent(self, intent, resolved_targets)
+    _resolve_carrier_intent = _resolve_carrier_intent
 
-    def _resolve_change_intent(
-        self,
-        intent: ChangeIntent,
-        resolved_targets: dict[str, ResolvedTarget],
-    ) -> ResolvedChangeIntent:
-        return _resolve_change_intent(self, intent, resolved_targets)
+    _resolve_change_intent = _resolve_change_intent
 
-    def _resolve_change_intent_world_position(
-        self,
-        intent: ChangeIntent,
-        resolved_targets: dict[str, ResolvedTarget],
-    ) -> tuple[int, int] | None:
-        return _resolve_change_intent_world_position(self, intent, resolved_targets)
+    _resolve_change_intent_world_position = _resolve_change_intent_world_position
 
     def _resolve_intent_world_position(
         self,
@@ -4165,19 +3095,13 @@ class WorldEngine:
         direction = delta / length
         return (float(direction[0]), float(direction[1]))
 
-    def _disk_world_cells(self, center_world_position: tuple[int, int], radius: int) -> list[tuple[int, int]]:
-        return _disk_world_cells(self, center_world_position, radius)
+    _disk_world_cells = _disk_world_cells
 
     @staticmethod
     def _disk_world_cells_raw(center_world_position: tuple[int, int], radius: int) -> list[tuple[int, int]]:
         return _disk_world_cells_raw(center_world_position, radius)
 
-    def _line_world_cells(
-        self,
-        start_world_position: tuple[int, int],
-        end_world_position: tuple[int, int],
-    ) -> list[tuple[int, int]]:
-        return _line_world_cells(self, start_world_position, end_world_position)
+    _line_world_cells = _line_world_cells
 
     @staticmethod
     def _line_world_cells_raw(
@@ -4186,47 +3110,17 @@ class WorldEngine:
     ) -> list[tuple[int, int]]:
         return _line_world_cells_raw(start_world_position, end_world_position)
 
-    def _capsule_world_cells(
-        self,
-        start_world_position: tuple[int, int],
-        end_world_position: tuple[int, int],
-        radius: int,
-    ) -> list[tuple[int, int]]:
-        return _capsule_world_cells(self, start_world_position, end_world_position, radius)
+    _capsule_world_cells = _capsule_world_cells
 
-    def _capsule_world_cells_raw(
-        self,
-        start_world_position: tuple[int, int],
-        end_world_position: tuple[int, int],
-        radius: int,
-    ) -> list[tuple[int, int]]:
-        return _capsule_world_cells_raw(self, start_world_position, end_world_position, radius)
+    _capsule_world_cells_raw = _capsule_world_cells_raw
 
     @staticmethod
     def _buffer_cell_bounds(cells: list[tuple[int, int]]) -> tuple[int, int, int, int] | None:
         return _buffer_cell_bounds(cells)
 
-    def _apply_change_stability_drift(
-        self,
-        intent_id: str,
-        world_position: tuple[int, int],
-        *,
-        effective_radius: int,
-        stability: float,
-    ) -> tuple[int, int]:
-        return _apply_change_stability_drift(self, intent_id, world_position, effective_radius=effective_radius, stability=stability)
+    _apply_change_stability_drift = _apply_change_stability_drift
 
-    def _resolve_legal_world_position(
-        self,
-        world_position: tuple[int, int],
-        *,
-        require_empty: bool,
-        fallback_mode: str,
-        fallback_radius: int,
-        effective_radius: int,
-        source_world_position: tuple[int, int] | None,
-    ) -> tuple[tuple[int, int] | None, bool, str | None]:
-        return _resolve_legal_world_position(self, world_position, require_empty=require_empty, fallback_mode=fallback_mode, fallback_radius=fallback_radius, effective_radius=effective_radius, source_world_position=source_world_position)
+    _resolve_legal_world_position = _resolve_legal_world_position
 
     @staticmethod
     def _intent_resolution_status(*, drifted: bool, fallback_applied: bool) -> str:
@@ -4243,18 +3137,11 @@ class WorldEngine:
             return None
         return "; ".join(filtered)
 
-    def _resolve_targeted_commands(
-        self,
-        commands: list[WorldCommand],
-        resolved_targets: dict[str, ResolvedTarget],
-    ) -> list[WorldCommand]:
-        return _resolve_targeted_commands(self, commands, resolved_targets)
+    _resolve_targeted_commands = _resolve_targeted_commands
 
-    def _resolve_target_query(self, query: TargetQuery) -> ResolvedTarget:
-        return _resolve_target_query(self, query)
+    _resolve_target_query = _resolve_target_query
 
-    def _resolve_target_query_distance_cells(self, query: TargetQuery) -> int:
-        return _resolve_target_query_distance_cells(self, query)
+    _resolve_target_query_distance_cells = _resolve_target_query_distance_cells
 
     @staticmethod
     def _distance_meters_to_cells(distance_meters: float) -> int:
@@ -4323,23 +3210,9 @@ class WorldEngine:
             }
         return None
 
-    def _resolve_entity_anchor(
-        self,
-        query: TargetQuery,
-        source_world_position: tuple[int, int],
-        *,
-        direction_filter: str | None,
-    ) -> dict[str, Any] | None:
-        return _resolve_entity_anchor(self, query, source_world_position, direction_filter=direction_filter)
+    _resolve_entity_anchor = _resolve_entity_anchor
 
-    def _resolve_terrain_anchor(
-        self,
-        source_world_position: tuple[int, int],
-        terrain_filters: list[str],
-        *,
-        direction_filter: str | None,
-    ) -> dict[str, Any] | None:
-        return _resolve_terrain_anchor(self, source_world_position, terrain_filters, direction_filter=direction_filter)
+    _resolve_terrain_anchor = _resolve_terrain_anchor
 
     def _entity_matches_anchor_filters(self, entity: EntityState, filters: tuple[str, ...]) -> bool:
         area = max(1, int(entity.width) * int(entity.height))
@@ -4361,8 +3234,7 @@ class WorldEngine:
                 return False
         return True
 
-    def _terrain_cell_matches(self, x: int, y: int, terrain_filter: str) -> bool:
-        return _terrain_cell_matches(self, x, y, terrain_filter)
+    _terrain_cell_matches = _terrain_cell_matches
 
     def _terrain_tree_cell_matches(self, x: int, y: int, material_id: int, phase: int) -> bool:
         if material_id == 0 or phase in {int(Phase.LIQUID), int(Phase.POWDER)}:
@@ -4396,11 +3268,9 @@ class WorldEngine:
         right_support = self._world_cell_is_solid_local(x + 1, y + 1) or self._world_cell_is_solid_local(x + 1, y + 2)
         return left_support and right_support
 
-    def _world_cell_is_solid_local(self, x: int, y: int) -> bool:
-        return _world_cell_is_solid_local(self, x, y)
+    _world_cell_is_solid_local = _world_cell_is_solid_local
 
-    def _world_cell_is_empty_local(self, x: int, y: int) -> bool:
-        return _world_cell_is_empty_local(self, x, y)
+    _world_cell_is_empty_local = _world_cell_is_empty_local
 
     def _world_cell_material_has_tag(self, x: int, y: int, tag: str) -> bool:
         material_id, _ = self._bounded_material_state_for_position(x, y)
@@ -4414,34 +3284,13 @@ class WorldEngine:
         material = self._shadow_material_def(material_id)
         return material is not None and tag in material.tags
 
-    def _bounded_material_state_for_position(self, x: int, y: int) -> tuple[int, int]:
-        return _bounded_material_state_for_position(self, x, y)
+    _bounded_material_state_for_position = _bounded_material_state_for_position
 
-    def _matches_direction_filter(
-        self,
-        source_world_position: tuple[int, int],
-        candidate_world_position: tuple[int, int],
-        direction_name: str,
-        *,
-        source_entity_id: int | None,
-    ) -> bool:
-        return _matches_direction_filter(self, source_world_position, candidate_world_position, direction_name, source_entity_id=source_entity_id)
+    _matches_direction_filter = _matches_direction_filter
 
-    def _query_direction_vector(
-        self,
-        query: TargetQuery,
-        *,
-        source_entity_id: int | None,
-    ) -> tuple[int, int] | None:
-        return _query_direction_vector(self, query, source_entity_id=source_entity_id)
+    _query_direction_vector = _query_direction_vector
 
-    def _direction_vector(
-        self,
-        direction_name: str,
-        *,
-        source_entity_id: int | None,
-    ) -> tuple[int, int] | None:
-        return _direction_vector(self, direction_name, source_entity_id=source_entity_id)
+    _direction_vector = _direction_vector
 
     def _source_facing_vector(self, source_entity_id: int | None) -> tuple[float, float]:
         if source_entity_id is not None:
@@ -4467,20 +3316,15 @@ class WorldEngine:
             )
         return self._buffer_to_world_position(self._entity_center_buffer_position(entity))
 
-    def _buffer_to_world_position(self, position: tuple[int, int]) -> tuple[int, int]:
-        return _buffer_to_world_position(self, position)
+    _buffer_to_world_position = _buffer_to_world_position
 
-    def _buffer_to_world_float_position(self, position: tuple[float, float]) -> tuple[float, float]:
-        return _buffer_to_world_float_position(self, position)
+    _buffer_to_world_float_position = _buffer_to_world_float_position
 
-    def _world_to_buffer_float_position(self, position: tuple[float, float]) -> tuple[float, float]:
-        return _world_to_buffer_float_position(self, position)
+    _world_to_buffer_float_position = _world_to_buffer_float_position
 
-    def _force_source_world_position(self, force_source: ForceSource) -> tuple[float, float]:
-        return _force_source_world_position(self, force_source)
+    _force_source_world_position = _force_source_world_position
 
-    def _force_source_buffer_position(self, force_source: ForceSource) -> tuple[float, float]:
-        return _force_source_buffer_position(self, force_source)
+    _force_source_buffer_position = _force_source_buffer_position
 
     def _normalize_runtime_force_source(self, force_source: ForceSource) -> ForceSource:
         world_x, world_y = self._force_source_world_position(force_source)
@@ -4493,44 +3337,19 @@ class WorldEngine:
             world_y=float(world_y),
         )
 
-    def _buffer_gas_to_world_position(self, position: tuple[int, int]) -> tuple[int, int]:
-        return _buffer_gas_to_world_position(self, position)
+    _buffer_gas_to_world_position = _buffer_gas_to_world_position
 
-    def _buffer_bbox_to_world_bbox(self, bbox: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
-        return _buffer_bbox_to_world_bbox(self, bbox)
+    _buffer_bbox_to_world_bbox = _buffer_bbox_to_world_bbox
 
-    def _clamped_world_window(self, world_x: int, world_y: int, width: int, height: int) -> tuple[int, int, int, int]:
-        return _clamped_world_window(self, world_x, world_y, width, height)
+    _clamped_world_window = _clamped_world_window
 
-    def _centered_world_window(self, center_x: int, center_y: int, width: int, height: int) -> tuple[int, int, int, int]:
-        return _centered_world_window(self, center_x, center_y, width, height)
+    _centered_world_window = _centered_world_window
 
-    def _world_axis_spans(
-        self,
-        world_start: int,
-        world_end: int,
-        *,
-        axis: str,
-        gas_grid: bool = False,
-    ) -> list[tuple[int, int]]:
-        return _world_axis_spans(self, world_start, world_end, axis=axis, gas_grid=gas_grid)
+    _world_axis_spans = _world_axis_spans
 
-    def _world_axis_indices(self, world_start: int, world_end: int, *, axis: str, gas_grid: bool = False) -> np.ndarray:
-        return _world_axis_indices(self, world_start, world_end, axis=axis, gas_grid=gas_grid)
+    _world_axis_indices = _world_axis_indices
 
-    def _extract_world_window(
-        self,
-        array: np.ndarray,
-        world_x0: int,
-        world_y0: int,
-        world_x1: int,
-        world_y1: int,
-        *,
-        x_axis: int,
-        y_axis: int,
-        gas_grid: bool = False,
-    ) -> np.ndarray:
-        return _extract_world_window(self, array, world_x0, world_y0, world_x1, world_y1, x_axis=x_axis, y_axis=y_axis, gas_grid=gas_grid)
+    _extract_world_window = _extract_world_window
 
     def _world_gas_window_for_cell_world_rect(
         self,
@@ -4550,11 +3369,9 @@ class WorldEngine:
             int((int(world_y1) + int(self.gas_cell_size) - 1) // int(self.gas_cell_size)),
         )
 
-    def _pack_cell_core_world_window(self, world_x0: int, world_y0: int, world_x1: int, world_y1: int) -> np.ndarray:
-        return _pack_cell_core_world_window(self, world_x0, world_y0, world_x1, world_y1)
+    _pack_cell_core_world_window = _pack_cell_core_world_window
 
-    def _world_to_buffer_clamped(self, world_x: int, world_y: int) -> tuple[int, int]:
-        return _world_to_buffer_clamped(self, world_x, world_y)
+    _world_to_buffer_clamped = _world_to_buffer_clamped
 
     def _clamp_world_position(self, world_x: int, world_y: int) -> tuple[int, int]:
         min_world_x = int(self.paging.origin_x)
@@ -4566,16 +3383,9 @@ class WorldEngine:
             max(min_world_y, min(max_world_y, int(world_y))),
         )
 
-    def _find_nearest_empty_world_position(
-        self,
-        start_world_position: tuple[int, int],
-        *,
-        radius: int,
-    ) -> tuple[int, int] | None:
-        return _find_nearest_empty_world_position(self, start_world_position, radius=radius)
+    _find_nearest_empty_world_position = _find_nearest_empty_world_position
 
-    def _world_cell_is_empty(self, world_x: int, world_y: int) -> bool:
-        return _world_cell_is_empty(self, world_x, world_y)
+    _world_cell_is_empty = _world_cell_is_empty
 
     @staticmethod
     def _world_distance_sq(left: tuple[int, int], right: tuple[int, int]) -> float:
@@ -4591,18 +3401,11 @@ class WorldEngine:
         ys = [cell[1] for cell in cells]
         return (min(xs), min(ys), max(xs) + 1, max(ys) + 1)
 
-    def _collect_observations(self, results: list[ReadbackResult]) -> dict[int, ObservationResult]:
-        return _collect_observations(self, results)
+    _collect_observations = _collect_observations
 
-    def _collect_entity_feedback(self, results: list[ReadbackResult]) -> dict[int, EntityFeedback]:
-        return _collect_entity_feedback(self, results)
+    _collect_entity_feedback = _collect_entity_feedback
 
-    def _build_entity_feedback(
-        self,
-        result: ReadbackResult,
-        entity: EntityState,
-    ) -> EntityFeedback | None:
-        return _build_entity_feedback(self, result, entity)
+    _build_entity_feedback = _build_entity_feedback
 
     def _build_entity_feedback_from_world(self, entity: EntityState) -> EntityFeedback | None:
         cell_state = {
@@ -4628,19 +3431,7 @@ class WorldEngine:
             entity_runtime=self._current_entity_runtime_snapshot(allow_gpu_sync_readback=allow_gpu_sync_readback),
         )
 
-    def _build_entity_feedback_from_state(
-        self,
-        entity: EntityState,
-        *,
-        cell_state: dict[str, np.ndarray],
-        entity_runtime: dict[str, np.ndarray],
-    ) -> EntityFeedback | None:
-        return _build_entity_feedback_from_state(
-            self,
-            entity,
-            cell_state=cell_state,
-            entity_runtime=entity_runtime,
-        )
+    _build_entity_feedback_from_state = _build_entity_feedback_from_state
 
     def _capture_stripe_array(
         self,
@@ -4682,11 +3473,9 @@ class WorldEngine:
             array[tuple(slices)] = values[tuple(source_slices)]
             offset += span
 
-    def _default_page_stripe_payload(self, update: PageStripeUpdate) -> dict[str, Any]:
-        return _default_page_stripe_payload(self, update)
+    _default_page_stripe_payload = _default_page_stripe_payload
 
-    def _stripe_buffer_ranges(self, update: PageStripeUpdate, *, gas_grid: bool) -> list[tuple[int, int]]:
-        return _stripe_buffer_ranges(self, update, gas_grid=gas_grid)
+    _stripe_buffer_ranges = _stripe_buffer_ranges
 
     def _mark_loaded_page_stripe_active(self, update: PageStripeUpdate) -> None:
         for start, end in self._stripe_buffer_ranges(update, gas_grid=False):
@@ -4695,45 +3484,21 @@ class WorldEngine:
             else:
                 self._mark_active_rect_runtime(0, start, self.width, end, tile_padding=1)
 
-    def _rebuild_sparse_runtime_indexes(self) -> None:
-        _rebuild_sparse_runtime_indexes(self)
+    _rebuild_sparse_runtime_indexes = _rebuild_sparse_runtime_indexes
 
-    def _rebuild_entity_placeholder_index(self) -> None:
-        _rebuild_entity_placeholder_index(self)
+    _rebuild_entity_placeholder_index = _rebuild_entity_placeholder_index
 
-    def _normalize_cell_runtime_arrays(
-        self,
-        material_id: np.ndarray,
-        phase: np.ndarray,
-        island_id: np.ndarray,
-        entity_id: np.ndarray,
-        placeholder_displaced_material: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        return _normalize_cell_runtime_arrays(self, material_id, phase, island_id, entity_id, placeholder_displaced_material)
+    _normalize_cell_runtime_arrays = _normalize_cell_runtime_arrays
 
-    def _normalize_page_stripe_cell_runtime(self, update: PageStripeUpdate) -> None:
-        _normalize_page_stripe_cell_runtime(self, update)
+    _normalize_page_stripe_cell_runtime = _normalize_page_stripe_cell_runtime
 
-    def _capture_page_stripe_entity_placeholder_runtime(
-        self,
-        update: PageStripeUpdate,
-        *,
-        stripe_axis: int,
-    ) -> np.ndarray:
-        return _capture_page_stripe_entity_placeholder_runtime(self, update, stripe_axis=stripe_axis)
+    _capture_page_stripe_entity_placeholder_runtime = _capture_page_stripe_entity_placeholder_runtime
 
-    def _apply_page_stripe_entity_placeholder_runtime(
-        self,
-        update: PageStripeUpdate,
-        entity_placeholder_entity_id: np.ndarray | None,
-    ) -> None:
-        _apply_page_stripe_entity_placeholder_runtime(self, update, entity_placeholder_entity_id)
+    _apply_page_stripe_entity_placeholder_runtime = _apply_page_stripe_entity_placeholder_runtime
 
-    def _rebuild_island_records(self) -> None:
-        _rebuild_island_records(self)
+    _rebuild_island_records = _rebuild_island_records
 
-    def _capture_page_stripe_island_runtime(self, stripe_island_ids: np.ndarray) -> dict[str, np.ndarray]:
-        return _capture_page_stripe_island_runtime(self, stripe_island_ids)
+    _capture_page_stripe_island_runtime = _capture_page_stripe_island_runtime
 
     def _page_stripe_island_bboxes_from_payload(
         self,
@@ -4787,32 +3552,19 @@ class WorldEngine:
             offset += span
         return {island_id: tuple(box) for island_id, box in boxes.items()}
 
-    def _merge_island_runtime_payload(
-        self,
-        runtime_payload: dict[str, Any] | None,
-        *,
-        update: PageStripeUpdate | None = None,
-        payload: dict[str, Any] | None = None,
-    ) -> None:
-        _merge_island_runtime_payload(self, runtime_payload, update=update, payload=payload)
+    _merge_island_runtime_payload = _merge_island_runtime_payload
 
-    def _rebuild_material_property_arrays(self) -> None:
-        _rebuild_material_property_arrays(self)
+    _rebuild_material_property_arrays = _rebuild_material_property_arrays
 
-    def _rebuild_gas_property_arrays(self) -> None:
-        _rebuild_gas_property_arrays(self)
+    _rebuild_gas_property_arrays = _rebuild_gas_property_arrays
 
-    def _rebuild_light_property_arrays(self) -> None:
-        _rebuild_light_property_arrays(self)
+    _rebuild_light_property_arrays = _rebuild_light_property_arrays
 
-    def _cell_participates_in_collapse(self, material_id: int, phase: int) -> bool:
-        return _cell_participates_in_collapse(self, material_id, phase)
+    _cell_participates_in_collapse = _cell_participates_in_collapse
 
-    def _mark_collapse_dirty_rect(self, x0: int, y0: int, x1: int, y1: int, *, pad: int = 8) -> None:
-        _mark_collapse_dirty_rect(self, x0, y0, x1, y1, pad=pad)
+    _mark_collapse_dirty_rect = _mark_collapse_dirty_rect
 
-    def _drain_gpu_collapse_structure_dirty_tiles(self) -> None:
-        _drain_gpu_collapse_structure_dirty_tiles(self)
+    _drain_gpu_collapse_structure_dirty_tiles = _drain_gpu_collapse_structure_dirty_tiles
 
     def _paint_material(self, x: int, y: int, material: str, radius: int) -> None:
         yy, xx = np.mgrid[0:self.height, 0:self.width]
