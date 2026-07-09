@@ -65,22 +65,25 @@ class GPUPipelineBase:
         try:
             yield
         finally:
-            if profile is None:
-                return
-            if ctx is not None:
-                ctx.finish()
-            elapsed_ms = (time.perf_counter() - start) * 1000.0
-            entry = {
-                "name": str(name),
-                "cpu_ms": elapsed_ms,
-                "gpu_ms": elapsed_ms if ctx is not None else None,
-            }
-            profile["passes"].append(entry)
-            summary = profile["summary"].setdefault(str(name), {"count": 0, "cpu_ms": 0.0, "gpu_ms": None})
-            summary["count"] += 1
-            summary["cpu_ms"] += elapsed_ms
-            if ctx is not None:
-                summary["gpu_ms"] = float(summary["gpu_ms"] or 0.0) + elapsed_ms
+            # NB: do NOT `return` here when profile is None — a `return` inside
+            # `finally` would SWALLOW any exception raised in the `with` body
+            # (e.g. _require_gpu_stage RuntimeError). Only record timing when
+            # profiling is enabled; otherwise let exceptions propagate.
+            if profile is not None:
+                if ctx is not None:
+                    ctx.finish()
+                elapsed_ms = (time.perf_counter() - start) * 1000.0
+                entry = {
+                    "name": str(name),
+                    "cpu_ms": elapsed_ms,
+                    "gpu_ms": elapsed_ms if ctx is not None else None,
+                }
+                profile["passes"].append(entry)
+                summary = profile["summary"].setdefault(str(name), {"count": 0, "cpu_ms": 0.0, "gpu_ms": None})
+                summary["count"] += 1
+                summary["cpu_ms"] += elapsed_ms
+                if ctx is not None:
+                    summary["gpu_ms"] = float(summary["gpu_ms"] or 0.0) + elapsed_ms
 
     # --- backend / uniform helpers ------------------------------------------
 
