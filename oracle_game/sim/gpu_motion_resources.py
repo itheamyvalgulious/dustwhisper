@@ -6,10 +6,13 @@ import numpy as np
 
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
-    from oracle_game.sim.gpu_motion import GPUMotionResources
 
+# GPUMotionResources is imported at runtime (not just TYPE_CHECKING) because
+# _ensure_resources constructs it. It is defined in the facade before the
+# bucket import block, so the partial-init resolves this without a cycle.
 from oracle_game.sim.gpu_motion import (
-    MAX_MATERIALS
+    GPUMotionResources,
+    MAX_MATERIALS,
 )
 
 
