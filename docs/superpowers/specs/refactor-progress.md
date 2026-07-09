@@ -50,3 +50,25 @@ enginedemo/http_console splits; EngineConfig; types/ split; package reorg
 - debug_frame golden: `b4b5996932795cbd` (DebugView×all + gas views, 96×64, 3 frames). NOTE: an earlier value (b4e60f4b007fe5a0) was captured AFTER the buggy liquid migration and reflected broken-liquid behavior; the liquid remnant fix corrected it to this true value.
 - geometry golden: `d9e44e209feaedd6` (7 coord methods on a 96×64 populated world)
 - GPU snapshot: `ce71a34376c5010d`
+
+## Session summary (2026-07-09) — 29 commits on `refactor/structure`
+
+### Accomplished (all behavior-preserving, verified via snapshot + goldens)
+- **Phase 1 (GPU base):** `sim/gpu_base.py` `GPUPipelineBase` (available/reset_pass_profile/_profile_pass/_formal_gpu_frame/_set_uniform_if_present/_sync_compute_writes + `_barrier_bits` hook). All 11 GPU pipelines subclass it; ~6 duped helpers removed each.
+- **Phase 1 (CPU):** `sim/cpu_base.py` shared `material_table_row` (3 solvers delegate). `Solver` base + `_select_backend` + stage registry pending (Phase 3).
+- **Phase 2 (shaders):** `sim/shader_loader.py` (template `{{NAME}}` substitution + `includes` for preambles). ALL 10 GPU pipelines' GLSL extracted to `oracle_game/shaders/<stage>/*.comp` (~288 shaders): gpu_merge(115), gpu_page_stripes(868), gpu_placeholders(346), gpu_gas(591), gpu_optics(635), gpu_world_commands(705), gpu_heat(1056), gpu_liquid(1542), gpu_motion(3370), gpu_collapse(5519), gpu_reactions(5148). Independent verifier `scripts/verify_shaders.py` (0 failures). Compound f-string exprs → derived markers (or baked literals in some collapse files — robustness follow-up).
+- **Phase 2/4 (gpu.py):** 4465 → `gpu/` package (_common/dtypes/packers/readback/bridge + __init__ re-exports). packers(1186) & bridge(2723) still >1000.
+- **Phase 4 (world.py):** 17279 → 11682. Extracted: constants → `world_constants.py`; `serialize_engine_capabilities` → `world_capabilities/` 12-module package; `_make_readback_payload` → `world_readback_payload.py`; `debug_frame`+15 → `world_debug_frame.py`; geometry bucket (34 methods) → `world_geometry.py`; runtime serializers → `world_runtime_serializers.py` (in progress).
+- **Bug found & fixed:** the gpu_liquid migration's verification was flawed — 32 `{EXPR}` remnants (`{MAX_MATERIALS - 1}` etc.) across 17 liquid .comp + 1 in placeholders rendered as invalid GLSL. Caught by the independent verifier; fixed via derived markers. The snapshot's scenario didn't compile those shaders (latent), but the 96×64 debug scenario did.
+
+### Key methodology (reusable for continuation)
+- **Gate = deterministic golden hash per extraction** (snapshot `ce71a34376c5010d` for the sim; per-bucket goldens for non-sim methods) + `scripts/verify_shaders.py` for all .glsl. Capture the golden BEFORE the move; the move is a verbatim `self`→`engine` lift, so a matching golden proves preservation.
+- **Subagent pattern:** dispatch `code-simplifier` per file/bucket with the exact golden + snapshot gate in the prompt; the verbatim-move + golden-check is mechanical and parallelizable across disjoint files.
+
+### Remaining work (prioritized)
+1. **world.py (11682 → <1000):** extract remaining buckets — payload serializers (`serialize_*`, scattered ~L2779-6900), intent-resolution cluster (~L9748-11000, interconnected), input coercion (`_coerce_*`/`_normalize_*` ~995 lines), shadow/sanctioned tables, bridge serializers, runtime rebuild, controller-turn, paging API, etc. Same verbatim-move + golden pattern.
+2. **Pipeline logic splits (still >1000):** gpu_collapse(5519), gpu_reactions(5148), gpu_motion(3370), gpu_liquid(1542), gpu_heat(1056), gpu/packers(1186), gpu/bridge(2723). These are non-shader Python (resource dataclasses + dispatch/stage methods). Split each pipeline class into focused modules (resources / stages / publish) — harder, needs per-pipeline care; gate via snapshot.
+3. **CPU solver splits:** reactions.py(2011), motion.py(1413), liquid.py(1007). Split each solver's logic (e.g. reactions.py pairings → separate module). Gate via a CPU snapshot golden (capture one).
+4. **rules.py (1578):** `_build_materials` is itself ~1022 lines (a single function) — split into per-category sub-builders composed in `_build_materials`. Gate via `RULES_GOLDEN=5d8c712ed57c4a46`.
+5. **Entry points:** enginedemo(1463) → main + demo_input/demo_render/demo_controller; http_console(1164) → split handlers. Verify via import + a headless run if possible.
+6. **Phase 1 leftovers:** `EngineConfig` (centralize the scattered config constants/thresholds); `types/` split (types.py is 560, under 1000 — low priority); package reorg (rename `sim/`→`cpu/`+`gpu/`, `engine/` for the world.py-extracted modules) with re-export shims; `Solver` base + stage registry (Phase 3) to make `_step_once_impl` data-driven.
