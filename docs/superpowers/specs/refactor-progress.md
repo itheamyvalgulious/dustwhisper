@@ -74,3 +74,32 @@ enginedemo/http_console splits; EngineConfig; types/ split; package reorg
 4. **rules.py (1578):** `_build_materials` is itself ~1022 lines (a single function) — split into per-category sub-builders composed in `_build_materials`. Gate via `RULES_GOLDEN=5d8c712ed57c4a46`.
 5. **Entry points:** enginedemo(1463) → main + demo_input/demo_render/demo_controller; http_console(1164) → split handlers. Verify via import + a headless run if possible.
 6. **Phase 1 leftovers:** `EngineConfig` (centralize the scattered config constants/thresholds); `types/` split (types.py is 560, under 1000 — low priority); package reorg (rename `sim/`→`cpu/`+`gpu/`, `engine/` for the world.py-extracted modules) with re-export shims; `Solver` base + stage registry (Phase 3) to make `_step_once_impl` data-driven.
+
+## UPDATE (2026-07-10) — ALL FILES UNDER 1000 LINES ✅
+
+70 commits on `refactor/structure`. Every `.py` file is now ≤ 1000 lines
+(largest: `rules_materials.py` at 984). The ≤1000-line-per-file hard
+constraint is MET across the entire codebase.
+
+### Final splits completed this session
+- world.py: 17279 → 880 (29 method-bucket extractions + 4 stub-collapse passes + import compaction + inter-assign blank compaction). Thin facade.
+- All 11 GPU pipelines split into facade + bucket modules (gpu_collapse 5519→510, gpu_reactions 5148→666, gpu_motion 3367→459, gpu_liquid 1542→190, gpu_heat 1056→180, + the 6 smaller ones already <1000).
+- gpu/bridge (GPUBridge): 2723 → 291 facade + 5 modules.
+- gpu/packers: 1186 → 714 + 508.
+- rules: 1578 → 450 + rules_materials(984) + rules_reactions(209).
+- 3 CPU solvers: reactions 2011→247, motion 1413→168, liquid 1007→110.
+- 2 entry points: enginedemo 1463→698, http_console 1164→377.
+- world_payload_serializers: 1412 → 826 + 662.
+
+### Verification (final, all green)
+- GPU snapshot: `ce71a34376c5010d` (unchanged from baseline)
+- CPU snapshot: `9f53a4b8af0a16e1` (captured mid-session; unchanged through CPU-solver splits)
+- capabilities golden: `f65d2183375bd352`
+- shader verifier (`scripts/verify_shaders.py`): 288 shaders, 0 failures
+- Per-bucket goldens (readback, debug_frame, geometry, runtime, bridge, shadow, coercion, table, payload, command, controller, paging, entity, intent, anchor, apply-commands, rebuild, helpers, state, demo): all unchanged.
+
+### Remaining design refinements (NOT required by the ≤1000 constraint)
+- `EngineConfig`: centralize the scattered config thresholds into one dataclass (currently `world_constants.py` holds many; some still inline).
+- Package reorg: rename `sim/` → `cpu/`+`gpu/` packages (files are already split by CPU/GPU; the rename + re-export shims would complete "CPU/GPU完全分离").
+- `Solver` base class + stage registry (Phase 3): make `_step_once_impl`'s stage loop data-driven (currently hardcoded delegations, but stages are cleanly separated into modules).
+- `types/` split (types.py is 560, already <1000 — low priority).
