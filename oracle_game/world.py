@@ -230,6 +230,25 @@ from oracle_game.world_geometry import (
     _world_to_buffer_clamped,
     _world_to_buffer_float_position,
 )
+from oracle_game.world_cell_mutators import (
+    _inject_gas_immediate,
+    _inject_temperature_immediate,
+    _inject_velocity_immediate,
+    add_gas_from_cells,
+    allocate_island_id,
+    cell_xy_to_gas,
+    clear_cell,
+    clear_cell_region,
+    clear_cells,
+    in_bounds,
+    material_by_id,
+    sample_ambient_to_cells,
+    sample_flow_to_cells,
+    set_cell,
+    set_cell_by_id,
+    set_material_by_mask,
+    swap_cells,
+)
 from oracle_game.world_input_coercion import (
     _assign_preview_readback_request_ids,
     _assign_readback_request_id,
@@ -4468,17 +4487,10 @@ class WorldEngine:
             pass
 
     def material_by_id(self, material_id: int) -> MaterialDef:
-        material = self._shadow_material_def(int(material_id))
-        if material is None:
-            raise KeyError(material_id)
-        return material
+        return material_by_id(self, material_id)
 
     def allocate_island_id(self) -> int:
-        island_id = max(1, int(self.next_island_id))
-        while island_id in self.islands:
-            island_id += 1
-        self.next_island_id = island_id + 1
-        return island_id
+        return allocate_island_id(self)
 
     def _refresh_island_records_for_ids(self, island_ids: Iterable[int]) -> None:
         touched = {int(island_id) for island_id in island_ids if int(island_id) > 0}
@@ -4516,21 +4528,18 @@ class WorldEngine:
         self.next_island_id = max(int(self.next_island_id), max(self.islands, default=0) + 1, 1)
 
     def in_bounds(self, x: int, y: int) -> bool:
-        return 0 <= x < self.width and 0 <= y < self.height
+        return in_bounds(self, x, y)
 
     def cell_xy_to_gas(self, x: int, y: int) -> tuple[int, int]:
         """Map a cell-space (x, y) pair onto the lower-resolution gas grid."""
-        return (
-            min(self.gas_height - 1, max(0, y // self.gas_cell_size)),
-            min(self.gas_width - 1, max(0, x // self.gas_cell_size)),
-        )
+        return cell_xy_to_gas(self, x, y)
 
     def cell_to_gas(self, y: int, x: int) -> tuple[int, int]:
         """Map a cell-space (y, x) pair onto the lower-resolution gas grid."""
         return self.cell_xy_to_gas(x, y)
 
     def sample_ambient_to_cells(self) -> np.ndarray:
-        return np.repeat(np.repeat(self.ambient_temperature, self.gas_cell_size, axis=0), self.gas_cell_size, axis=1)[: self.height, : self.width]
+        return sample_ambient_to_cells(self)
 
     def ambient_temperature_at_cell(self, x: int, y: int) -> float:
         gy, gx = self.cell_xy_to_gas(x, y)
@@ -4553,7 +4562,7 @@ class WorldEngine:
         return np.ascontiguousarray(repeated[local_y0 : local_y0 + (y1 - y0), local_x0 : local_x0 + (x1 - x0)])
 
     def sample_flow_to_cells(self) -> np.ndarray:
-        return np.repeat(np.repeat(self.flow_velocity, self.gas_cell_size, axis=0), self.gas_cell_size, axis=1)[: self.height, : self.width]
+        return sample_flow_to_cells(self)
 
     def downsample_cells_to_gas(self, field: np.ndarray) -> np.ndarray:
         result = np.zeros((self.gas_height, self.gas_width), dtype=np.float32)
@@ -4566,58 +4575,10 @@ class WorldEngine:
         return result
 
     def add_gas_from_cells(self, mask: np.ndarray, species: str, amount: float) -> None:
-        species_id = self._resolve_sanctioned_gas_id(species)
-        if species_id < 0:
-            raise KeyError(species)
-        self._invalidate_gpu_authoritative_resources("gas_concentration")
-        ys, xs = np.nonzero(mask)
-        for y, x in zip(ys.tolist(), xs.tolist()):
-            gy, gx = self.cell_to_gas(y, x)
-            self.gas_concentration[species_id, gy, gx] += amount
+        return add_gas_from_cells(self, mask, species, amount)
 
     def set_cell_by_id(self, x: int, y: int, material_id: int, *, phase: Phase | None = None, mark_dirty: bool = True) -> None:
-        self._invalidate_gpu_authoritative_cell_resources()
-        previous_material = int(self.material_id[y, x])
-        previous_phase = int(self.phase[y, x])
-        previous_island_id = int(self.island_id[y, x])
-        previous_displaced = int(self.placeholder_displaced_material[y, x])
-        self.material_id[y, x] = int(material_id)
-        if phase is not None:
-            resolved_phase = int(phase)
-        else:
-            shadow_phase = self._shadow_material_default_phase(int(material_id))
-            resolved_phase = int(shadow_phase) if shadow_phase is not None else 0
-        self.phase[y, x] = resolved_phase
-        self.cell_flags[y, x] = 0
-        self.timer_pack[y, x] = 0
-        shadow_integrity = self._shadow_material_base_integrity(int(material_id))
-        self.integrity[y, x] = float(shadow_integrity) if shadow_integrity is not None else 0.0
-        spawn_temperature = self._shadow_material_spawn_temperature(int(material_id))
-        if spawn_temperature is not None:
-            self.cell_temperature[y, x] = max(float(self.cell_temperature[y, x]), spawn_temperature)
-        current_is_placeholder = self._shadow_material_is_placeholder(int(material_id))
-        previous_is_placeholder = self._shadow_material_is_placeholder(previous_material)
-        if current_is_placeholder:
-            if previous_is_placeholder:
-                self.placeholder_displaced_material[y, x] = previous_displaced
-            elif previous_material != 0 and previous_phase == int(Phase.LIQUID):
-                self.placeholder_displaced_material[y, x] = previous_material
-            else:
-                self.placeholder_displaced_material[y, x] = 0
-        else:
-            self.entity_id[y, x] = 0
-            self.placeholder_displaced_material[y, x] = 0
-        current_displaced = int(self.placeholder_displaced_material[y, x])
-        if current_is_placeholder or previous_is_placeholder or previous_displaced != current_displaced:
-            self._pending_placeholder_dirty_rects.append((int(x), int(y), int(x) + 1, int(y) + 1))
-        self.island_id[y, x] = 0 if self.phase[y, x] != int(Phase.FALLING_ISLAND) else self.island_id[y, x]
-        self._refresh_island_records_for_ids((previous_island_id, int(self.island_id[y, x])))
-        self._mark_active_rect_runtime(max(0, x - 1), max(0, y - 1), min(self.width, x + 2), min(self.height, y + 2))
-        if mark_dirty and (
-            self._cell_participates_in_collapse(previous_material, previous_phase)
-            or self._cell_participates_in_collapse(int(self.material_id[y, x]), int(self.phase[y, x]))
-        ):
-            self._mark_collapse_dirty_rect(x, y, x + 1, y + 1)
+        return set_cell_by_id(self, x, y, material_id, phase=phase, mark_dirty=mark_dirty)
 
     def _inject_velocity_immediate(
         self,
@@ -4629,199 +4590,31 @@ class WorldEngine:
         carrier: str,
         mode: str,
     ) -> None:
-        velocity_vec = np.asarray(velocity, dtype=np.float32)
-        if mode not in {"add", "set"}:
-            raise ValueError(f"unsupported velocity mode: {mode}")
-        if carrier not in {"cell", "flow", "both"}:
-            raise ValueError(f"unsupported velocity carrier: {carrier}")
-        if carrier in {"cell", "both"}:
-            self._invalidate_gpu_authoritative_resources("cell_core")
-            yy, xx = np.mgrid[0:self.height, 0:self.width]
-            cell_mask = (xx - x) ** 2 + (yy - y) ** 2 <= radius ** 2
-            if mode == "set":
-                self.velocity[cell_mask] = velocity_vec
-            else:
-                self.velocity[cell_mask] += velocity_vec
-        if carrier in {"flow", "both"}:
-            self._invalidate_gpu_authoritative_resources("flow_velocity")
-            gas_center_x = min(self.gas_width - 1, max(0, x // self.gas_cell_size))
-            gas_center_y = min(self.gas_height - 1, max(0, y // self.gas_cell_size))
-            gas_radius = max(0, (radius + self.gas_cell_size - 1) // self.gas_cell_size)
-            yy, xx = np.mgrid[0:self.gas_height, 0:self.gas_width]
-            flow_mask = (xx - gas_center_x) ** 2 + (yy - gas_center_y) ** 2 <= gas_radius ** 2
-            if mode == "set":
-                self.flow_velocity[flow_mask] = velocity_vec
-            else:
-                self.flow_velocity[flow_mask] += velocity_vec
-        self._mark_active_rect_runtime(
-            max(0, x - radius),
-            max(0, y - radius),
-            min(self.width, x + radius + 1),
-            min(self.height, y + radius + 1),
-        )
+        return _inject_velocity_immediate(self, x, y, velocity, radius, carrier=carrier, mode=mode)
 
     def _inject_temperature_immediate(self, x: int, y: int, delta: float, radius: int) -> None:
-        self._invalidate_gpu_authoritative_resources("cell_core")
-        yy, xx = np.mgrid[0:self.height, 0:self.width]
-        mask = (xx - x) ** 2 + (yy - y) ** 2 <= radius ** 2
-        self.cell_temperature[mask] += delta
-        self._mark_active_rect_runtime(max(0, x - radius), max(0, y - radius), min(self.width, x + radius + 1), min(self.height, y + radius + 1))
+        return _inject_temperature_immediate(self, x, y, delta, radius)
 
     def _inject_gas_immediate(self, x: int, y: int, species: str, amount: float, radius: int) -> None:
-        gy, gx = self.cell_xy_to_gas(x, y)
-        species_id = self._resolve_sanctioned_gas_id(species)
-        if species_id < 0:
-            raise KeyError(species)
-        self._invalidate_gpu_authoritative_resources("gas_concentration")
-        self.gas_concentration[species_id, gy, gx] = max(0.0, self.gas_concentration[species_id, gy, gx] + amount)
-        self._mark_active_rect_runtime(max(0, x - radius), max(0, y - radius), min(self.width, x + radius + 1), min(self.height, y + radius + 1))
+        return _inject_gas_immediate(self, x, y, species, amount, radius)
 
     def set_cell(self, x: int, y: int, material_name: str, *, phase: Phase | None = None, mark_dirty: bool = True) -> None:
-        material_id = self._resolve_sanctioned_material_id(material_name)
-        if material_id <= 0:
-            raise KeyError(material_name)
-        self.set_cell_by_id(x, y, material_id, phase=phase, mark_dirty=mark_dirty)
+        return set_cell(self, x, y, material_name, phase=phase, mark_dirty=mark_dirty)
 
     def clear_cell(self, x: int, y: int, *, mark_dirty: bool = True) -> None:
-        self._invalidate_gpu_authoritative_cell_resources()
-        previous_material = int(self.material_id[y, x])
-        previous_phase = int(self.phase[y, x])
-        previous_island_id = int(self.island_id[y, x])
-        previous_displaced = int(self.placeholder_displaced_material[y, x])
-        previous_is_placeholder = self._shadow_material_is_placeholder(previous_material)
-        self.material_id[y, x] = 0
-        self.phase[y, x] = 0
-        self.cell_flags[y, x] = 0
-        self.velocity[y, x] = 0.0
-        self.cell_temperature[y, x] = self.ambient_temperature_at_cell(x, y)
-        self.timer_pack[y, x] = 0
-        self.integrity[y, x] = 0.0
-        self.island_id[y, x] = 0
-        self.entity_id[y, x] = 0
-        self.placeholder_displaced_material[y, x] = 0
-        if previous_is_placeholder or previous_displaced != 0:
-            self._pending_placeholder_dirty_rects.append((int(x), int(y), int(x) + 1, int(y) + 1))
-        self._refresh_island_records_for_ids((previous_island_id,))
-        self._mark_active_rect_runtime(max(0, x - 1), max(0, y - 1), min(self.width, x + 2), min(self.height, y + 2))
-        if mark_dirty and self._cell_participates_in_collapse(previous_material, previous_phase):
-            self._mark_collapse_dirty_rect(x, y, x + 1, y + 1)
+        return clear_cell(self, x, y, mark_dirty=mark_dirty)
 
     def clear_cells(self, mask: np.ndarray, *, mark_dirty: bool = True) -> None:
-        ys, xs = np.nonzero(mask)
-        for y, x in zip(ys.tolist(), xs.tolist()):
-            self.clear_cell(int(x), int(y), mark_dirty=mark_dirty)
+        return clear_cells(self, mask, mark_dirty=mark_dirty)
 
     def set_material_by_mask(self, mask: np.ndarray, material_name: str, *, phase: Phase | None = None, mark_dirty: bool = True) -> None:
-        ys, xs = np.nonzero(mask)
-        for y, x in zip(ys.tolist(), xs.tolist()):
-            self.set_cell(int(x), int(y), material_name, phase=phase, mark_dirty=mark_dirty)
+        return set_material_by_mask(self, mask, material_name, phase=phase, mark_dirty=mark_dirty)
 
     def swap_cells(self, x0: int, y0: int, x1: int, y1: int) -> None:
-        self._invalidate_gpu_authoritative_cell_resources()
-        previous_placeholder_cells = (
-            (x0, y0, int(self.entity_id[y0, x0]), int(self.material_id[y0, x0])),
-            (x1, y1, int(self.entity_id[y1, x1]), int(self.material_id[y1, x1])),
-        )
-        previous_island_ids = (
-            int(self.island_id[y0, x0]),
-            int(self.island_id[y1, x1]),
-        )
-        material0 = int(self.material_id[y0, x0])
-        material1 = int(self.material_id[y1, x1])
-        if (material0 == 0) != (material1 == 0):
-            src_x, src_y, dst_x, dst_y = (x1, y1, x0, y0) if material0 == 0 else (x0, y0, x1, y1)
-            for array in (
-                self.material_id,
-                self.phase,
-                self.cell_flags,
-                self.cell_temperature,
-                self.integrity,
-                self.island_id,
-                self.entity_id,
-                self.placeholder_displaced_material,
-            ):
-                value = array[src_y, src_x].copy() if hasattr(array[src_y, src_x], "copy") else array[src_y, src_x]
-                array[dst_y, dst_x] = value
-            for array in (self.velocity, self.timer_pack):
-                array[dst_y, dst_x] = array[src_y, src_x].copy()
-            self.material_id[src_y, src_x] = 0
-            self.phase[src_y, src_x] = 0
-            self.cell_flags[src_y, src_x] = 0
-            self.cell_temperature[src_y, src_x] = 0.0
-            self.integrity[src_y, src_x] = 0.0
-            self.island_id[src_y, src_x] = 0
-            self.entity_id[src_y, src_x] = 0
-            self.placeholder_displaced_material[src_y, src_x] = 0
-            self.velocity[src_y, src_x] = 0.0
-            self.timer_pack[src_y, src_x] = 0
-        else:
-            for array in (
-                self.material_id,
-                self.phase,
-                self.cell_flags,
-                self.cell_temperature,
-                self.integrity,
-                self.island_id,
-                self.entity_id,
-                self.placeholder_displaced_material,
-            ):
-                array[y0, x0], array[y1, x1] = (
-                    array[y1, x1].copy() if hasattr(array[y1, x1], "copy") else array[y1, x1],
-                    array[y0, x0].copy() if hasattr(array[y0, x0], "copy") else array[y0, x0],
-                )
-            for array in (self.velocity, self.timer_pack):
-                temp = array[y0, x0].copy()
-                array[y0, x0] = array[y1, x1]
-                array[y1, x1] = temp
-        for cell_x, cell_y, entity_id, material_id in previous_placeholder_cells:
-            if entity_id > 0:
-                cells = self.entity_placeholders.get(entity_id)
-                if cells is not None:
-                    cells.discard((cell_x, cell_y))
-                    if not cells:
-                        self.entity_placeholders.pop(entity_id, None)
-        for cell_x, cell_y in ((x0, y0), (x1, y1)):
-            entity_id = int(self.entity_id[cell_y, cell_x])
-            material_id = int(self.material_id[cell_y, cell_x])
-            if entity_id > 0 and material_id > 0 and self._shadow_material_is_placeholder(material_id):
-                self.entity_placeholders.setdefault(entity_id, set()).add((cell_x, cell_y))
-        self._refresh_island_records_for_ids(
-            previous_island_ids
-            + (
-                int(self.island_id[y0, x0]),
-                int(self.island_id[y1, x1]),
-            )
-        )
-        self._mark_active_rect_runtime(max(0, min(x0, x1) - 1), max(0, min(y0, y1) - 1), min(self.width, max(x0, x1) + 2), min(self.height, max(y0, y1) + 2))
+        return swap_cells(self, x0, y0, x1, y1)
 
     def clear_cell_region(self, x0: int, y0: int, x1: int, y1: int, *, mark_dirty: bool = True) -> None:
-        self._invalidate_gpu_authoritative_cell_resources()
-        region_material = self.material_id[y0:y1, x0:x1]
-        region_phase = self.phase[y0:y1, x0:x1]
-        region_island_id = self.island_id[y0:y1, x0:x1].copy()
-        affects_collapse = bool(
-            mark_dirty
-            and region_material.size
-            and np.any(
-                (region_material != 0)
-                & (region_phase != int(Phase.FALLING_ISLAND))
-                & (self.material_is_structural[region_material] | self.material_is_support_anchor[region_material])
-            )
-        )
-        self.material_id[y0:y1, x0:x1] = 0
-        self.phase[y0:y1, x0:x1] = 0
-        self.cell_flags[y0:y1, x0:x1] = 0
-        self.velocity[y0:y1, x0:x1] = 0.0
-        self.cell_temperature[y0:y1, x0:x1] = self.ambient_temperature_region(x0, y0, x1, y1)
-        self.timer_pack[y0:y1, x0:x1] = 0
-        self.integrity[y0:y1, x0:x1] = 0.0
-        self.island_id[y0:y1, x0:x1] = 0
-        self.entity_id[y0:y1, x0:x1] = 0
-        self.placeholder_displaced_material[y0:y1, x0:x1] = 0
-        self._refresh_island_records_for_ids(np.unique(region_island_id))
-        self._mark_active_rect_runtime(x0, y0, x1, y1)
-        if affects_collapse:
-            self._mark_collapse_dirty_rect(x0, y0, x1, y1)
+        return clear_cell_region(self, x0, y0, x1, y1, mark_dirty=mark_dirty)
 
     def serialize_local_cells(self, x: int, y: int, width: int, height: int) -> dict[str, Any]:
         return serialize_local_cells(self, x, y, width, height)
