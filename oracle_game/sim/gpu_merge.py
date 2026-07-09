@@ -21,12 +21,12 @@ liquid (motion writes island settlements; liquid writes placeholder displacement
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
 from dataclasses import dataclass
-import time
 from typing import Any
 
 import numpy as np
+
+from oracle_game.sim.gpu_base import GPUPipelineBase
 
 LOCAL_SIZE = 8
 
@@ -39,41 +39,13 @@ class MergeCandidates:
     liquid: dict[str, Any]
 
 
-class GPUMergePipeline:
+class GPUMergePipeline(GPUPipelineBase):
+    # ``available`` / ``reset_pass_profile`` / ``_profile_pass`` are inherited
+    # from :class:`GPUPipelineBase` (formerly copy-pasted here verbatim).
+
     def __init__(self) -> None:
         self.programs: dict[str, Any] = {}
         self.last_pass_profile: dict[str, Any] = {"passes": [], "summary": {}}
-
-    def available(self, world: "WorldEngine") -> bool:  # type: ignore[name-defined]
-        if getattr(world, "simulation_backend", "gpu") == "cpu":
-            return False
-        bridge = world.bridge
-        return bool(bridge.enabled and bridge.ctx is not None and bridge.ctx.version_code >= 430)
-
-    def reset_pass_profile(self) -> None:
-        self.last_pass_profile = {"passes": [], "summary": {}}
-
-    @contextmanager
-    def _profile_pass(self, world: "WorldEngine", name: str):  # type: ignore[name-defined]
-        profile = self.last_pass_profile if bool(getattr(world, "profile_passes_enabled", False)) else None
-        ctx = world.bridge.ctx if bool(getattr(world, "profile_passes_sync", False)) else None
-        if profile is not None and ctx is not None:
-            ctx.finish()
-        start = time.perf_counter() if profile is not None else 0.0
-        try:
-            yield
-        finally:
-            if profile is None:
-                return
-            if ctx is not None:
-                ctx.finish()
-            elapsed_ms = (time.perf_counter() - start) * 1000.0
-            profile["passes"].append({"name": str(name), "cpu_ms": elapsed_ms, "gpu_ms": elapsed_ms if ctx is not None else None})
-            summary = profile["summary"].setdefault(str(name), {"count": 0, "cpu_ms": 0.0, "gpu_ms": None})
-            summary["count"] += 1
-            summary["cpu_ms"] += elapsed_ms
-            if ctx is not None:
-                summary["gpu_ms"] = float(summary["gpu_ms"] or 0.0) + elapsed_ms
 
     def _ensure_programs(self, ctx: Any) -> None:
         if "merge_cell_core" in self.programs:

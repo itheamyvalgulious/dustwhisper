@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
 from dataclasses import dataclass
-import time
 from typing import Any
 
 import numpy as np
 
+from oracle_game.sim.gpu_base import GPUPipelineBase
 from oracle_game.sim.gpu_collapse_dirty import (
     COLLAPSE_STRUCTURE_DIRTY_TILE_COUNT_BUFFER,
     COLLAPSE_STRUCTURE_DIRTY_TILE_DISPATCH_ARGS_BUFFER,
@@ -89,7 +88,7 @@ class GPUHeatStageTargets:
         )
 
 
-class GPUHeatPipeline:
+class GPUHeatPipeline(GPUPipelineBase):
     def __init__(self) -> None:
         self.resources: GPUHeatResources | None = None
         self.programs: dict[str, Any] = {}
@@ -103,39 +102,8 @@ class GPUHeatPipeline:
         self.last_cpu_active_upload_skipped = False
         self.last_pass_profile: dict[str, Any] = {"passes": [], "summary": {}}
 
-    def available(self, world: "WorldEngine") -> bool:
-        if getattr(world, "simulation_backend", "gpu") == "cpu":
-            return False
-        return bool(world.bridge.enabled and world.bridge.ctx is not None and world.bridge.ctx.version_code >= 430)
-
-    def reset_pass_profile(self) -> None:
-        self.last_pass_profile = {"passes": [], "summary": {}}
-
-    @contextmanager
-    def _profile_pass(self, world: "WorldEngine", name: str):
-        profile = self.last_pass_profile if bool(getattr(world, "profile_passes_enabled", False)) else None
-        ctx = world.bridge.ctx if bool(getattr(world, "profile_passes_sync", False)) else None
-        if profile is not None and ctx is not None:
-            ctx.finish()
-        start = time.perf_counter() if profile is not None else 0.0
-        try:
-            yield
-        finally:
-            if profile is not None:
-                if ctx is not None:
-                    ctx.finish()
-                elapsed_ms = (time.perf_counter() - start) * 1000.0
-                entry = {
-                    "name": str(name),
-                    "cpu_ms": elapsed_ms,
-                    "gpu_ms": elapsed_ms if ctx is not None else None,
-                }
-                profile["passes"].append(entry)
-                summary = profile["summary"].setdefault(str(name), {"count": 0, "cpu_ms": 0.0, "gpu_ms": None})
-                summary["count"] += 1
-                summary["cpu_ms"] += elapsed_ms
-                if ctx is not None:
-                    summary["gpu_ms"] = float(summary["gpu_ms"] or 0.0) + elapsed_ms
+    # ``available`` / ``reset_pass_profile`` / ``_profile_pass`` are inherited
+    # from :class:`GPUPipelineBase` (formerly inlined here verbatim).
 
     def step(
         self,
@@ -1674,11 +1642,7 @@ class GPUHeatPipeline:
         )
         self._sync_compute_writes(bridge.ctx)
 
-    def _formal_gpu_frame(self, world: "WorldEngine") -> bool:
-        return (
-            getattr(world, "simulation_backend", "") == "gpu"
-            and bool(getattr(world, "_world_simulation_frame_active", False))
-        )
+    # ``_formal_gpu_frame`` is inherited from :class:`GPUPipelineBase`.
 
     def _load_authoritative_bridge_inputs(
         self,
@@ -2277,15 +2241,6 @@ class GPUHeatPipeline:
                 "gas_concentration",
             )
 
-    def _set_uniform_if_present(self, program: Any, name: str, value: Any) -> None:
-        try:
-            program[name].value = value
-        except KeyError:
-            return
-
-    def _sync_compute_writes(self, ctx: Any) -> None:
-        ctx.memory_barrier(
-            ctx.SHADER_IMAGE_ACCESS_BARRIER_BIT
-            | ctx.TEXTURE_FETCH_BARRIER_BIT
-            | getattr(ctx, "SHADER_STORAGE_BARRIER_BIT", 0),
-        )
+    # ``_set_uniform_if_present`` and ``_sync_compute_writes`` are inherited
+    # from :class:`GPUPipelineBase`; the heat pass uses the default barrier
+    # bits (image-access | texture-fetch | shader-storage).
