@@ -926,8 +926,7 @@ class WorldEngine:
 
     _material_optics_table_snapshot_payload = _material_optics_table_snapshot_payload
 
-    def _material_optics_snapshot_map(self) -> dict[tuple[str, str], MaterialOpticsDef]:
-        return _material_optics_snapshot_map(self)
+    _material_optics_snapshot_map = _material_optics_snapshot_map
 
     _reaction_table_snapshot_payload = _reaction_table_snapshot_payload
 
@@ -1092,8 +1091,7 @@ class WorldEngine:
     def _gas_field_count(self) -> int:
         return max(self.rulebook.gases_by_id, default=-1) + 1
 
-    def _light_field_count(self) -> int:
-        return _light_field_count(self)
+    _light_field_count = _light_field_count
 
     update_material_table = update_material_table
 
@@ -1209,8 +1207,7 @@ class WorldEngine:
 
     serialize_ready_readbacks = serialize_ready_readbacks
 
-    def readback_request_status(self, request_id: int) -> str:
-        return readback_request_status(self, request_id)
+    readback_request_status = readback_request_status
 
     serialize_frame_state = serialize_frame_state
 
@@ -1293,8 +1290,7 @@ class WorldEngine:
 
     step = step
 
-    def simulation_backend_report(self) -> dict[str, Any]:
-        return simulation_backend_report(self)
+    simulation_backend_report = simulation_backend_report
 
     def poll_readbacks(self, request_id: int | None = None) -> ReadbackResult | None:
         if request_id is None:
@@ -1331,43 +1327,7 @@ class WorldEngine:
 
     preview_entity_controller_turn = preview_entity_controller_turn
 
-    def submit_entity_controller_turn(
-        self,
-        *,
-        controller_state: Any = None,
-        controller_state_provided: bool = False,
-        focus_center: tuple[int, int] | None = None,
-        entities: list[EntityState | dict[str, Any]] | None = None,
-        entity_placeholders: list[EntityPlaceholder | dict[str, Any]] | None = None,
-        patches: list[EntityStatePatch | dict[str, Any]] | None = None,
-        observation_specs: list[EntityObservationSpec | dict[str, Any]] | None = None,
-        force_sources: list[ForceSource | dict[str, Any]] | None = None,
-        emitters: list[dict[str, Any]] | None = None,
-        target_queries: list[TargetQuery | dict[str, Any]] | None = None,
-        change_intents: list[ChangeIntent | dict[str, Any]] | None = None,
-        carrier_intents: list[CarrierIntent | dict[str, Any]] | None = None,
-        observation_targets: list[ObservationTarget | dict[str, Any]] | None = None,
-        readback_requests: list[ReadbackRequest | dict[str, Any]] | None = None,
-        commands: list[WorldCommand | dict[str, Any]] | None = None,
-    ) -> int:
-        return submit_entity_controller_turn(
-            self,
-            controller_state=controller_state,
-            controller_state_provided=controller_state_provided,
-            focus_center=focus_center,
-            entities=entities,
-            entity_placeholders=entity_placeholders,
-            patches=patches,
-            observation_specs=observation_specs,
-            force_sources=force_sources,
-            emitters=emitters,
-            target_queries=target_queries,
-            change_intents=change_intents,
-            carrier_intents=carrier_intents,
-            observation_targets=observation_targets,
-            readback_requests=readback_requests,
-            commands=commands,
-        )
+    submit_entity_controller_turn = submit_entity_controller_turn
 
     request_entity_controller_turn = request_entity_controller_turn
 
@@ -1447,12 +1407,7 @@ class WorldEngine:
             preview_page_stripes.append((PageStripeUpdate(**asdict(update)), deepcopy(payload)))
         return preview_page_stripes
 
-    def _preview_bridge_placeholder_dirty_rects(
-        self,
-        current_entity_placeholders: dict[int, set[tuple[int, int]]],
-        placeholders: list[EntityPlaceholder],
-    ) -> list[dict[str, Any]]:
-        return _preview_bridge_placeholder_dirty_rects(self, current_entity_placeholders, placeholders)
+    _preview_bridge_placeholder_dirty_rects = _preview_bridge_placeholder_dirty_rects
 
     @staticmethod
     def _serialize_bridge_readback_request_stages(
@@ -1517,8 +1472,7 @@ class WorldEngine:
     ) -> list[tuple[int, int, int, int]]:
         return _subtract_page_stripe_range_from_region(region, axis=axis, start=start, end=end)
 
-    def close(self) -> None:
-        return close(self)
+    close = close
 
     def __del__(self) -> None:  # pragma: no cover
         _world_engine_del(self)
@@ -1527,8 +1481,7 @@ class WorldEngine:
 
     allocate_island_id = allocate_island_id
 
-    def _refresh_island_records_for_ids(self, island_ids: Iterable[int]) -> None:
-        return _refresh_island_records_for_ids(self, island_ids)
+    _refresh_island_records_for_ids = _refresh_island_records_for_ids
 
     in_bounds = in_bounds
 
@@ -1564,8 +1517,7 @@ class WorldEngine:
 
     sample_flow_to_cells = sample_flow_to_cells
 
-    def downsample_cells_to_gas(self, field: np.ndarray) -> np.ndarray:
-        return downsample_cells_to_gas(self, field)
+    downsample_cells_to_gas = downsample_cells_to_gas
 
     add_gas_from_cells = add_gas_from_cells
 
@@ -1680,8 +1632,7 @@ class WorldEngine:
             int(min(max_gas_y, clamped_gas_y + span_y)),
         )
 
-    def _bridge_shadow_buffer_coord_space(self, array: np.ndarray) -> str | None:
-        return _bridge_shadow_buffer_coord_space(self, array)
+    _bridge_shadow_buffer_coord_space = _bridge_shadow_buffer_coord_space
 
     _serialize_bridge_ndarray_slice = _serialize_bridge_ndarray_slice
 
@@ -1833,14 +1784,11 @@ class WorldEngine:
 
     serialize_entity_observation_state = serialize_entity_observation_state
 
-    def _current_cell_state_snapshot(self, *, allow_gpu_sync_readback: bool = False) -> dict[str, np.ndarray]:
-        return _current_cell_state_snapshot(self, allow_gpu_sync_readback=allow_gpu_sync_readback)
+    _current_cell_state_snapshot = _current_cell_state_snapshot
 
-    def _current_entity_runtime_snapshot(self, *, allow_gpu_sync_readback: bool = False) -> dict[str, np.ndarray]:
-        return _current_entity_runtime_snapshot(self, allow_gpu_sync_readback=allow_gpu_sync_readback)
+    _current_entity_runtime_snapshot = _current_entity_runtime_snapshot
 
-    def _entity_placeholder_state_gpu_authoritative(self) -> bool:
-        return _entity_placeholder_state_gpu_authoritative(self)
+    _entity_placeholder_state_gpu_authoritative = _entity_placeholder_state_gpu_authoritative
 
     serialize_entity_placeholders = serialize_entity_placeholders
 
@@ -1943,8 +1891,7 @@ class WorldEngine:
 
     _queue_loaded_collapse_pending_regions_from_payload = _queue_loaded_collapse_pending_regions_from_payload
 
-    def _advance_paging(self, center_x: int, center_y: int) -> list[PageStripeUpdate]:
-        return _advance_paging(self, center_x, center_y)
+    _advance_paging = _advance_paging
 
     _prepare_bridge_frame_inputs = _prepare_bridge_frame_inputs
 
@@ -2029,8 +1976,7 @@ class WorldEngine:
 
     _release_entity_placeholder_cell = _release_entity_placeholder_cell
 
-    def _mirror_release_entity_placeholder_cell(self, x: int, y: int, entity_id: int) -> None:
-        return _mirror_release_entity_placeholder_cell(self, x, y, entity_id)
+    _mirror_release_entity_placeholder_cell = _mirror_release_entity_placeholder_cell
 
     _resolve_sanctioned_material_id = _resolve_sanctioned_material_id
 
@@ -2196,80 +2142,37 @@ class WorldEngine:
 
     _frame_entities_to_placeholders_and_observations = _frame_entities_to_placeholders_and_observations
 
-    def _runtime_entities_to_immediate_observation_targets(
-        self,
-        entities: list[EntityState],
-    ) -> list[ObservationTarget]:
-        return _runtime_entities_to_immediate_observation_targets(self, entities)
+    _runtime_entities_to_immediate_observation_targets = _runtime_entities_to_immediate_observation_targets
 
     _sync_entity_states = _sync_entity_states
 
     _sync_entity_observation_specs = _sync_entity_observation_specs
 
-    def _patch_entity_states(self, patches: list[EntityStatePatch]) -> None:
-        return _patch_entity_states(self, patches)
+    _patch_entity_states = _patch_entity_states
 
     _build_preview_entity_placeholders = _build_preview_entity_placeholders
 
-    def _preview_can_occupy_placeholder_cell(
-        self,
-        x: int,
-        y: int,
-        placeholder: EntityPlaceholder,
-        current_cells: dict[tuple[int, int], int],
-        released_cells: set[tuple[int, int]],
-    ) -> bool:
-        return _preview_can_occupy_placeholder_cell(self, x, y, placeholder, current_cells, released_cells)
+    _preview_can_occupy_placeholder_cell = _preview_can_occupy_placeholder_cell
 
-    def _material_state_for_position(
-        self,
-        x: int,
-        y: int,
-        *,
-        blocked_cells: set[tuple[int, int]] | None = None,
-        released_cells: set[tuple[int, int]] | None = None,
-    ) -> tuple[int, int]:
-        return _material_state_for_position(self, x, y, blocked_cells=blocked_cells, released_cells=released_cells)
+    _material_state_for_position = _material_state_for_position
 
-    def _build_observation_requests(
-        self,
-        targets: list[ObservationTarget],
-        resolved_targets: dict[str, ResolvedTarget],
-    ) -> list[ReadbackRequest]:
-        return _build_observation_requests(self, targets, resolved_targets)
+    _build_observation_requests = _build_observation_requests
 
     _build_observation_request = _build_observation_request
 
-    def _resolve_readback_requests(
-        self,
-        requests: list[ReadbackRequest],
-        resolved_targets: dict[str, ResolvedTarget],
-    ) -> list[ReadbackRequest]:
-        return _resolve_readback_requests(self, requests, resolved_targets)
+    _resolve_readback_requests = _resolve_readback_requests
 
     _resolve_readback_request = _resolve_readback_request
 
     _resolve_target_queries = _resolve_target_queries
 
-    def _resolve_change_intents(
-        self,
-        intents: list[ChangeIntent],
-        resolved_targets: dict[str, ResolvedTarget],
-    ) -> tuple[dict[str, ResolvedChangeIntent], list[WorldCommand]]:
-        return _resolve_change_intents(self, intents, resolved_targets)
+    _resolve_change_intents = _resolve_change_intents
 
-    def _public_resolved_change_intent(self, intent: ResolvedChangeIntent) -> ResolvedChangeIntent:
-        return _public_resolved_change_intent(self, intent)
+    _public_resolved_change_intent = _public_resolved_change_intent
 
-    def _public_resolved_target(self, target: ResolvedTarget) -> ResolvedTarget:
-        return _public_resolved_target(self, target)
+    _public_resolved_target = _public_resolved_target
 
-    def _resolve_carrier_intents(
-        self,
-        intents: list[CarrierIntent],
-        resolved_targets: dict[str, ResolvedTarget],
-    ) -> tuple[dict[str, ResolvedCarrierIntent], list[WorldCommand]]:
-        return _resolve_carrier_intents(self, intents, resolved_targets)
+    _resolve_carrier_intents = _resolve_carrier_intents
 
     _public_resolved_carrier_intent = _public_resolved_carrier_intent
 
@@ -2279,39 +2182,9 @@ class WorldEngine:
 
     _resolve_change_intent_world_position = _resolve_change_intent_world_position
 
-    def _resolve_intent_world_position(
-        self,
-        *,
-        target_query_id: str | None,
-        center_x: int | None,
-        center_y: int | None,
-        target_dx: int,
-        target_dy: int,
-        resolved_targets: dict[str, ResolvedTarget],
-    ) -> tuple[int, int] | None:
-        return _resolve_intent_world_position(
-            self,
-            target_query_id=target_query_id,
-            center_x=center_x,
-            center_y=center_y,
-            target_dx=target_dx,
-            target_dy=target_dy,
-            resolved_targets=resolved_targets,
-        )
+    _resolve_intent_world_position = _resolve_intent_world_position
 
-    def _resolve_intent_source_positions(
-        self,
-        *,
-        source_entity_id: int | None,
-        source_x: int | None,
-        source_y: int | None,
-    ) -> tuple[tuple[int, int], tuple[int, int]]:
-        return _resolve_intent_source_positions(
-            self,
-            source_entity_id=source_entity_id,
-            source_x=source_x,
-            source_y=source_y,
-        )
+    _resolve_intent_source_positions = _resolve_intent_source_positions
 
     @staticmethod
     def _normalized_world_direction(
@@ -2365,40 +2238,29 @@ class WorldEngine:
     def _distance_meters_to_cells(distance_meters: float) -> int:
         return _distance_meters_to_cells(distance_meters)
 
-    def _resolve_query_source_position(self, query: TargetQuery) -> tuple[int, int] | None:
-        return _resolve_query_source_position(self, query)
+    _resolve_query_source_position = _resolve_query_source_position
 
-    def _default_target_source_position(self) -> tuple[int, int]:
-        return _default_target_source_position(self)
+    _default_target_source_position = _default_target_source_position
 
-    def _resolve_anchor_target(
-        self,
-        query: TargetQuery,
-        source_world_position: tuple[int, int],
-    ) -> dict[str, Any] | None:
-        return _resolve_anchor_target(self, query, source_world_position)
+    _resolve_anchor_target = _resolve_anchor_target
 
     _resolve_entity_anchor = _resolve_entity_anchor
 
     _resolve_terrain_anchor = _resolve_terrain_anchor
 
-    def _entity_matches_anchor_filters(self, entity: EntityState, filters: tuple[str, ...]) -> bool:
-        return _entity_matches_anchor_filters(self, entity, filters)
+    _entity_matches_anchor_filters = _entity_matches_anchor_filters
 
     _terrain_cell_matches = _terrain_cell_matches
 
-    def _terrain_tree_cell_matches(self, x: int, y: int, material_id: int, phase: int) -> bool:
-        return _terrain_tree_cell_matches(self, x, y, material_id, phase)
+    _terrain_tree_cell_matches = _terrain_tree_cell_matches
 
-    def _terrain_hill_cell_matches(self, x: int, y: int, material_id: int, phase: int) -> bool:
-        return _terrain_hill_cell_matches(self, x, y, material_id, phase)
+    _terrain_hill_cell_matches = _terrain_hill_cell_matches
 
     _world_cell_is_solid_local = _world_cell_is_solid_local
 
     _world_cell_is_empty_local = _world_cell_is_empty_local
 
-    def _world_cell_material_has_tag(self, x: int, y: int, tag: str) -> bool:
-        return _world_cell_material_has_tag(self, x, y, tag)
+    _world_cell_material_has_tag = _world_cell_material_has_tag
 
     _bounded_material_state_for_position = _bounded_material_state_for_position
 
@@ -2408,14 +2270,11 @@ class WorldEngine:
 
     _direction_vector = _direction_vector
 
-    def _source_facing_vector(self, source_entity_id: int | None) -> tuple[float, float]:
-        return _source_facing_vector(self, source_entity_id)
+    _source_facing_vector = _source_facing_vector
 
-    def _entity_center_buffer_position(self, entity: EntityState) -> tuple[int, int]:
-        return _entity_center_buffer_position(self, entity)
+    _entity_center_buffer_position = _entity_center_buffer_position
 
-    def _entity_center_world_position(self, entity: EntityState) -> tuple[int, int]:
-        return _entity_center_world_position(self, entity)
+    _entity_center_world_position = _entity_center_world_position
 
     _buffer_to_world_position = _buffer_to_world_position
 
@@ -2427,8 +2286,7 @@ class WorldEngine:
 
     _force_source_buffer_position = _force_source_buffer_position
 
-    def _normalize_runtime_force_source(self, force_source: ForceSource) -> ForceSource:
-        return _normalize_runtime_force_source(self, force_source)
+    _normalize_runtime_force_source = _normalize_runtime_force_source
 
     _buffer_gas_to_world_position = _buffer_gas_to_world_position
 
@@ -2444,21 +2302,13 @@ class WorldEngine:
 
     _extract_world_window = _extract_world_window
 
-    def _world_gas_window_for_cell_world_rect(
-        self,
-        world_x0: int,
-        world_y0: int,
-        world_x1: int,
-        world_y1: int,
-    ) -> tuple[int, int, int, int]:
-        return _world_gas_window_for_cell_world_rect(self, world_x0, world_y0, world_x1, world_y1)
+    _world_gas_window_for_cell_world_rect = _world_gas_window_for_cell_world_rect
 
     _pack_cell_core_world_window = _pack_cell_core_world_window
 
     _world_to_buffer_clamped = _world_to_buffer_clamped
 
-    def _clamp_world_position(self, world_x: int, world_y: int) -> tuple[int, int]:
-        return _clamp_world_position(self, world_x, world_y)
+    _clamp_world_position = _clamp_world_position
 
     _find_nearest_empty_world_position = _find_nearest_empty_world_position
 
@@ -2468,8 +2318,7 @@ class WorldEngine:
     def _world_distance_sq(left: tuple[int, int], right: tuple[int, int]) -> float:
         return _world_distance_sq(left, right)
 
-    def _entity_placeholder_bbox(self, entity_id: int) -> tuple[int, int, int, int] | None:
-        return _entity_placeholder_bbox(self, entity_id)
+    _entity_placeholder_bbox = _entity_placeholder_bbox
 
     _collect_observations = _collect_observations
 
@@ -2477,20 +2326,9 @@ class WorldEngine:
 
     _build_entity_feedback = _build_entity_feedback
 
-    def _build_entity_feedback_from_world(self, entity: EntityState) -> EntityFeedback | None:
-        return _build_entity_feedback_from_world(self, entity)
+    _build_entity_feedback_from_world = _build_entity_feedback_from_world
 
-    def _build_entity_feedback_from_current_state(
-        self,
-        entity: EntityState,
-        *,
-        allow_gpu_sync_readback: bool = False,
-    ) -> EntityFeedback | None:
-        return _build_entity_feedback_from_current_state(
-            self,
-            entity,
-            allow_gpu_sync_readback=allow_gpu_sync_readback,
-        )
+    _build_entity_feedback_from_current_state = _build_entity_feedback_from_current_state
 
     _build_entity_feedback_from_state = _build_entity_feedback_from_state
 
@@ -2561,12 +2399,7 @@ class WorldEngine:
 
     _capture_page_stripe_island_runtime = _capture_page_stripe_island_runtime
 
-    def _page_stripe_island_bboxes_from_payload(
-        self,
-        update: PageStripeUpdate,
-        payload: dict[str, Any],
-    ) -> dict[int, tuple[int, int, int, int]] | None:
-        return _page_stripe_island_bboxes_from_payload(self, update, payload)
+    _page_stripe_island_bboxes_from_payload = _page_stripe_island_bboxes_from_payload
 
     _merge_island_runtime_payload = _merge_island_runtime_payload
 
@@ -2582,21 +2415,10 @@ class WorldEngine:
 
     _drain_gpu_collapse_structure_dirty_tiles = _drain_gpu_collapse_structure_dirty_tiles
 
-    def _paint_material(self, x: int, y: int, material: str, radius: int) -> None:
-        return _paint_material(self, x, y, material, radius)
+    _paint_material = _paint_material
 
-    def _write_material_region_immediate(
-        self,
-        x: int,
-        y: int,
-        width: int,
-        height: int,
-        material: str,
-    ) -> None:
-        return _write_material_region_immediate(self, x, y, width, height, material)
+    _write_material_region_immediate = _write_material_region_immediate
 
-    def _build_demo_scene(self) -> None:
-        return _build_demo_scene(self)
+    _build_demo_scene = _build_demo_scene
 
-    def _fill_rect(self, x: int, y: int, width: int, height: int, material: str) -> None:
-        return _fill_rect(self, x, y, width, height, material)
+    _fill_rect = _fill_rect
