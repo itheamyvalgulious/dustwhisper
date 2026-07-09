@@ -16,24 +16,28 @@ Re-run after each phase:
 
 ## Phases
 - [x] Phase 0 — baseline captured.
-- [x] Phase 1 (GPU base) — `sim/gpu_base.py` `GPUPipelineBase`; all 11 GPU pipelines subclass it (dup helpers removed; `_barrier_bits` overrides where needed). Snapshot unchanged.
-- [~] Phase 1 (other foundations) — shader loader built (`sim/shader_loader.py`); `EngineConfig`, `types/` split, `cpu/base`, `MaterialTableAccessor` still TODO.
-- [~] Phase 2 (shader extraction) — pilot done: gpu_merge GLSL → `shaders/merge/merge_cell_core.comp` (loader verified source-identical; gpu_merge 295→115 lines). 277 shaders remain across 10 files.
-- [~] Phase 4 (world.py split) — in progress:
-  - [x] constants block → `world_constants.py`
-  - [x] `serialize_engine_capabilities` (4254 lines) → `world_capabilities.py` (world.py 17279→12948)
-  - [ ] `world_capabilities.py` split into <1000 sections (subagent running)
-  - [ ] `_make_readback_payload` → `world_readback_payload.py` (subagent running)
+- [x] Phase 1 (GPU base) — `sim/gpu_base.py` `GPUPipelineBase`; all 11 GPU pipelines subclass it (dup helpers removed; `_barrier_bits` overrides where needed).
+- [~] Phase 1 (other foundations) — shader loader built (`sim/shader_loader.py`, with `includes`); shared `material_table_row` extracted to `sim/cpu_base.py` (3 CPU solvers delegate). `EngineConfig`, `types/` split, `Solver` base + `_select_backend` still TODO (Phase 3).
+- [~] Phase 2 (shader extraction):
+  - [x] gpu_merge (295→115), gpu_page_stripes (1073→868), gpu_placeholders (657→346), gpu_gas (1095→591) — fully migrated, < 1000.
+  - [x] gpu_motion (9210→3370), gpu_liquid (4775→1540), gpu_collapse (11347→5522) — shaders extracted; STILL > 1000 (remaining is non-shader pipeline Python logic; further split pending).
+  - [ ] gpu_reactions (9675), gpu_heat (2246), gpu_optics (1273), gpu_world_commands (1041) — preamble files, TODO (use `includes`).
+  - Note: compound f-string expressions (`{LOCAL_SIZE-1}`, `{A*B}`, `{Cls.ATTR}`) baked as evaluated literals in some collapse .comp (behavior-identical; derived-marker conversion is a robustness follow-up).
+- [~] Phase 4 (world.py split) — world.py 17279→12488:
+  - [x] constants → `world_constants.py`
+  - [x] `serialize_engine_capabilities` → `world_capabilities/` package (12 modules, each ≤916 lines)
+  - [x] `_make_readback_payload` → `world_readback_payload.py`
   - [ ] geometry bucket, intent-resolution cluster, input coercion, debug-frame, payload serializers (TODO)
 
-## Files still > 1000 lines (after current work)
-world.py (12948), gpu_collapse (11347), gpu_reactions (9675), gpu_motion (9210),
-gpu_liquid (4775), gpu.py (4465), world_capabilities.py (4284, being split),
-gpu_heat (2246), reactions.py (2011), rules.py (1578), enginedemo.py (1463),
-motion.py (1417), gpu_optics (1273), http_console.py (1164), gpu_gas (1095),
-gpu_page_stripes (1073), gpu_world_commands (1041), liquid.py (1011).
+## Files still > 1000 lines (current)
+world.py (12488), gpu_reactions (9675), gpu_collapse (5522), gpu.py (4465),
+gpu_motion (3370), gpu_heat (2246), reactions.py (2011), rules.py (1578),
+gpu_liquid (1540), enginedemo.py (1463), motion.py (1413), gpu_optics (1273),
+http_console.py (1164), gpu_world_commands (1041), liquid.py (1007).
+(Total down from 78245 to ~58129.)
 
 ## Per-extraction gates (in addition to snapshot)
 - capabilities golden: `f65d2183375bd352`
 - readback golden: `7062d287b034df0c`
+- debug_frame golden: `b4e60f4b007fe5a0` (DebugView×all + gas views, 96×64, 3 frames) — for the pending debug-frame bucket extraction
 - GPU snapshot: `ce71a34376c5010d`
