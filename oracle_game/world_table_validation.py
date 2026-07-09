@@ -4,6 +4,8 @@ from copy import deepcopy
 from dataclasses import asdict
 from typing import Any, Callable, Iterable, TYPE_CHECKING
 
+import numpy as np
+
 from oracle_game.types import (
     GasSpeciesDef,
     LightTypeDef,
@@ -15,7 +17,10 @@ from oracle_game.types import (
     ReactionType,
     SelfReactionRule,
 )
-from oracle_game.world_constants import PAIR_REACTION_RULE_SET_NAMES
+from oracle_game.world_constants import (
+    PAIR_REACTION_RULE_SET_NAMES,
+    REACTION_RULE_SET_NAMES,
+)
 
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
@@ -406,3 +411,96 @@ def _validate_reaction_payload(engine: "WorldEngine", reactions_payload: dict[st
         if integrity_at_most is not None and integrity_at_least is not None:
             if float(integrity_at_most) < float(integrity_at_least):
                 raise ValueError("self rules require integrity_at_most >= integrity_at_least")
+
+
+def _material_placeholder_mask(engine: "WorldEngine", material_id: np.ndarray) -> np.ndarray:
+    ids = np.asarray(material_id, dtype=np.int64)
+    mask = np.zeros(ids.shape, dtype=np.bool_)
+    valid = (ids >= 0) & (ids < int(engine.material_is_placeholder.shape[0]))
+    if np.any(valid):
+        mask[valid] = engine.material_is_placeholder[ids[valid]]
+    return mask
+
+
+def _set_reaction_rule_list(engine: "WorldEngine", rule_set: str, entries: list[dict[str, Any]] | list[PairReactionRule] | list[SelfReactionRule]) -> None:
+    normalized = str(rule_set)
+    if normalized == "self_rules":
+        normalized_entries = [engine._coerce_self_reaction_rule(entry) for entry in entries]
+        engine.rulebook.self_rules = normalized_entries
+        return
+    normalized_entries = [engine._coerce_pair_reaction_rule(entry) for entry in entries]
+    if normalized == "material_material":
+        engine.rulebook.material_material_rules = normalized_entries
+        return
+    if normalized == "material_gas":
+        engine.rulebook.material_gas_rules = normalized_entries
+        return
+    if normalized == "material_light":
+        engine.rulebook.material_light_rules = normalized_entries
+        return
+    if normalized == "gas_gas":
+        engine.rulebook.gas_gas_rules = normalized_entries
+        return
+    if normalized == "gas_light":
+        engine.rulebook.gas_light_rules = normalized_entries
+        return
+    raise KeyError(rule_set)
+
+
+def _set_reaction_rules_payload(engine: "WorldEngine", rules_payload: dict[str, list[dict[str, Any]]]) -> None:
+    for rule_set in REACTION_RULE_SET_NAMES:
+        _set_reaction_rule_list(engine, str(rule_set), list(rules_payload.get(str(rule_set), [])))
+
+
+def _remap_reaction_payload_result_actions(
+    rules_payload: dict[str, list[dict[str, Any]]],
+    *,
+    deleted_action_index: int,
+) -> None:
+    for rule_set in PAIR_REACTION_RULE_SET_NAMES:
+        for rule in rules_payload.get(str(rule_set), []):
+            result_action = int(rule.get("result_action", -1))
+            if result_action == deleted_action_index:
+                rule["result_action"] = 0
+            elif result_action > deleted_action_index:
+                rule["result_action"] = result_action - 1
+
+
+def _remap_material_payload_reaction_slots(
+    materials_payload: list[dict[str, Any]],
+    *,
+    deleted_action_index: int,
+) -> None:
+    for material in materials_payload:
+        slots = list(material.get("reaction_slots", (-1, -1, -1, -1, -1, -1, -1, -1)))
+        remapped_slots: list[int] = []
+        for slot in slots[:8]:
+            action_index = int(slot)
+            if action_index == deleted_action_index:
+                remapped_slots.append(-1)
+            elif action_index > deleted_action_index:
+                remapped_slots.append(action_index - 1)
+            else:
+                remapped_slots.append(action_index)
+        if len(remapped_slots) < 8:
+            remapped_slots.extend([-1] * (8 - len(remapped_slots)))
+        material["reaction_slots"] = tuple(remapped_slots)
+
+
+def _clamp_material_payload_reaction_slots(
+    materials_payload: list[dict[str, Any]],
+    *,
+    action_count: int,
+) -> None:
+    for material in materials_payload:
+        slots = list(material.get("reaction_slots", (-1, -1, -1, -1, -1, -1, -1, -1)))
+        clamped_slots: list[int] = []
+        for slot in slots[:8]:
+            action_index = int(slot)
+            if action_index < -1 or action_index >= action_count:
+                clamped_slots.append(-1)
+            else:
+                clamped_slots.append(action_index)
+        if len(clamped_slots) < 8:
+            clamped_slots.extend([-1] * (8 - len(clamped_slots)))
+        material["reaction_slots"] = tuple(clamped_slots)

@@ -634,3 +634,89 @@ def _build_entity_feedback_from_state(
         bbox=(min(bbox_xs), min(bbox_ys), max(bbox_xs) + 1, max(bbox_ys) + 1),
         cells=cells,
     )
+
+
+def _sync_pre_simulation_bridge_without_debug_upload(engine: "WorldEngine") -> None:
+    try:
+        engine.bridge.sync_world(engine, upload_debug_texture=False)
+    except TypeError as exc:
+        if "upload_debug_texture" not in str(exc):
+            raise
+        engine.bridge.sync_world(engine)
+
+
+def _sync_force_sources(engine: "WorldEngine", force_sources: list[ForceSource]) -> None:
+    engine.force_sources = [
+        engine._normalize_runtime_force_source(
+            force_source
+            if isinstance(force_source, ForceSource)
+            else ForceSource(**force_source)
+        )
+        for force_source in force_sources
+    ]
+    for force_source in engine.force_sources:
+        radius = int(np.ceil(force_source.radius))
+        x = int(round(force_source.x))
+        y = int(round(force_source.y))
+        engine._mark_active_rect_runtime(
+            max(0, x - radius),
+            max(0, y - radius),
+            min(engine.width, x + radius + 1),
+            min(engine.height, y + radius + 1),
+        )
+
+
+def _append_force_source_immediate(engine: "WorldEngine", force_source: ForceSource) -> None:
+    engine.force_sources.append(engine._normalize_runtime_force_source(force_source))
+    radius = int(np.ceil(force_source.radius))
+    x = int(round(engine.force_sources[-1].x))
+    y = int(round(engine.force_sources[-1].y))
+    engine._mark_active_rect_runtime(
+        max(0, x - radius),
+        max(0, y - radius),
+        min(engine.width, x + radius + 1),
+        min(engine.height, y + radius + 1),
+    )
+
+
+def _sync_persistent_emitters(engine: "WorldEngine", emitters: list[dict[str, object]]) -> None:
+    engine.persistent_emitters = [dict(emitter) for emitter in emitters]
+    for emitter in engine.persistent_emitters:
+        radius = int(max(0, round(float(emitter["range_cells"]))))
+        x = int(emitter["origin"][0])
+        y = int(emitter["origin"][1])
+        engine._mark_active_rect_runtime(
+            max(0, x - radius),
+            max(0, y - radius),
+            min(engine.width, x + radius + 1),
+            min(engine.height, y + radius + 1),
+        )
+
+
+def _append_transient_light_emitter_immediate(engine: "WorldEngine", emitter: dict[str, object]) -> None:
+    record = dict(emitter)
+    engine.emitters.append(record)
+    radius = int(max(0, round(float(record["range_cells"]))))
+    x = int(record["origin"][0])
+    y = int(record["origin"][1])
+    engine._mark_active_rect_runtime(
+        max(0, x - radius),
+        max(0, y - radius),
+        min(engine.width, x + radius + 1),
+        min(engine.height, y + radius + 1),
+    )
+
+
+def _mirror_occupy_entity_placeholder_cell(engine: "WorldEngine", x: int, y: int, placeholder: EntityPlaceholder) -> bool:
+    if not engine.in_bounds(x, y):
+        return False
+    placeholder_material_id = engine._resolve_sanctioned_placeholder_material_id(str(placeholder.material))
+    if placeholder_material_id <= 0:
+        return False
+    material_id = int(engine.material_id[y, x])
+    if material_id != 0 and int(engine.phase[y, x]) != int(Phase.LIQUID):
+        return False
+    engine.set_cell_by_id(x, y, placeholder_material_id, mark_dirty=False)
+    engine.entity_id[y, x] = placeholder.entity_id
+    engine._mark_active_rect_runtime(max(0, x - 1), max(0, y - 1), min(engine.width, x + 2), min(engine.height, y + 2))
+    return True

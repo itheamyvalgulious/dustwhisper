@@ -312,3 +312,42 @@ def clear_cell_region(engine: "WorldEngine", x0: int, y0: int, x1: int, y1: int,
     engine._mark_active_rect_runtime(x0, y0, x1, y1)
     if affects_collapse:
         engine._mark_collapse_dirty_rect(x0, y0, x1, y1)
+
+
+def _gas_field_count(engine: "WorldEngine") -> int:
+    return max(engine.rulebook.gases_by_id, default=-1) + 1
+
+
+def cell_to_gas(engine: "WorldEngine", y: int, x: int) -> tuple[int, int]:
+    """Map a cell-space (y, x) pair onto the lower-resolution gas grid."""
+    return cell_xy_to_gas(engine, x, y)
+
+
+def ambient_temperature_at_cell(engine: "WorldEngine", x: int, y: int) -> float:
+    gy, gx = cell_xy_to_gas(engine, x, y)
+    return float(engine.ambient_temperature[gy, gx])
+
+
+def ambient_temperature_region(engine: "WorldEngine", x0: int, y0: int, x1: int, y1: int) -> np.ndarray:
+    if x0 >= x1 or y0 >= y1:
+        return np.zeros((0, 0), dtype=np.float32)
+    gx0 = min(engine.gas_width, max(0, x0 // engine.gas_cell_size))
+    gy0 = min(engine.gas_height, max(0, y0 // engine.gas_cell_size))
+    gx1 = min(engine.gas_width, max(gx0 + 1, (x1 + engine.gas_cell_size - 1) // engine.gas_cell_size))
+    gy1 = min(engine.gas_height, max(gy0 + 1, (y1 + engine.gas_cell_size - 1) // engine.gas_cell_size))
+    repeated = np.repeat(
+        np.repeat(engine.ambient_temperature[gy0:gy1, gx0:gx1], engine.gas_cell_size, axis=0),
+        engine.gas_cell_size,
+        axis=1,
+    )
+    local_y0 = y0 - gy0 * engine.gas_cell_size
+    local_x0 = x0 - gx0 * engine.gas_cell_size
+    return np.ascontiguousarray(repeated[local_y0 : local_y0 + (y1 - y0), local_x0 : local_x0 + (x1 - x0)])
+
+
+def _gas_window_for_cell_rect(engine: "WorldEngine", x0: int, y0: int, x1: int, y1: int) -> tuple[int, int, int, int]:
+    gx0 = min(engine.gas_width, max(0, x0 // engine.gas_cell_size))
+    gy0 = min(engine.gas_height, max(0, y0 // engine.gas_cell_size))
+    gx1 = min(engine.gas_width, max(gx0, (x1 + engine.gas_cell_size - 1) // engine.gas_cell_size))
+    gy1 = min(engine.gas_height, max(gy0, (y1 + engine.gas_cell_size - 1) // engine.gas_cell_size))
+    return (gx0, gy0, gx1, gy1)

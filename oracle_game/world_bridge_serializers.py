@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+from dataclasses import asdict
 import json
 from typing import Any, Sequence, TYPE_CHECKING
 
@@ -7,7 +9,7 @@ import numpy as np
 
 from oracle_game.gpu import PAGE_STRIPE_AXIS_IDS, PAGE_STRIPE_FIELD_PATHS, PAGE_STRIPE_KIND_IDS
 from oracle_game.readback_contract import READBACK_CHANNEL_BITS
-from oracle_game.types import ReadbackRequest
+from oracle_game.types import PageStripeUpdate, ReadbackRequest
 
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
@@ -619,3 +621,63 @@ def serialize_bridge_frame_snapshot(engine: "WorldEngine") -> dict[str, Any]:
             stage="staged",
         ),
     }
+
+
+def _bridge_row_count(array: np.ndarray) -> int:
+    return int(array.shape[0]) if array.ndim > 0 else 0
+
+
+def _normalize_bridge_slice_bounds(array: np.ndarray, *, offset: int = 0, limit: int | None = None) -> tuple[int, int]:
+    row_count = _bridge_row_count(array)
+    start = min(max(0, int(offset)), row_count)
+    if limit is None:
+        end = row_count
+    else:
+        end = min(row_count, start + max(0, int(limit)))
+    return start, end
+
+
+def _normalize_bridge_window_bounds(
+    array: np.ndarray,
+    *,
+    x: int = 0,
+    y: int = 0,
+    w: int | None = None,
+    h: int | None = None,
+) -> tuple[int, int, int, int]:
+    if array.ndim < 2:
+        raise ValueError("bridge shadow buffer window requires at least 2 dimensions")
+    width = int(array.shape[-1])
+    height = int(array.shape[-2])
+    x0 = min(max(0, int(x)), width)
+    y0 = min(max(0, int(y)), height)
+    if w is None:
+        x1 = width
+    else:
+        x1 = min(width, x0 + max(0, int(w)))
+    if h is None:
+        y1 = height
+    else:
+        y1 = min(height, y0 + max(0, int(h)))
+    return x0, y0, x1, y1
+
+
+def _clamped_gas_window(engine: "WorldEngine", gas_x: int, gas_y: int, width: int, height: int) -> tuple[int, int, int, int]:
+    min_gas_x = int(engine.paging.origin_x) // int(engine.gas_cell_size)
+    min_gas_y = int(engine.paging.origin_y) // int(engine.gas_cell_size)
+    max_gas_x = min_gas_x + int(engine.gas_width)
+    max_gas_y = min_gas_y + int(engine.gas_height)
+    clamped_gas_x = min_gas_x if engine.gas_width <= 0 else max(min_gas_x, min(max_gas_x - 1, int(gas_x)))
+    clamped_gas_y = min_gas_y if engine.gas_height <= 0 else max(min_gas_y, min(max_gas_y - 1, int(gas_y)))
+    span_x = max(0, int(width))
+    span_y = max(0, int(height))
+    return (
+        int(clamped_gas_x),
+        int(clamped_gas_y),
+        int(min(max_gas_x, clamped_gas_x + span_x)),
+        int(min(max_gas_y, clamped_gas_y + span_y)),
+    )
+
+
+def _record_bridge_page_stripe(engine: "WorldEngine", update: PageStripeUpdate, payload: dict[str, Any]) -> None:
+    engine.bridge_frame_page_stripes.append((PageStripeUpdate(**asdict(update)), deepcopy(payload)))

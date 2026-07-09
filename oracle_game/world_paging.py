@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from copy import deepcopy
+from dataclasses import asdict, replace
 from typing import Any, Iterable, TYPE_CHECKING
 
 import numpy as np
 
 from oracle_game.page_store import StoredStripeKey
-from oracle_game.types import PageStripeUpdate, TargetQuery
+from oracle_game.types import PageStripeUpdate, ReadbackResult, TargetQuery
 
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
@@ -551,3 +552,161 @@ def _stripe_buffer_ranges(engine: "WorldEngine", update: PageStripeUpdate, *, ga
     if end > 0:
         ranges.append((0, end))
     return ranges
+
+
+def capture_page_stripe_to_store(engine: "WorldEngine", update: PageStripeUpdate) -> dict[str, Any]:
+    return store_page_stripe(engine, update, capture_page_stripe(engine, update))
+
+
+def poll_readbacks(engine: "WorldEngine", request_id: int | None = None) -> ReadbackResult | None:
+    if request_id is None:
+        if not engine.completed_readbacks:
+            return None
+        return engine.completed_readbacks.popleft()
+    for index, result in enumerate(engine.completed_readbacks):
+        if result.request.request_id == int(request_id):
+            del engine.completed_readbacks[index]
+            return result
+    return None
+
+
+def poll_all_readbacks(engine: "WorldEngine", *, current_frame_id: int | None = None) -> list[ReadbackResult]:
+    results: list[ReadbackResult] = []
+    if current_frame_id is not None:
+        engine._collect_ready_readbacks(current_frame_id)
+    while engine.completed_readbacks:
+        results.append(engine.completed_readbacks.popleft())
+    return results
+
+
+def _contextualize_page_stripe_update(engine: "WorldEngine", update: PageStripeUpdate) -> PageStripeUpdate:
+    if update.axis == "x":
+        default_cross_start = int(engine.paging.origin_y)
+        default_cross_end = int(engine.paging.origin_y + engine.height)
+    else:
+        default_cross_start = int(engine.paging.origin_x)
+        default_cross_end = int(engine.paging.origin_x + engine.width)
+    cross_world_start = default_cross_start if update.cross_world_start is None else int(update.cross_world_start)
+    cross_world_end = default_cross_end if update.cross_world_end is None else int(update.cross_world_end)
+    if (
+        update.cross_world_start == cross_world_start
+        and update.cross_world_end == cross_world_end
+    ):
+        return update
+    return replace(
+        update,
+        cross_world_start=cross_world_start,
+        cross_world_end=cross_world_end,
+    )
+
+
+def _page_store_key(update: PageStripeUpdate) -> tuple[str, int, int, int, int]:
+    return (
+        str(update.axis),
+        int(update.world_start),
+        int(update.world_end),
+        0 if update.cross_world_start is None else int(update.cross_world_start),
+        0 if update.cross_world_end is None else int(update.cross_world_end),
+    )
+
+
+def _preview_apply_paging_updates(
+    engine: "WorldEngine",
+    updates: list[PageStripeUpdate],
+) -> list[tuple[PageStripeUpdate, dict[str, Any]]]:
+    preview_saved_payloads: dict[tuple[str, int, int, int, int], dict[str, Any]] = {}
+    preview_page_stripes: list[tuple[PageStripeUpdate, dict[str, Any]]] = []
+    for update in updates:
+        if update.kind != "save":
+            continue
+        preview_saved_payloads[_page_store_key(update)] = capture_page_stripe(engine, update)
+        _clear_saved_page_stripe_runtime_state(engine, update)
+    for update in updates:
+        if update.kind != "load":
+            continue
+        payload = preview_saved_payloads.get(_page_store_key(update))
+        if payload is None:
+            payload = engine.page_store.load(update)
+        if payload is None:
+            payload = _default_page_stripe_payload(engine, update)
+        _apply_page_stripe(engine, update, payload)
+        preview_page_stripes.append((PageStripeUpdate(**asdict(update)), deepcopy(payload)))
+    return preview_page_stripes
+
+
+def _clear_saved_page_stripe_runtime_state(engine: "WorldEngine", update: PageStripeUpdate) -> None:
+    if update.kind != "save":
+        return
+    for start, end in _stripe_buffer_ranges(engine, update, gas_grid=False):
+        if update.axis == "x":
+            engine.active.clear_rect(start, 0, end, engine.height)
+        else:
+            engine.active.clear_rect(0, start, engine.width, end)
+    engine.collapse_dirty_regions = _prune_page_stripe_regions(engine, engine.collapse_dirty_regions, update)
+    engine.collapse_deferred_regions = _prune_page_stripe_regions(engine, engine.collapse_deferred_regions, update)
+
+
+def _prune_page_stripe_regions(
+    engine: "WorldEngine",
+    regions: Iterable[tuple[int, int, int, int]],
+    update: PageStripeUpdate,
+) -> list[tuple[int, int, int, int]]:
+    next_regions = [tuple(int(value) for value in region) for region in regions]
+    if update.kind != "save":
+        return next_regions
+    for start, end in _stripe_buffer_ranges(engine, update, gas_grid=False):
+        pruned: list[tuple[int, int, int, int]] = []
+        for region in next_regions:
+            pruned.extend(engine._subtract_page_stripe_range_from_region(region, axis=update.axis, start=start, end=end))
+        next_regions = pruned
+    return next_regions
+
+
+def _capture_stripe_array(
+    engine: "WorldEngine",
+    array: np.ndarray,
+    update: PageStripeUpdate,
+    *,
+    stripe_axis: int,
+    ranges: list[tuple[int, int]] | None = None,
+) -> np.ndarray:
+    spans = ranges if ranges is not None else _stripe_buffer_ranges(engine, update, gas_grid=False)
+    parts: list[np.ndarray] = []
+    for start, end in spans:
+        slices = [slice(None)] * array.ndim
+        slices[stripe_axis] = slice(start, end)
+        parts.append(np.ascontiguousarray(array[tuple(slices)]))
+    if not parts:
+        return np.empty((0,), dtype=array.dtype)
+    if len(parts) == 1:
+        return parts[0].copy()
+    return np.concatenate(parts, axis=stripe_axis)
+
+
+def _write_stripe_array(
+    engine: "WorldEngine",
+    array: np.ndarray,
+    update: PageStripeUpdate,
+    values: np.ndarray,
+    *,
+    stripe_axis: int,
+    ranges: list[tuple[int, int]] | None = None,
+) -> None:
+    spans = ranges if ranges is not None else _stripe_buffer_ranges(engine, update, gas_grid=False)
+    offset = 0
+    for start, end in spans:
+        span = end - start
+        slices = [slice(None)] * array.ndim
+        slices[stripe_axis] = slice(start, end)
+        source_slices = [slice(None)] * values.ndim
+        source_slices[stripe_axis] = slice(offset, offset + span)
+        array[tuple(slices)] = values[tuple(source_slices)]
+        offset += span
+
+
+def _mark_loaded_page_stripe_active(engine: "WorldEngine", update: PageStripeUpdate) -> None:
+    for start, end in _stripe_buffer_ranges(engine, update, gas_grid=False):
+        if update.axis == "x":
+            engine._mark_active_rect_runtime(start, 0, end, engine.height, tile_padding=1)
+        else:
+            engine._mark_active_rect_runtime(0, start, engine.width, end, tile_padding=1)

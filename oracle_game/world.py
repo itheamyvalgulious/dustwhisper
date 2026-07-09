@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from collections import deque
 from contextlib import contextmanager
-from copy import deepcopy
-from dataclasses import asdict, replace
 from enum import Enum
 import threading
 import time
@@ -75,8 +73,6 @@ from oracle_game.world_constants import (
     BASE_MATERIAL_RUNTIME_ALIASES,
     ENTITY_STATE_PATCH_METADATA_FIELDS,
     GPU_REALTIME_BUDGET_CELL_THRESHOLD,
-    PAIR_REACTION_RULE_SET_NAMES,
-    REACTION_RULE_SET_NAMES,
     TARGET_QUERY_DISTANCE_HINT_CELLS,
     UNSET_CONTROLLER_STATE,
 )
@@ -248,8 +244,14 @@ from oracle_game.world_entity_sync import (
     set_force_sources,
     set_emitters,
     consume_entity_observation_results,
+    _append_force_source_immediate,
+    _append_transient_light_emitter_immediate,
+    _mirror_occupy_entity_placeholder_cell,
     _preview_consume_entity_observation_results,
     _sync_entity_placeholders,
+    _sync_force_sources,
+    _sync_persistent_emitters,
+    _sync_pre_simulation_bridge_without_debug_upload,
     _release_entity_placeholder_cell,
     _occupy_entity_placeholder_cell,
     _frame_entities_to_placeholders_and_observations,
@@ -302,14 +304,23 @@ from oracle_game.world_paging import (
     _apply_page_stripe,
     _apply_page_stripe_dense_cpu,
     _capture_page_stripe_cpu_snapshot,
+    _capture_stripe_array,
+    _clear_saved_page_stripe_runtime_state,
     _coerce_page_store_key,
     _coerce_page_stripe_payload,
+    _contextualize_page_stripe_update,
     _default_page_stripe_payload,
+    _mark_loaded_page_stripe_active,
+    _page_store_key,
+    _preview_apply_paging_updates,
+    _prune_page_stripe_regions,
     _stripe_buffer_ranges,
+    _write_stripe_array,
     advance_paging,
     apply_page_stripe,
     apply_stored_page_stripe,
     capture_page_stripe,
+    capture_page_stripe_to_store,
     clear_page_store,
     export_page_store_entries,
     focus_paging,
@@ -317,6 +328,8 @@ from oracle_game.world_paging import (
     list_page_store_stripe_keys,
     load_page_stripe,
     page_store_has_stripe,
+    poll_all_readbacks,
+    poll_readbacks,
     store_page_stripe,
 )
 from oracle_game.world_intent_resolver import (
@@ -328,11 +341,16 @@ from oracle_game.world_intent_resolver import (
     _resolve_target_queries,
 )
 from oracle_game.world_cell_mutators import (
+    _gas_field_count,
+    _gas_window_for_cell_rect,
     _inject_gas_immediate,
     _inject_temperature_immediate,
     _inject_velocity_immediate,
     add_gas_from_cells,
     allocate_island_id,
+    ambient_temperature_at_cell,
+    ambient_temperature_region,
+    cell_to_gas,
     cell_xy_to_gas,
     clear_cell,
     clear_cell_region,
@@ -393,9 +411,11 @@ from oracle_game.world_input_coercion import (
     _public_force_source_input,
 )
 from oracle_game.world_table_validation import (
+    _clamp_material_payload_reaction_slots,
     _gas_species_table_snapshot_payload,
     _light_type_table_snapshot_payload,
     _material_optics_table_snapshot_payload,
+    _material_placeholder_mask,
     _material_table_snapshot_payload,
     _merged_gas_species_table_payload,
     _merged_light_type_table_payload,
@@ -404,6 +424,10 @@ from oracle_game.world_table_validation import (
     _merged_reaction_table_payload,
     _payload_name_set,
     _reaction_table_snapshot_payload,
+    _remap_material_payload_reaction_slots,
+    _remap_reaction_payload_result_actions,
+    _set_reaction_rule_list,
+    _set_reaction_rules_payload,
     _set_stable_shadow_payload,
     _shadow_gas_species_payload,
     _shadow_has_table_payload,
@@ -510,9 +534,14 @@ from oracle_game.world_state_snapshots import (
     simulation_backend_report,
 )
 from oracle_game.world_bridge_serializers import (
+    _bridge_row_count,
+    _clamped_gas_window,
     _decode_bridge_uploaded_command,
     _decode_bridge_uploaded_label,
     _decode_bridge_uploaded_page_stripe_section,
+    _normalize_bridge_slice_bounds,
+    _normalize_bridge_window_bounds,
+    _record_bridge_page_stripe,
     _serialize_bridge_index_stages,
     _serialize_bridge_ndarray,
     _serialize_bridge_ndarray_slice,
@@ -1049,7 +1078,7 @@ class WorldEngine:
     _coerce_world_frame_input = _coerce_world_frame_input
 
     def _gas_field_count(self) -> int:
-        return max(self.rulebook.gases_by_id, default=-1) + 1
+        return _gas_field_count(self)
 
     _light_field_count = _light_field_count
 
@@ -1194,7 +1223,7 @@ class WorldEngine:
     store_page_stripe = store_page_stripe
 
     def capture_page_stripe_to_store(self, update: PageStripeUpdate) -> dict[str, Any]:
-        return self.store_page_stripe(update, self.capture_page_stripe(update))
+        return capture_page_stripe_to_store(self, update)
 
     load_page_stripe = load_page_stripe
 
@@ -1253,23 +1282,10 @@ class WorldEngine:
     simulation_backend_report = simulation_backend_report
 
     def poll_readbacks(self, request_id: int | None = None) -> ReadbackResult | None:
-        if request_id is None:
-            if not self.completed_readbacks:
-                return None
-            return self.completed_readbacks.popleft()
-        for index, result in enumerate(self.completed_readbacks):
-            if result.request.request_id == int(request_id):
-                del self.completed_readbacks[index]
-                return result
-        return None
+        return poll_readbacks(self, request_id)
 
     def poll_all_readbacks(self, *, current_frame_id: int | None = None) -> list[ReadbackResult]:
-        results: list[ReadbackResult] = []
-        if current_frame_id is not None:
-            self._collect_ready_readbacks(current_frame_id)
-        while self.completed_readbacks:
-            results.append(self.completed_readbacks.popleft())
-        return results
+        return poll_all_readbacks(self, current_frame_id=current_frame_id)
 
     consume_entity_observation_results = consume_entity_observation_results
 
@@ -1315,57 +1331,17 @@ class WorldEngine:
     _restore_preview_runtime_state = _restore_preview_runtime_state
 
     def _contextualize_page_stripe_update(self, update: PageStripeUpdate) -> PageStripeUpdate:
-        if update.axis == "x":
-            default_cross_start = int(self.paging.origin_y)
-            default_cross_end = int(self.paging.origin_y + self.height)
-        else:
-            default_cross_start = int(self.paging.origin_x)
-            default_cross_end = int(self.paging.origin_x + self.width)
-        cross_world_start = default_cross_start if update.cross_world_start is None else int(update.cross_world_start)
-        cross_world_end = default_cross_end if update.cross_world_end is None else int(update.cross_world_end)
-        if (
-            update.cross_world_start == cross_world_start
-            and update.cross_world_end == cross_world_end
-        ):
-            return update
-        return replace(
-            update,
-            cross_world_start=cross_world_start,
-            cross_world_end=cross_world_end,
-        )
+        return _contextualize_page_stripe_update(self, update)
 
     @staticmethod
     def _page_store_key(update: PageStripeUpdate) -> tuple[str, int, int, int, int]:
-        return (
-            str(update.axis),
-            int(update.world_start),
-            int(update.world_end),
-            0 if update.cross_world_start is None else int(update.cross_world_start),
-            0 if update.cross_world_end is None else int(update.cross_world_end),
-        )
+        return _page_store_key(update)
 
     def _preview_apply_paging_updates(
         self,
         updates: list[PageStripeUpdate],
     ) -> list[tuple[PageStripeUpdate, dict[str, Any]]]:
-        preview_saved_payloads: dict[tuple[str, int, int, int, int], dict[str, Any]] = {}
-        preview_page_stripes: list[tuple[PageStripeUpdate, dict[str, Any]]] = []
-        for update in updates:
-            if update.kind != "save":
-                continue
-            preview_saved_payloads[self._page_store_key(update)] = self.capture_page_stripe(update)
-            self._clear_saved_page_stripe_runtime_state(update)
-        for update in updates:
-            if update.kind != "load":
-                continue
-            payload = preview_saved_payloads.get(self._page_store_key(update))
-            if payload is None:
-                payload = self.page_store.load(update)
-            if payload is None:
-                payload = self._default_page_stripe_payload(update)
-            self._apply_page_stripe(update, payload)
-            preview_page_stripes.append((PageStripeUpdate(**asdict(update)), deepcopy(payload)))
-        return preview_page_stripes
+        return _preview_apply_paging_updates(self, updates)
 
     _preview_bridge_placeholder_dirty_rects = _preview_bridge_placeholder_dirty_rects
 
@@ -1397,30 +1373,14 @@ class WorldEngine:
     _queue_loaded_collapse_pending_regions = _queue_loaded_collapse_pending_regions
 
     def _clear_saved_page_stripe_runtime_state(self, update: PageStripeUpdate) -> None:
-        if update.kind != "save":
-            return
-        for start, end in self._stripe_buffer_ranges(update, gas_grid=False):
-            if update.axis == "x":
-                self.active.clear_rect(start, 0, end, self.height)
-            else:
-                self.active.clear_rect(0, start, self.width, end)
-        self.collapse_dirty_regions = self._prune_page_stripe_regions(self.collapse_dirty_regions, update)
-        self.collapse_deferred_regions = self._prune_page_stripe_regions(self.collapse_deferred_regions, update)
+        return _clear_saved_page_stripe_runtime_state(self, update)
 
     def _prune_page_stripe_regions(
         self,
         regions: Iterable[tuple[int, int, int, int]],
         update: PageStripeUpdate,
     ) -> list[tuple[int, int, int, int]]:
-        next_regions = [tuple(int(value) for value in region) for region in regions]
-        if update.kind != "save":
-            return next_regions
-        for start, end in self._stripe_buffer_ranges(update, gas_grid=False):
-            pruned: list[tuple[int, int, int, int]] = []
-            for region in next_regions:
-                pruned.extend(self._subtract_page_stripe_range_from_region(region, axis=update.axis, start=start, end=end))
-            next_regions = pruned
-        return next_regions
+        return _prune_page_stripe_regions(self, regions, update)
 
     @staticmethod
     def _subtract_page_stripe_range_from_region(
@@ -1451,29 +1411,15 @@ class WorldEngine:
 
     def cell_to_gas(self, y: int, x: int) -> tuple[int, int]:
         """Map a cell-space (y, x) pair onto the lower-resolution gas grid."""
-        return self.cell_xy_to_gas(x, y)
+        return cell_to_gas(self, y, x)
 
     sample_ambient_to_cells = sample_ambient_to_cells
 
     def ambient_temperature_at_cell(self, x: int, y: int) -> float:
-        gy, gx = self.cell_xy_to_gas(x, y)
-        return float(self.ambient_temperature[gy, gx])
+        return ambient_temperature_at_cell(self, x, y)
 
     def ambient_temperature_region(self, x0: int, y0: int, x1: int, y1: int) -> np.ndarray:
-        if x0 >= x1 or y0 >= y1:
-            return np.zeros((0, 0), dtype=np.float32)
-        gx0 = min(self.gas_width, max(0, x0 // self.gas_cell_size))
-        gy0 = min(self.gas_height, max(0, y0 // self.gas_cell_size))
-        gx1 = min(self.gas_width, max(gx0 + 1, (x1 + self.gas_cell_size - 1) // self.gas_cell_size))
-        gy1 = min(self.gas_height, max(gy0 + 1, (y1 + self.gas_cell_size - 1) // self.gas_cell_size))
-        repeated = np.repeat(
-            np.repeat(self.ambient_temperature[gy0:gy1, gx0:gx1], self.gas_cell_size, axis=0),
-            self.gas_cell_size,
-            axis=1,
-        )
-        local_y0 = y0 - gy0 * self.gas_cell_size
-        local_x0 = x0 - gx0 * self.gas_cell_size
-        return np.ascontiguousarray(repeated[local_y0 : local_y0 + (y1 - y0), local_x0 : local_x0 + (x1 - x0)])
+        return ambient_temperature_region(self, x0, y0, x1, y1)
 
     sample_flow_to_cells = sample_flow_to_cells
 
@@ -1539,17 +1485,11 @@ class WorldEngine:
 
     @staticmethod
     def _bridge_row_count(array: np.ndarray) -> int:
-        return int(array.shape[0]) if array.ndim > 0 else 0
+        return _bridge_row_count(array)
 
     @classmethod
     def _normalize_bridge_slice_bounds(cls, array: np.ndarray, *, offset: int = 0, limit: int | None = None) -> tuple[int, int]:
-        row_count = cls._bridge_row_count(array)
-        start = min(max(0, int(offset)), row_count)
-        if limit is None:
-            end = row_count
-        else:
-            end = min(row_count, start + max(0, int(limit)))
-        return start, end
+        return _normalize_bridge_slice_bounds(array, offset=offset, limit=limit)
 
     @staticmethod
     def _normalize_bridge_window_bounds(
@@ -1560,37 +1500,10 @@ class WorldEngine:
         w: int | None = None,
         h: int | None = None,
     ) -> tuple[int, int, int, int]:
-        if array.ndim < 2:
-            raise ValueError("bridge shadow buffer window requires at least 2 dimensions")
-        width = int(array.shape[-1])
-        height = int(array.shape[-2])
-        x0 = min(max(0, int(x)), width)
-        y0 = min(max(0, int(y)), height)
-        if w is None:
-            x1 = width
-        else:
-            x1 = min(width, x0 + max(0, int(w)))
-        if h is None:
-            y1 = height
-        else:
-            y1 = min(height, y0 + max(0, int(h)))
-        return x0, y0, x1, y1
+        return _normalize_bridge_window_bounds(array, x=x, y=y, w=w, h=h)
 
     def _clamped_gas_window(self, gas_x: int, gas_y: int, width: int, height: int) -> tuple[int, int, int, int]:
-        min_gas_x = int(self.paging.origin_x) // int(self.gas_cell_size)
-        min_gas_y = int(self.paging.origin_y) // int(self.gas_cell_size)
-        max_gas_x = min_gas_x + int(self.gas_width)
-        max_gas_y = min_gas_y + int(self.gas_height)
-        clamped_gas_x = min_gas_x if self.gas_width <= 0 else max(min_gas_x, min(max_gas_x - 1, int(gas_x)))
-        clamped_gas_y = min_gas_y if self.gas_height <= 0 else max(min_gas_y, min(max_gas_y - 1, int(gas_y)))
-        span_x = max(0, int(width))
-        span_y = max(0, int(height))
-        return (
-            int(clamped_gas_x),
-            int(clamped_gas_y),
-            int(min(max_gas_x, clamped_gas_x + span_x)),
-            int(min(max_gas_y, clamped_gas_y + span_y)),
-        )
+        return _clamped_gas_window(self, gas_x, gas_y, width, height)
 
     _bridge_shadow_buffer_coord_space = _bridge_shadow_buffer_coord_space
 
@@ -1839,11 +1752,7 @@ class WorldEngine:
         return make_readback_payload(self, request)
 
     def _gas_window_for_cell_rect(self, x0: int, y0: int, x1: int, y1: int) -> tuple[int, int, int, int]:
-        gx0 = min(self.gas_width, max(0, x0 // self.gas_cell_size))
-        gy0 = min(self.gas_height, max(0, y0 // self.gas_cell_size))
-        gx1 = min(self.gas_width, max(gx0, (x1 + self.gas_cell_size - 1) // self.gas_cell_size))
-        gy1 = min(self.gas_height, max(gy0, (y1 + self.gas_cell_size - 1) // self.gas_cell_size))
-        return (gx0, gy0, gx1, gy1)
+        return _gas_window_for_cell_rect(self, x0, y0, x1, y1)
 
     _apply_page_stripe = _apply_page_stripe
 
@@ -1858,12 +1767,7 @@ class WorldEngine:
     _needs_pre_simulation_bridge_sync = _needs_pre_simulation_bridge_sync
 
     def _sync_pre_simulation_bridge_without_debug_upload(self) -> None:
-        try:
-            self.bridge.sync_world(self, upload_debug_texture=False)
-        except TypeError as exc:
-            if "upload_debug_texture" not in str(exc):
-                raise
-            self.bridge.sync_world(self)
+        return _sync_pre_simulation_bridge_without_debug_upload(self)
 
     _clear_bridge_frame_inputs = _clear_bridge_frame_inputs
 
@@ -1874,65 +1778,19 @@ class WorldEngine:
     _sync_entity_placeholders = _sync_entity_placeholders
 
     def _sync_force_sources(self, force_sources: list[ForceSource]) -> None:
-        self.force_sources = [
-            self._normalize_runtime_force_source(
-                force_source
-                if isinstance(force_source, ForceSource)
-                else ForceSource(**force_source)
-            )
-            for force_source in force_sources
-        ]
-        for force_source in self.force_sources:
-            radius = int(np.ceil(force_source.radius))
-            x = int(round(force_source.x))
-            y = int(round(force_source.y))
-            self._mark_active_rect_runtime(
-                max(0, x - radius),
-                max(0, y - radius),
-                min(self.width, x + radius + 1),
-                min(self.height, y + radius + 1),
-            )
+        return _sync_force_sources(self, force_sources)
 
     def _append_force_source_immediate(self, force_source: ForceSource) -> None:
-        self.force_sources.append(self._normalize_runtime_force_source(force_source))
-        radius = int(np.ceil(force_source.radius))
-        x = int(round(self.force_sources[-1].x))
-        y = int(round(self.force_sources[-1].y))
-        self._mark_active_rect_runtime(
-            max(0, x - radius),
-            max(0, y - radius),
-            min(self.width, x + radius + 1),
-            min(self.height, y + radius + 1),
-        )
+        return _append_force_source_immediate(self, force_source)
 
     def _sync_persistent_emitters(self, emitters: list[dict[str, object]]) -> None:
-        self.persistent_emitters = [dict(emitter) for emitter in emitters]
-        for emitter in self.persistent_emitters:
-            radius = int(max(0, round(float(emitter["range_cells"]))))
-            x = int(emitter["origin"][0])
-            y = int(emitter["origin"][1])
-            self._mark_active_rect_runtime(
-                max(0, x - radius),
-                max(0, y - radius),
-                min(self.width, x + radius + 1),
-                min(self.height, y + radius + 1),
-            )
+        return _sync_persistent_emitters(self, emitters)
 
     def _append_transient_light_emitter_immediate(self, emitter: dict[str, object]) -> None:
-        record = dict(emitter)
-        self.emitters.append(record)
-        radius = int(max(0, round(float(record["range_cells"]))))
-        x = int(record["origin"][0])
-        y = int(record["origin"][1])
-        self._mark_active_rect_runtime(
-            max(0, x - radius),
-            max(0, y - radius),
-            min(self.width, x + radius + 1),
-            min(self.height, y + radius + 1),
-        )
+        return _append_transient_light_emitter_immediate(self, emitter)
 
     def _record_bridge_page_stripe(self, update: PageStripeUpdate, payload: dict[str, Any]) -> None:
-        self.bridge_frame_page_stripes.append((PageStripeUpdate(**asdict(update)), deepcopy(payload)))
+        return _record_bridge_page_stripe(self, update, payload)
 
     _release_entity_placeholder_cell = _release_entity_placeholder_cell
 
@@ -1987,12 +1845,7 @@ class WorldEngine:
     _shadow_material_is_placeholder = _shadow_material_is_placeholder
 
     def _material_placeholder_mask(self, material_id: np.ndarray) -> np.ndarray:
-        ids = np.asarray(material_id, dtype=np.int64)
-        mask = np.zeros(ids.shape, dtype=np.bool_)
-        valid = (ids >= 0) & (ids < int(self.material_is_placeholder.shape[0]))
-        if np.any(valid):
-            mask[valid] = self.material_is_placeholder[ids[valid]]
-        return mask
+        return _material_placeholder_mask(self, material_id)
 
     _shadow_material_is_plant = _shadow_material_is_plant
 
@@ -2001,32 +1854,10 @@ class WorldEngine:
     _reaction_rule_list = _reaction_rule_list
 
     def _set_reaction_rule_list(self, rule_set: str, entries: list[dict[str, Any]] | list[PairReactionRule] | list[SelfReactionRule]) -> None:
-        normalized = str(rule_set)
-        if normalized == "self_rules":
-            normalized_entries = [self._coerce_self_reaction_rule(entry) for entry in entries]
-            self.rulebook.self_rules = normalized_entries
-            return
-        normalized_entries = [self._coerce_pair_reaction_rule(entry) for entry in entries]
-        if normalized == "material_material":
-            self.rulebook.material_material_rules = normalized_entries
-            return
-        if normalized == "material_gas":
-            self.rulebook.material_gas_rules = normalized_entries
-            return
-        if normalized == "material_light":
-            self.rulebook.material_light_rules = normalized_entries
-            return
-        if normalized == "gas_gas":
-            self.rulebook.gas_gas_rules = normalized_entries
-            return
-        if normalized == "gas_light":
-            self.rulebook.gas_light_rules = normalized_entries
-            return
-        raise KeyError(rule_set)
+        return _set_reaction_rule_list(self, rule_set, entries)
 
     def _set_reaction_rules_payload(self, rules_payload: dict[str, list[dict[str, Any]]]) -> None:
-        for rule_set in REACTION_RULE_SET_NAMES:
-            self._set_reaction_rule_list(str(rule_set), list(rules_payload.get(str(rule_set), [])))
+        return _set_reaction_rules_payload(self, rules_payload)
 
     @staticmethod
     def _remap_reaction_payload_result_actions(
@@ -2034,13 +1865,7 @@ class WorldEngine:
         *,
         deleted_action_index: int,
     ) -> None:
-        for rule_set in PAIR_REACTION_RULE_SET_NAMES:
-            for rule in rules_payload.get(str(rule_set), []):
-                result_action = int(rule.get("result_action", -1))
-                if result_action == deleted_action_index:
-                    rule["result_action"] = 0
-                elif result_action > deleted_action_index:
-                    rule["result_action"] = result_action - 1
+        return _remap_reaction_payload_result_actions(rules_payload, deleted_action_index=deleted_action_index)
 
     @staticmethod
     def _remap_material_payload_reaction_slots(
@@ -2048,20 +1873,7 @@ class WorldEngine:
         *,
         deleted_action_index: int,
     ) -> None:
-        for material in materials_payload:
-            slots = list(material.get("reaction_slots", (-1, -1, -1, -1, -1, -1, -1, -1)))
-            remapped_slots: list[int] = []
-            for slot in slots[:8]:
-                action_index = int(slot)
-                if action_index == deleted_action_index:
-                    remapped_slots.append(-1)
-                elif action_index > deleted_action_index:
-                    remapped_slots.append(action_index - 1)
-                else:
-                    remapped_slots.append(action_index)
-            if len(remapped_slots) < 8:
-                remapped_slots.extend([-1] * (8 - len(remapped_slots)))
-            material["reaction_slots"] = tuple(remapped_slots)
+        return _remap_material_payload_reaction_slots(materials_payload, deleted_action_index=deleted_action_index)
 
     @staticmethod
     def _clamp_material_payload_reaction_slots(
@@ -2069,36 +1881,14 @@ class WorldEngine:
         *,
         action_count: int,
     ) -> None:
-        for material in materials_payload:
-            slots = list(material.get("reaction_slots", (-1, -1, -1, -1, -1, -1, -1, -1)))
-            clamped_slots: list[int] = []
-            for slot in slots[:8]:
-                action_index = int(slot)
-                if action_index < -1 or action_index >= action_count:
-                    clamped_slots.append(-1)
-                else:
-                    clamped_slots.append(action_index)
-            if len(clamped_slots) < 8:
-                clamped_slots.extend([-1] * (8 - len(clamped_slots)))
-            material["reaction_slots"] = tuple(clamped_slots)
+        return _clamp_material_payload_reaction_slots(materials_payload, action_count=action_count)
 
     _shadow_reaction_rule = _shadow_reaction_rule
 
     _occupy_entity_placeholder_cell = _occupy_entity_placeholder_cell
 
     def _mirror_occupy_entity_placeholder_cell(self, x: int, y: int, placeholder: EntityPlaceholder) -> bool:
-        if not self.in_bounds(x, y):
-            return False
-        placeholder_material_id = self._resolve_sanctioned_placeholder_material_id(str(placeholder.material))
-        if placeholder_material_id <= 0:
-            return False
-        material_id = int(self.material_id[y, x])
-        if material_id != 0 and int(self.phase[y, x]) != int(Phase.LIQUID):
-            return False
-        self.set_cell_by_id(x, y, placeholder_material_id, mark_dirty=False)
-        self.entity_id[y, x] = placeholder.entity_id
-        self._mark_active_rect_runtime(max(0, x - 1), max(0, y - 1), min(self.width, x + 2), min(self.height, y + 2))
-        return True
+        return _mirror_occupy_entity_placeholder_cell(self, x, y, placeholder)
 
     _frame_entities_to_placeholders_and_observations = _frame_entities_to_placeholders_and_observations
 
@@ -2300,17 +2090,7 @@ class WorldEngine:
         stripe_axis: int,
         ranges: list[tuple[int, int]] | None = None,
     ) -> np.ndarray:
-        spans = ranges if ranges is not None else self._stripe_buffer_ranges(update, gas_grid=False)
-        parts: list[np.ndarray] = []
-        for start, end in spans:
-            slices = [slice(None)] * array.ndim
-            slices[stripe_axis] = slice(start, end)
-            parts.append(np.ascontiguousarray(array[tuple(slices)]))
-        if not parts:
-            return np.empty((0,), dtype=array.dtype)
-        if len(parts) == 1:
-            return parts[0].copy()
-        return np.concatenate(parts, axis=stripe_axis)
+        return _capture_stripe_array(self, array, update, stripe_axis=stripe_axis, ranges=ranges)
 
     def _write_stripe_array(
         self,
@@ -2321,27 +2101,14 @@ class WorldEngine:
         stripe_axis: int,
         ranges: list[tuple[int, int]] | None = None,
     ) -> None:
-        spans = ranges if ranges is not None else self._stripe_buffer_ranges(update, gas_grid=False)
-        offset = 0
-        for start, end in spans:
-            span = end - start
-            slices = [slice(None)] * array.ndim
-            slices[stripe_axis] = slice(start, end)
-            source_slices = [slice(None)] * values.ndim
-            source_slices[stripe_axis] = slice(offset, offset + span)
-            array[tuple(slices)] = values[tuple(source_slices)]
-            offset += span
+        return _write_stripe_array(self, array, update, values, stripe_axis=stripe_axis, ranges=ranges)
 
     _default_page_stripe_payload = _default_page_stripe_payload
 
     _stripe_buffer_ranges = _stripe_buffer_ranges
 
     def _mark_loaded_page_stripe_active(self, update: PageStripeUpdate) -> None:
-        for start, end in self._stripe_buffer_ranges(update, gas_grid=False):
-            if update.axis == "x":
-                self._mark_active_rect_runtime(start, 0, end, self.height, tile_padding=1)
-            else:
-                self._mark_active_rect_runtime(0, start, self.width, end, tile_padding=1)
+        return _mark_loaded_page_stripe_active(self, update)
 
     _rebuild_sparse_runtime_indexes = _rebuild_sparse_runtime_indexes
 
