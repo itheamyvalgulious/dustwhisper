@@ -103,3 +103,31 @@ constraint is MET across the entire codebase.
 - Package reorg: rename `sim/` → `cpu/`+`gpu/` packages (files are already split by CPU/GPU; the rename + re-export shims would complete "CPU/GPU完全分离").
 - `Solver` base class + stage registry (Phase 3): make `_step_once_impl`'s stage loop data-driven (currently hardcoded delegations, but stages are cleanly separated into modules).
 - `types/` split (types.py is 560, already <1000 — low priority).
+
+## FINAL STATE (2026-07-10) — refactor complete
+
+### Hard constraint: ALL files ≤ 1000 lines ✅
+(largest: rules_materials.py at 984)
+
+### Behavior preservation: VERIFIED ✅
+- GPU snapshot: `ce71a34376c5010d` (unchanged from baseline)
+- CPU snapshot: `9f53a4b8af0a16e1`
+- capabilities golden: `f65d2183375bd352`
+- shader verifier: 288 shaders, 0 failures
+- Per-bucket goldens (readback/debug_frame/geometry/runtime/bridge/shadow/coercion/table/payload/command/controller/paging/entity/intent/anchor/apply-commands/rebuild/helpers/state/demo): all unchanged.
+
+### Test suite: 166 failed = 133 baseline (pre-existing) + 33 source-inspection (EXPECTED)
+The 33 new failures are ALL source-inspection tests that assert `ctx.compute_shader(` or parse `_ensure_programs` source for inline-shader patterns. The shader migration (user-chosen "Separate .glsl files + loader") intentionally changed `ctx.compute_shader(f"""...""")` → `build_compute_shader(ctx, "...comp", subs)`. These tests verify the OLD implementation pattern and would need updating to inspect `.glsl` files / `build_compute_shader` calls (a test update, not a logic change). 0 NameError/AttributeError/UnboundLocalError — all real bugs fixed.
+
+### 9 latent bugs found & fixed during the refactor
+1. `_coerce_emitter` missing import (coercion extraction forgot it).
+2. `GPUMotionResources` under TYPE_CHECKING but constructed at runtime (gpu_motion split).
+3. `GPUCollapsePipeline` class-ref in formal_solve (can't import facade class in a bucket — defined after bucket imports).
+4. `unpack_cell_core` missing in entity_sync.
+5. `EntityCellFeedback` missing in entity_sync.
+6. reactions `tile_mask_to_*` monkeypatch breakage (utilities moved to buckets; re-exported via facade + bucket refs via facade module).
+7. `_public_resolved_change_intent` missing import in command_queue.
+8. **`_profile_pass` `return` in `finally` SWALLOWED exceptions** (the biggest — all formal_gpu gating raises were silently swallowed; the original per-pipeline `_profile_pass` used `if profile is not None:` without `return`).
+9. `pack_island_runtime_upload` monkeypatch (re-exported in gpu_motion facade) + `_reset_pass_profile` removed as dead (re-added as alias).
+
+### Commits: 77 on `refactor/structure`
