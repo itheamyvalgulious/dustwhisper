@@ -77,9 +77,10 @@ class GPUOpticsPipeline(GPUPipelineBase):
 
     # ``available`` / ``reset_pass_profile`` / ``_profile_pass`` are inherited
     # from :class:`GPUPipelineBase` (formerly inlined here verbatim). The
-    # ``_profile_enabled`` / ``_reset_pass_profile`` private helpers that only
-    # supported those inlined bodies were dead once inheritance took over and
-    # are removed as part of the same consolidation.
+    # ``_profile_enabled`` private helper is dead once inheritance takes over
+    # and is removed. ``_reset_pass_profile`` is kept as an alias for the
+    # inherited ``reset_pass_profile`` (tests call the underscore form directly).
+    _reset_pass_profile = GPUPipelineBase.reset_pass_profile
 
     def step(
         self,

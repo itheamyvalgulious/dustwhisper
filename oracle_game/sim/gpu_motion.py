@@ -5,7 +5,7 @@ from typing import Any
 
 import numpy as np
 
-from oracle_game.gpu import ISLAND_RUNTIME_DTYPE
+from oracle_game.gpu import ISLAND_RUNTIME_DTYPE, pack_island_runtime_upload
 from oracle_game.sim.gpu_base import GPUPipelineBase
 from oracle_game.sim.shader_loader import build_compute_shader
 
