@@ -232,6 +232,9 @@ def _collect_component_labels_gpu(
     *,
     empty_min: tuple[int, int] | None = None,
     tile_mask_name: str | None = None,
+    reject_invalid_components: bool = False,
+    invalid_generation: int | None = None,
+    component_flag_generation: int | None = None,
 ) -> int:
     ctx = world.bridge.ctx
     if ctx is None:
@@ -246,7 +249,25 @@ def _collect_component_labels_gpu(
     resources.component_count.write(np.zeros(1, dtype=np.uint32).tobytes())
 
     if pipeline._formal_gpu_frame(world) and tile_mask_name is not None:
-        program = pipeline.programs["collect_component_labels_connected_tiles"]
+        if reject_invalid_components and component_flag_generation is None:
+            with pipeline._profile_pass(
+                world,
+                "label_collect_components.clear_root_flags",
+            ):
+                pipeline._clear_component_label_flags_connected_tiles(
+                    world,
+                    resources,
+                    label_texture,
+                    width,
+                    height,
+                    component_capacity,
+                    tile_mask_name,
+                )
+        program = pipeline.programs[
+            "collect_component_labels_connected_tiles_generation"
+            if invalid_generation is not None
+            else "collect_component_labels_connected_tiles"
+        ]
         if not hasattr(program, "run_indirect"):
             raise RuntimeError("formal connected component collect requires ComputeShader.run_indirect")
         program["cell_grid_size"].value = (int(width), int(height))
@@ -257,6 +278,9 @@ def _collect_component_labels_gpu(
         program["tile_size"].value = int(max(1, int(getattr(world.active, "tile_size", FORMAL_CONNECTED_TILE_LOCAL_SIZE))))
         program["component_capacity"].value = int(component_capacity)
         program["empty_min"].value = (int(empty_min_value[0]), int(empty_min_value[1]))
+        program["reject_invalid_components"].value = bool(reject_invalid_components)
+        if invalid_generation is not None:
+            program["invalid_generation"].value = int(invalid_generation)
         label_texture.use(location=0)
         resources.component_flags.bind_to_storage_buffer(binding=0)
         resources.component_labels.bind_to_storage_buffer(binding=1)
@@ -265,8 +289,12 @@ def _collect_component_labels_gpu(
         world.bridge.buffers[tile_mask_name].bind_to_storage_buffer(binding=4)
         world.bridge.buffers[FORMAL_CONNECTED_TILE_COUNT_BUFFER].bind_to_storage_buffer(binding=5)
         world.bridge.buffers[FORMAL_CONNECTED_TILE_LIST_BUFFER].bind_to_storage_buffer(binding=6)
-        program.run_indirect(world.bridge.buffers[FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER])
-        ctx.memory_barrier(ctx.SHADER_STORAGE_BARRIER_BIT)
+        resources.component_invalid.bind_to_storage_buffer(binding=7)
+        with pipeline._profile_pass(world, "label_collect_components.collect_root_list"):
+            program.run_indirect(
+                world.bridge.buffers[FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER]
+            )
+            ctx.memory_barrier(ctx.SHADER_STORAGE_BARRIER_BIT)
         return component_capacity
 
     program = pipeline.programs["collect_component_labels"]
@@ -350,18 +378,33 @@ def _prepare_formal_component_list_and_metadata(
     height: int,
     *,
     tile_mask_name: str | None = None,
+    reject_invalid_components: bool = False,
+    defer_metadata_summary: bool = False,
+    invalid_generation: int | None = None,
+    component_flag_generation: int | None = None,
 ) -> int:
     ctx = world.bridge.ctx
     if ctx is None:
         raise RuntimeError("GPU collapse pipeline requires a valid ModernGL context")
     with pipeline._profile_pass(world, "label_collect_components.collect_roots"):
+        collect_kwargs: dict[str, Any] = {
+            "empty_min": (int(x0 + width), int(y0 + height)),
+            "tile_mask_name": tile_mask_name,
+        }
+        if reject_invalid_components:
+            collect_kwargs["reject_invalid_components"] = True
+        if invalid_generation is not None:
+            collect_kwargs["invalid_generation"] = int(invalid_generation)
+        if component_flag_generation is not None:
+            collect_kwargs["component_flag_generation"] = int(
+                component_flag_generation
+            )
         component_capacity = pipeline._collect_component_labels_gpu(
             world,
             label_texture,
             width,
             height,
-            empty_min=(int(x0 + width), int(y0 + height)),
-            tile_mask_name=tile_mask_name,
+            **collect_kwargs,
         )
     if component_capacity == 0:
         return 0
@@ -369,17 +412,18 @@ def _prepare_formal_component_list_and_metadata(
     # formal connected materialization stays routed to
     # summarize_compact_components_connected_tiles instead of the legacy
     # full-grid summarize shader.
-    with pipeline._profile_pass(world, "label_collect_components.summarize_metadata"):
-        pipeline._summarize_formal_component_metadata(
-            world,
-            label_texture,
-            x0,
-            y0,
-            width,
-            height,
-            component_capacity,
-            tile_mask_name=tile_mask_name,
-        )
+    if not defer_metadata_summary:
+        with pipeline._profile_pass(world, "label_collect_components.summarize_metadata"):
+            pipeline._summarize_formal_component_metadata(
+                world,
+                label_texture,
+                x0,
+                y0,
+                width,
+                height,
+                component_capacity,
+                tile_mask_name=tile_mask_name,
+            )
     return component_capacity
 
 
@@ -445,6 +489,7 @@ def _materialize_compact_labeled_component_texture(
     height: int,
     *,
     tile_mask_name: str | None = None,
+    publish_component_labels: bool = False,
 ) -> None:
     ctx = world.bridge.ctx
     if ctx is None:
@@ -551,7 +596,16 @@ def _materialize_compact_labeled_component_texture(
     with pipeline._profile_pass(world, "materialize.publish_bridge_outputs"):
         if connected_tiles:
             assert tile_mask_name is not None
-            pipeline._publish_bridge_region_outputs_connected_tiles(world, resources, x0, y0, width, height, tile_mask_name)
+            pipeline._publish_bridge_region_outputs_connected_tiles(
+                world,
+                resources,
+                x0,
+                y0,
+                width,
+                height,
+                tile_mask_name,
+                component_label_texture=label_texture if publish_component_labels else None,
+            )
         else:
             pipeline._publish_bridge_region_outputs(world, resources, x0, y0, width, height)
     pipeline.last_cpu_mirror_downloaded = False
@@ -566,6 +620,9 @@ def _publish_compact_component_island_runtime(
     y0: int,
     width: int,
     height: int,
+    *,
+    admission_slot: int = 0,
+    admission_stride: int = 1,
 ) -> None:
     if component_capacity == 0:
         return
@@ -590,7 +647,17 @@ def _publish_compact_component_island_runtime(
         bridge.buffers["island_runtime_count"].write(np.array([0], dtype=np.int32).tobytes())
 
     resources = pipeline._ensure_resources(ctx, width, height)
-    pipeline._build_component_dispatch_args(world, component_capacity)
+    dispatch_stride = max(1, int(admission_stride))
+    dispatch_invocations = (
+        256 * dispatch_stride
+        if pipeline._runtime_admission_stride_dispatch_enabled
+        else 256
+    )
+    pipeline._build_component_dispatch_args(
+        world,
+        component_capacity,
+        invocations_per_group=dispatch_invocations,
+    )
     program = pipeline.programs["publish_compact_component_island_runtime"]
     program["component_capacity"].value = int(component_capacity)
     program["island_id_base"].value = int(island_id_base)
@@ -600,6 +667,8 @@ def _publish_compact_component_island_runtime(
         int(world.paging.buffer_origin_x),
         int(world.paging.buffer_origin_y),
     )
+    program["admission_slot"].value = max(0, int(admission_slot))
+    program["admission_stride"].value = max(1, int(admission_stride))
     resources.component_metadata.bind_to_storage_buffer(binding=0)
     bridge_buffer.bind_to_storage_buffer(binding=1)
     bridge.buffers["island_runtime_count"].bind_to_storage_buffer(binding=2)

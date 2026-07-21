@@ -1,0 +1,85 @@
+#version 430
+layout(
+    local_size_x={{FORMAL_CONNECTED_TILE_LOCAL_SIZE}},
+    local_size_y={{FORMAL_CONNECTED_TILE_LOCAL_SIZE}},
+    local_size_z=1
+) in;
+uniform ivec2 cell_grid_size;
+uniform ivec2 tile_grid_size;
+uniform int tile_size;
+
+layout(binding=0) uniform sampler2D component_mask_tex;
+layout(r32f, binding=1) writeonly uniform image2D label_out_img;
+
+layout(std430, binding=0) readonly buffer ConnectedTileMask {
+    int connected_tiles[];
+};
+layout(std430, binding=1) readonly buffer ConnectedTileCount {
+    uint connected_tile_count[];
+};
+layout(std430, binding=2) readonly buffer ConnectedTileList {
+    ivec2 connected_tile_list[];
+};
+layout(std430, binding=3) buffer ConnectedTileRowMasks {
+    uint connected_tile_row_masks[];
+};
+layout(std430, binding=4) buffer ConnectedTileColumnMasks {
+    uint connected_tile_column_masks[];
+};
+
+bool tile_in_grid(ivec2 tile) {
+    return tile.x >= 0 && tile.y >= 0 && tile.x < tile_grid_size.x && tile.y < tile_grid_size.y;
+}
+
+void main() {
+    uint work_index = gl_WorkGroupID.x;
+    if (work_index >= connected_tile_count[0]) {
+        return;
+    }
+    ivec2 tile = connected_tile_list[int(work_index)];
+    if (!tile_in_grid(tile)) {
+        return;
+    }
+    int tile_index = tile.y * tile_grid_size.x + tile.x;
+    if (connected_tiles[tile_index] == 0) {
+        return;
+    }
+
+    ivec2 local_cell = ivec2(gl_LocalInvocationID.xy);
+    int mask_base = tile_index * {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}};
+    if (local_cell.x == 0) {
+        connected_tile_row_masks[mask_base + local_cell.y] = 0u;
+    }
+    if (local_cell.y == 0) {
+        connected_tile_column_masks[mask_base + local_cell.x] = 0u;
+    }
+    memoryBarrierBuffer();
+    barrier();
+
+    ivec2 cell = tile * tile_size + local_cell;
+    bool local_valid =
+        local_cell.x < tile_size &&
+        local_cell.y < tile_size &&
+        cell.x >= 0 &&
+        cell.y >= 0 &&
+        cell.x < cell_grid_size.x &&
+        cell.y < cell_grid_size.y;
+    if (!local_valid) {
+        return;
+    }
+
+    bool component = texelFetch(component_mask_tex, cell, 0).x > 0.5;
+    int cell_index = cell.y * cell_grid_size.x + cell.x;
+    int label = component ? cell_index + 1 : 0;
+    imageStore(label_out_img, cell, vec4(float(label), 0.0, 0.0, 0.0));
+    if (component) {
+        atomicOr(
+            connected_tile_row_masks[mask_base + local_cell.y],
+            1u << uint(local_cell.x)
+        );
+        atomicOr(
+            connected_tile_column_masks[mask_base + local_cell.x],
+            1u << uint(local_cell.y)
+        );
+    }
+}

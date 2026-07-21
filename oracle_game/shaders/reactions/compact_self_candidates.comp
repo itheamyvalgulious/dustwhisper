@@ -1,0 +1,40 @@
+#version 430
+layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+uniform ivec2 cell_grid_size;
+layout(binding=0) uniform usampler2D cell_state_tex;
+layout(binding=2) uniform sampler2D active_cell_tex;
+layout(std430, binding=0) readonly buffer MaterialTags {
+    uvec4 material_tags[{{MAX_MATERIALS}}];
+};
+layout(std430, binding=1) buffer SelfCandidateCount {
+    uint self_candidate_count[];
+};
+layout(std430, binding=2) buffer SelfCandidateList {
+    uint self_candidate_list[];
+};
+layout(std430, binding=3) buffer SelfCandidateDispatchArgs {
+    uint self_candidate_dispatch_args[];
+};
+layout(std430, binding=4) buffer SelfCandidateMarks {
+    uint self_candidate_marks[];
+};
+
+void main() {
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
+        return;
+    }
+    if (texelFetch(active_cell_tex, gid, 0).x <= 0.5) {
+        return;
+    }
+    int material_id = int(texelFetch(cell_state_tex, gid, 0).x & 0xFFFFu);
+    material_id = clamp(material_id, 0, {{MAX_MATERIALS_MINUS_1}});
+    uint span = material_tags[material_id].w;
+    if ((span >> 16u) == 0u) {
+        return;
+    }
+    uint slot = atomicAdd(self_candidate_count[0], 1u);
+    self_candidate_list[slot] = uint(gid.y * cell_grid_size.x + gid.x);
+    self_candidate_marks[gid.y * cell_grid_size.x + gid.x] = self_candidate_count[1];
+    atomicMax(self_candidate_dispatch_args[0], (slot + 64u) / 64u);
+}

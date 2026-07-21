@@ -13,6 +13,7 @@ from oracle_game.types import Phase
 from oracle_game.sim.gpu_motion import (
     LOCAL_SIZE
 )
+from oracle_game.sim.gpu_motion_bridge import _pack_cell_state_texture
 
 
 def label_falling_island_components(
@@ -53,8 +54,9 @@ def label_falling_island_component_metadata_texture(
     upload_plan = pipeline._cpu_upload_plan(world)
     pipeline._record_cpu_upload_plan(upload_plan)
     if upload_plan["cell_core"]:
-        resources.material_tex.write(world.material_id.astype("f4").tobytes())
-        resources.phase_tex.write(world.phase.astype("f4").tobytes())
+        resources.cell_state_tex.write(
+            _pack_cell_state_texture(world.material_id, world.phase, world.cell_flags).tobytes()
+        )
     if upload_plan["island_id"]:
         resources.island_id_tex.write(world.island_id.astype("f4").tobytes())
     group_x = (world.width + LOCAL_SIZE - 1) // LOCAL_SIZE
@@ -65,8 +67,7 @@ def label_falling_island_component_metadata_texture(
     init_program["cell_grid_size"].value = (world.width, world.height)
     init_program["target_island_id"].value = int(island_id)
     init_program["phase_falling_island"].value = int(Phase.FALLING_ISLAND)
-    resources.material_tex.use(location=0)
-    resources.phase_tex.use(location=1)
+    resources.cell_state_tex.use(location=0)
     resources.island_id_tex.use(location=2)
     resources.component_label_ping.bind_to_image(3, read=False, write=True)
     init_program.run(group_x, group_y, 1)

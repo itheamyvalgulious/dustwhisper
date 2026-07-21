@@ -21,9 +21,7 @@ layout(std430, binding=11) buffer ActiveTileTTLBuffer {
     int active_tile_ttl[];
 };
 
-layout(binding=0) uniform sampler2D material_tex;
-layout(binding=1) uniform sampler2D phase_tex;
-layout(binding=2) uniform sampler2D cell_flags_tex;
+layout(binding=0) uniform usampler2D cell_state_tex;
 layout(binding=3) uniform sampler2D velocity_tex;
 layout(binding=4) uniform sampler2D temp_tex;
 layout(binding=5) uniform sampler2D timer_tex;
@@ -33,9 +31,7 @@ layout(binding=8) uniform sampler2D entity_id_tex;
 layout(binding=9) uniform sampler2D displaced_tex;
 layout(binding=10) uniform sampler2D active_tile_tex;
 
-layout(r32f, binding=0) writeonly uniform image2D material_out_img;
-layout(r32f, binding=1) writeonly uniform image2D phase_out_img;
-layout(r32f, binding=2) writeonly uniform image2D cell_flags_out_img;
+layout(r32ui, binding=0) writeonly uniform uimage2D cell_state_out_img;
 layout(rg32f, binding=3) writeonly uniform image2D velocity_out_img;
 layout(r32f, binding=4) writeonly uniform image2D temp_out_img;
 layout(rgba32f, binding=5) writeonly uniform image2D timer_out_img;
@@ -64,11 +60,11 @@ void refresh_changed_cell(ivec2 cell) {
 }
 
 int material_at(ivec2 cell) {
-    return int(texelFetch(material_tex, cell, 0).x + 0.5);
+    return int(texelFetch(cell_state_tex, cell, 0).x & 0xFFFFu);
 }
 
 int phase_at(ivec2 cell) {
-    return int(texelFetch(phase_tex, cell, 0).x + 0.5);
+    return int((texelFetch(cell_state_tex, cell, 0).x >> 16u) & 0xFFu);
 }
 
 bool blocks_dda_target(ivec2 cell) {
@@ -271,9 +267,7 @@ vec2 collision_response(vec2 velocity, ivec2 attempted_delta, ivec2 actual_delta
 
 void store_payload(
     ivec2 dst,
-    float material_value,
-    float phase_value,
-    float flags_value,
+    uint cell_state,
     vec2 velocity_value,
     float temp_value,
     vec4 timer_value,
@@ -282,9 +276,7 @@ void store_payload(
     float entity_value,
     float displaced_value
 ) {
-    imageStore(material_out_img, dst, vec4(material_value, 0.0, 0.0, 0.0));
-    imageStore(phase_out_img, dst, vec4(phase_value, 0.0, 0.0, 0.0));
-    imageStore(cell_flags_out_img, dst, vec4(flags_value, 0.0, 0.0, 0.0));
+    imageStore(cell_state_out_img, dst, uvec4(cell_state, 0u, 0u, 0u));
     imageStore(velocity_out_img, dst, vec4(velocity_value, 0.0, 0.0));
     imageStore(temp_out_img, dst, vec4(temp_value, 0.0, 0.0, 0.0));
     imageStore(timer_out_img, dst, timer_value);
@@ -294,9 +286,7 @@ void store_payload(
 void store_original(ivec2 dst) {
     store_payload(
         dst,
-        texelFetch(material_tex, dst, 0).x,
-        texelFetch(phase_tex, dst, 0).x,
-        texelFetch(cell_flags_tex, dst, 0).x,
+        texelFetch(cell_state_tex, dst, 0).x,
         texelFetch(velocity_tex, dst, 0).xy,
         texelFetch(temp_tex, dst, 0).x,
         texelFetch(timer_tex, dst, 0),
@@ -308,7 +298,7 @@ void store_original(ivec2 dst) {
 }
 
 void store_clear(ivec2 dst) {
-    store_payload(dst, 0.0, 0.0, 0.0, vec2(0.0), 0.0, vec4(0.0), 0.0, 0.0, 0.0, 0.0);
+    store_payload(dst, 0u, vec2(0.0), 0.0, vec4(0.0), 0.0, 0.0, 0.0, 0.0);
 }
 
 void store_incoming(ivec2 dst, ivec2 src) {
@@ -321,9 +311,7 @@ void store_incoming(ivec2 dst, ivec2 src) {
     }
     store_payload(
         dst,
-        texelFetch(material_tex, src, 0).x,
-        texelFetch(phase_tex, src, 0).x,
-        texelFetch(cell_flags_tex, src, 0).x,
+        texelFetch(cell_state_tex, src, 0).x,
         velocity_value,
         texelFetch(temp_tex, src, 0).x,
         texelFetch(timer_tex, src, 0),

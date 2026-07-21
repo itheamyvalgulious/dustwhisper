@@ -4,7 +4,7 @@
             uniform ivec2 cell_grid_size;
             layout(rgba32f, binding=0) writeonly uniform image2D local_emit_cell_lo_img;
             layout(rgba32f, binding=1) writeonly uniform image2D local_emit_cell_hi_img;
-            layout(rgba32f, binding=2) writeonly uniform image2D local_timer_img;
+            layout(r32ui, binding=2) writeonly uniform uimage2D local_timer_img;
             layout(rg32f, binding=3) writeonly uniform image2D local_cell_meta_img;
             layout(r32f, binding=4) writeonly uniform image2D emitted_material_mask_img;
             layout(r32f, binding=5) writeonly uniform image2D cell_reset_img;
@@ -18,10 +18,9 @@
                 vec4 zero4 = vec4(0.0);
                 imageStore(local_emit_cell_lo_img, gid, zero4);
                 imageStore(local_emit_cell_hi_img, gid, zero4);
-                imageStore(local_timer_img, gid, zero4);
+                imageStore(local_timer_img, gid, uvec4(0u));
                 imageStore(local_cell_meta_img, gid, zero4);
                 imageStore(emitted_material_mask_img, gid, zero4);
                 imageStore(cell_reset_img, gid, zero4);
                 imageStore(reaction_latched_img, gid, zero4);
             }
-            

@@ -9,6 +9,12 @@ uniform int reservation_count;
 uniform bool use_reservation_count_buffer;
 uniform bool use_active_tile_dispatch;
 uniform bool skip_untouched_original_stores;
+uniform bool use_bridge_inputs;
+uniform bool pack_aux_in_apply_indices;
+uniform bool write_cell_core;
+#if {{POWDER_APPLY_INDEX_EPOCH}}
+uniform uint powder_apply_epoch;
+#endif
 
 struct PowderReservation {
     ivec2 source_xy;
@@ -19,6 +25,11 @@ struct PowderReservation {
     int material_id;
     int resolve_state;
 };
+
+uint pack_timer(vec4 timer) {
+    uvec4 value = uvec4(clamp(round(timer), vec4(0.0), vec4(255.0)));
+    return value.x | (value.y << 8u) | (value.z << 16u) | (value.w << 24u);
+}
 
 layout(std430, binding=0) buffer PowderReservations {
     PowderReservation reservations[];
@@ -32,10 +43,10 @@ layout(std430, binding=2) readonly buffer PowderReservationCount {
 layout(std430, binding=3) buffer ActiveTileTTLBuffer {
     int active_tile_ttl[];
 };
-layout(std430, binding=4) readonly buffer PowderApplyIncoming {
+layout(std430, binding=4) buffer PowderApplyIncoming {
     int apply_incoming[];
 };
-layout(std430, binding=5) readonly buffer PowderApplyOutgoing {
+layout(std430, binding=5) buffer PowderApplyOutgoing {
     int apply_outgoing[];
 };
 layout(std430, binding=6) readonly buffer ActiveTileCountBuffer {
@@ -44,10 +55,52 @@ layout(std430, binding=6) readonly buffer ActiveTileCountBuffer {
 layout(std430, binding=7) readonly buffer ActiveTileListBuffer {
     ivec2 active_tile_list[];
 };
+#if {{DIRECT_BRIDGE_OUTPUTS}}
+layout(std430, binding=8) buffer BridgeCellCoreBuffer {
+#else
+layout(std430, binding=8) readonly buffer BridgeCellCoreBuffer {
+#endif
+    uint bridge_cell_core[];
+};
+#if {{DIRECT_BRIDGE_OUTPUTS}}
+layout(std430, binding=9) buffer BridgeIslandBuffer {
+#else
+layout(std430, binding=9) readonly buffer BridgeIslandBuffer {
+#endif
+    int bridge_island_id[];
+};
+#if {{DIRECT_BRIDGE_OUTPUTS}}
+layout(std430, binding=10) buffer BridgeEntityBuffer {
+#else
+layout(std430, binding=10) readonly buffer BridgeEntityBuffer {
+#endif
+    int bridge_entity_id[];
+};
+#if {{DIRECT_BRIDGE_OUTPUTS}}
+layout(std430, binding=11) buffer BridgeDisplacedBuffer {
+#else
+layout(std430, binding=11) readonly buffer BridgeDisplacedBuffer {
+#endif
+    int bridge_displaced[];
+};
+layout(std430, binding=12) buffer PowderTargetWinner {
+    int powder_target_winner[];
+};
+#if {{POWDER_APPLY_INDEX_EPOCH}}
+layout(std430, binding=15) readonly buffer PowderApplyEpoch {
+    uvec2 apply_epoch[];
+};
+#endif
+#if {{DIRECT_BRIDGE_OUTPUTS}}
+layout(std430, binding=13) readonly buffer PowderSourceCellCoreSnapshot {
+    uint powder_source_cell_core[];
+};
+layout(std430, binding=14) readonly buffer PowderSourceAuxSnapshot {
+    int powder_source_aux[];
+};
+#endif
 
-layout(binding=0) uniform sampler2D material_tex;
-layout(binding=1) uniform sampler2D phase_tex;
-layout(binding=2) uniform sampler2D cell_flags_tex;
+layout(binding=0) uniform usampler2D cell_state_tex;
 layout(binding=3) uniform sampler2D velocity_tex;
 layout(binding=4) uniform sampler2D temp_tex;
 layout(binding=5) uniform sampler2D timer_tex;
@@ -56,16 +109,115 @@ layout(binding=7) uniform sampler2D island_id_tex;
 layout(binding=8) uniform sampler2D entity_id_tex;
 layout(binding=9) uniform sampler2D displaced_tex;
 
-layout(r32f, binding=0) writeonly uniform image2D material_out_img;
-layout(r32f, binding=1) writeonly uniform image2D phase_out_img;
-layout(r32f, binding=2) writeonly uniform image2D cell_flags_out_img;
+layout(r32ui, binding=0) writeonly uniform uimage2D cell_state_out_img;
 layout(rg32f, binding=3) writeonly uniform image2D velocity_out_img;
 layout(r32f, binding=4) writeonly uniform image2D temp_out_img;
 layout(rgba32f, binding=5) writeonly uniform image2D timer_out_img;
 layout(r32f, binding=6) writeonly uniform image2D integrity_out_img;
+layout(r32f, binding=1) writeonly uniform image2D bridge_material_img;
 
 bool same_cell(ivec2 lhs, ivec2 rhs) {
     return lhs.x == rhs.x && lhs.y == rhs.y;
+}
+
+int cell_index(ivec2 cell) {
+    return cell.y * cell_grid_size.x + cell.x;
+}
+
+uint bridge_core_word(ivec2 cell, int word_offset) {
+#if {{DIRECT_BRIDGE_OUTPUTS}}
+    return powder_source_cell_core[cell_index(cell) * 5 + word_offset];
+#else
+    return bridge_cell_core[cell_index(cell) * 5 + word_offset];
+#endif
+}
+
+uint cell_state_at(ivec2 cell) {
+    return use_bridge_inputs
+        ? bridge_core_word(cell, 0)
+        : texelFetch(cell_state_tex, cell, 0).x;
+}
+
+float material_at(ivec2 cell) {
+    return float(cell_state_at(cell) & 0xFFFFu);
+}
+
+float phase_at(ivec2 cell) {
+    return float((cell_state_at(cell) >> 16u) & 0xFFu);
+}
+
+float flags_at(ivec2 cell) {
+    return float((cell_state_at(cell) >> 24u) & 0xFFu);
+}
+
+vec2 velocity_at(ivec2 cell) {
+    return use_bridge_inputs
+        ? unpackHalf2x16(bridge_core_word(cell, 1))
+        : texelFetch(velocity_tex, cell, 0).xy;
+}
+
+float temperature_at(ivec2 cell) {
+    return use_bridge_inputs
+        ? uintBitsToFloat(bridge_core_word(cell, 2))
+        : texelFetch(temp_tex, cell, 0).x;
+}
+
+vec4 timer_at(ivec2 cell) {
+    if (!use_bridge_inputs) {
+        return texelFetch(timer_tex, cell, 0);
+    }
+    uint word = bridge_core_word(cell, 3);
+    return vec4(
+        float(word & 0xFFu),
+        float((word >> 8u) & 0xFFu),
+        float((word >> 16u) & 0xFFu),
+        float((word >> 24u) & 0xFFu)
+    );
+}
+
+float integrity_at(ivec2 cell) {
+    return use_bridge_inputs
+        ? float(bridge_core_word(cell, 4) & 0xFFFFu)
+        : texelFetch(integrity_tex, cell, 0).x;
+}
+
+int island_at(ivec2 cell) {
+    int index = cell_index(cell);
+#if {{DIRECT_BRIDGE_OUTPUTS}}
+    return pack_aux_in_apply_indices
+        ? powder_source_aux[index]
+        : int(round(texelFetch(island_id_tex, cell, 0).x));
+#else
+    return pack_aux_in_apply_indices
+        ? bridge_island_id[index]
+        : int(round(texelFetch(island_id_tex, cell, 0).x));
+#endif
+}
+
+int entity_at(ivec2 cell) {
+    int index = cell_index(cell);
+#if {{DIRECT_BRIDGE_OUTPUTS}}
+    return pack_aux_in_apply_indices
+        ? powder_source_aux[cell_grid_size.x * cell_grid_size.y + index]
+        : int(round(texelFetch(entity_id_tex, cell, 0).x));
+#else
+    return pack_aux_in_apply_indices
+        ? bridge_entity_id[index]
+        : int(round(texelFetch(entity_id_tex, cell, 0).x));
+#endif
+}
+
+int displaced_at(ivec2 cell) {
+    int index = cell_index(cell);
+#if {{DIRECT_BRIDGE_OUTPUTS}}
+    return pack_aux_in_apply_indices
+        ? powder_source_aux[cell_grid_size.x * cell_grid_size.y * 2 + index]
+        : int(round(texelFetch(displaced_tex, cell, 0).x));
+#else
+    return pack_aux_in_apply_indices
+        ? bridge_displaced[index]
+        : int(round(texelFetch(displaced_tex, cell, 0).x));
+#endif
 }
 
 bool active_dispatch_cell(out ivec2 cell) {
@@ -141,60 +293,116 @@ vec2 collision_response(vec2 velocity, ivec2 attempted_delta, ivec2 actual_delta
 }
 
 int incoming_reservation_index(ivec2 cell) {
-    return apply_incoming[cell.y * cell_grid_size.x + cell.x];
+    int index = cell.y * cell_grid_size.x + cell.x;
+#if {{POWDER_APPLY_INDEX_EPOCH}}
+    return apply_epoch[index].x == powder_apply_epoch ? apply_incoming[index] : -1;
+#else
+    return apply_incoming[index];
+#endif
 }
 
 int outgoing_reservation_index(ivec2 cell) {
-    return apply_outgoing[cell.y * cell_grid_size.x + cell.x];
+    int index = cell.y * cell_grid_size.x + cell.x;
+#if {{POWDER_APPLY_INDEX_EPOCH}}
+    return apply_epoch[index].y == powder_apply_epoch ? apply_outgoing[index] : -1;
+#else
+    return apply_outgoing[index];
+#endif
 }
 
 void store_payload(
     ivec2 dst,
-    float material_value,
-    float phase_value,
-    float flags_value,
+    uint cell_state,
     vec2 velocity_value,
     float temp_value,
     vec4 timer_value,
     float integrity_value,
-    float island_value,
-    float entity_value,
-    float displaced_value
+    int island_value,
+    int entity_value,
+    int displaced_value,
+    bool incoming_payload
 ) {
-    imageStore(material_out_img, dst, vec4(material_value, 0.0, 0.0, 0.0));
-    imageStore(phase_out_img, dst, vec4(phase_value, 0.0, 0.0, 0.0));
-    imageStore(cell_flags_out_img, dst, vec4(flags_value, 0.0, 0.0, 0.0));
+#if {{DIRECT_BRIDGE_OUTPUTS}}
+    int index = cell_index(dst);
+    int word_index = index * 5;
+    if (write_cell_core) {
+        bridge_cell_core[word_index] = cell_state;
+        bridge_cell_core[word_index + 1] = packHalf2x16(velocity_value);
+        bridge_cell_core[word_index + 2] = floatBitsToUint(temp_value);
+        bridge_cell_core[word_index + 3] = pack_timer(timer_value);
+        bridge_cell_core[word_index + 4] = uint(clamp(round(integrity_value), 0.0, 65535.0));
+        imageStore(bridge_material_img, dst, vec4(float(cell_state & 0xFFFFu), 0.0, 0.0, 0.0));
+    }
+    // Match the canonical texture->bridge publish conversion, which stores
+    // aux values through an f32 texture and rounds them back to int.
+    bridge_island_id[index] = int(round(float(island_value)));
+    uint canonical_entity_bits = floatBitsToUint(float(entity_value));
+    if (incoming_payload && entity_value >= 0) {
+        canonical_entity_bits |= 0x80000000u;
+    }
+    int canonical_entity_scratch = floatBitsToInt(canonical_entity_bits);
+    bridge_entity_id[index] = int(round(intBitsToFloat(int(
+        uint(canonical_entity_scratch) & 0x7FFFFFFFu
+    ))));
+    bridge_displaced[index] = int(round(float(displaced_value)));
+#else
+    imageStore(cell_state_out_img, dst, uvec4(cell_state, 0u, 0u, 0u));
     imageStore(velocity_out_img, dst, vec4(velocity_value, 0.0, 0.0));
     imageStore(temp_out_img, dst, vec4(temp_value, 0.0, 0.0, 0.0));
     imageStore(timer_out_img, dst, timer_value);
     imageStore(integrity_out_img, dst, vec4(integrity_value, 0.0, 0.0, 0.0));
+    if (pack_aux_in_apply_indices) {
+        int index = cell_index(dst);
+        powder_target_winner[index] = int(floatBitsToUint(float(island_value)) | 0x80000000u);
+        uint entity_bits = floatBitsToUint(float(entity_value));
+        // Keep an ownership bit for a future reservation-indexed terminal
+        // publish. Valid entity IDs are non-negative, so the f32 sign bit is
+        // otherwise unused; the canonical publish masks it back out.
+        if (incoming_payload && entity_value >= 0) {
+            entity_bits |= 0x80000000u;
+        }
+        apply_incoming[index] = floatBitsToInt(entity_bits);
+        apply_outgoing[index] = floatBitsToInt(float(displaced_value));
+    }
+#endif
+#if {{DIRECT_BRIDGE_OUTPUTS}}
+    if (pack_aux_in_apply_indices) {
+        int scratch_index = cell_index(dst);
+        powder_target_winner[scratch_index] = int(floatBitsToUint(float(island_value)) | 0x80000000u);
+        uint entity_bits = floatBitsToUint(float(entity_value));
+        if (incoming_payload && entity_value >= 0) {
+            entity_bits |= 0x80000000u;
+        }
+        apply_incoming[scratch_index] = floatBitsToInt(entity_bits);
+        apply_outgoing[scratch_index] = floatBitsToInt(float(displaced_value));
+    }
+#endif
 }
 
 void store_original(ivec2 dst, vec2 velocity_override, bool override_velocity) {
-    vec2 velocity_value = override_velocity ? velocity_override : texelFetch(velocity_tex, dst, 0).xy;
+    vec2 velocity_value = override_velocity ? velocity_override : velocity_at(dst);
     store_payload(
         dst,
-        texelFetch(material_tex, dst, 0).x,
-        texelFetch(phase_tex, dst, 0).x,
-        texelFetch(cell_flags_tex, dst, 0).x,
+        cell_state_at(dst),
         velocity_value,
-        texelFetch(temp_tex, dst, 0).x,
-        texelFetch(timer_tex, dst, 0),
-        texelFetch(integrity_tex, dst, 0).x,
-        texelFetch(island_id_tex, dst, 0).x,
-        texelFetch(entity_id_tex, dst, 0).x,
-        texelFetch(displaced_tex, dst, 0).x
+        temperature_at(dst),
+        timer_at(dst),
+        integrity_at(dst),
+        island_at(dst),
+        entity_at(dst),
+        displaced_at(dst),
+        false
     );
 }
 
 void store_clear(ivec2 dst) {
-    store_payload(dst, 0.0, 0.0, 0.0, vec2(0.0), 0.0, vec4(0.0), 0.0, 0.0, 0.0, 0.0);
+    store_payload(dst, 0u, vec2(0.0), 0.0, vec4(0.0), 0.0, 0, 0, 0, false);
 }
 
 void store_incoming(ivec2 dst, PowderReservation reservation) {
     ivec2 src = reservation.source_xy;
-    int material_id = int(texelFetch(material_tex, src, 0).x + 0.5);
-    vec2 velocity_value = texelFetch(velocity_tex, src, 0).xy;
+    int material_id = int(material_at(src) + 0.5);
+    vec2 velocity_value = velocity_at(src);
     ivec2 desired_delta = reservation.desired_target_xy - reservation.source_xy;
     ivec2 actual_delta = reservation.resolved_target_xy - reservation.source_xy;
     if (material_id != 0 && (desired_delta.x != actual_delta.x || desired_delta.y != actual_delta.y)) {
@@ -202,16 +410,15 @@ void store_incoming(ivec2 dst, PowderReservation reservation) {
     }
     store_payload(
         dst,
-        texelFetch(material_tex, src, 0).x,
-        texelFetch(phase_tex, src, 0).x,
-        texelFetch(cell_flags_tex, src, 0).x,
+        cell_state_at(src),
         velocity_value,
-        texelFetch(temp_tex, src, 0).x,
-        texelFetch(timer_tex, src, 0),
-        texelFetch(integrity_tex, src, 0).x,
-        texelFetch(island_id_tex, src, 0).x,
-        texelFetch(entity_id_tex, src, 0).x,
-        texelFetch(displaced_tex, src, 0).x
+        temperature_at(src),
+        timer_at(src),
+        integrity_at(src),
+        island_at(src),
+        entity_at(src),
+        displaced_at(src),
+        true
     );
 }
 
@@ -229,6 +436,18 @@ void main() {
     }
     int incoming_index = incoming_reservation_index(gid);
     int outgoing_index = outgoing_reservation_index(gid);
+#if {{DIRECT_BRIDGE_OUTPUTS}}
+    if (skip_untouched_original_stores && incoming_index < 0 && outgoing_index < 0) {
+        if (write_cell_core) {
+            imageStore(
+                bridge_material_img,
+                gid,
+                vec4(float(bridge_core_word(gid, 0) & 0xFFFFu), 0.0, 0.0, 0.0)
+            );
+        }
+        return;
+    }
+#endif
     if (incoming_index >= 0) {
         refresh_changed_cell(gid);
         store_incoming(gid, reservations[incoming_index]);
@@ -241,9 +460,9 @@ void main() {
             store_clear(gid);
             return;
         }
-        int material_id = int(texelFetch(material_tex, gid, 0).x + 0.5);
+        int material_id = int(material_at(gid) + 0.5);
         ivec2 desired_delta = reservation.desired_target_xy - reservation.source_xy;
-        vec2 velocity_value = texelFetch(velocity_tex, gid, 0).xy;
+        vec2 velocity_value = velocity_at(gid);
         if (desired_delta.x != 0 || desired_delta.y != 0) {
             velocity_value = collision_response(velocity_value, desired_delta, ivec2(0, 0), material_id);
         } else {

@@ -6,10 +6,14 @@
             uniform int gas_cell_size;
             uniform int gas_count;
             uniform int rule_count;
+            #if {{FLOW_SOURCE_GENERATION_VALIDITY}}
+            uniform bool flow_source_generation_validity_enabled;
+            uniform uint flow_source_generation;
+            #endif
             layout(binding=0) uniform sampler2DArray gas_tex;
             layout(binding=1) uniform sampler2D ambient_tex;
             layout(binding=2) uniform sampler2D active_gas_tex;
-            layout(binding=3) uniform sampler2D material_tex;
+            layout(binding=3) uniform usampler2D cell_state_tex;
             layout(binding=4) uniform sampler2D temp_tex;
             layout(binding=5) uniform sampler2D flow_velocity_tex;
             layout(std430, binding=0) buffer ActionI {
@@ -44,8 +48,21 @@
             layout(rgba32f, binding=2) writeonly uniform image2DArray flow_source_img;
             layout(rgba32f, binding=3) writeonly uniform image2D emit_cell_lo_img;
             layout(rgba32f, binding=4) writeonly uniform image2D emit_cell_hi_img;
-            layout(rgba32f, binding=5) writeonly uniform image2D emit_timer_img;
+            layout(r32ui, binding=5) writeonly uniform uimage2D emit_timer_img;
             layout(rg32f, binding=6) writeonly uniform image2D emit_meta_img;
+            #if {{FLOW_SOURCE_GENERATION_VALIDITY}}
+            layout({{FLOW_SOURCE_GENERATION_IMAGE_FORMAT}}, binding={{FLOW_SOURCE_GENERATION_BINDING}}) writeonly uniform uimage2DArray flow_source_generation_img;
+            #endif
+
+
+            void store_flow_source(ivec3 location, vec4 source) {
+                imageStore(flow_source_img, location, source);
+                #if {{FLOW_SOURCE_GENERATION_VALIDITY}}
+                if (flow_source_generation_validity_enabled) {
+                    imageStore(flow_source_generation_img, location, uvec4(flow_source_generation));
+                }
+                #endif
+            }
 
             void write_flow_sources(ivec2 cell, ivec4 ai, vec4 af, float scale) {
                 if (ai.w == 0) {
@@ -58,19 +75,19 @@
                 }
                 int direction_id = ai.z;
                 if (direction_id == {{DIRECTION_RIGHT}}) {
-                    imageStore(flow_source_img, ivec3(cell, 0), vec4(1.0, 0.0, radius, strength));
+                    store_flow_source(ivec3(cell, 0), vec4(1.0, 0.0, radius, strength));
                 } else if (direction_id == {{DIRECTION_LEFT}}) {
-                    imageStore(flow_source_img, ivec3(cell, 0), vec4(-1.0, 0.0, radius, strength));
+                    store_flow_source(ivec3(cell, 0), vec4(-1.0, 0.0, radius, strength));
                 } else if (direction_id == {{DIRECTION_UP}}) {
-                    imageStore(flow_source_img, ivec3(cell, 0), vec4(0.0, -1.0, radius, strength));
+                    store_flow_source(ivec3(cell, 0), vec4(0.0, -1.0, radius, strength));
                 } else if (direction_id == {{DIRECTION_DOWN}}) {
-                    imageStore(flow_source_img, ivec3(cell, 0), vec4(0.0, 1.0, radius, strength));
+                    store_flow_source(ivec3(cell, 0), vec4(0.0, 1.0, radius, strength));
                 } else if (direction_id == {{DIRECTION_ALL}} && abs(af.w) > 1.0e-5) {
                     float flow_sign = af.w > 0.0 ? 1.0 : -1.0;
-                    imageStore(flow_source_img, ivec3(cell, 0), vec4(-flow_sign, 0.0, radius, strength));
-                    imageStore(flow_source_img, ivec3(cell, 1), vec4(flow_sign, 0.0, radius, strength));
-                    imageStore(flow_source_img, ivec3(cell, 2), vec4(0.0, -flow_sign, radius, strength));
-                    imageStore(flow_source_img, ivec3(cell, 3), vec4(0.0, flow_sign, radius, strength));
+                    store_flow_source(ivec3(cell, 0), vec4(-flow_sign, 0.0, radius, strength));
+                    store_flow_source(ivec3(cell, 1), vec4(flow_sign, 0.0, radius, strength));
+                    store_flow_source(ivec3(cell, 2), vec4(0.0, -flow_sign, radius, strength));
+                    store_flow_source(ivec3(cell, 3), vec4(0.0, flow_sign, radius, strength));
                 }
             }
 
@@ -187,7 +204,7 @@
                 if (target.x < 0 || target.y < 0 || target.x >= cell_grid_size.x || target.y >= cell_grid_size.y) {
                     return;
                 }
-                if (texelFetch(material_tex, target, 0).x > 0.5) {
+                if ((texelFetch(cell_state_tex, target, 0).x & 0xFFFFu) != 0u) {
                     return;
                 }
                 float target_phase = material_params[material_id].y;
@@ -200,7 +217,7 @@
                 }
                 imageStore(emit_cell_lo_img, target, vec4(float(material_id), target_phase, target_temp, target_integrity));
                 imageStore(emit_cell_hi_img, target, vec4(emitted_velocity(source, target, ai, af), 0.0, 0.0));
-                imageStore(emit_timer_img, target, vec4(0.0));
+                imageStore(emit_timer_img, target, uvec4(0u));
                 imageStore(emit_meta_img, target, vec4(1.0, 0.0, 0.0, 0.0));
             }
 
@@ -306,4 +323,3 @@
                     imageStore(ambient_out_img, gid.xy, vec4(ambient_value, 0.0, 0.0, 0.0));
                 }
             }
-            

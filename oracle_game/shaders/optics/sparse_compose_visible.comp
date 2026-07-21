@@ -1,0 +1,70 @@
+#version 430
+layout(local_size_x={{SPARSE_LOCAL_SIZE}}, local_size_y=1, local_size_z=1) in;
+uniform ivec2 cell_grid_size;
+uniform ivec2 gas_grid_size;
+uniform int gas_cell_size;
+uniform int light_count;
+uniform int dose_channel_count;
+layout(std430, binding=0) readonly buffer IllumAccum { uint illum_accum[]; };
+layout(std430, binding=1) readonly buffer GasDoseAccum { uint gas_dose_accum[]; };
+layout(std430, binding=2) readonly buffer LightBuffer { vec4 light_params[{{LIGHT_PARAM_COUNT}}]; };
+layout(std430, binding=3) readonly buffer SparseVisibleList { uint sparse_visible_list[]; };
+layout(std430, binding=4) readonly buffer SparseRuntime { uint sparse_runtime[]; };
+layout(rgba32f, binding=0) writeonly uniform image2D bridge_light_img;
+layout(rgba32f, binding=1) writeonly uniform image2D bridge_visible_img;
+const float GAS_ACCUM_INV_SCALE = {{GAS_ACCUM_INV_SCALE}};
+const float ILLUM_ACCUM_INV_SCALE = {{ILLUM_ACCUM_INV_SCALE}};
+vec3 accent_for_channel(int visual_channel) {
+    int channel = ((visual_channel % 3) + 3) % 3;
+    if (channel == 0) return vec3(1.0, 0.2, 0.1);
+    if (channel == 1) return vec3(0.25, 1.0, 0.2);
+    return vec3(0.1, 0.3, 1.0);
+}
+vec3 tint_for_style(int style_id) {
+    if (style_id == 2) return vec3(0.85, 1.2, 0.95);
+    if (style_id == 3) return vec3(1.2, 0.55, 0.35);
+    if (style_id == 4) return vec3(0.55, 1.05, 1.25);
+    return vec3(1.0, 1.0, 1.0);
+}
+vec3 scales_for_style(int style_id) {
+    if (style_id == 2) return vec3(0.10, 0.03, 0.07);
+    if (style_id == 3) return vec3(0.09, 0.025, 0.05);
+    if (style_id == 4) return vec3(0.09, 0.025, 0.06);
+    return vec3(0.11, 0.02, 0.04);
+}
+void main() {
+    uint invocation = gl_GlobalInvocationID.x;
+    if (invocation >= sparse_runtime[2]) return;
+    uint spatial_index = sparse_visible_list[invocation];
+    ivec2 cell = ivec2(int(spatial_index) % cell_grid_size.x, int(spatial_index) / cell_grid_size.x);
+    ivec2 gas_cell = cell / gas_cell_size;
+    vec3 frame = vec3(0.0);
+    int count = min(light_count, {{MAX_LIGHTS}});
+    for (int light_id = 0; light_id < count; ++light_id) {
+        vec4 light_color = light_params[light_id];
+        vec4 light_meta = light_params[{{MAX_LIGHTS}} + light_id];
+        int dose_channel = int(light_color.w + 0.5);
+        if (dose_channel < 0 || dose_channel >= dose_channel_count) continue;
+        int cell_index = (dose_channel * cell_grid_size.y + cell.y) * cell_grid_size.x + cell.x;
+        float cell_visible = float(illum_accum[cell_index]) * ILLUM_ACCUM_INV_SCALE;
+        float gas_haze = 0.0;
+        if (gas_cell.x >= 0 && gas_cell.y >= 0 && gas_cell.x < gas_grid_size.x && gas_cell.y < gas_grid_size.y) {
+            int gas_index = (dose_channel * gas_grid_size.y + gas_cell.y) * gas_grid_size.x + gas_cell.x;
+            gas_haze = float(gas_dose_accum[gas_index]) * GAS_ACCUM_INV_SCALE;
+        }
+        if (cell_visible <= 0.0 && gas_haze <= 0.0) continue;
+        int visual_channel = int(light_meta.x + 0.5);
+        int style_id = int(light_meta.y + 0.5);
+        vec3 tint = tint_for_style(style_id);
+        vec3 scales = scales_for_style(style_id);
+        vec3 accent = accent_for_channel(visual_channel);
+        frame += (
+            cell_visible * (light_color.rgb * tint * scales.x)
+            + cell_visible * (accent * scales.y)
+            + gas_haze * (tint * scales.z)
+        );
+    }
+    vec4 visible = vec4(frame, 1.0);
+    imageStore(bridge_light_img, cell, visible);
+    imageStore(bridge_visible_img, cell, visible);
+}

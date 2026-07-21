@@ -13,18 +13,18 @@ from oracle_game.sim.gpu_heat import (
     MAX_MATERIALS,
     GPUHeatResources,
 )
+from oracle_game.sim.gpu_timer_pack import pack_cell_state, pack_u8x4
 
 
 def release(pipeline) -> None:
+    pipeline._last_formal_output_frame_id = None
+    pipeline._deferred_cell_core_frame_id = None
+    pipeline._motion_handoff_candidate = None
     if pipeline.resources is None:
         return
     for resource in (
-        pipeline.resources.material_tex,
-        pipeline.resources.material_out_tex,
-        pipeline.resources.phase_tex,
-        pipeline.resources.phase_out_tex,
-        pipeline.resources.cell_flags_tex,
-        pipeline.resources.cell_flags_out_tex,
+        pipeline.resources.cell_state_tex,
+        pipeline.resources.cell_state_out_tex,
         pipeline.resources.timer_tex,
         pipeline.resources.timer_out_tex,
         pipeline.resources.integrity_tex,
@@ -67,14 +67,10 @@ def _ensure_resources(pipeline, world: "WorldEngine") -> GPUHeatResources:
         return pipeline.resources
     pipeline.release()
     gas_count = signature[4]
-    material_tex = ctx.texture((world.width, world.height), 1, dtype="f4")
-    material_out_tex = ctx.texture((world.width, world.height), 1, dtype="f4")
-    phase_tex = ctx.texture((world.width, world.height), 1, dtype="f4")
-    phase_out_tex = ctx.texture((world.width, world.height), 1, dtype="f4")
-    cell_flags_tex = ctx.texture((world.width, world.height), 1, dtype="f4")
-    cell_flags_out_tex = ctx.texture((world.width, world.height), 1, dtype="f4")
-    timer_tex = ctx.texture((world.width, world.height), 4, dtype="f4")
-    timer_out_tex = ctx.texture((world.width, world.height), 4, dtype="f4")
+    cell_state_tex = ctx.texture((world.width, world.height), 1, dtype="u4")
+    cell_state_out_tex = ctx.texture((world.width, world.height), 1, dtype="u4")
+    timer_tex = ctx.texture((world.width, world.height), 1, dtype="u4")
+    timer_out_tex = ctx.texture((world.width, world.height), 1, dtype="u4")
     integrity_tex = ctx.texture((world.width, world.height), 1, dtype="f4")
     integrity_out_tex = ctx.texture((world.width, world.height), 1, dtype="f4")
     island_id_tex = ctx.texture((world.width, world.height), 1, dtype="f4")
@@ -96,12 +92,8 @@ def _ensure_resources(pipeline, world: "WorldEngine") -> GPUHeatResources:
     ambient_pong = ctx.texture((world.gas_width, world.gas_height), 1, dtype="f4")
     active_tile_tex = ctx.texture((world.active.tile_width, world.active.tile_height), 1, dtype="f4")
     for texture in (
-        material_tex,
-        material_out_tex,
-        phase_tex,
-        phase_out_tex,
-        cell_flags_tex,
-        cell_flags_out_tex,
+        cell_state_tex,
+        cell_state_out_tex,
         timer_tex,
         timer_out_tex,
         integrity_tex,
@@ -132,12 +124,8 @@ def _ensure_resources(pipeline, world: "WorldEngine") -> GPUHeatResources:
     gas_params = ctx.buffer(reserve=MAX_GAS_SPECIES * 4 * 4, dynamic=True)
     pipeline.resources = GPUHeatResources(
         signature=signature,
-        material_tex=material_tex,
-        material_out_tex=material_out_tex,
-        phase_tex=phase_tex,
-        phase_out_tex=phase_out_tex,
-        cell_flags_tex=cell_flags_tex,
-        cell_flags_out_tex=cell_flags_out_tex,
+        cell_state_tex=cell_state_tex,
+        cell_state_out_tex=cell_state_out_tex,
         timer_tex=timer_tex,
         timer_out_tex=timer_out_tex,
         integrity_tex=integrity_tex,
@@ -197,10 +185,10 @@ def _upload_inputs(pipeline, world: "WorldEngine", resources: GPUHeatResources, 
     pipeline.last_cpu_gas_upload_skipped = not upload_gas_from_cpu
     pipeline.last_cpu_active_upload_skipped = not upload_active_from_cpu
     if upload_cell_state_from_cpu:
-        resources.material_tex.write(world.material_id.astype("f4").tobytes())
-        resources.phase_tex.write(world.phase.astype("f4").tobytes())
-        resources.cell_flags_tex.write(world.cell_flags.astype("f4").tobytes())
-        resources.timer_tex.write(world.timer_pack.astype("f4").tobytes())
+        resources.cell_state_tex.write(
+            pack_cell_state(world.material_id, world.phase, world.cell_flags).tobytes()
+        )
+        resources.timer_tex.write(pack_u8x4(world.timer_pack).tobytes())
         resources.integrity_tex.write(world.integrity.astype("f4").tobytes())
         resources.velocity_tex.write(world.velocity.astype("f4").tobytes())
         resources.velocity_out_tex.write(world.velocity.astype("f4").tobytes())

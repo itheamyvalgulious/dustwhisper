@@ -3,11 +3,10 @@
             layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
             uniform ivec2 cell_grid_size;
             uniform int self_rule_count;
-            layout(binding=0) uniform sampler2D material_tex;
-            layout(binding=1) uniform sampler2D phase_tex;
+            layout(binding=0) uniform usampler2D cell_state_tex;
             layout(binding=2) uniform sampler2D temp_tex;
             layout(binding=3) uniform sampler2D integrity_tex;
-            layout(binding=4) uniform sampler2D timer_in_tex;
+            layout(binding=4) uniform usampler2D timer_in_tex;
             layout(binding=5) uniform sampler2D active_cell_tex;
             layout(std430, binding=0) buffer MaterialSlotsLo {
                 ivec4 material_slots_lo[{{MAX_MATERIALS}}];
@@ -24,9 +23,21 @@
             layout(std430, binding=4) buffer SelfRuleF {
                 vec4 self_rule_f[{{MAX_SELF_RULES}}];
             };
-            layout(rgba32f, binding=0) writeonly uniform image2D timer_out_img;
+            layout(r32ui, binding=0) writeonly uniform uimage2D timer_out_img;
             layout(rgba32f, binding=1) writeonly uniform image2D trigger_lo_img;
             layout(rgba32f, binding=2) writeonly uniform image2D trigger_hi_img;
+            vec4 unpack_timer(uint timer) {
+                return vec4(
+                    float(timer & 0xFFu),
+                    float((timer >> 8u) & 0xFFu),
+                    float((timer >> 16u) & 0xFFu),
+                    float((timer >> 24u) & 0xFFu)
+                );
+            }
+            uint pack_timer(vec4 timer) {
+                uvec4 value = uvec4(clamp(round(timer), vec4(0.0), vec4(255.0)));
+                return value.x | (value.y << 8u) | (value.z << 16u) | (value.w << 24u);
+            }
             int slot_action(int material_id, int slot_index) {
                 if (slot_index < 4) {
                     return material_slots_lo[material_id][slot_index];
@@ -38,23 +49,24 @@
                 if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
                     return;
                 }
-                int material_id = int(texelFetch(material_tex, gid, 0).x + 0.5);
-                vec4 timers = texelFetch(timer_in_tex, gid, 0);
+                uint cell_state = texelFetch(cell_state_tex, gid, 0).x;
+                int material_id = int(cell_state & 0xFFFFu);
+                vec4 timers = unpack_timer(texelFetch(timer_in_tex, gid, 0).x);
                 vec4 trigger_lo = vec4(0.0);
                 vec4 trigger_hi = vec4(0.0);
                 if (texelFetch(active_cell_tex, gid, 0).x <= 0.5) {
-                    imageStore(timer_out_img, gid, timers);
+                    imageStore(timer_out_img, gid, uvec4(pack_timer(timers), 0u, 0u, 0u));
                     imageStore(trigger_lo_img, gid, trigger_lo);
                     imageStore(trigger_hi_img, gid, trigger_hi);
                     return;
                 }
                 if (material_id <= 0) {
-                    imageStore(timer_out_img, gid, timers);
+                    imageStore(timer_out_img, gid, uvec4(pack_timer(timers), 0u, 0u, 0u));
                     imageStore(trigger_lo_img, gid, trigger_lo);
                     imageStore(trigger_hi_img, gid, trigger_hi);
                     return;
                 }
-                int phase_value = int(texelFetch(phase_tex, gid, 0).x + 0.5);
+                int phase_value = int((cell_state >> 16u) & 0xFFu);
                 float temp_value = texelFetch(temp_tex, gid, 0).x;
                 float integrity_value = texelFetch(integrity_tex, gid, 0).x;
                 material_id = clamp(material_id, 0, {{MAX_MATERIALS_MINUS_1}});
@@ -93,8 +105,7 @@
                         trigger_hi[slot_index - 4] = float(action_index);
                     }
                 }
-                imageStore(timer_out_img, gid, timers);
+                imageStore(timer_out_img, gid, uvec4(pack_timer(timers), 0u, 0u, 0u));
                 imageStore(trigger_lo_img, gid, trigger_lo);
                 imageStore(trigger_hi_img, gid, trigger_hi);
             }
-            

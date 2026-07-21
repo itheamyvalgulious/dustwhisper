@@ -140,6 +140,8 @@ def _load_authoritative_bridge_connected_tile_inputs(
     width: int,
     height: int,
     tile_mask_name: str,
+    *,
+    force_cell_core: bool = False,
 ) -> None:
     if not pipeline._formal_gpu_frame(world):
         return
@@ -152,6 +154,10 @@ def _load_authoritative_bridge_connected_tile_inputs(
 
     authoritative = bridge.gpu_authoritative_resources
     copy_cell_core = "cell_core" in authoritative
+    hydrate_cell_core = bool(
+        copy_cell_core
+        and (force_cell_core or not pipeline._classification_bridge_hydration_fusion_enabled)
+    )
     copy_island_id = "island_id" in authoritative
     copy_entity_id = "entity_id" in authoritative
     copy_displaced = "placeholder_displaced_material" in authoritative
@@ -167,7 +173,7 @@ def _load_authoritative_bridge_connected_tile_inputs(
         int(getattr(world.active, "tile_height", 1)),
     )
 
-    if copy_cell_core:
+    if hydrate_cell_core:
         program = pipeline.programs["load_bridge_connected_tile_cell"]
         if not hasattr(program, "run_indirect"):
             raise RuntimeError("formal connected bridge cell input load requires ComputeShader.run_indirect")
@@ -176,7 +182,7 @@ def _load_authoritative_bridge_connected_tile_inputs(
         program["world_grid_size"].value = (int(world.width), int(world.height))
         program["tile_grid_size"].value = tile_grid_size
         program["tile_size"].value = int(tile_size)
-        program["copy_cell_core"].value = bool(copy_cell_core)
+        program["copy_cell_core"].value = True
         bridge.buffers["cell_core"].bind_to_storage_buffer(binding=0)
         bridge.buffers[tile_mask_name].bind_to_storage_buffer(binding=1)
         bridge.buffers[FORMAL_CONNECTED_TILE_COUNT_BUFFER].bind_to_storage_buffer(binding=2)
@@ -237,7 +243,7 @@ def _load_authoritative_bridge_pending_region(
     program["region_origin"].value = (int(x0), int(y0))
     program["cell_grid_size"].value = (int(world.width), int(world.height))
     bridge.buffers["collapse_delay_pending"].bind_to_storage_buffer(binding=0)
-    resources.phase_tex.bind_to_image(1, read=False, write=True)
+    resources.pending_tex.bind_to_image(1, read=False, write=True)
     group_x = (width + LOCAL_SIZE - 1) // LOCAL_SIZE
     group_y = (height + LOCAL_SIZE - 1) // LOCAL_SIZE
     program.run(group_x, group_y, 1)
@@ -281,7 +287,7 @@ def _load_authoritative_bridge_connected_tile_pending(
     bridge.buffers[tile_mask_name].bind_to_storage_buffer(binding=1)
     bridge.buffers[FORMAL_CONNECTED_TILE_COUNT_BUFFER].bind_to_storage_buffer(binding=2)
     bridge.buffers[FORMAL_CONNECTED_TILE_LIST_BUFFER].bind_to_storage_buffer(binding=3)
-    resources.phase_tex.bind_to_image(0, read=False, write=True)
+    resources.pending_tex.bind_to_image(0, read=False, write=True)
     program.run_indirect(bridge.buffers[FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER])
     pipeline._sync_compute_writes(bridge.ctx)
 
@@ -421,7 +427,12 @@ def _publish_bridge_supported_unsupported_masks_connected_tiles(
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
         raise RuntimeError("GPU collapse pipeline requires bridge GPU resources for authoritative runtime masks")
-    program = pipeline.programs["publish_bridge_supported_unsupported_masks_connected_tiles"]
+    use_u8 = supported_texture is resources.support_u8_ping or supported_texture is resources.support_u8_pong
+    program = pipeline.programs[
+        "publish_bridge_supported_unsupported_masks_connected_tiles_u8"
+        if use_u8
+        else "publish_bridge_supported_unsupported_masks_connected_tiles"
+    ]
     if not hasattr(program, "run_indirect"):
         raise RuntimeError("formal connected support mask publish requires ComputeShader.run_indirect")
     program["region_size"].value = (int(width), int(height))
@@ -574,6 +585,8 @@ def _publish_bridge_region_outputs_connected_tiles(
     width: int,
     height: int,
     tile_mask_name: str,
+    *,
+    component_label_texture: Any | None = None,
 ) -> None:
     bridge = world.bridge
     bridge.ensure_world_resources(world)
@@ -585,7 +598,11 @@ def _publish_bridge_region_outputs_connected_tiles(
         world._require_gpu_authoritative_resources("collapse output", "cell_core")
         bridge.sync_world(world)
 
-    program = pipeline.programs["publish_bridge_region_cell_connected_tiles"]
+    program = pipeline.programs[
+        "publish_bridge_region_cell_connected_tiles_incremental"
+        if component_label_texture is not None
+        else "publish_bridge_region_cell_connected_tiles"
+    ]
     if not hasattr(program, "run_indirect"):
         raise RuntimeError("formal connected output publish requires ComputeShader.run_indirect")
     program["cell_grid_size"].value = (int(width), int(height))
@@ -605,6 +622,8 @@ def _publish_bridge_region_outputs_connected_tiles(
     resources.island_id_out_tex.use(location=6)
     resources.entity_id_out_tex.use(location=7)
     resources.displaced_out_tex.use(location=8)
+    if component_label_texture is not None:
+        component_label_texture.use(location=9)
     bridge.buffers["cell_core"].bind_to_storage_buffer(binding=0)
     bridge.buffers["island_id"].bind_to_storage_buffer(binding=1)
     bridge.buffers["entity_id"].bind_to_storage_buffer(binding=2)
@@ -612,16 +631,22 @@ def _publish_bridge_region_outputs_connected_tiles(
     bridge.buffers[tile_mask_name].bind_to_storage_buffer(binding=4)
     bridge.buffers[FORMAL_CONNECTED_TILE_COUNT_BUFFER].bind_to_storage_buffer(binding=5)
     bridge.buffers[FORMAL_CONNECTED_TILE_LIST_BUFFER].bind_to_storage_buffer(binding=6)
+    if component_label_texture is not None:
+        bridge.buffers["collapse_component_label"].bind_to_storage_buffer(binding=7)
+        bridge.buffers["collapse_collapsed_cell_mask"].bind_to_storage_buffer(binding=8)
     bridge.textures["material"].bind_to_image(0, read=False, write=True)
     program.run_indirect(bridge.buffers[FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER])
     pipeline._sync_compute_writes(bridge.ctx)
-    bridge.mark_gpu_authoritative(
+    authoritative_names = [
         "cell_core",
         "material",
         "island_id",
         "entity_id",
         "placeholder_displaced_material",
-    )
+    ]
+    if component_label_texture is not None:
+        authoritative_names.extend(("collapse_component_label", "collapse_collapsed_cell_mask"))
+    bridge.mark_gpu_authoritative(*authoritative_names)
 
 
 def _barrier_bits(pipeline) -> tuple[str, ...]:

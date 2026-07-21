@@ -5,6 +5,8 @@ uniform int island_id_base;
 uniform ivec2 cell_grid_size;
 uniform ivec2 paging_origin;
 uniform ivec2 paging_buffer_origin;
+uniform int admission_slot;
+uniform int admission_stride;
 
 layout(std430, binding=0) readonly buffer ComponentMetadata {
     int component_metadata[];
@@ -29,7 +31,8 @@ void store_runtime_word(int record_index, int word_offset, int value) {
 }
 
 void main() {
-    uint index = gl_GlobalInvocationID.x;
+    uint index = gl_GlobalInvocationID.x * uint(max(admission_stride, 1))
+        + uint(max(admission_slot, 0));
     uint count = min(component_count, uint(max(component_capacity, 0)));
     if (index >= count) {
         return;

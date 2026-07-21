@@ -1,0 +1,15 @@
+            layout(rgba32f, binding=6) writeonly uniform image2DArray timed_deferred_lo_img;
+            layout(rgba32f, binding=7) writeonly uniform image2DArray timed_deferred_hi_img;
+
+            void store_timed_deferred_outputs(
+                ivec2 gid,
+                vec4 deferred_action_lo,
+                vec4 deferred_action_hi,
+                vec4 deferred_scale_lo,
+                vec4 deferred_scale_hi
+            ) {
+                imageStore(timed_deferred_lo_img, ivec3(gid, 0), deferred_action_lo);
+                imageStore(timed_deferred_lo_img, ivec3(gid, 1), deferred_scale_lo);
+                imageStore(timed_deferred_hi_img, ivec3(gid, 0), deferred_action_hi);
+                imageStore(timed_deferred_hi_img, ivec3(gid, 1), deferred_scale_hi);
+            }

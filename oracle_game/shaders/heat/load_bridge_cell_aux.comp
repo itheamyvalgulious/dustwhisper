@@ -33,4 +33,3 @@
                     imageStore(displaced_img, gid, vec4(float(bridge_displaced[cell_index]), 0.0, 0.0, 0.0));
                 }
             }
-            

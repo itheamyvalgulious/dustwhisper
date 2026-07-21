@@ -11,7 +11,6 @@
             uniform int jump;
             uniform bool refine_local_labels;
 
-            layout(binding=0) uniform sampler2D component_mask_tex;
             layout(binding=1) uniform sampler2D label_in_tex;
             layout(r32f, binding=2) writeonly uniform image2D label_out_img;
 
@@ -31,7 +30,6 @@
                 uint connected_tile_column_masks[];
             };
 
-		            shared int s_component[{{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}][{{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}];
 		            shared int s_label[{{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}][{{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}];
 	            shared int s_next[{{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}][{{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}];
 	            shared uint s_step_changed;
@@ -59,14 +57,12 @@
                 return tile_connected_mask(cell / tile_size);
             }
 
-            bool component_connected(ivec2 cell) {
-                return cell_connected(cell) && texelFetch(component_mask_tex, cell, 0).x > 0.5;
-            }
-
             int label_global(ivec2 cell) {
-                if (!component_connected(cell)) {
+                if (!cell_connected(cell)) {
                     return 0;
                 }
+                // Seed/materialize writes a positive label iff this cell is in
+                // the component; propagation only replaces it with another positive label.
                 return int(texelFetch(label_in_tex, cell, 0).x + 0.5);
             }
 
@@ -212,7 +208,7 @@
 	                    barrier();
 	                    int previous_label = s_label[local_cell.y][local_cell.x];
 	                    int next_label = previous_label;
-	                    if (local_valid && s_component[local_cell.y][local_cell.x] != 0 && next_label > 0) {
+	                    if (local_valid && next_label > 0) {
 	                        if (local_cell.x > 0) {
 	                            int candidate = s_label[local_cell.y][local_cell.x - 1];
 	                            if (candidate > 0 && candidate < next_label) {
@@ -258,7 +254,7 @@
 	                            }
 	                        }
 	                    }
-		                    if (local_valid && s_component[local_cell.y][local_cell.x] != 0 && next_label > 0 && next_label < previous_label) {
+		                    if (local_valid && next_label > 0 && next_label < previous_label) {
 		                        atomicOr(s_step_changed, 1u);
 		                    }
 		                    s_next[local_cell.y][local_cell.x] = next_label;
@@ -288,9 +284,7 @@
                     local_cell.y >= tile_size ||
                     !in_grid(cell)
                 );
-                bool component = local_valid && texelFetch(component_mask_tex, cell, 0).x > 0.5;
-                int current_label = component ? int(texelFetch(label_in_tex, cell, 0).x + 0.5) : 0;
-	                s_component[local_cell.y][local_cell.x] = component ? 1 : 0;
+	            int current_label = local_valid ? int(texelFetch(label_in_tex, cell, 0).x + 0.5) : 0;
 	                s_label[local_cell.y][local_cell.x] = current_label;
 	                s_next[local_cell.y][local_cell.x] = current_label;
 	                barrier();
@@ -307,7 +301,7 @@
 
 	                    int jump_label = s_label[local_cell.y][local_cell.x];
 	                    int previous_jump_label = jump_label;
-	                    if (local_valid && s_component[local_cell.y][local_cell.x] != 0 && jump_label > 0) {
+	                    if (local_valid && jump_label > 0) {
 	                        for (int axis = 0; axis < 4; ++axis) {
 	                            ivec2 offset = axis == 0 ? ivec2(-jump, 0) : axis == 1 ? ivec2(jump, 0) : axis == 2 ? ivec2(0, -jump) : ivec2(0, jump);
 	                            ivec2 sample_cell = cell + offset;
@@ -323,7 +317,7 @@
 		                            }
 		                        }
 		                    }
-		                    if (local_valid && s_component[local_cell.y][local_cell.x] != 0 && jump_label > 0 && jump_label < previous_jump_label) {
+		                    if (local_valid && jump_label > 0 && jump_label < previous_jump_label) {
 		                        atomicOr(s_jump_changed, 1u);
 		                    }
 		                    s_next[local_cell.y][local_cell.x] = jump_label;
@@ -336,8 +330,7 @@
 	                }
 
                 if (local_valid) {
-                    int final_label = s_component[local_cell.y][local_cell.x] != 0 ? s_label[local_cell.y][local_cell.x] : 0;
+                    int final_label = s_label[local_cell.y][local_cell.x];
                     imageStore(label_out_img, cell, vec4(float(final_label), 0.0, 0.0, 0.0));
                 }
             }
-            

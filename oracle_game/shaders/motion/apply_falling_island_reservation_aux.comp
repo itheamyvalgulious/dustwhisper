@@ -50,8 +50,7 @@ layout(std430, binding=7) readonly buffer ActiveTileListBuffer {
     ivec2 active_tile_list[];
 };
 
-layout(binding=0) uniform sampler2D material_tex;
-layout(binding=1) uniform sampler2D phase_tex;
+layout(binding=0) uniform usampler2D cell_state_tex;
 layout(binding=7) uniform sampler2D island_id_tex;
 layout(binding=8) uniform sampler2D entity_id_tex;
 layout(binding=9) uniform sampler2D displaced_tex;
@@ -116,8 +115,9 @@ bool source_matches(FallingIslandReservation reservation, ivec2 cell) {
         return false;
     }
     int source_island_id = int(texelFetch(island_id_tex, cell, 0).x + 0.5);
-    int source_material_id = int(texelFetch(material_tex, cell, 0).x + 0.5);
-    int source_phase_id = int(texelFetch(phase_tex, cell, 0).x + 0.5);
+    uint cell_state = texelFetch(cell_state_tex, cell, 0).x;
+    int source_material_id = int(cell_state & 0xFFFFu);
+    int source_phase_id = int((cell_state >> 16u) & 0xFFu);
     return source_island_id == reservation.island_id
         && source_material_id > 0
         && source_phase_id == phase_falling_island;

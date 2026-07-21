@@ -1,4 +1,5 @@
 #version 430
+#define DIRECT_BRIDGE_AUX_INPUTS {{DIRECT_BRIDGE_AUX_INPUTS}}
 layout(local_size_x=64, local_size_y=1, local_size_z=1) in;
 uniform ivec2 cell_grid_size;
 uniform ivec2 tile_grid_size;
@@ -6,7 +7,7 @@ uniform int tile_size;
 uniform int placeholder_material_id;
 uniform uint source_workgroups_per_tile;
 uniform uint workgroups_per_tile;
-layout(binding=0) uniform sampler2D material_tex;
+layout(binding=0) uniform usampler2D cell_state_tex;
 layout(binding=1) uniform sampler2D displaced_tex;
 
 layout(std430, binding=0) readonly buffer ActiveTileCountBuffer {
@@ -26,6 +27,9 @@ layout(std430, binding=4) buffer AffectedTileDispatchArgsBuffer {
 };
 layout(std430, binding=5) buffer AffectedTileFlagsBuffer {
     uint affected_tile_flags[];
+};
+layout(std430, binding=6) readonly buffer BridgeDisplacedBuffer {
+    int bridge_displaced_material[];
 };
 
 void emit_tile(ivec2 tile) {
@@ -75,8 +79,10 @@ void main() {
         if (cell.x >= cell_grid_size.x || cell.y >= cell_grid_size.y) {
             continue;
         }
-        int material = int(texelFetch(material_tex, cell, 0).x + 0.5);
-        float displaced = texelFetch(displaced_tex, cell, 0).x;
+        int material = int(texelFetch(cell_state_tex, cell, 0).x & 0xFFFFu);
+        float displaced = (DIRECT_BRIDGE_AUX_INPUTS != 0)
+            ? float(bridge_displaced_material[cell.y * cell_grid_size.x + cell.x])
+            : texelFetch(displaced_tex, cell, 0).x;
         if (material == placeholder_material_id && displaced > 0.5) {
             emit_pending_tile_region(tile);
             return;

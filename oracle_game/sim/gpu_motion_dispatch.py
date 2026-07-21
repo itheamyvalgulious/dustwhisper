@@ -107,7 +107,7 @@ def _build_falling_island_materialization_candidate_dispatch(
     program["tile_size"].value = int(world.active.tile_size)
     program["phase_falling_island"].value = int(Phase.FALLING_ISLAND)
     program["workgroups_per_tile"].value = int(pipeline._active_tile_workgroups_per_tile(world))
-    resources.phase_tex.use(location=0)
+    resources.cell_state_tex.use(location=0)
     resources.island_id_tex.use(location=1)
     resources.active_tile_count.bind_to_storage_buffer(binding=0)
     resources.active_tile_list.bind_to_storage_buffer(binding=1)
@@ -132,9 +132,10 @@ def _copy_scalar_texture(pipeline, ctx: Any, source_tex: Any, dest_tex: Any, wid
 
 
 def _swap_powder_apply_textures(pipeline, resources: GPUMotionResources) -> None:
-    resources.material_tex, resources.material_out_tex = resources.material_out_tex, resources.material_tex
-    resources.phase_tex, resources.phase_out_tex = resources.phase_out_tex, resources.phase_tex
-    resources.cell_flags_tex, resources.cell_flags_out_tex = resources.cell_flags_out_tex, resources.cell_flags_tex
+    resources.cell_state_tex, resources.cell_state_out_tex = (
+        resources.cell_state_out_tex,
+        resources.cell_state_tex,
+    )
     resources.velocity_tex, resources.velocity_out_tex = resources.velocity_out_tex, resources.velocity_tex
     resources.temp_tex, resources.temp_out_tex = resources.temp_out_tex, resources.temp_tex
     resources.timer_tex, resources.timer_out_tex = resources.timer_out_tex, resources.timer_tex
@@ -184,13 +185,18 @@ def _build_powder_reservation_dispatch_args(
     resources: GPUMotionResources,
     *,
     invocations_per_group: int,
+    count_buffer: Any | None = None,
 ) -> None:
     ctx = world.bridge.ctx
     assert ctx is not None
     program = pipeline.programs["build_powder_reservation_dispatch"]
     program["invocations_per_group"].value = int(invocations_per_group)
     program["max_reservation_count"].value = int(world.width * world.height)
-    resources.powder_reservation_count.bind_to_storage_buffer(binding=6)
+    (
+        resources.powder_reservation_count
+        if count_buffer is None
+        else count_buffer
+    ).bind_to_storage_buffer(binding=6)
     resources.powder_reservation_dispatch_args.bind_to_storage_buffer(binding=7)
     program.run(1, 1, 1)
     pipeline._sync_compute_writes(ctx)
@@ -204,6 +210,8 @@ def _run_powder_reservation_indirect(
     pass_name: str,
     *,
     invocations_per_group: int = POWDER_RESERVATION_LOCAL_SIZE,
+    before_run: Any | None = None,
+    count_buffer: Any | None = None,
 ) -> None:
     if not hasattr(program, "run_indirect"):
         raise RuntimeError(f"GPU motion {pass_name} requires ModernGL ComputeShader.run_indirect")
@@ -211,7 +219,10 @@ def _run_powder_reservation_indirect(
         world,
         resources,
         invocations_per_group=int(invocations_per_group),
+        count_buffer=count_buffer,
     )
+    if before_run is not None:
+        before_run()
     program.run_indirect(resources.powder_reservation_dispatch_args)
 
 

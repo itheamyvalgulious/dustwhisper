@@ -90,7 +90,7 @@ Alternative B (split by carrier CellWorld/GasWorld/OpticsWorld) deferred — mos
 
 ## 8. Verification gate
 
-After every phase: run `tests/test_engine_core.py` + parity/snapshot scripts (`tmp/behavior_snapshot.py` etc.) + frame-by-frame CPU↔GPU parity check. A phase advances only when parity holds. If parity breaks, revert and fix before proceeding.
+After every phase: run `tests/test_engine_core.py` + `scripts/behavior_snapshot.py` + frame-by-frame CPU↔GPU parity checks. A phase advances only when parity holds. If parity breaks, revert and fix before proceeding.
 
 ## 9. Non-goals
 

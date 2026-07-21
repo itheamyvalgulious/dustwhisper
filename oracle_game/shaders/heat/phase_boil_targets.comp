@@ -1,0 +1,136 @@
+uniform int phase_liquid;
+uniform int phase_falling_island;
+uniform int freeze_cold_neighbor_threshold;
+uniform float dt;
+uniform bool clear_terminal_aux;
+uniform bool publish_bridge_aux;
+uniform bool skip_private_aux_writes;
+
+layout(std430, binding=3) buffer MaterialPhaseBuffer {
+    ivec4 phase_params[{{MAX_MATERIALS}}];
+};
+layout(std430, binding=1) writeonly buffer BridgeIslandBuffer {
+    int bridge_island_id[];
+};
+layout(std430, binding=2) writeonly buffer BridgeEntityBuffer {
+    int bridge_entity_id[];
+};
+layout(binding=4) uniform sampler2D temp_tex;
+layout(binding=7) uniform sampler2D integrity_tex;
+layout(r32f, binding=0) writeonly uniform image2D island_id_img;
+layout(r32f, binding=1) writeonly uniform image2D entity_id_img;
+layout(r32f, binding=5) writeonly uniform image2D phase_target_img;
+#if !{{HEAT_PACKED_PHASE_BOIL_TARGETS}}
+layout(r32f, binding=6) writeonly uniform image2D boil_target_img;
+#endif
+
+bool is_placeholder_material(int material_id) {
+    if (material_id <= 0 || material_id >= {{MAX_MATERIALS}}) {
+        return false;
+    }
+    return int(response_params[material_id].w + 0.5) == 7;
+}
+
+void store_targets(ivec2 cell, int phase_target, int boil_target) {
+#if {{HEAT_PACKED_PHASE_BOIL_TARGETS}}
+    int packed_targets = phase_target | (boil_target << 8);
+    imageStore(phase_target_img, cell, vec4(float(packed_targets), 0.0, 0.0, 0.0));
+#else
+    imageStore(phase_target_img, cell, vec4(float(phase_target), 0.0, 0.0, 0.0));
+    imageStore(boil_target_img, cell, vec4(float(boil_target), 0.0, 0.0, 0.0));
+#endif
+}
+
+void main() {
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
+        return;
+    }
+    if (!solve_cell_active(gid)) {
+        store_targets(gid, 0, 0);
+        return;
+    }
+
+    int material_id = material_id_at(gid);
+    if (material_id <= 0) {
+        store_targets(gid, 0, 0);
+        return;
+    }
+
+    vec4 material_param = params[material_id];
+    ivec4 transition = phase_params[material_id];
+    float temperature = texelFetch(temp_tex, gid, 0).x;
+    float melt_point = material_param.z;
+    int phase_target = 0;
+    if (!isnan(melt_point)) {
+        if (transition.y > 0 && temperature > melt_point) {
+            phase_target = transition.y;
+        } else if (transition.z > 0 && transition.x == phase_liquid && temperature < melt_point) {
+            ivec2 left = ivec2(max(gid.x - 1, 0), gid.y);
+            ivec2 right = ivec2(min(gid.x + 1, cell_grid_size.x - 1), gid.y);
+            ivec2 down = ivec2(gid.x, max(gid.y - 1, 0));
+            ivec2 up = ivec2(gid.x, min(gid.y + 1, cell_grid_size.y - 1));
+            int cold_count = 1;
+            cold_count += texelFetch(temp_tex, left, 0).x < melt_point ? 1 : 0;
+            cold_count += texelFetch(temp_tex, right, 0).x < melt_point ? 1 : 0;
+            cold_count += texelFetch(temp_tex, down, 0).x < melt_point ? 1 : 0;
+            cold_count += texelFetch(temp_tex, up, 0).x < melt_point ? 1 : 0;
+            if (cold_count >= freeze_cold_neighbor_threshold) {
+                phase_target = transition.z;
+            }
+        }
+    }
+
+    float boil_point = material_param.w;
+    int gas_species_plus_one = transition.w;
+    int boil_target = 0;
+    if (!isnan(boil_point) && gas_species_plus_one > 0 && temperature > boil_point) {
+        boil_target = gas_species_plus_one;
+    }
+    if (clear_terminal_aux) {
+#if {{HEAT_LAZY_ACTION_INPUTS}}
+        // Most cells have no terminal action. Avoid hydrating integrity just
+        // to prove that neither the phase nor boil path consumes it.
+        float integrity_value = 0.0;
+#else
+        float integrity_value = texelFetch(integrity_tex, gid, 0).x;
+#endif
+        bool clear_island = false;
+        bool clear_entity = false;
+        if (phase_target > 0) {
+            int target_material = clamp(phase_target, 0, {{MAX_MATERIALS_MINUS_ONE}});
+            clear_island = phase_params[target_material].x != phase_falling_island;
+            clear_entity = !is_placeholder_material(target_material);
+            integrity_value = response_params[target_material].y;
+        }
+        if (boil_target > 0) {
+#if {{HEAT_LAZY_ACTION_INPUTS}}
+            if (phase_target <= 0) {
+                integrity_value = texelFetch(integrity_tex, gid, 0).x;
+            }
+#endif
+            integrity_value -= 0.5 * dt;
+            if (integrity_value <= 0.0) {
+                clear_island = true;
+                clear_entity = true;
+            }
+        }
+        if (clear_island) {
+            if (!skip_private_aux_writes) {
+                imageStore(island_id_img, gid, vec4(0.0));
+            }
+            if (publish_bridge_aux) {
+                bridge_island_id[gid.y * cell_grid_size.x + gid.x] = 0;
+            }
+        }
+        if (clear_entity) {
+            if (!skip_private_aux_writes) {
+                imageStore(entity_id_img, gid, vec4(0.0));
+            }
+            if (publish_bridge_aux) {
+                bridge_entity_id[gid.y * cell_grid_size.x + gid.x] = 0;
+            }
+        }
+    }
+    store_targets(gid, phase_target, boil_target);
+}

@@ -3,8 +3,7 @@ layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1)
 uniform ivec2 cell_grid_size;
 uniform int target_island_id;
 uniform int phase_falling_island;
-layout(binding=0) uniform sampler2D material_tex;
-layout(binding=1) uniform sampler2D phase_tex;
+layout(binding=0) uniform usampler2D cell_state_tex;
 layout(binding=2) uniform sampler2D island_id_tex;
 layout(r32f, binding=3) writeonly uniform image2D component_label_img;
 
@@ -13,8 +12,9 @@ void main() {
     if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
         return;
     }
-    int material_id = int(texelFetch(material_tex, gid, 0).x + 0.5);
-    int phase_id = int(texelFetch(phase_tex, gid, 0).x + 0.5);
+    uint cell_state = texelFetch(cell_state_tex, gid, 0).x;
+    int material_id = int(cell_state & 0xFFFFu);
+    int phase_id = int((cell_state >> 16u) & 0xFFu);
     int island_id = int(texelFetch(island_id_tex, gid, 0).x + 0.5);
     float label = 0.0;
     if (material_id > 0 && phase_id == phase_falling_island && island_id == target_island_id) {

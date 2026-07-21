@@ -4,7 +4,6 @@
             layout(std430, binding=3) buffer MaterialPhaseBuffer {
                 ivec4 phase_params[{{MAX_MATERIALS}}];
             };
-            layout(binding=4) uniform sampler2D phase_tex;
             layout(binding=5) uniform sampler2D temp_tex;
             layout(r32f, binding=6) writeonly uniform image2D phase_target_img;
             void main() {
@@ -46,4 +45,3 @@
                 }
                 imageStore(phase_target_img, gid, vec4(float(target_material), 0.0, 0.0, 0.0));
             }
-            

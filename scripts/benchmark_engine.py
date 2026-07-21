@@ -204,11 +204,36 @@ def run_scenario(
     readback: bool,
     profile_passes: bool,
     profile_passes_sync: bool = False,
+    heat_terminal_phase_fusion: bool | None = None,
+    heat_terminal_dirty_publish_fusion: bool | None = None,
+    heat_terminal_workgroup16x8: bool | None = None,
 ) -> dict[str, object]:
     engine = WorldEngine(width=width, height=height, gpu_context=ctx)
     try:
         engine.profile_passes_enabled = bool(profile_passes)
         engine.profile_passes_sync = bool(profile_passes_sync)
+        heat_solver = getattr(engine, "heat_solver", None)
+        heat_pipeline = getattr(heat_solver, "gpu_pipeline", None)
+        if heat_pipeline is not None:
+            if heat_terminal_phase_fusion is not None:
+                heat_pipeline._terminal_phase_fusion_enabled = bool(heat_terminal_phase_fusion)
+            if heat_terminal_dirty_publish_fusion is not None:
+                heat_pipeline._terminal_dirty_publish_fusion_enabled = bool(
+                    heat_terminal_dirty_publish_fusion
+                )
+            if heat_terminal_workgroup16x8 is not None:
+                heat_pipeline._terminal4x6_workgroup16x8_enabled = bool(
+                    heat_terminal_workgroup16x8
+                )
+        active_heat_terminal_phase_fusion = bool(
+            getattr(heat_pipeline, "_terminal_phase_fusion_enabled", False)
+        )
+        active_heat_terminal_dirty_publish_fusion = bool(
+            getattr(heat_pipeline, "_terminal_dirty_publish_fusion_enabled", False)
+        )
+        active_heat_terminal_workgroup16x8 = bool(
+            getattr(heat_pipeline, "_terminal4x6_workgroup16x8_enabled", False)
+        )
         setup(engine)
         if engine.simulation_backend == "gpu":
             engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
@@ -224,6 +249,7 @@ def run_scenario(
             engine.poll_all_readbacks()
 
         frame_ms: list[float] = []
+        frame_samples: list[dict[str, object]] = []
         pass_profiles: list[dict[str, Any]] = []
         readbacks_completed = 0
         for frame_index in range(frames):
@@ -232,7 +258,36 @@ def run_scenario(
             start = time.perf_counter()
             engine.step(dt)
             ctx.finish()
-            frame_ms.append((time.perf_counter() - start) * 1000.0)
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            frame_ms.append(elapsed_ms)
+            collapse_pipeline = getattr(getattr(engine, "collapse_solver", None), "gpu_pipeline", None)
+            epoch = getattr(collapse_pipeline, "_formal_dirty_epoch", None)
+            phase = getattr(collapse_pipeline, "last_incremental_collapse_phase", None)
+            current_frame_id = int(getattr(engine, "frame_id", frame_index + 1))
+            epoch_id = int(
+                getattr(epoch, "epoch_id", getattr(collapse_pipeline, "incremental_collapse_epoch_sequence", 0))
+            )
+            started_frame_id = int(
+                getattr(
+                    epoch,
+                    "started_frame_id",
+                    getattr(collapse_pipeline, "last_incremental_collapse_epoch_started_frame_id", current_frame_id),
+                )
+                or current_frame_id
+            )
+            frame_samples.append(
+                {
+                    "frame_id": current_frame_id,
+                    "frame_mod4": current_frame_id % 4,
+                    "frame_ms": elapsed_ms,
+                    "collapse_phase": None if phase is None else int(phase),
+                    "epoch_id": epoch_id,
+                    "epoch_age": max(0, current_frame_id - started_frame_id),
+                    "epochs_started": int(getattr(collapse_pipeline, "incremental_collapse_epochs_started", 0)),
+                    "epochs_completed": int(getattr(collapse_pipeline, "incremental_collapse_epochs_completed", 0)),
+                    "outstanding": epoch is not None,
+                }
+            )
             if profile_passes:
                 pass_profiles.append(dict(engine.last_pass_profile))
             readbacks_completed += len(engine.poll_all_readbacks())
@@ -245,8 +300,29 @@ def run_scenario(
             "min_ms": min(frame_ms, default=0.0),
             "p95_ms": percentile(frame_ms, 0.95),
             "max_ms": max(frame_ms, default=0.0),
+            "frame_samples": frame_samples,
             "readbacks_completed": readbacks_completed,
             "backend_report": report,
+            "heat_terminal_phase_fusion": active_heat_terminal_phase_fusion,
+            "heat_terminal_dirty_publish_fusion": active_heat_terminal_dirty_publish_fusion,
+            "heat_terminal_workgroup16x8": active_heat_terminal_workgroup16x8,
+        }
+        phase_frame_ms = {
+            phase: [
+                float(sample["frame_ms"])
+                for sample in frame_samples
+                if sample["collapse_phase"] == phase
+            ]
+            for phase in range(4)
+        }
+        result["collapse_phase_frame_ms"] = {
+            str(phase): {
+                "count": len(values),
+                "avg_ms": statistics.fmean(values) if values else 0.0,
+                "p95_ms": percentile(values, 0.95),
+                "max_ms": max(values, default=0.0),
+            }
+            for phase, values in phase_frame_ms.items()
         }
         if profile_passes:
             result["pass_profiles"] = pass_profiles
@@ -272,6 +348,24 @@ def main() -> int:
         help="Synchronize around profiled passes to attribute queued GPU work to the pass that launched it.",
     )
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    parser.add_argument(
+        "--heat-terminal-phase-fusion",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Benchmark terminal4x6 phase/boil recomputation without implying dirty publish fusion.",
+    )
+    parser.add_argument(
+        "--heat-terminal-dirty-publish-fusion",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Benchmark terminal4x6 dirty queue publication without implying phase/boil fusion.",
+    )
+    parser.add_argument(
+        "--heat-terminal-workgroup16x8",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Benchmark the default-off terminal4x6 16x8 workgroup variant.",
+    )
     parser.add_argument("--scenario", action="append", choices=sorted(SCENARIOS), help="Run only the selected scenario; repeatable.")
     args = parser.parse_args()
 
@@ -291,6 +385,9 @@ def main() -> int:
             readback=args.readback,
             profile_passes=args.profile_passes,
             profile_passes_sync=args.profile_passes_sync,
+            heat_terminal_phase_fusion=args.heat_terminal_phase_fusion,
+            heat_terminal_dirty_publish_fusion=args.heat_terminal_dirty_publish_fusion,
+            heat_terminal_workgroup16x8=args.heat_terminal_workgroup16x8,
         )
         for name in selected
     ]

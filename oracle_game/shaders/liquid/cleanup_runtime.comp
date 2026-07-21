@@ -1,17 +1,25 @@
 #version 430
+#define RESTORE_BRIDGE_AUX_OUTPUTS {{RESTORE_BRIDGE_AUX_OUTPUTS}}
 layout(local_size_x={{PASS_LOCAL_SIZE}}, local_size_y={{PASS_LOCAL_SIZE}}, local_size_z=1) in;
 uniform ivec2 cell_grid_size;
 uniform ivec2 tile_grid_size;
 uniform int tile_size;
 uniform int phase_falling_island;
 uniform bool use_active_tile_dispatch;
-layout(binding=0) uniform sampler2D material_pre_tex;
-layout(binding=1) uniform sampler2D phase_pre_tex;
-layout(binding=2) uniform sampler2D material_final_tex;
-layout(binding=3) uniform sampler2D phase_final_tex;
+uniform bool use_split_placeholder_roles;
+uniform bool restrict_to_active_tiles;
+const bool DIRECT_BRIDGE_INPUTS = {{DIRECT_BRIDGE_INPUTS}} != 0;
+const bool DIRECT_BRIDGE_AUX_OUTPUTS = {{DIRECT_BRIDGE_AUX_OUTPUTS}} != 0;
+const bool DIRECT_BRIDGE_AUX_INPUTS = {{DIRECT_BRIDGE_AUX_INPUTS}} != 0;
+const bool DIRECT_BRIDGE_ISLAND_INPUTS = {{DIRECT_BRIDGE_ISLAND_INPUTS}} != 0;
+const bool DIRECT_BRIDGE_ENTITY_INPUTS = {{DIRECT_BRIDGE_ENTITY_INPUTS}} != 0;
+layout(binding=0) uniform usampler2D cell_state_pre_tex;
+layout(binding=2) uniform usampler2D cell_state_final_tex;
+layout(binding=3) uniform usampler2D cell_state_fallback_tex;
 layout(binding=4) uniform sampler2D island_in_tex;
 layout(binding=5) uniform sampler2D entity_in_tex;
 layout(binding=6) uniform sampler2D displaced_in_tex;
+layout(binding=7) uniform sampler2D active_tile_tex;
 layout(std430, binding=0) buffer MaterialParams {
     vec4 material_params[{{MAX_MATERIALS}}];
 };
@@ -21,9 +29,25 @@ layout(std430, binding=1) readonly buffer ActiveTileCountBuffer {
 layout(std430, binding=2) readonly buffer ActiveTileListBuffer {
     ivec2 active_tile_list[];
 };
+layout(std430, binding=3) readonly buffer BridgeCellCoreBuffer {
+    uint bridge_cell_core[];
+};
+layout(std430, binding=4) readonly buffer AffectedTileFlagsBuffer {
+    uint affected_tile_flags[];
+};
+layout(std430, binding=5) buffer BridgeIslandBuffer {
+    int bridge_island_id[];
+};
+layout(std430, binding=6) buffer BridgeEntityBuffer {
+    int bridge_entity_id[];
+};
+layout(std430, binding=7) buffer BridgeDisplacedBuffer {
+    int bridge_displaced[];
+};
 layout(r32f, binding=0) writeonly uniform image2D island_out_img;
 layout(r32f, binding=1) writeonly uniform image2D entity_out_img;
-layout(r32f, binding=2) writeonly uniform image2D displaced_out_img;
+layout(r32f, binding=2) uniform image2D displaced_out_img;
+layout(r32f, binding=3) writeonly uniform image2D island_cache_img;
 
 bool is_placeholder_material(int material_id) {
     material_id = clamp(material_id, 0, {{MAX_MATERIALS_MINUS_1}});
@@ -42,6 +66,9 @@ bool active_dispatch_cell(out ivec2 cell) {
     ivec2 subtile_xy = ivec2(subtile % groups_per_tile_axis, subtile / groups_per_tile_axis);
     ivec2 tile = active_tile_list[int(active_tile_index)];
     if (tile.x < 0 || tile.y < 0 || tile.x >= tile_grid_size.x || tile.y >= tile_grid_size.y) {
+        return false;
+    }
+    if (restrict_to_active_tiles && texelFetch(active_tile_tex, tile, 0).x <= 0.5) {
         return false;
     }
     ivec2 tile_origin = tile * tile_size;
@@ -63,14 +90,39 @@ void main() {
             return;
         }
     }
-    int pre_material = int(texelFetch(material_pre_tex, gid, 0).x + 0.5);
-    int pre_phase = int(texelFetch(phase_pre_tex, gid, 0).x + 0.5);
-    int final_material = int(texelFetch(material_final_tex, gid, 0).x + 0.5);
-    int final_phase = int(texelFetch(phase_final_tex, gid, 0).x + 0.5);
+    int cell_index = gid.y * cell_grid_size.x + gid.x;
+    int word_index = cell_index * 5;
+    uint core_word0 = DIRECT_BRIDGE_INPUTS ? bridge_cell_core[word_index] : 0u;
+    uint pre_state = DIRECT_BRIDGE_INPUTS ? core_word0 : texelFetch(cell_state_pre_tex, gid, 0).x;
+    ivec2 tile = ivec2(
+        clamp(gid.x / tile_size, 0, tile_grid_size.x - 1),
+        clamp(gid.y / tile_size, 0, tile_grid_size.y - 1)
+    );
+    bool placeholder_affected = use_split_placeholder_roles
+        && affected_tile_flags[tile.y * tile_grid_size.x + tile.x] != 0u;
+    uint final_state = !use_split_placeholder_roles || placeholder_affected
+        ? texelFetch(cell_state_final_tex, gid, 0).x
+        : texelFetch(cell_state_fallback_tex, gid, 0).x;
+    int pre_material = int(pre_state & 0xFFFFu);
+    int pre_phase = int((pre_state >> 16u) & 0xFFu);
+    int final_material = int(final_state & 0xFFFFu);
+    int final_phase = int((final_state >> 16u) & 0xFFu);
     bool changed = pre_material != final_material || pre_phase != final_phase;
-    float island_value = texelFetch(island_in_tex, gid, 0).x;
-    float entity_value = texelFetch(entity_in_tex, gid, 0).x;
-    float displaced_value = texelFetch(displaced_in_tex, gid, 0).x;
+    float island_input_value = DIRECT_BRIDGE_ISLAND_INPUTS
+        ? float(bridge_island_id[cell_index])
+        : DIRECT_BRIDGE_AUX_INPUTS
+        ? float(bridge_island_id[cell_index])
+        : texelFetch(island_in_tex, gid, 0).x;
+    float island_value = island_input_value;
+    float entity_input_value = DIRECT_BRIDGE_AUX_INPUTS || DIRECT_BRIDGE_ENTITY_INPUTS
+        ? float(bridge_entity_id[cell_index])
+        : texelFetch(entity_in_tex, gid, 0).x;
+    float entity_value = entity_input_value;
+    float displaced_value = placeholder_affected || !use_split_placeholder_roles
+        ? (DIRECT_BRIDGE_AUX_INPUTS
+            ? float(bridge_displaced[cell_index])
+            : texelFetch(displaced_in_tex, gid, 0).x)
+        : imageLoad(displaced_out_img, gid).x;
     if (changed && !is_placeholder_material(final_material)) {
         entity_value = 0.0;
         displaced_value = 0.0;
@@ -81,6 +133,44 @@ void main() {
         && (final_phase != phase_falling_island || final_material <= 0)
     ) {
         island_value = 0.0;
+    }
+    if (DIRECT_BRIDGE_AUX_OUTPUTS) {
+#if RESTORE_BRIDGE_AUX_OUTPUTS
+        bridge_island_id[cell_index] = int(round(island_value));
+        bridge_entity_id[cell_index] = int(round(entity_value));
+        bridge_displaced[cell_index] = int(round(displaced_value));
+        if (island_value < 0.5 && island_input_value > 0.5) {
+            imageStore(island_out_img, gid, vec4(0.0));
+        }
+        if (entity_value < 0.5 && entity_input_value > 0.5) {
+            imageStore(entity_out_img, gid, vec4(0.0));
+        }
+        imageStore(displaced_out_img, gid, vec4(displaced_value, 0.0, 0.0, 0.0));
+        return;
+#endif
+        if (DIRECT_BRIDGE_ISLAND_INPUTS) {
+            // Preserve the canonical private cache while island_out_img
+            // receives the usual cleanup result.
+            imageStore(island_cache_img, gid, vec4(island_input_value, 0.0, 0.0, 0.0));
+            if (island_value < 0.5 && island_input_value > 0.5) {
+                imageStore(island_out_img, gid, vec4(0.0));
+                bridge_island_id[cell_index] = 0;
+            }
+        } else if (island_value < 0.5 && island_input_value > 0.5) {
+            imageStore(island_out_img, gid, vec4(0.0));
+            bridge_island_id[cell_index] = 0;
+        }
+        if (entity_value < 0.5 && entity_input_value > 0.5) {
+            imageStore(entity_out_img, gid, vec4(0.0));
+            bridge_entity_id[cell_index] = 0;
+        }
+        bool displaced_changed = placeholder_affected
+            || (displaced_value < 0.5 && imageLoad(displaced_out_img, gid).x > 0.5);
+        if (displaced_changed) {
+            imageStore(displaced_out_img, gid, vec4(displaced_value, 0.0, 0.0, 0.0));
+            bridge_displaced[cell_index] = int(round(displaced_value));
+        }
+        return;
     }
     imageStore(island_out_img, gid, vec4(island_value, 0.0, 0.0, 0.0));
     imageStore(entity_out_img, gid, vec4(entity_value, 0.0, 0.0, 0.0));

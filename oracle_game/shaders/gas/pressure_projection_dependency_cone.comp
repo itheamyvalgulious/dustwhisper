@@ -1,0 +1,125 @@
+#version 430
+layout(
+    local_size_x={{PRESSURE_CONE_LOCAL_X}},
+    local_size_y={{PRESSURE_CONE_LOCAL_Y}},
+    local_size_z=1
+) in;
+
+uniform ivec2 grid_size;
+layout(binding=0) uniform sampler2D pressure_seed_tex;
+layout(binding=1) uniform sampler2D divergence_tex;
+layout(binding=2) uniform sampler2D velocity_tex;
+layout(binding={{ACTIVE_GAS_TEXTURE_UNIT}}) uniform sampler2D active_gas_tex;
+layout(r32f, binding=0) writeonly uniform image2D pressure_out_img;
+layout(rg32f, binding=1) writeonly uniform image2D velocity_out_img;
+layout(r32f, binding=2) writeonly uniform image2D pressure_shadow_img;
+
+const int CORE_X = {{PRESSURE_CONE_CORE_X}};
+const int CORE_Y = {{PRESSURE_CONE_CORE_Y}};
+const int HALO = {{PRESSURE_CONE_HALO}};
+const int TILE_X = CORE_X + 2 * HALO;
+const int TILE_Y = CORE_Y + 2 * HALO;
+const int TILE_COUNT = TILE_X * TILE_Y;
+const int CORE_COUNT = CORE_X * CORE_Y;
+
+shared float pressure_a[TILE_COUNT];
+shared float pressure_b[TILE_COUNT];
+shared float divergence_values[TILE_COUNT];
+shared uint active_values[TILE_COUNT];
+
+int tile_index(ivec2 local_cell) {
+    return local_cell.y * TILE_X + local_cell.x;
+}
+
+ivec2 clamp_cell(ivec2 cell) {
+    return clamp(cell, ivec2(0), grid_size - ivec2(1));
+}
+
+ivec2 physical_to_local(ivec2 cell, ivec2 tile_origin) {
+    return clamp_cell(cell) - tile_origin;
+}
+
+float pressure_value(bool source_is_a, ivec2 physical_cell, ivec2 tile_origin) {
+    int index = tile_index(physical_to_local(physical_cell, tile_origin));
+    return source_is_a ? pressure_a[index] : pressure_b[index];
+}
+
+void main() {
+    int lane = int(gl_LocalInvocationIndex);
+    ivec2 output_origin = ivec2(gl_WorkGroupID.xy) * ivec2(CORE_X, CORE_Y);
+    ivec2 tile_origin = output_origin - ivec2(HALO);
+
+    for (int index = lane; index < TILE_COUNT; index += {{PRESSURE_CONE_LOCAL_X}} * {{PRESSURE_CONE_LOCAL_Y}}) {
+        ivec2 local_cell = ivec2(index % TILE_X, index / TILE_X);
+        ivec2 physical_cell = clamp_cell(tile_origin + local_cell);
+        pressure_a[index] = texelFetch(pressure_seed_tex, physical_cell, 0).x;
+        divergence_values[index] = texelFetch(divergence_tex, physical_cell, 0).x;
+        active_values[index] = texelFetch(active_gas_tex, physical_cell, 0).x > 0.5 ? 1u : 0u;
+    }
+    memoryBarrierShared();
+    barrier();
+
+    for (int iteration = 0; iteration < {{PRESSURE_CONE_JACOBI_ITERATIONS}}; ++iteration) {
+        int border = iteration + 1;
+        bool source_is_a = (iteration & 1) == 0;
+        for (int index = lane; index < TILE_COUNT; index += {{PRESSURE_CONE_LOCAL_X}} * {{PRESSURE_CONE_LOCAL_Y}}) {
+            ivec2 local_cell = ivec2(index % TILE_X, index / TILE_X);
+            if (
+                local_cell.x < border || local_cell.x >= TILE_X - border
+                || local_cell.y < border || local_cell.y >= TILE_Y - border
+            ) {
+                continue;
+            }
+            ivec2 physical_cell = clamp_cell(tile_origin + local_cell);
+            float center = pressure_value(source_is_a, physical_cell, tile_origin);
+            float result = center;
+            int canonical_index = tile_index(physical_to_local(physical_cell, tile_origin));
+            if (active_values[canonical_index] != 0u) {
+                ivec2 left = ivec2(max(physical_cell.x - 1, 0), physical_cell.y);
+                ivec2 right = ivec2(min(physical_cell.x + 1, grid_size.x - 1), physical_cell.y);
+                ivec2 down = ivec2(physical_cell.x, max(physical_cell.y - 1, 0));
+                ivec2 up = ivec2(physical_cell.x, min(physical_cell.y + 1, grid_size.y - 1));
+                result = (
+                    pressure_value(source_is_a, left, tile_origin)
+                    + pressure_value(source_is_a, right, tile_origin)
+                    + pressure_value(source_is_a, down, tile_origin)
+                    + pressure_value(source_is_a, up, tile_origin)
+                    - divergence_values[canonical_index]
+                ) * 0.25;
+            }
+            if (source_is_a) {
+                pressure_b[index] = result;
+            } else {
+                pressure_a[index] = result;
+            }
+        }
+        memoryBarrierShared();
+        barrier();
+    }
+
+    for (int core_index = lane; core_index < CORE_COUNT; core_index += {{PRESSURE_CONE_LOCAL_X}} * {{PRESSURE_CONE_LOCAL_Y}}) {
+        ivec2 core_cell = ivec2(core_index % CORE_X, core_index / CORE_X);
+        ivec2 gid = output_origin + core_cell;
+        if (gid.x >= grid_size.x || gid.y >= grid_size.y) {
+            continue;
+        }
+        ivec2 local_cell = core_cell + ivec2(HALO);
+        float center = pressure_b[tile_index(local_cell)];
+        vec2 velocity = texelFetch(velocity_tex, gid, 0).xy;
+        int canonical_index = tile_index(physical_to_local(gid, tile_origin));
+        if (active_values[canonical_index] != 0u) {
+            ivec2 left = ivec2(max(gid.x - 1, 0), gid.y);
+            ivec2 right = ivec2(min(gid.x + 1, grid_size.x - 1), gid.y);
+            ivec2 down = ivec2(gid.x, max(gid.y - 1, 0));
+            ivec2 up = ivec2(gid.x, min(gid.y + 1, grid_size.y - 1));
+            float grad_x = pressure_value(false, right, tile_origin)
+                - pressure_value(false, left, tile_origin);
+            float grad_y = pressure_value(false, up, tile_origin)
+                - pressure_value(false, down, tile_origin);
+            velocity -= 0.5 * vec2(grad_x, grad_y);
+        }
+        imageStore(pressure_out_img, gid, vec4(center, 0.0, 0.0, 0.0));
+        imageStore(pressure_shadow_img, gid, vec4(pressure_a[tile_index(local_cell)], 0.0, 0.0, 0.0));
+        imageStore(velocity_out_img, gid, vec4(velocity, 0.0, 0.0));
+    }
+}

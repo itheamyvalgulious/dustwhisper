@@ -1,16 +1,33 @@
 #version 430
+#define DIRECT_BRIDGE_CELL_INPUTS {{DIRECT_BRIDGE_CELL_INPUTS}}
+const bool DIRECT_BRIDGE_AUX_INPUTS = {{DIRECT_BRIDGE_AUX_INPUTS}} != 0;
 layout(local_size_x={{PASS_LOCAL_SIZE}}, local_size_y={{PASS_LOCAL_SIZE}}, local_size_z=1) in;
 uniform ivec2 cell_grid_size;
 uniform ivec2 tile_grid_size;
 uniform int tile_size;
 uniform int phase_liquid;
 uniform int phase_falling_island;
-layout(binding=0) uniform sampler2D material_tex;
-layout(binding=1) uniform sampler2D phase_tex;
+uniform bool publish_bridge_outputs;
+uniform bool publish_bridge_aux_outputs;
+uniform bool write_cell_core;
+uniform bool resident_hydrate_inputs;
+uniform bool use_split_placeholder_roles;
+uniform bool buoyancy_fused_roles;
+layout(binding=0) uniform usampler2D cell_state_tex;
+layout(binding=1) uniform usampler2D cell_state_fallback_tex;
 layout(binding=2) uniform sampler2D velocity_tex;
 layout(binding=3) uniform sampler2D active_tile_tex;
 layout(binding=4) uniform sampler2D entity_tex;
 layout(binding=5) uniform sampler2D displaced_tex;
+layout(binding=7) uniform usampler2D timer_tex;
+layout(binding=8) uniform sampler2D temp_tex;
+layout(binding=9) uniform sampler2D integrity_tex;
+layout(binding=10) uniform sampler2D island_out_tex;
+layout(binding=11) uniform sampler2D entity_out_tex;
+layout(binding=12) uniform sampler2D velocity_fallback_tex;
+layout(binding=13) uniform usampler2D timer_fallback_tex;
+layout(binding=14) uniform sampler2D temp_fallback_tex;
+layout(binding=15) uniform sampler2D integrity_fallback_tex;
 layout(std430, binding=0) buffer MaterialParams {
     vec4 material_params[{{MAX_MATERIALS}}];
 };
@@ -20,7 +37,32 @@ layout(std430, binding=1) readonly buffer ActiveTileCountBuffer {
 layout(std430, binding=2) readonly buffer ActiveTileListBuffer {
     ivec2 active_tile_list[];
 };
+// Keep the bridge core readable for every variant.  The direct-input variant
+// uses the same binding for read/write; the canonical variant only publishes
+// through it.  A read/write declaration avoids NVIDIA's strict preprocessor
+// handling of integer-valued #if expressions in this shader.
+layout(std430, binding=3) buffer BridgeCellCoreBuffer {
+    uint bridge_cell_core[];
+};
+layout(std430, binding=4) buffer BridgeIslandBuffer {
+    int bridge_island_id[];
+};
+layout(std430, binding=5) buffer BridgeEntityBuffer {
+    int bridge_entity_id[];
+};
+layout(std430, binding=6) buffer BridgeDisplacedBuffer {
+    int bridge_displaced[];
+};
+layout(std430, binding=7) readonly buffer AffectedTileFlagsBuffer {
+    uint affected_tile_flags[];
+};
 layout(rg32f, binding=0) writeonly uniform image2D liquid_flow_intent_img;
+layout(r32f, binding=1) writeonly uniform image2D bridge_material_img;
+layout(r32ui, binding=2) writeonly uniform uimage2D resident_cell_state_img;
+layout(rg32f, binding=3) writeonly uniform image2D resident_velocity_img;
+layout(r32f, binding=4) writeonly uniform image2D resident_entity_img;
+layout(r32f, binding=5) writeonly uniform image2D resident_displaced_img;
+
 
 bool in_bounds(ivec2 cell) {
     return cell.x >= 0 && cell.y >= 0 && cell.x < cell_grid_size.x && cell.y < cell_grid_size.y;
@@ -33,6 +75,47 @@ bool tile_active(ivec2 cell) {
     );
     return texelFetch(active_tile_tex, tile, 0).x > 0.5;
 }
+
+bool placeholder_role_is_primary(ivec2 cell) {
+    if (!use_split_placeholder_roles) {
+        return true;
+    }
+    ivec2 tile = ivec2(
+        clamp(cell.x / tile_size, 0, tile_grid_size.x - 1),
+        clamp(cell.y / tile_size, 0, tile_grid_size.y - 1)
+    );
+    if (affected_tile_flags[tile.y * tile_grid_size.x + tile.x] != 0u) {
+        return true;
+    }
+    // The fused buoyancy pass swaps ping/pong handles. Active fallback cells
+    // live in the new out role, while untouched inactive neighbors retain the
+    // control path's old out value in the new in role.
+    return buoyancy_fused_roles && !tile_active(cell);
+}
+
+uint cell_state_at(ivec2 cell) {
+#if DIRECT_BRIDGE_CELL_INPUTS
+    if (tile_active(cell)) {
+        return bridge_cell_core[(cell.y * cell_grid_size.x + cell.x) * 5];
+    }
+#endif
+    return placeholder_role_is_primary(cell)
+        ? texelFetch(cell_state_tex, cell, 0).x
+        : texelFetch(cell_state_fallback_tex, cell, 0).x;
+}
+
+
+vec2 velocity_at(ivec2 cell) {
+#if DIRECT_BRIDGE_CELL_INPUTS
+    if (tile_active(cell)) {
+        return unpackHalf2x16(bridge_cell_core[(cell.y * cell_grid_size.x + cell.x) * 5 + 1]);
+    }
+#endif
+    return placeholder_role_is_primary(cell)
+        ? texelFetch(velocity_tex, cell, 0).xy
+        : texelFetch(velocity_fallback_tex, cell, 0).xy;
+}
+
 
 bool active_dispatch_cell(out ivec2 cell) {
     int groups_per_tile_axis = max(1, (tile_size + {{PASS_LOCAL_SIZE_MINUS_1}}) / {{PASS_LOCAL_SIZE}});
@@ -64,10 +147,16 @@ bool reachable_empty(ivec2 cell) {
     if (!in_bounds(cell)) {
         return false;
     }
-    float material = texelFetch(material_tex, cell, 0).x;
-    int phase_id = int(texelFetch(phase_tex, cell, 0).x + 0.5);
-    float entity = texelFetch(entity_tex, cell, 0).x;
-    float displaced = texelFetch(displaced_tex, cell, 0).x;
+    uint cell_state = cell_state_at(cell);
+    float material = float(cell_state & 0xFFFFu);
+    int phase_id = int((cell_state >> 16u) & 0xFFu);
+    int cell_index = cell.y * cell_grid_size.x + cell.x;
+    float entity = DIRECT_BRIDGE_AUX_INPUTS
+        ? float(bridge_entity_id[cell_index])
+        : texelFetch(entity_tex, cell, 0).x;
+    float displaced = DIRECT_BRIDGE_AUX_INPUTS
+        ? float(bridge_displaced[cell_index])
+        : texelFetch(displaced_tex, cell, 0).x;
     return material < 0.5
         && phase_id != phase_liquid
         && phase_id != phase_falling_island
@@ -117,12 +206,51 @@ void main() {
     if (!active_dispatch_cell(gid)) {
         return;
     }
-    vec2 velocity = texelFetch(velocity_tex, gid, 0).xy;
+    bool primary_role = placeholder_role_is_primary(gid);
+    vec2 velocity = velocity_at(gid);
     vec2 intent = vec2(0.0);
-    int material_id = int(texelFetch(material_tex, gid, 0).x + 0.5);
-    int phase_id = int(texelFetch(phase_tex, gid, 0).x + 0.5);
+    uint cell_state = cell_state_at(gid);
+    if (resident_hydrate_inputs) {
+        int resident_index = gid.y * cell_grid_size.x + gid.x;
+        imageStore(resident_cell_state_img, gid, uvec4(cell_state, 0u, 0u, 0u));
+        imageStore(resident_velocity_img, gid, vec4(velocity, 0.0, 0.0));
+        imageStore(resident_entity_img, gid, vec4(float(bridge_entity_id[resident_index]), 0.0, 0.0, 0.0));
+        imageStore(resident_displaced_img, gid, vec4(float(bridge_displaced[resident_index]), 0.0, 0.0, 0.0));
+    }
+    uint material = cell_state & 0xFFFFu;
+    int material_id = int(material);
+    int phase_id = int((cell_state >> 16u) & 0xFFu);
     if (material_id > 0 && phase_id == phase_liquid) {
         intent = liquid_intent(gid, velocity) - velocity;
     }
     imageStore(liquid_flow_intent_img, gid, vec4(intent, 0.0, 0.0));
+    if (!publish_bridge_outputs) {
+        return;
+    }
+
+    int cell_index = gid.y * cell_grid_size.x + gid.x;
+    if (write_cell_core) {
+        float temperature = primary_role
+            ? texelFetch(temp_tex, gid, 0).x
+            : texelFetch(temp_fallback_tex, gid, 0).x;
+        uint timer_word = primary_role
+            ? texelFetch(timer_tex, gid, 0).x
+            : texelFetch(timer_fallback_tex, gid, 0).x;
+        float integrity_value = primary_role
+            ? texelFetch(integrity_tex, gid, 0).x
+            : texelFetch(integrity_fallback_tex, gid, 0).x;
+        uint integrity = uint(clamp(round(integrity_value), 0.0, 65535.0));
+        int word_index = cell_index * 5;
+        bridge_cell_core[word_index] = cell_state;
+        bridge_cell_core[word_index + 1] = packHalf2x16(velocity);
+        bridge_cell_core[word_index + 2] = floatBitsToUint(temperature);
+        bridge_cell_core[word_index + 3] = timer_word;
+        bridge_cell_core[word_index + 4] = integrity;
+        imageStore(bridge_material_img, gid, vec4(float(material), 0.0, 0.0, 0.0));
+    }
+    if (publish_bridge_aux_outputs) {
+        bridge_island_id[cell_index] = int(round(texelFetch(island_out_tex, gid, 0).x));
+        bridge_entity_id[cell_index] = int(round(texelFetch(entity_out_tex, gid, 0).x));
+        bridge_displaced[cell_index] = int(round(texelFetch(displaced_tex, gid, 0).x));
+    }
 }

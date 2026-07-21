@@ -6,8 +6,28 @@ uniform int tile_size;
 uniform int phase_powder;
 uniform int phase_liquid;
 uniform int phase_falling_island;
+uniform bool use_bridge_authoritative_blockers;
+uniform bool use_liquid_flow_intent;
+uniform bool precompute_fallback_blockers;
 uniform float dt;
+#if {{POWDER_SOURCE_TILE_PRODUCER}}
+uniform uint apply_workgroups_per_tile;
+#endif
 
+#if {{POWDER_COMPACT_RESERVATION}}
+struct CompactPowderReservation {
+    uint source_xy;
+    uint desired_target_xy;
+    uint reserved_target_xy;
+    uint resolved_target_xy;
+    uint velocity_xy;
+    uint material_resolve;
+};
+
+layout(std430, binding=0) buffer PowderReservations {
+    CompactPowderReservation reservations[];
+};
+#else
 struct PowderReservation {
     ivec2 source_xy;
     ivec2 desired_target_xy;
@@ -21,6 +41,7 @@ struct PowderReservation {
 layout(std430, binding=0) buffer PowderReservations {
     PowderReservation reservations[];
 };
+#endif
 layout(std430, binding=1) buffer PowderReservationCount {
     int powder_reservation_count;
 };
@@ -36,18 +57,65 @@ layout(std430, binding=4) readonly buffer ActiveTileCountBuffer {
 layout(std430, binding=5) readonly buffer ActiveTileListBuffer {
     ivec2 active_tile_list[];
 };
+layout(std430, binding=6) buffer PowderTargetWinners {
+    int target_winners[];
+};
+#if {{POWDER_NONTRIVIAL_RESOLVE_WORKLIST}}
+layout(std430, binding=7) buffer NontrivialResolveCountBuffer {
+    uint nontrivial_resolve_count[];
+};
+#endif
+layout(std430, binding=8) readonly buffer BridgeCellCoreBuffer {
+    uint bridge_cell_core[];
+};
+#if {{POWDER_NONTRIVIAL_RESOLVE_WORKLIST}}
+layout(std430, binding=9) writeonly buffer NontrivialResolveIndexBuffer {
+    int nontrivial_resolve_indices[];
+};
+#else
+layout(std430, binding=9) readonly buffer BridgeIslandBuffer {
+    int bridge_island_id[];
+};
+#endif
+layout(std430, binding=10) readonly buffer BridgeEntityBuffer {
+    int bridge_entity_id[];
+};
+layout(std430, binding=11) readonly buffer BridgeDisplacedBuffer {
+    int bridge_displaced_material[];
+};
+#if {{POWDER_SOURCE_TILE_PRODUCER}}
+layout(std430, binding=12) buffer PowderAffectedTileFlags {
+    uint affected_tile_flags[];
+};
+layout(std430, binding=13) buffer AffectedTileCountBuffer {
+    uint affected_tile_count[];
+};
+layout(std430, binding=14) buffer AffectedTileListBuffer {
+    ivec2 affected_tile_list[];
+};
+layout(std430, binding=15) buffer AffectedTileDispatchArgsBuffer {
+    uint affected_tile_dispatch_args[];
+};
+shared uint generated_reservation_in_workgroup;
+#endif
 
-layout(binding=0) uniform sampler2D material_tex;
-layout(binding=1) uniform sampler2D phase_tex;
+layout(binding=0) uniform usampler2D cell_state_tex;
 layout(binding=2) uniform sampler2D velocity_tex;
 layout(binding=3) uniform sampler2D active_tile_tex;
-layout(binding=4) uniform sampler2D powder_target_tex;
+layout(binding=4) uniform sampler2D liquid_flow_intent_tex;
+layout(binding=5) uniform sampler2D entity_id_tex;
+layout(binding=6) uniform sampler2D displaced_tex;
 
 bool in_bounds(ivec2 cell) {
     return cell.x >= 0 && cell.y >= 0 && cell.x < cell_grid_size.x && cell.y < cell_grid_size.y;
 }
 
-bool active_dispatch_cell(out ivec2 cell) {
+int cell_index(ivec2 cell) {
+    return cell.y * cell_grid_size.x + cell.x;
+}
+
+bool active_dispatch_cell(out ivec2 cell, out ivec2 source_tile) {
+    source_tile = ivec2(-1);
     int groups_per_tile_axis = max(1, (tile_size + {{LOCAL_SIZE_MINUS_1}}) / {{LOCAL_SIZE}});
     int workgroups_per_tile = groups_per_tile_axis * groups_per_tile_axis;
     uint group_index = gl_WorkGroupID.x;
@@ -61,6 +129,7 @@ bool active_dispatch_cell(out ivec2 cell) {
     if (tile.x < 0 || tile.y < 0 || tile.x >= tile_grid_size.x || tile.y >= tile_grid_size.y) {
         return false;
     }
+    source_tile = tile;
     ivec2 tile_origin = tile * tile_size;
     ivec2 local_cell = subtile_xy * {{LOCAL_SIZE}} + ivec2(gl_LocalInvocationID.xy);
     cell = tile_origin + local_cell;
@@ -69,47 +138,270 @@ bool active_dispatch_cell(out ivec2 cell) {
 }
 
 int material_at(ivec2 cell) {
-    return int(texelFetch(material_tex, cell, 0).x + 0.5);
+    if (use_bridge_authoritative_blockers) {
+        return int(bridge_cell_core[cell_index(cell) * 5] & 0xFFFFu);
+    }
+    return int(texelFetch(cell_state_tex, cell, 0).x & 0xFFFFu);
 }
 
 int phase_at(ivec2 cell) {
-    return int(texelFetch(phase_tex, cell, 0).x + 0.5);
+    if (use_bridge_authoritative_blockers) {
+        return int((bridge_cell_core[cell_index(cell) * 5] >> 16u) & 0xFFu);
+    }
+    return int((texelFetch(cell_state_tex, cell, 0).x >> 16u) & 0xFFu);
 }
 
-void append_reservation(
+vec2 velocity_at(ivec2 cell) {
+    if (use_bridge_authoritative_blockers) {
+        return unpackHalf2x16(bridge_cell_core[cell_index(cell) * 5 + 1]);
+    }
+    return texelFetch(velocity_tex, cell, 0).xy;
+}
+
+bool blocks_dda_target(ivec2 cell) {
+    return material_at(cell) > 0
+        || phase_at(cell) == phase_falling_island
+        || (
+            use_bridge_authoritative_blockers
+            ? bridge_entity_id[cell_index(cell)] != 0
+            : texelFetch(entity_id_tex, cell, 0).x > 0.5
+        )
+        || (
+            use_bridge_authoritative_blockers
+            ? bridge_displaced_material[cell_index(cell)] != 0
+            : texelFetch(displaced_tex, cell, 0).x > 0.5
+        );
+}
+
+ivec2 dda_target(ivec2 cell, ivec2 desired) {
+    if (desired.x == 0 && desired.y == 0) {
+        return cell;
+    }
+    ivec2 current = ivec2(0, 0);
+    ivec2 furthest = cell;
+    int dx = abs(desired.x);
+    int dy = -abs(desired.y);
+    int sx = current.x < desired.x ? 1 : -1;
+    int sy = current.y < desired.y ? 1 : -1;
+    int err = dx + dy;
+    while (true) {
+        if (current.x == desired.x && current.y == desired.y) {
+            break;
+        }
+        int e2 = 2 * err;
+        if (e2 >= dy) {
+            err += dy;
+            current.x += sx;
+        }
+        if (e2 <= dx) {
+            err += dx;
+            current.y += sy;
+        }
+        ivec2 sample_cell = cell + current;
+        if (!in_bounds(sample_cell) || blocks_dda_target(sample_cell)) {
+            break;
+        }
+        furthest = sample_cell;
+    }
+    return furthest;
+}
+
+int source_rank(ivec2 source) {
+    int rank_y = (cell_grid_size.y - 1) - clamp(source.y, 0, cell_grid_size.y - 1);
+    int rank_x = clamp(source.x, 0, cell_grid_size.x - 1);
+    return rank_y * cell_grid_size.x + rank_x;
+}
+
+ivec2 fallback_candidate(ivec2 source, int material_id, int index) {
+    float gravity = material_params[clamp(material_id, 0, {{MAX_MATERIALS_MINUS_1}})].y;
+    if (gravity >= 0.0) {
+        if (index == 0) return source + ivec2(0, 1);
+        if (index == 1) return source + ivec2(-1, 1);
+        return source + ivec2(1, 1);
+    }
+    if (index == 0) return source + ivec2(0, -1);
+    if (index == 1) return source + ivec2(-1, -1);
+    return source + ivec2(1, -1);
+}
+
+int fallback_blocker_mask(ivec2 source, int material_id, int phase_id) {
+    if (
+        !precompute_fallback_blockers
+        || phase_id != phase_powder
+        || int(contact_params[material_id].z + 0.5) == {{POWDER_SOLVER_SUSPENDED}}
+    ) {
+        return 0;
+    }
+    int mask = 0;
+    for (int candidate_index = 0; candidate_index < 3; ++candidate_index) {
+        ivec2 fallback = fallback_candidate(source, material_id, candidate_index);
+        if (!in_bounds(fallback) || blocks_dda_target(fallback)) {
+            mask |= 1 << candidate_index;
+        }
+    }
+    return mask;
+}
+
+void index_path_winners(ivec2 source, ivec2 target) {
+    ivec2 desired = target - source;
+    if (desired.x == 0 && desired.y == 0) {
+        return;
+    }
+    int rank = source_rank(source);
+    ivec2 current = ivec2(0, 0);
+    int dx = abs(desired.x);
+    int dy = -abs(desired.y);
+    int sx = current.x < desired.x ? 1 : -1;
+    int sy = current.y < desired.y ? 1 : -1;
+    int err = dx + dy;
+    while (true) {
+        if (current.x == desired.x && current.y == desired.y) {
+            break;
+        }
+        int e2 = 2 * err;
+        if (e2 >= dy) {
+            err += dy;
+            current.x += sx;
+        }
+        if (e2 <= dx) {
+            err += dx;
+            current.y += sy;
+        }
+        ivec2 path_cell = source + current;
+        if (!in_bounds(path_cell)) {
+            return;
+        }
+        atomicMin(target_winners[cell_index(path_cell)], rank);
+    }
+}
+
+int append_reservation(
     ivec2 source,
     ivec2 desired,
     ivec2 reserved,
     vec2 velocity,
-    int material_id
+    int material_id,
+    int precomputed_fallback_mask
 ) {
     int index = atomicAdd(powder_reservation_count, 1);
+#if {{POWDER_COMPACT_RESERVATION}}
+    reservations[index].source_xy =
+        (uint(source.x) & 0xFFFFu) | ((uint(source.y) & 0xFFFFu) << 16u);
+    reservations[index].desired_target_xy =
+        (uint(desired.x) & 0xFFFFu) | ((uint(desired.y) & 0xFFFFu) << 16u);
+    reservations[index].reserved_target_xy =
+        (uint(reserved.x) & 0xFFFFu) | ((uint(reserved.y) & 0xFFFFu) << 16u);
+    reservations[index].resolved_target_xy = reservations[index].source_xy;
+    reservations[index].velocity_xy = use_bridge_authoritative_blockers
+        ? bridge_cell_core[cell_index(source) * 5 + 1]
+        : packHalf2x16(velocity);
+    reservations[index].material_resolve =
+        (uint(material_id) & 0xFFFFu)
+        | ((uint(precomputed_fallback_mask << 8) & 0xFFFFu) << 16u);
+#else
     reservations[index].source_xy = source;
     reservations[index].desired_target_xy = desired;
     reservations[index].reserved_target_xy = reserved;
     reservations[index].resolved_target_xy = source;
     reservations[index].velocity_xy = velocity;
     reservations[index].material_id = material_id;
-    reservations[index].resolve_state = {{POWDER_RESOLVE_BLOCKED}};
+    reservations[index].resolve_state = precomputed_fallback_mask << 8;
+#endif
+    return index;
 }
 
-void main() {
-    ivec2 source;
-    if (dt < 0.0) {
-        return;
-    }
-    if (!active_dispatch_cell(source)) {
-        return;
-    }
+bool same_cell(ivec2 lhs, ivec2 rhs) {
+    return lhs.x == rhs.x && lhs.y == rhs.y;
+}
+
+bool generate_reservation_for_source(ivec2 source) {
     int material_id = material_at(source);
     int phase_id = phase_at(source);
     if (material_id <= 0 || (phase_id != phase_powder && phase_id != phase_liquid)) {
-        return;
+        return false;
     }
     material_id = clamp(material_id, 0, {{MAX_MATERIALS_MINUS_1}});
-    vec2 velocity = texelFetch(velocity_tex, source, 0).xy;
-    vec4 target_payload = texelFetch(powder_target_tex, source, 0);
-    ivec2 reserved = ivec2(round(target_payload.xy));
-    ivec2 desired = ivec2(round(target_payload.zw));
-    append_reservation(source, desired, reserved, velocity, material_id);
+    vec2 velocity = velocity_at(source);
+    vec2 motion_velocity = velocity;
+    if (phase_id == phase_liquid && use_liquid_flow_intent) {
+        motion_velocity += texelFetch(liquid_flow_intent_tex, source, 0).xy;
+    }
+    int max_step = int(material_params[material_id].x + 0.5);
+    vec2 frame_delta = motion_velocity * dt;
+    ivec2 desired_delta = ivec2(
+        int(clamp(round(frame_delta.x), float(-max_step), float(max_step))),
+        int(clamp(round(frame_delta.y), float(-max_step), float(max_step)))
+    );
+    ivec2 desired = source + desired_delta;
+    ivec2 reserved = dda_target(source, desired_delta);
+    int precomputed_fallback_mask = fallback_blocker_mask(source, material_id, phase_id);
+    bool terminal_blocked = false;
+#if {{POWDER_NONTRIVIAL_RESOLVE_WORKLIST}}
+    int solver_kind = int(contact_params[material_id].z + 0.5);
+    terminal_blocked = same_cell(reserved, source)
+        && (
+            phase_id == phase_liquid
+            || solver_kind == {{POWDER_SOLVER_SUSPENDED}}
+            || precomputed_fallback_mask == 7
+        );
+#endif
+    int reservation_index = append_reservation(
+        source,
+        desired,
+        reserved,
+        velocity,
+        material_id,
+        terminal_blocked ? 0 : precomputed_fallback_mask
+    );
+#if {{POWDER_NONTRIVIAL_RESOLVE_WORKLIST}}
+    if (!terminal_blocked) {
+        uint resolve_slot = atomicAdd(nontrivial_resolve_count[0], 1u);
+        nontrivial_resolve_indices[resolve_slot] = reservation_index;
+    }
+#endif
+    index_path_winners(source, reserved);
+    return true;
+}
+
+#if {{POWDER_SOURCE_TILE_PRODUCER}}
+void append_source_tile(ivec2 tile) {
+    int tile_index = tile.y * tile_grid_size.x + tile.x;
+    uint previous = atomicExchange(affected_tile_flags[tile_index], 1u);
+    if (previous != 0u) {
+        return;
+    }
+    uint slot = atomicAdd(affected_tile_count[0], 1u);
+    affected_tile_list[slot] = tile;
+    atomicMax(
+        affected_tile_dispatch_args[0],
+        (slot + 1u) * max(apply_workgroups_per_tile, 1u)
+    );
+}
+#endif
+
+void main() {
+    ivec2 source;
+    ivec2 source_tile;
+#if {{POWDER_SOURCE_TILE_PRODUCER}}
+    if (gl_LocalInvocationIndex == 0u) {
+        generated_reservation_in_workgroup = 0u;
+    }
+    barrier();
+    bool active_source = active_dispatch_cell(source, source_tile);
+    if (dt >= 0.0 && active_source && generate_reservation_for_source(source)) {
+        atomicOr(generated_reservation_in_workgroup, 1u);
+    }
+    barrier();
+    if (gl_LocalInvocationIndex == 0u && generated_reservation_in_workgroup != 0u) {
+        append_source_tile(source_tile);
+    }
+#else
+    if (dt < 0.0) {
+        return;
+    }
+    if (!active_dispatch_cell(source, source_tile)) {
+        return;
+    }
+    generate_reservation_for_source(source);
+#endif
 }

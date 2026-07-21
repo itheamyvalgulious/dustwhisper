@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, TYPE_CHECKING
 
+import numpy as np
+
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
     from oracle_game.sim.gpu_collapse import GPUCollapseResources
@@ -109,6 +111,7 @@ def _solve_formal_connected_dirty_tile_frontier(
 
 
 def _compact_formal_connected_tile_mask(pipeline, world: "WorldEngine", tile_mask_name: str) -> None:
+    pipeline._invalidate_persistent_dense_tile_worklist()
     ctx = world.bridge.ctx
     if ctx is None:
         raise RuntimeError("GPU collapse pipeline requires a valid ModernGL context")
@@ -153,6 +156,7 @@ def _seed_formal_connected_tile_frontier(
     width: int,
     height: int,
 ) -> None:
+    pipeline._invalidate_persistent_dense_tile_worklist()
     ctx = world.bridge.ctx
     if ctx is None:
         raise RuntimeError("GPU collapse pipeline requires a valid ModernGL context")
@@ -214,6 +218,7 @@ def _seed_formal_connected_tile_frontier_from_dirty_queue(
     width: int,
     height: int,
 ) -> None:
+    pipeline._invalidate_persistent_dense_tile_worklist()
     ctx = world.bridge.ctx
     if ctx is None:
         raise RuntimeError("GPU collapse pipeline requires a valid ModernGL context")
@@ -280,6 +285,7 @@ def _expand_formal_connected_tile_frontier(
     next_frontier: tuple[str, str, str],
     jump: int = 1,
 ) -> None:
+    pipeline._invalidate_persistent_dense_tile_worklist()
     ctx = world.bridge.ctx
     if ctx is None:
         raise RuntimeError("GPU collapse pipeline requires a valid ModernGL context")
@@ -649,42 +655,27 @@ def _solve_formal_connected_tile_support_textures(
     ctx = world.bridge.ctx
     if ctx is None:
         raise RuntimeError("GPU collapse pipeline requires a valid ModernGL context")
-    current = resources.support_ping
-    scratch = resources.support_pong
-    with pipeline._profile_pass(world, "support_jfa.axis_masks"):
-        pipeline._build_formal_connected_axis_masks(
-            world,
-            resources,
-            resources.structural_tex,
-            width,
-            height,
-            tile_mask_name,
-        )
-    jumps = pipeline._formal_jfa_jumps(width, height)
-    with pipeline._profile_pass(world, "support_jfa.jfa"):
-        for band_name, band_jumps in pipeline._formal_jfa_profile_jump_bands(jumps):
-            with pipeline._profile_pass(world, f"support_jfa.jfa.{band_name}"):
-                for jump in band_jumps:
-                    current, scratch = pipeline._run_formal_connected_tile_support_pass(
-                        world,
-                        resources,
-                        current,
-                        scratch,
-                        width,
-                        height,
-                        tile_mask_name,
-                        jump,
-                    )
-    with pipeline._profile_pass(world, "support_jfa.refine"):
-        current, scratch = pipeline._run_formal_connected_tile_support_refine_passes(
-            world,
-            resources,
-            current,
-            scratch,
-            width,
-            height,
-            tile_mask_name,
-        )
+    current, scratch, schedule = _begin_formal_connected_tile_support(
+        pipeline,
+        world,
+        resources,
+        width,
+        height,
+        tile_mask_name,
+    )
+    current, scratch = _run_formal_connected_tile_support_slice(
+        pipeline,
+        world,
+        resources,
+        current,
+        scratch,
+        width,
+        height,
+        tile_mask_name,
+        schedule,
+        0,
+        len(schedule),
+    )
     if publish_masks:
         with pipeline._profile_pass(world, "support_jfa.publish"):
             pipeline._publish_bridge_supported_unsupported_masks_connected_tiles(
@@ -698,6 +689,289 @@ def _solve_formal_connected_tile_support_textures(
                 tile_mask_name=tile_mask_name,
             )
     return current
+
+
+def _begin_formal_connected_tile_support(
+    pipeline,
+    world: "WorldEngine",
+    resources: GPUCollapseResources,
+    width: int,
+    height: int,
+    tile_mask_name: str,
+    *,
+    use_u8: bool = False,
+    axis_masks_prebuilt: bool = False,
+) -> tuple[Any, Any, tuple[int, ...]]:
+    if pipeline._support_tile_union_enabled:
+        # The graph candidate performs one tile-local closure and one boundary
+        # union job instead of a texture ping-pong schedule.
+        return resources.support_ping, resources.support_pong, (0,)
+    if use_u8:
+        ctx = world.bridge.ctx
+        if ctx is None:
+            raise RuntimeError("GPU collapse pipeline requires a valid ModernGL context")
+        current, scratch = pipeline._ensure_formal_connected_u8_support_textures(ctx, resources)
+    else:
+        current, scratch = resources.support_ping, resources.support_pong
+    if axis_masks_prebuilt and not use_u8:
+        raise ValueError("prebuilt formal support axis masks require the U8 support path")
+    if not axis_masks_prebuilt:
+        with pipeline._profile_pass(world, "support_jfa.axis_masks"):
+            pipeline._build_formal_connected_axis_masks(
+                world,
+                resources,
+                resources.structural_tex,
+                width,
+                height,
+                tile_mask_name,
+                support_seed_texture=resources.support_ping if use_u8 else None,
+                support_seed_u8_texture=current if use_u8 else None,
+            )
+    schedule = (
+        *pipeline._formal_jfa_jumps(width, height),
+        *([1] * pipeline._formal_connected_tile_refine_pass_count(world)),
+    )
+    return current, scratch, tuple(int(jump) for jump in schedule)
+
+
+def _run_formal_connected_tile_support_slice(
+    pipeline,
+    world: "WorldEngine",
+    resources: GPUCollapseResources,
+    current: Any,
+    scratch: Any,
+    width: int,
+    height: int,
+    tile_mask_name: str,
+    schedule: tuple[int, ...],
+    start: int,
+    stop: int,
+) -> tuple[Any, Any]:
+    schedule_length = len(schedule)
+    slice_start = max(0, min(schedule_length, int(start)))
+    slice_stop = max(slice_start, min(schedule_length, int(stop)))
+    if pipeline._support_tile_union_enabled:
+        if slice_start == 0 and slice_stop > 0:
+            return _run_formal_connected_tile_support_union(
+                pipeline,
+                world,
+                resources,
+                width,
+                height,
+                tile_mask_name,
+            )
+        return current, scratch
+    refine_pass_count = min(
+        schedule_length,
+        max(0, int(pipeline._formal_connected_tile_refine_pass_count(world))),
+    )
+    jfa_stop = schedule_length - refine_pass_count
+    jfa_slice_start = min(slice_start, jfa_stop)
+    jfa_slice_stop = min(slice_stop, jfa_stop)
+    if jfa_slice_start < jfa_slice_stop:
+        jumps = schedule[jfa_slice_start:jfa_slice_stop]
+        with pipeline._profile_pass(world, "support_jfa.jfa"):
+            for band_name, band_jumps in pipeline._formal_jfa_profile_jump_bands(jumps):
+                with pipeline._profile_pass(world, f"support_jfa.jfa.{band_name}"):
+                    for jump in band_jumps:
+                        with pipeline._profile_pass(
+                            world,
+                            f"support_jfa.jump_{int(jump)}",
+                        ):
+                            current, scratch = (
+                                pipeline._run_formal_connected_tile_support_pass(
+                                    world,
+                                    resources,
+                                    current,
+                                    scratch,
+                                    width,
+                                    height,
+                                    tile_mask_name,
+                                    jump,
+                                )
+                            )
+    refine_slice_start = max(slice_start, jfa_stop)
+    if refine_slice_start < slice_stop:
+        with pipeline._profile_pass(world, "support_jfa.refine"):
+            for jump in schedule[refine_slice_start:slice_stop]:
+                current, scratch = pipeline._run_formal_connected_tile_support_pass(
+                    world,
+                    resources,
+                    current,
+                    scratch,
+                    width,
+                    height,
+                    tile_mask_name,
+                    jump,
+                )
+    return current, scratch
+
+
+def _ensure_support_tile_union_buffers(
+    pipeline,
+    ctx: Any,
+    resources: GPUCollapseResources,
+    width: int,
+    height: int,
+    edge_capacity: int,
+) -> None:
+    cell_bytes = max(4, int(width) * int(height) * np.dtype(np.uint32).itemsize)
+    edge_bytes = max(8, int(edge_capacity) * 2 * np.dtype(np.uint32).itemsize)
+    specs = (
+        ("support_tile_union_roots", cell_bytes),
+        ("support_tile_union_parent", cell_bytes),
+        ("support_tile_union_seeded", cell_bytes),
+        ("support_tile_union_edges", edge_bytes),
+        ("support_tile_union_edge_count", 4),
+    )
+    for name, required_bytes in specs:
+        buffer = getattr(resources, name)
+        if buffer is not None and buffer.size >= required_bytes:
+            continue
+        if buffer is not None:
+            buffer.release()
+        setattr(resources, name, ctx.buffer(reserve=required_bytes, dynamic=True))
+
+
+def _run_formal_connected_tile_support_union(
+    pipeline,
+    world: "WorldEngine",
+    resources: GPUCollapseResources,
+    width: int,
+    height: int,
+    tile_mask_name: str,
+) -> tuple[Any, Any]:
+    ctx = world.bridge.ctx
+    if ctx is None:
+        raise RuntimeError("GPU collapse pipeline requires a valid ModernGL context")
+    pipeline._ensure_programs(ctx)
+    bridge = world.bridge
+    bridge.ensure_world_resources(world)
+    tile_width = max(1, int(world.active.tile_width))
+    tile_height = max(1, int(world.active.tile_height))
+    tile_size = max(1, int(world.active.tile_size))
+    if tile_size > FORMAL_CONNECTED_TILE_LOCAL_SIZE:
+        raise RuntimeError("formal connected support tile union requires tile_size <= 32")
+    edge_capacity = max(
+        1,
+        max(0, tile_width - 1) * int(height)
+        + max(0, tile_height - 1) * int(width),
+    )
+    _ensure_support_tile_union_buffers(
+        pipeline,
+        ctx,
+        resources,
+        width,
+        height,
+        edge_capacity,
+    )
+    roots = resources.support_tile_union_roots
+    parents = resources.support_tile_union_parent
+    seeded = resources.support_tile_union_seeded
+    edges = resources.support_tile_union_edges
+    edge_count = resources.support_tile_union_edge_count
+    if roots is None or parents is None or seeded is None or edges is None or edge_count is None:
+        raise RuntimeError("formal connected support tile union buffers were not allocated")
+    edge_count.write(np.zeros(1, dtype=np.uint32).tobytes())
+
+    with pipeline._profile_pass(world, "support_tile_union.local_components"):
+        program = pipeline.programs["support_tile_union_local"]
+        program["cell_grid_size"].value = (int(width), int(height))
+        program["tile_grid_size"].value = (tile_width, tile_height)
+        program["tile_size"].value = tile_size
+        resources.structural_tex.use(location=0)
+        resources.support_ping.use(location=1)
+        bridge.buffers[tile_mask_name].bind_to_storage_buffer(binding=0)
+        bridge.buffers[FORMAL_CONNECTED_TILE_COUNT_BUFFER].bind_to_storage_buffer(binding=1)
+        bridge.buffers[FORMAL_CONNECTED_TILE_LIST_BUFFER].bind_to_storage_buffer(binding=2)
+        roots.bind_to_storage_buffer(binding=3)
+        parents.bind_to_storage_buffer(binding=4)
+        seeded.bind_to_storage_buffer(binding=5)
+        program.run_indirect(bridge.buffers[FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER])
+        pipeline._sync_compute_writes(ctx)
+
+    with pipeline._profile_pass(world, "support_tile_union.boundary_edges"):
+        program = pipeline.programs["support_tile_union_edges"]
+        program["cell_grid_size"].value = (int(width), int(height))
+        program["tile_grid_size"].value = (tile_width, tile_height)
+        program["tile_size"].value = tile_size
+        program["edge_capacity"].value = edge_capacity
+        bridge.buffers[tile_mask_name].bind_to_storage_buffer(binding=0)
+        bridge.buffers[FORMAL_CONNECTED_TILE_COUNT_BUFFER].bind_to_storage_buffer(binding=1)
+        bridge.buffers[FORMAL_CONNECTED_TILE_LIST_BUFFER].bind_to_storage_buffer(binding=2)
+        roots.bind_to_storage_buffer(binding=3)
+        edges.bind_to_storage_buffer(binding=4)
+        edge_count.bind_to_storage_buffer(binding=5)
+        program.run_indirect(bridge.buffers[FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER])
+        pipeline._sync_compute_writes(ctx)
+
+    edge_groups = (edge_capacity + 63) // 64
+    with pipeline._profile_pass(world, "support_tile_union.union"):
+        if pipeline._support_tile_union_atomic_union_enabled:
+            cell_count = max(1, int(width) * int(height))
+            hook = pipeline.programs["support_tile_union_atomic_hook"]
+            hook["edge_capacity"].value = edge_capacity
+            hook["cell_count"].value = cell_count
+            edges.bind_to_storage_buffer(binding=0)
+            edge_count.bind_to_storage_buffer(binding=1)
+            parents.bind_to_storage_buffer(binding=2)
+            hook.run(edge_groups, 1, 1)
+            pipeline._sync_compute_writes(ctx)
+
+            # Union is complete after the lock-free hook. Compress every edge
+            # endpoint once so the existing seed/materialize shaders retain
+            # their shallow-parent fast path, including adversarial tile chains.
+            shortcut = pipeline.programs["support_tile_union_atomic_shortcut"]
+            shortcut["edge_capacity"].value = edge_capacity
+            shortcut["cell_count"].value = cell_count
+            edges.bind_to_storage_buffer(binding=0)
+            edge_count.bind_to_storage_buffer(binding=1)
+            parents.bind_to_storage_buffer(binding=2)
+            shortcut.run(edge_groups, 1, 1)
+            pipeline._sync_compute_writes(ctx)
+        else:
+            union_rounds = max(1, (max(1, int(width) * int(height))).bit_length() + 2)
+            hook = pipeline.programs["support_tile_union_hook"]
+            hook["edge_capacity"].value = edge_capacity
+            shortcut = pipeline.programs["support_tile_union_shortcut"]
+            shortcut["edge_capacity"].value = edge_capacity
+            for _ in range(union_rounds):
+                edges.bind_to_storage_buffer(binding=0)
+                edge_count.bind_to_storage_buffer(binding=1)
+                parents.bind_to_storage_buffer(binding=2)
+                hook.run(edge_groups, 1, 1)
+                pipeline._sync_compute_writes(ctx)
+                edges.bind_to_storage_buffer(binding=0)
+                edge_count.bind_to_storage_buffer(binding=1)
+                parents.bind_to_storage_buffer(binding=2)
+                shortcut.run(edge_groups, 1, 1)
+                pipeline._sync_compute_writes(ctx)
+
+    with pipeline._profile_pass(world, "support_tile_union.propagate_seeds"):
+        program = pipeline.programs["support_tile_union_seed"]
+        program["edge_capacity"].value = edge_capacity
+        edges.bind_to_storage_buffer(binding=0)
+        edge_count.bind_to_storage_buffer(binding=1)
+        parents.bind_to_storage_buffer(binding=2)
+        seeded.bind_to_storage_buffer(binding=3)
+        program.run(edge_groups, 1, 1)
+        pipeline._sync_compute_writes(ctx)
+
+    with pipeline._profile_pass(world, "support_tile_union.materialize"):
+        program = pipeline.programs["support_tile_union_materialize"]
+        program["cell_grid_size"].value = (int(width), int(height))
+        program["tile_grid_size"].value = (tile_width, tile_height)
+        program["tile_size"].value = tile_size
+        resources.support_pong.bind_to_image(0, read=False, write=True)
+        bridge.buffers[tile_mask_name].bind_to_storage_buffer(binding=0)
+        bridge.buffers[FORMAL_CONNECTED_TILE_COUNT_BUFFER].bind_to_storage_buffer(binding=1)
+        bridge.buffers[FORMAL_CONNECTED_TILE_LIST_BUFFER].bind_to_storage_buffer(binding=2)
+        roots.bind_to_storage_buffer(binding=3)
+        parents.bind_to_storage_buffer(binding=4)
+        seeded.bind_to_storage_buffer(binding=5)
+        program.run_indirect(bridge.buffers[FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER])
+        pipeline._sync_compute_writes(ctx)
+    return resources.support_pong, resources.support_ping
 
 
 def _seed_formal_connected_tile_support_frontier(
@@ -828,7 +1102,37 @@ def _run_formal_connected_tile_support_pass(
         raise RuntimeError("formal connected support propagation requires tile_size <= 32")
     tile_width = max(1, int(getattr(world.active, "tile_width", 1)))
     tile_height = max(1, int(getattr(world.active, "tile_height", 1)))
-    program = pipeline.programs["propagate_formal_connected_tiles"]
+    use_u8 = current is resources.support_u8_ping or current is resources.support_u8_pong
+    if use_u8:
+        if (
+            pipeline._support_jfa_u8_propagated_source_mask_elision_enabled
+            and pipeline._support_jfa_row_major_output_enabled
+            and pipeline._support_jfa_nv32_row_hydrate_enabled
+            and pipeline._support_jfa_nv32_row_hydrate_supported
+        ):
+            program_name = (
+                "propagate_formal_connected_tiles_u8_row_major_"
+                "source_mask_elision_nv32"
+            )
+        elif pipeline._support_jfa_u8_propagated_source_mask_elision_enabled:
+            program_name = (
+                "propagate_formal_connected_tiles_u8_row_major_source_mask_elision"
+                if pipeline._support_jfa_row_major_output_enabled
+                else "propagate_formal_connected_tiles_u8_source_mask_elision"
+            )
+        else:
+            program_name = (
+                "propagate_formal_connected_tiles_u8_row_major"
+                if pipeline._support_jfa_row_major_output_enabled
+                else "propagate_formal_connected_tiles_u8"
+            )
+    else:
+        program_name = (
+            "propagate_formal_connected_tiles_row_major"
+            if pipeline._support_jfa_row_major_output_enabled
+            else "propagate_formal_connected_tiles"
+        )
+    program = pipeline.programs[program_name]
     if not hasattr(program, "run_indirect"):
         raise RuntimeError("formal connected support propagation requires ComputeShader.run_indirect")
     program["cell_grid_size"].value = (int(width), int(height))
@@ -844,7 +1148,15 @@ def _run_formal_connected_tile_support_pass(
     resources.connected_tile_row_masks.bind_to_storage_buffer(binding=3)
     resources.connected_tile_column_masks.bind_to_storage_buffer(binding=4)
     program.run_indirect(bridge.buffers[FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER])
-    pipeline._sync_compute_writes(ctx)
+    if pipeline._support_jfa_image_barrier_elision_enabled:
+        # The next JFA pass samples ``current`` as a texture and writes a
+        # different ping-pong image.  Image-access ordering is therefore not
+        # needed; texture-fetch + storage ordering covers the actual hazards.
+        ctx.memory_barrier(
+            ctx.TEXTURE_FETCH_BARRIER_BIT | ctx.SHADER_STORAGE_BARRIER_BIT
+        )
+    else:
+        pipeline._sync_compute_writes(ctx)
     bridge.mark_gpu_authoritative(
         tile_mask_name,
         FORMAL_CONNECTED_TILE_COUNT_BUFFER,

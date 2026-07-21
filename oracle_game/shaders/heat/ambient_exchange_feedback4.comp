@@ -1,0 +1,72 @@
+uniform float dt;
+
+layout(binding=3) uniform sampler2D temp_in_tex;
+layout(binding=4) uniform sampler2D ambient_in_tex;
+layout(r32f, binding=5) writeonly uniform image2D temp_out_img;
+layout(r32f, binding=6) writeonly uniform image2D ambient_out_img;
+
+shared float feedback_deltas[{{LOCAL_SIZE}} * {{LOCAL_SIZE}}];
+
+void main() {
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 local_id = ivec2(gl_LocalInvocationID.xy);
+    int local_index = int(gl_LocalInvocationIndex);
+    bool cell_in_bounds = gid.x < cell_grid_size.x && gid.y < cell_grid_size.y;
+    float feedback_delta = 0.0;
+
+    if (cell_in_bounds) {
+        float center = texelFetch(temp_in_tex, gid, 0).x;
+        int material_id = material_id_at(gid);
+        float exchange = params[material_id].y;
+        float heat_capacity = max(response_params[material_id].x, 1.0e-4);
+        ivec2 gas_cell = gid / 4;
+        float ambient = texelFetch(ambient_in_tex, gas_cell, 0).x;
+
+        feedback_delta = (ambient - center) * (exchange / heat_capacity) * dt;
+        float updated = center;
+        if (solve_cell_active(gid)) {
+            updated = center + (ambient - center) * (exchange / heat_capacity) * dt;
+        }
+        imageStore(temp_out_img, gid, vec4(updated, 0.0, 0.0, 0.0));
+    }
+
+    feedback_deltas[local_index] = feedback_delta;
+    barrier();
+
+    // Each 8x8 workgroup owns four aligned 4x4 gas cells. Only their
+    // top-left lanes reduce, after every lane has reached the barrier.
+    if ((local_id.x & 3) != 0 || (local_id.y & 3) != 0) {
+        return;
+    }
+
+    ivec2 gas_cell = ivec2(gl_WorkGroupID.xy) * 2 + local_id / 4;
+    if (gas_cell.x >= gas_grid_size.x || gas_cell.y >= gas_grid_size.y) {
+        return;
+    }
+
+    float ambient = texelFetch(ambient_in_tex, gas_cell, 0).x;
+    if (!solve_gas_cell_active(gas_cell)) {
+        imageStore(ambient_out_img, gas_cell, vec4(ambient, 0.0, 0.0, 0.0));
+        return;
+    }
+
+    float accum = 0.0;
+    int count = 0;
+    for (int local_y = 0; local_y < 4; ++local_y) {
+        for (int local_x = 0; local_x < 4; ++local_x) {
+            ivec2 cell = gas_cell * 4 + ivec2(local_x, local_y);
+            if (cell.x >= cell_grid_size.x || cell.y >= cell_grid_size.y) {
+                continue;
+            }
+            int shared_index = (local_id.y + local_y) * {{LOCAL_SIZE}} + local_id.x + local_x;
+            accum += -feedback_deltas[shared_index] * 0.02;
+            count += 1;
+        }
+    }
+
+    float updated = ambient;
+    if (count > 0) {
+        updated += accum / float(count);
+    }
+    imageStore(ambient_out_img, gas_cell, vec4(updated, 0.0, 0.0, 0.0));
+}

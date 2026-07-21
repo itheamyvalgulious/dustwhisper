@@ -1,0 +1,12 @@
+            #version 430
+            layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+            uniform ivec2 gas_grid_size;
+            layout({{FLOW_SOURCE_GENERATION_IMAGE_FORMAT}}, binding=0) writeonly uniform uimage2DArray flow_source_generation_img;
+
+            void main() {
+                ivec3 gid = ivec3(gl_GlobalInvocationID.xyz);
+                if (gid.x >= gas_grid_size.x || gid.y >= gas_grid_size.y || gid.z >= {{FLOW_SOURCE_LAYERS}}) {
+                    return;
+                }
+                imageStore(flow_source_generation_img, gid, uvec4(0u));
+            }

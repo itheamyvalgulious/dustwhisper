@@ -3,6 +3,7 @@ layout(local_size_x=1, local_size_y=1, local_size_z=1) in;
 uniform ivec2 tile_grid_size;
 uniform uint source_workgroups_per_tile;
 uniform uint workgroups_per_boundary;
+uniform uint boundary_row_groups;
 layout(std430, binding=0) readonly buffer ActiveTileCountBuffer {
     uint active_tile_count[];
 };
@@ -40,7 +41,12 @@ void emit_boundary(ivec2 boundary_tile) {
     }
     uint slot = atomicAdd(affected_tile_count[0], 1u);
     affected_tile_list[int(slot)] = boundary_tile;
-    atomicMax(affected_tile_dispatch_args[0], (slot + 1u) * max(workgroups_per_boundary, 1u));
+    if (boundary_row_groups > 0u) {
+        atomicMax(affected_tile_dispatch_args[0], slot + 1u);
+        atomicMax(affected_tile_dispatch_args[1], boundary_row_groups);
+    } else {
+        atomicMax(affected_tile_dispatch_args[0], (slot + 1u) * max(workgroups_per_boundary, 1u));
+    }
 }
 
 void main() {

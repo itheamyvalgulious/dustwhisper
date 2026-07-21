@@ -5,7 +5,7 @@ uniform int island_count;
 uniform bool use_island_count_buffer;
 uniform bool use_bridge_authoritative_state;
 uniform float dt;
-layout(binding=0) uniform sampler2D material_tex;
+layout(binding=0) uniform usampler2D cell_state_tex;
 layout(binding=1) uniform sampler2D island_id_tex;
 layout(std430, binding=0) buffer IslandIdBuffer {
     int island_ids[];
@@ -47,7 +47,7 @@ int material_at(ivec2 cell) {
     if (use_bridge_authoritative_state) {
         return int(bridge_cell_core[cell_index(cell) * 5] & 0xFFFFu);
     }
-    return int(texelFetch(material_tex, cell, 0).x + 0.5);
+    return int(texelFetch(cell_state_tex, cell, 0).x & 0xFFFFu);
 }
 
 int island_at(ivec2 cell) {

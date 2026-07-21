@@ -4,6 +4,8 @@
             uniform ivec2 cell_grid_size;
             uniform ivec2 gas_grid_size;
             uniform int dose_channel_count;
+            uniform bool clear_reaction_latches;
+            uniform uint reaction_latched_flag_shifted;
             layout(rgba32f, binding=0) writeonly uniform image2D bridge_light_img;
             layout(rgba32f, binding=1) writeonly uniform image2D bridge_visible_img;
             layout(std430, binding=0) writeonly buffer BridgeCellDoseBuffer {
@@ -14,6 +16,9 @@
             };
             layout(std430, binding=2) buffer LightDoseGuard {
                 uint light_dose_guard[];
+            };
+            layout(std430, binding=3) buffer BridgeCellCoreBuffer {
+                uint bridge_cell_core[];
             };
             void main() {
                 ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
@@ -30,6 +35,10 @@
                     if (channel == 0) {
                         imageStore(bridge_light_img, gid, vec4(0.0, 0.0, 0.0, 1.0));
                         imageStore(bridge_visible_img, gid, vec4(0.0, 0.0, 0.0, 1.0));
+                        if (clear_reaction_latches) {
+                            int word_index = (gid.y * cell_grid_size.x + gid.x) * 5;
+                            bridge_cell_core[word_index] &= ~reaction_latched_flag_shifted;
+                        }
                     }
                 }
                 if (gid.x < gas_grid_size.x && gid.y < gas_grid_size.y && channel < dose_channel_count) {
@@ -37,4 +46,3 @@
                     bridge_gas_dose[gas_index] = 0.0;
                 }
             }
-            

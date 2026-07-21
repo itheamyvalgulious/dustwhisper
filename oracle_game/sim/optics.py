@@ -75,7 +75,45 @@ class OpticsSolver:
         self.gpu_pipeline = GPUOpticsPipeline()
         self.last_backend = "idle"
         self.last_pass_profile: dict[str, Any] = {"passes": [], "summary": {}}
+        self._formal_full_active_mask_reuse_enabled = True
+        # Keep solve-mask construction canonical; this narrower candidate only
+        # aliases formal changed masks after the GPU pass, avoiding three
+        # full-resolution CPU copies without changing the authoritative mask.
+        # Formal GPU frames already have canonical solve masks in hand. Reuse
+        # those arrays as the changed-mask views instead of copying each full
+        # resolution mask three times; non-formal/partial paths retain the
+        # copy helper below.
+        self._formal_changed_mask_alias_enabled = True
+        self._formal_full_active_mask_cache_signature: tuple[int, ...] | None = None
+        self._formal_full_active_mask_cache: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
         self.reset_runtime_state()
+
+    def _full_active_mask_cache(
+        self,
+        world: "WorldEngine",
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        signature = (
+            int(world.active.tile_height),
+            int(world.active.tile_width),
+            int(world.height),
+            int(world.width),
+            int(world.gas_height),
+            int(world.gas_width),
+        )
+        if (
+            self._formal_full_active_mask_cache is None
+            or self._formal_full_active_mask_cache_signature != signature
+        ):
+            masks = (
+                np.ones(signature[0:2], dtype=np.bool_),
+                np.ones(signature[2:4], dtype=np.bool_),
+                np.ones(signature[4:6], dtype=np.bool_),
+            )
+            for mask in masks:
+                mask.flags.writeable = False
+            self._formal_full_active_mask_cache_signature = signature
+            self._formal_full_active_mask_cache = masks
+        return self._formal_full_active_mask_cache
 
     def _profile_enabled(self, world: "WorldEngine") -> bool:
         return bool(getattr(world, "profile_passes_enabled", False))
@@ -131,6 +169,8 @@ class OpticsSolver:
             )
 
     def step(self, world: "WorldEngine") -> None:
+        self.gpu_pipeline.last_reaction_latch_clear_fused = False
+        self.gpu_pipeline.last_full_active_mask_hydration_elision_used = False
         if self._profile_enabled(world):
             self.reset_pass_profile()
             self.gpu_pipeline.reset_pass_profile()
@@ -194,7 +234,13 @@ class OpticsSolver:
             if formal_gpu_frame and not active_scheduler_gpu_authoritative:
                 world._require_gpu_stage("active scheduler optics solve masks")
         with self._profile_pass(world, "optics_solve_tile_mask"):
-            if active_scheduler_gpu_authoritative:
+            reuse_full_active_masks = bool(
+                active_scheduler_gpu_authoritative
+                and self._formal_full_active_mask_reuse_enabled
+            )
+            if reuse_full_active_masks:
+                solve_tile_mask, solve_cell_mask, solve_gas_mask = self._full_active_mask_cache(world)
+            elif active_scheduler_gpu_authoritative:
                 solve_tile_mask = np.ones((world.active.tile_height, world.active.tile_width), dtype=np.bool_)
             else:
                 solve_tile_mask = self._solve_tile_mask(world, emitters)
@@ -202,25 +248,37 @@ class OpticsSolver:
                     solve_tile_mask = np.ones_like(solve_tile_mask, dtype=np.bool_)
             has_solve_tiles = bool(np.any(solve_tile_mask))
         with self._profile_pass(world, "optics_mask_expansion"):
-            solve_cell_mask = tile_mask_to_cell_mask(
-                solve_tile_mask,
-                tile_size=world.active.tile_size,
-                width=world.width,
-                height=world.height,
-            )
-            solve_gas_mask = tile_mask_to_gas_mask(
-                solve_tile_mask,
-                tile_size=world.active.tile_size,
-                gas_cell_size=world.gas_cell_size,
-                width=world.width,
-                height=world.height,
-                gas_width=world.gas_width,
-                gas_height=world.gas_height,
-            )
+            if not reuse_full_active_masks:
+                solve_cell_mask = tile_mask_to_cell_mask(
+                    solve_tile_mask,
+                    tile_size=world.active.tile_size,
+                    width=world.width,
+                    height=world.height,
+                )
+                solve_gas_mask = tile_mask_to_gas_mask(
+                    solve_tile_mask,
+                    tile_size=world.active.tile_size,
+                    gas_cell_size=world.gas_cell_size,
+                    width=world.width,
+                    height=world.height,
+                    gas_width=world.gas_width,
+                    gas_height=world.gas_height,
+                )
         with self._profile_pass(world, "optics_mask_snapshots"):
-            self.last_solve_tile_mask = solve_tile_mask.copy()
-            self.last_solve_cell_mask = solve_cell_mask.copy()
-            self.last_solve_gas_mask = solve_gas_mask.copy()
+            if reuse_full_active_masks:
+                self.last_solve_tile_mask = solve_tile_mask
+                self.last_solve_cell_mask = solve_cell_mask
+                self.last_solve_gas_mask = solve_gas_mask
+            elif formal_gpu_frame and self._formal_changed_mask_alias_enabled:
+                # These masks are immutable for the remainder of a formal GPU
+                # frame; retaining them avoids three full-resolution copies.
+                self.last_solve_tile_mask = solve_tile_mask
+                self.last_solve_cell_mask = solve_cell_mask
+                self.last_solve_gas_mask = solve_gas_mask
+            else:
+                self.last_solve_tile_mask = solve_tile_mask.copy()
+                self.last_solve_cell_mask = solve_cell_mask.copy()
+                self.last_solve_gas_mask = solve_gas_mask.copy()
         with self._profile_pass(world, "optics_previous_output_snapshot"):
             if formal_gpu_frame:
                 previous_visible = None
@@ -276,7 +334,17 @@ class OpticsSolver:
             with self._profile_pass(world, "optics_active_tile_marking"):
                 self._mark_tiles_from_mask(world, solve_tile_mask)
         with self._profile_pass(world, "optics_changed_mask_updates"):
-            if formal_gpu_frame:
+            if formal_gpu_frame and (
+                reuse_full_active_masks or self._formal_changed_mask_alias_enabled
+            ):
+                self.last_visible_changed_mask = solve_cell_mask
+                self.last_cell_dose_changed_mask = solve_cell_mask
+                self.last_gas_dose_changed_mask = solve_gas_mask
+                if formal_gpu_frame and self._formal_changed_mask_alias_enabled and not reuse_full_active_masks:
+                    # Preserve the child-pass accounting contract without
+                    # synchronizing the GPU three times for no-op copies.
+                    self._record_aliased_changed_mask_passes(world)
+            elif formal_gpu_frame:
                 self._copy_direct_changed_masks(world, solve_cell_mask, solve_gas_mask)
             elif gpu_available and not self.gpu_pipeline.last_cpu_mirror_downloaded:
                 self._copy_direct_changed_masks(world, solve_cell_mask, solve_gas_mask)
@@ -618,6 +686,16 @@ class OpticsSolver:
         with self._profile_pass(world, "optics_changed_mask_gas_dose"):
             np.copyto(self.last_gas_dose_changed_mask, solve_gas_mask)
 
+    def _record_aliased_changed_mask_passes(self, world: "WorldEngine") -> None:
+        if not self._profile_enabled(world):
+            return
+        for name in (
+            "optics_changed_mask_visible",
+            "optics_changed_mask_cell_dose",
+            "optics_changed_mask_gas_dose",
+        ):
+            self._record_pass_profile_entry(name, 0.0, None)
+
     def _refresh_active_regions(
         self,
         world: "WorldEngine",
@@ -687,20 +765,34 @@ class OpticsSolver:
         tile_shape = (0, 0) if world is None else (world.active.tile_height, world.active.tile_width)
         cell_shape = (0, 0) if world is None else (world.height, world.width)
         gas_shape = (0, 0) if world is None else (world.gas_height, world.gas_width)
-        self.last_runtime_backend = "idle"
-        self.last_solve_tile_mask = np.zeros(tile_shape, dtype=np.bool_)
-        self.last_solve_cell_mask = np.zeros(cell_shape, dtype=np.bool_)
-        self.last_solve_gas_mask = np.zeros(gas_shape, dtype=np.bool_)
-        self.last_visible_changed_mask = np.zeros(cell_shape, dtype=np.bool_)
-        self.last_cell_dose_changed_mask = np.zeros(cell_shape, dtype=np.bool_)
-        self.last_gas_dose_changed_mask = np.zeros(gas_shape, dtype=np.bool_)
-        self.last_emitter_origin_mask = np.zeros(cell_shape, dtype=np.bool_)
-        dose_channels = 0 if world is None else int(world.cell_optical_dose.shape[0])
         formal_gpu_frame = (
             world is not None
             and getattr(world, "simulation_backend", "") == "gpu"
             and bool(getattr(world, "_world_simulation_frame_active", False))
         )
+        reuse_full_active_masks = bool(
+            formal_gpu_frame
+            and self._formal_full_active_mask_reuse_enabled
+            and "active_tile_ttl" in world.bridge.gpu_authoritative_resources
+        )
+        self.last_runtime_backend = "idle"
+        if reuse_full_active_masks:
+            full_tile, full_cell, full_gas = self._full_active_mask_cache(world)
+            self.last_solve_tile_mask = full_tile
+            self.last_solve_cell_mask = full_cell
+            self.last_solve_gas_mask = full_gas
+            self.last_visible_changed_mask = full_cell
+            self.last_cell_dose_changed_mask = full_cell
+            self.last_gas_dose_changed_mask = full_gas
+        else:
+            self.last_solve_tile_mask = np.zeros(tile_shape, dtype=np.bool_)
+            self.last_solve_cell_mask = np.zeros(cell_shape, dtype=np.bool_)
+            self.last_solve_gas_mask = np.zeros(gas_shape, dtype=np.bool_)
+            self.last_visible_changed_mask = np.zeros(cell_shape, dtype=np.bool_)
+            self.last_cell_dose_changed_mask = np.zeros(cell_shape, dtype=np.bool_)
+            self.last_gas_dose_changed_mask = np.zeros(gas_shape, dtype=np.bool_)
+        self.last_emitter_origin_mask = np.zeros(cell_shape, dtype=np.bool_)
+        dose_channels = 0 if world is None else int(world.cell_optical_dose.shape[0])
         exposure_shape = (0, 0, 0) if formal_gpu_frame else (dose_channels, *cell_shape)
         self._visible_exposure = np.zeros(exposure_shape, dtype=np.float32)
         self.last_emitters: list[dict[str, object]] = []

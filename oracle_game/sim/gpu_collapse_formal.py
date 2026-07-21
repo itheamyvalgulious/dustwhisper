@@ -297,6 +297,9 @@ def _build_formal_connected_axis_masks(
     width: int,
     height: int,
     tile_mask_name: str,
+    *,
+    support_seed_texture: Any | None = None,
+    support_seed_u8_texture: Any | None = None,
 ) -> None:
     ctx = world.bridge.ctx
     if ctx is None:
@@ -312,13 +315,24 @@ def _build_formal_connected_axis_masks(
     tile_width = max(1, int(getattr(world.active, "tile_width", 1)))
     tile_height = max(1, int(getattr(world.active, "tile_height", 1)))
     pipeline._ensure_formal_connected_axis_mask_buffers(ctx, resources, tile_width * tile_height)
-    program = pipeline.programs["build_formal_connected_axis_masks"]
+    convert_support_seed = support_seed_u8_texture is not None
+    if convert_support_seed != (support_seed_texture is not None):
+        raise ValueError("u8 support seed conversion requires both source and destination textures")
+    program = pipeline.programs[
+        "build_formal_connected_axis_masks_u8"
+        if convert_support_seed
+        else "build_formal_connected_axis_masks"
+    ]
     if not hasattr(program, "run_indirect"):
         raise RuntimeError("formal connected axis mask build requires ComputeShader.run_indirect")
     program["cell_grid_size"].value = (int(width), int(height))
     program["tile_grid_size"].value = (tile_width, tile_height)
     program["tile_size"].value = int(tile_size)
     source_texture.use(location=0)
+    if convert_support_seed:
+        assert support_seed_texture is not None and support_seed_u8_texture is not None
+        support_seed_texture.use(location=1)
+        support_seed_u8_texture.bind_to_image(0, read=False, write=True)
     bridge.buffers[tile_mask_name].bind_to_storage_buffer(binding=0)
     bridge.buffers[FORMAL_CONNECTED_TILE_COUNT_BUFFER].bind_to_storage_buffer(binding=1)
     bridge.buffers[FORMAL_CONNECTED_TILE_LIST_BUFFER].bind_to_storage_buffer(binding=2)
@@ -394,6 +408,43 @@ def _ensure_formal_deferred_region_request_buffers(pipeline, world: "WorldEngine
 def _ensure_formal_connected_frontier_buffers(pipeline, world: "WorldEngine") -> tuple[str, str]:
     with pipeline._profile_pass(world, "connected_frontier_buffer_prepare"):
         return pipeline._ensure_formal_connected_frontier_buffers_impl(world)
+
+
+def _invalidate_persistent_dense_tile_worklist(pipeline) -> None:
+    if pipeline._persistent_dense_tile_worklist_signature is not None:
+        pipeline.persistent_dense_tile_worklist_invalidations += 1
+    pipeline._persistent_dense_tile_worklist_signature = None
+
+
+def _persistent_dense_tile_worklist_signature(
+    pipeline,
+    world: "WorldEngine",
+    width: int,
+    height: int,
+) -> tuple[int, ...] | None:
+    bridge = world.bridge
+    ctx = bridge.ctx
+    buffer_names = (
+        FORMAL_CONNECTED_TILE_FRONTIER_BUFFER,
+        FORMAL_CONNECTED_TILE_LIST_BUFFER,
+        FORMAL_CONNECTED_TILE_COUNT_BUFFER,
+        FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER,
+    )
+    if ctx is None or any(name not in bridge.buffers for name in buffer_names):
+        return None
+    return (
+        id(ctx),
+        int(world.width),
+        int(world.height),
+        int(getattr(world.active, "tile_size", FORMAL_CONNECTED_TILE_LOCAL_SIZE)),
+        int(getattr(world.active, "tile_width", 1)),
+        int(getattr(world.active, "tile_height", 1)),
+        0,
+        0,
+        int(width),
+        int(height),
+        *(id(bridge.buffers[name]) for name in buffer_names),
+    )
 
 
 def _ensure_formal_connected_frontier_buffers_impl(pipeline, world: "WorldEngine") -> tuple[str, str]:
@@ -536,10 +587,21 @@ def _seed_formal_texture_region_tile_worklist(
     width: int,
     height: int,
 ) -> str | None:
-    pipeline._ensure_formal_connected_frontier_buffers(world)
     bridge = world.bridge
     if not bridge.enabled or bridge.ctx is None:
         raise RuntimeError("GPU collapse pipeline requires bridge GPU resources for connected tile worklists")
+    if pipeline._persistent_dense_tile_worklist_enabled:
+        signature = pipeline._persistent_dense_tile_worklist_signature_for(
+            world,
+            width,
+            height,
+        )
+        if signature is not None and signature == pipeline._persistent_dense_tile_worklist_signature:
+            pipeline.persistent_dense_tile_worklist_hits += 1
+            return FORMAL_CONNECTED_TILE_FRONTIER_BUFFER
+
+    pipeline._ensure_formal_connected_frontier_buffers(world)
+    bridge = world.bridge
     tile_size = max(1, int(getattr(world.active, "tile_size", FORMAL_CONNECTED_TILE_LOCAL_SIZE)))
     if tile_size > FORMAL_CONNECTED_TILE_LOCAL_SIZE:
         raise RuntimeError("formal connected texture region propagation requires tile_size <= 32")
@@ -563,6 +625,7 @@ def _seed_formal_texture_region_tile_worklist(
     for tile_x, tile_y in tile_array.tolist():
         tile_mask[int(tile_y) * tile_width + int(tile_x)] = 1
 
+    pipeline._invalidate_persistent_dense_tile_worklist()
     bridge.buffers[FORMAL_CONNECTED_TILE_FRONTIER_BUFFER].write(tile_mask.tobytes())
     bridge.buffers[FORMAL_CONNECTED_TILE_LIST_BUFFER].write(tile_array.tobytes())
     bridge.buffers[FORMAL_CONNECTED_TILE_COUNT_BUFFER].write(
@@ -577,6 +640,11 @@ def _seed_formal_texture_region_tile_worklist(
         FORMAL_CONNECTED_TILE_COUNT_BUFFER,
         FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER,
     )
+    if pipeline._persistent_dense_tile_worklist_enabled:
+        pipeline._persistent_dense_tile_worklist_signature = (
+            pipeline._persistent_dense_tile_worklist_signature_for(world, width, height)
+        )
+        pipeline.persistent_dense_tile_worklist_rebuilds += 1
     return FORMAL_CONNECTED_TILE_FRONTIER_BUFFER
 
 
@@ -596,6 +664,7 @@ def _clear_formal_connected_cell_buffer_names(pipeline, world: "WorldEngine", bu
 
 
 def _clear_formal_connected_tile_mask_buffers(pipeline, world: "WorldEngine") -> None:
+    pipeline._invalidate_persistent_dense_tile_worklist()
     ctx = world.bridge.ctx
     if ctx is None:
         raise RuntimeError("GPU collapse pipeline requires a valid ModernGL context")
@@ -628,6 +697,11 @@ def _clear_formal_connected_tile_worklist(
     count_name: str,
     dispatch_args_name: str,
 ) -> None:
+    if (
+        count_name == FORMAL_CONNECTED_TILE_COUNT_BUFFER
+        or dispatch_args_name == FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER
+    ):
+        pipeline._invalidate_persistent_dense_tile_worklist()
     ctx = world.bridge.ctx
     if ctx is None:
         raise RuntimeError("GPU collapse pipeline requires a valid ModernGL context")

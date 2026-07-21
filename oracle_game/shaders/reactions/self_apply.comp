@@ -1,5 +1,6 @@
 
             uniform int self_rule_count;
+            uniform bool use_self_rule_material_spans;
             layout(std430, binding=12) buffer SelfRuleI {
                 ivec4 self_rule_i[{{MAX_SELF_RULES}}];
             };
@@ -7,15 +8,35 @@
                 vec4 self_rule_f[{{MAX_SELF_RULES}}];
             };
             void main() {
+#if {{SELF_SPARSE_INPLACE}}
+                uint candidate_slot = uint(gl_GlobalInvocationID.y)
+                    * (uint(gl_NumWorkGroups.x) * uint(gl_WorkGroupSize.x))
+                    + uint(gl_GlobalInvocationID.x);
+                if (candidate_slot >= self_sparse_candidate_count[0]) {
+                    return;
+                }
+                uint candidate_cell = self_sparse_candidate_list[candidate_slot];
+                ivec2 gid = ivec2(
+                    int(candidate_cell % uint(cell_grid_size.x)),
+                    int(candidate_cell / uint(cell_grid_size.x))
+                );
+#else
                 ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
                 if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
                     return;
                 }
-                float material_value = texelFetch(material_tex, gid, 0).x;
-                float phase_value = texelFetch(phase_tex, gid, 0).x;
+#endif
+#if {{SELF_CACHE_CELL_STATE}}
+                uint source_cell_state = texelFetch(cell_state_tex, gid, 0).x;
+                float material_value = float(source_cell_state & 0xFFFFu);
+                float phase_value = float((source_cell_state >> 16u) & 0xFFu);
+#else
+                float material_value = material_value_at(gid);
+                float phase_value = phase_value_at(gid);
+#endif
                 float temp_value = texelFetch(temp_tex, gid, 0).x;
                 float integrity_value = texelFetch(integrity_tex, gid, 0).x;
-                vec4 timer_value = texelFetch(timer_tex, gid, 0);
+                vec4 timer_value = unpack_timer(texelFetch(timer_tex, gid, 0).x);
                 vec4 deferred_action_lo = vec4(0.0);
                 vec4 deferred_action_hi = vec4(0.0);
                 vec4 deferred_scale_lo = vec4(0.0);
@@ -26,6 +47,9 @@
                 if (!solve_active(gid)) {
                     store_cell_outputs(
                         gid,
+#if {{SELF_CACHE_CELL_STATE}}
+                        source_cell_state,
+#endif
                         material_value,
                         phase_value,
                         temp_value,
@@ -44,6 +68,9 @@
                 if (material_id <= 0) {
                     store_cell_outputs(
                         gid,
+#if {{SELF_CACHE_CELL_STATE}}
+                        source_cell_state,
+#endif
                         material_value,
                         phase_value,
                         temp_value,
@@ -62,12 +89,24 @@
                 material_id = clamp_material_id(material_id);
                 vec4 trigger_lo = vec4(0.0);
                 vec4 trigger_hi = vec4(0.0);
-                for (int rule_index = 0; rule_index < self_rule_count; ++rule_index) {
+                uint self_rule_span = material_tags[material_id].w;
+                int self_rule_begin = use_self_rule_material_spans
+                    ? int(self_rule_span & 0xFFFFu)
+                    : 0;
+                int self_rule_end = use_self_rule_material_spans
+                    ? min(self_rule_count, self_rule_begin + int(self_rule_span >> 16u))
+                    : self_rule_count;
+                for (int rule_index = self_rule_begin; rule_index < self_rule_end; ++rule_index) {
                     ivec4 ri = self_rule_i[rule_index];
                     vec4 rf = self_rule_f[rule_index];
+                    #if {{SELF_RULE_DIRECT_ACTION_SPANS}}
+                    int action_index = ri.x;
+                    #else
+                    int action_index = -1;
                     if (ri.x != material_id) {
                         continue;
                     }
+                    #endif
                     if (ri.z != 0 && ((1 << phase_id) & ri.z) == 0) {
                         continue;
                     }
@@ -81,7 +120,9 @@
                         continue;
                     }
                     int slot_index = ri.y;
-                    int action_index = slot_action(material_id, slot_index);
+                    #if !{{SELF_RULE_DIRECT_ACTION_SPANS}}
+                    action_index = slot_action(material_id, slot_index);
+                    #endif
                     if (action_index <= 0) {
                         continue;
                     }
@@ -129,8 +170,28 @@
                     gid,
                     trigger_hi
                 );
+                collect_self_emit_material_targets(
+                    gid,
+                    deferred_action_lo,
+                    deferred_action_hi
+                );
+                #if {{SELF_FUSED_GAS_OUTPUT}}
+                collect_self_fused_gas_outputs(
+                    gid,
+                    deferred_action_lo,
+                    deferred_action_hi,
+                    deferred_scale_lo,
+                    deferred_scale_hi
+                );
+                #endif
+                #ifdef SELF_GAS_CANDIDATE_OUTPUT
+                collect_self_gas_candidate(gid, deferred_action_lo, deferred_action_hi);
+                #endif
                 store_cell_outputs(
                     gid,
+#if {{SELF_CACHE_CELL_STATE}}
+                    source_cell_state,
+#endif
                     material_value,
                     phase_value,
                     temp_value,
@@ -144,4 +205,3 @@
                     reaction_latched_value
                 );
             }
-            

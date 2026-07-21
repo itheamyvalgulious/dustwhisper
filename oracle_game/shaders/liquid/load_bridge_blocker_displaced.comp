@@ -1,0 +1,53 @@
+#version 430
+layout(local_size_x={{PASS_LOCAL_SIZE}}, local_size_y={{PASS_LOCAL_SIZE}}, local_size_z=1) in;
+uniform ivec2 cell_grid_size;
+uniform ivec2 tile_grid_size;
+uniform int tile_size;
+layout(std430, binding=0) readonly buffer BridgeEntityBuffer {
+    int bridge_entity_id[];
+};
+layout(std430, binding=1) readonly buffer BridgeDisplacedBuffer {
+    int bridge_displaced[];
+};
+layout(std430, binding=2) readonly buffer ActiveTileCountBuffer {
+    uint active_tile_count[];
+};
+layout(std430, binding=3) readonly buffer ActiveTileListBuffer {
+    ivec2 active_tile_list[];
+};
+layout(r8ui, binding=0) writeonly uniform uimage2D blocker_mask_img;
+layout(r32f, binding=1) writeonly uniform image2D displaced_in_img;
+
+bool active_dispatch_cell(out ivec2 cell) {
+    int groups_per_tile_axis = max(1, (tile_size + {{PASS_LOCAL_SIZE_MINUS_1}}) / {{PASS_LOCAL_SIZE}});
+    int workgroups_per_tile = groups_per_tile_axis * groups_per_tile_axis;
+    uint group_index = gl_WorkGroupID.x;
+    uint active_tile_index = group_index / uint(workgroups_per_tile);
+    if (active_tile_index >= active_tile_count[0]) {
+        return false;
+    }
+    int subtile = int(group_index % uint(workgroups_per_tile));
+    ivec2 subtile_xy = ivec2(subtile % groups_per_tile_axis, subtile / groups_per_tile_axis);
+    ivec2 tile = active_tile_list[int(active_tile_index)];
+    if (tile.x < 0 || tile.y < 0 || tile.x >= tile_grid_size.x || tile.y >= tile_grid_size.y) {
+        return false;
+    }
+    ivec2 tile_origin = tile * tile_size;
+    ivec2 local_cell = subtile_xy * {{PASS_LOCAL_SIZE}} + ivec2(gl_LocalInvocationID.xy);
+    cell = tile_origin + local_cell;
+    ivec2 tile_end = min(tile_origin + ivec2(tile_size), cell_grid_size);
+    return cell.x < tile_end.x && cell.y < tile_end.y;
+}
+
+void main() {
+    ivec2 gid;
+    if (!active_dispatch_cell(gid)) {
+        return;
+    }
+    int cell_index = gid.y * cell_grid_size.x + gid.x;
+    int entity = bridge_entity_id[cell_index];
+    int displaced = bridge_displaced[cell_index];
+    uint blocked = entity > 0 || displaced > 0 ? 1u : 0u;
+    imageStore(blocker_mask_img, gid, uvec4(blocked, 0u, 0u, 0u));
+    imageStore(displaced_in_img, gid, vec4(float(displaced), 0.0, 0.0, 0.0));
+}

@@ -1,0 +1,48 @@
+#version 430
+layout(local_size_x=64, local_size_y=1, local_size_z=1) in;
+
+uniform uint edge_capacity;
+uniform uint cell_count;
+
+layout(std430, binding=0) readonly buffer BoundaryEdges {
+    uvec2 boundary_edges[];
+};
+layout(std430, binding=1) readonly buffer BoundaryEdgeCount {
+    uint boundary_edge_count[];
+};
+layout(std430, binding=2) coherent buffer UnionParents {
+    uint union_parents[];
+};
+
+uint find_root(uint label) {
+    for (uint step = 0u; step < cell_count; ++step) {
+        uint parent = atomicAdd(union_parents[label - 1u], 0u);
+        if (parent == 0u || parent == label) {
+            return label;
+        }
+        label = parent;
+    }
+    return label;
+}
+
+void main() {
+    uint edge_index = gl_GlobalInvocationID.x;
+    uint count = min(boundary_edge_count[0], edge_capacity);
+    if (edge_index >= count) {
+        return;
+    }
+    uvec2 edge = boundary_edges[edge_index];
+    for (uint step = 0u; step < cell_count; ++step) {
+        uint lhs = find_root(edge.x);
+        uint rhs = find_root(edge.y);
+        if (lhs == rhs) {
+            return;
+        }
+        uint lower = min(lhs, rhs);
+        uint upper = max(lhs, rhs);
+        uint previous = atomicCompSwap(union_parents[upper - 1u], upper, lower);
+        if (previous == upper) {
+            return;
+        }
+    }
+}

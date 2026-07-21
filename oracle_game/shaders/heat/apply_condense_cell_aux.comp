@@ -1,6 +1,5 @@
 
-            layout(binding=4) uniform sampler2D material_after_tex;
-            layout(binding=5) uniform sampler2D phase_after_tex;
+            layout(binding=4) uniform usampler2D cell_state_after_tex;
             layout(binding=12) uniform sampler2D island_id_after_tex;
             layout(binding=22) uniform sampler2D displaced_after_tex;
             layout(binding=23) uniform sampler2D velocity_after_tex;
@@ -18,7 +17,7 @@
                         if (probe.x >= cell_grid_size.x || probe.y >= cell_grid_size.y) {
                             continue;
                         }
-                        if (int(texelFetch(material_after_tex, probe, 0).x + 0.5) == 0) {
+                        if ((texelFetch(cell_state_after_tex, probe, 0).x & 0xFFFFu) == 0u) {
                             rank += 1;
                         }
                         if (all(equal(probe, cell))) {
@@ -55,7 +54,7 @@
                 );
                 float displaced_value = texelFetch(displaced_after_tex, gid, 0).x;
                 vec2 velocity_value = texelFetch(velocity_after_tex, gid, 0).xy;
-                int current_material = int(texelFetch(material_after_tex, gid, 0).x + 0.5);
+                int current_material = int(texelFetch(cell_state_after_tex, gid, 0).x & 0xFFFFu);
                 if (solve_gas_cell_active(gas_cell) && current_material == 0) {
                     int empty_rank = empty_rank_in_gas_cell(gid, gas_cell);
                     int target_material = target_material_for_empty_rank(gas_cell, empty_rank);
@@ -66,4 +65,3 @@
                 imageStore(displaced_final_img, gid, vec4(displaced_value, 0.0, 0.0, 0.0));
                 imageStore(velocity_final_img, gid, vec4(velocity_value, 0.0, 0.0));
             }
-            

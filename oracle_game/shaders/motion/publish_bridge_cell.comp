@@ -6,10 +6,11 @@ uniform int tile_size;
 uniform bool velocity_out_active_only;
 uniform bool use_active_tile_dispatch;
 uniform bool use_powder_apply_touch_sources;
+uniform bool use_packed_powder_aux;
+uniform bool sparse_powder_bridge_publish;
+uniform bool use_bridge_input_core;
 uniform bool write_cell_core;
-layout(binding=0) uniform sampler2D material_tex;
-layout(binding=1) uniform sampler2D phase_tex;
-layout(binding=2) uniform sampler2D flags_tex;
+layout(binding=0) uniform usampler2D cell_state_tex;
 layout(binding=3) uniform sampler2D velocity_tex;
 layout(binding=4) uniform sampler2D temp_tex;
 layout(binding=5) uniform sampler2D timer_tex;
@@ -19,24 +20,22 @@ layout(binding=8) uniform sampler2D entity_tex;
 layout(binding=9) uniform sampler2D displaced_tex;
 layout(binding=10) uniform sampler2D velocity_fallback_tex;
 layout(binding=11) uniform sampler2D active_tile_tex;
-layout(binding=12) uniform sampler2D material_input_tex;
-layout(binding=13) uniform sampler2D phase_input_tex;
-layout(binding=14) uniform sampler2D flags_input_tex;
+layout(binding=12) uniform usampler2D cell_state_input_tex;
 layout(binding=15) uniform sampler2D velocity_input_tex;
 layout(binding=16) uniform sampler2D temp_input_tex;
 layout(binding=17) uniform sampler2D timer_input_tex;
 layout(binding=18) uniform sampler2D integrity_input_tex;
 layout(r32f, binding=0) writeonly uniform image2D bridge_material_img;
-layout(std430, binding=0) writeonly buffer BridgeCellCoreBuffer {
+layout(std430, binding=0) buffer BridgeCellCoreBuffer {
     uint bridge_cell_core[];
 };
-layout(std430, binding=1) writeonly buffer BridgeIslandBuffer {
+layout(std430, binding=1) buffer BridgeIslandBuffer {
     int bridge_island_id[];
 };
-layout(std430, binding=2) writeonly buffer BridgeEntityBuffer {
+layout(std430, binding=2) buffer BridgeEntityBuffer {
     int bridge_entity_id[];
 };
-layout(std430, binding=3) writeonly buffer BridgeDisplacedBuffer {
+layout(std430, binding=3) buffer BridgeDisplacedBuffer {
     int bridge_displaced[];
 };
 layout(std430, binding=4) readonly buffer ActiveTileCountBuffer {
@@ -50,6 +49,9 @@ layout(std430, binding=6) readonly buffer PowderApplyIncoming {
 };
 layout(std430, binding=7) readonly buffer PowderApplyOutgoing {
     int powder_apply_outgoing[];
+};
+layout(std430, binding=8) readonly buffer PowderTargetWinner {
+    int powder_target_winner[];
 };
 
 uint pack_timer(vec4 timer) {
@@ -101,45 +103,78 @@ void main() {
     int cell_index = gid.y * cell_grid_size.x + gid.x;
     bool use_output_core = true;
     if (use_powder_apply_touch_sources) {
-        use_output_core = powder_apply_incoming[cell_index] >= 0 || powder_apply_outgoing[cell_index] >= 0;
+        use_output_core = use_packed_powder_aux
+            ? (uint(powder_target_winner[cell_index]) & 0x80000000u) != 0u
+            : powder_apply_incoming[cell_index] >= 0 || powder_apply_outgoing[cell_index] >= 0;
     }
-    float material_value;
-    float phase_value;
-    float flags_value;
+    if (sparse_powder_bridge_publish && use_powder_apply_touch_sources && !use_output_core) {
+        uint untouched_state = bridge_cell_core[cell_index * 5];
+        imageStore(
+            bridge_material_img,
+            gid,
+            vec4(float(untouched_state & 0xFFFFu), 0.0, 0.0, 0.0)
+        );
+        return;
+    }
+    uint cell_state;
     vec2 velocity;
     float temperature;
     vec4 timer;
     float integrity_value;
     if (use_output_core) {
-        material_value = texelFetch(material_tex, gid, 0).x;
-        phase_value = texelFetch(phase_tex, gid, 0).x;
-        flags_value = texelFetch(flags_tex, gid, 0).x;
+        cell_state = texelFetch(cell_state_tex, gid, 0).x;
         velocity = texelFetch(velocity_tex, gid, 0).xy;
         temperature = texelFetch(temp_tex, gid, 0).x;
         timer = texelFetch(timer_tex, gid, 0);
         integrity_value = texelFetch(integrity_tex, gid, 0).x;
+    } else if (use_bridge_input_core) {
+        int word_index = cell_index * 5;
+        cell_state = bridge_cell_core[word_index];
+        velocity = unpackHalf2x16(bridge_cell_core[word_index + 1]);
+        temperature = uintBitsToFloat(bridge_cell_core[word_index + 2]);
+        uint timer_word = bridge_cell_core[word_index + 3];
+        timer = vec4(
+            float(timer_word & 0xFFu),
+            float((timer_word >> 8u) & 0xFFu),
+            float((timer_word >> 16u) & 0xFFu),
+            float((timer_word >> 24u) & 0xFFu)
+        );
+        integrity_value = float(bridge_cell_core[word_index + 4] & 0xFFFFu);
     } else {
-        material_value = texelFetch(material_input_tex, gid, 0).x;
-        phase_value = texelFetch(phase_input_tex, gid, 0).x;
-        flags_value = texelFetch(flags_input_tex, gid, 0).x;
+        cell_state = texelFetch(cell_state_input_tex, gid, 0).x;
         velocity = texelFetch(velocity_input_tex, gid, 0).xy;
         temperature = texelFetch(temp_input_tex, gid, 0).x;
         timer = texelFetch(timer_input_tex, gid, 0);
         integrity_value = texelFetch(integrity_input_tex, gid, 0).x;
     }
-    uint material = uint(clamp(round(material_value), 0.0, 65535.0));
-    uint phase = uint(clamp(round(phase_value), 0.0, 255.0));
-    uint flags = uint(clamp(round(flags_value), 0.0, 255.0));
+    uint material = cell_state & 0xFFFFu;
     if (velocity_out_active_only && !solve_cell_active(gid)) {
         velocity = texelFetch(velocity_fallback_tex, gid, 0).xy;
     }
     uint integrity = uint(clamp(round(integrity_value), 0.0, 65535.0));
-    int island = int(round(texelFetch(island_tex, gid, 0).x));
-    int entity = int(round(texelFetch(entity_tex, gid, 0).x));
-    int displaced = int(round(texelFetch(displaced_tex, gid, 0).x));
+    int island;
+    int entity;
+    int displaced;
+    if (use_packed_powder_aux) {
+        if (use_output_core) {
+            island = int(round(uintBitsToFloat(uint(powder_target_winner[cell_index]) & 0x7FFFFFFFu)));
+            entity = int(round(intBitsToFloat(int(
+                uint(powder_apply_incoming[cell_index]) & 0x7FFFFFFFu
+            ))));
+            displaced = int(round(intBitsToFloat(powder_apply_outgoing[cell_index])));
+        } else {
+            island = int(round(float(bridge_island_id[cell_index])));
+            entity = int(round(float(bridge_entity_id[cell_index])));
+            displaced = int(round(float(bridge_displaced[cell_index])));
+        }
+    } else {
+        island = int(round(texelFetch(island_tex, gid, 0).x));
+        entity = int(round(texelFetch(entity_tex, gid, 0).x));
+        displaced = int(round(texelFetch(displaced_tex, gid, 0).x));
+    }
     int word_index = cell_index * 5;
     if (write_cell_core) {
-        bridge_cell_core[word_index] = material | (phase << 16u) | (flags << 24u);
+        bridge_cell_core[word_index] = cell_state;
         bridge_cell_core[word_index + 1] = packHalf2x16(velocity);
         bridge_cell_core[word_index + 2] = floatBitsToUint(temperature);
         bridge_cell_core[word_index + 3] = pack_timer(timer);

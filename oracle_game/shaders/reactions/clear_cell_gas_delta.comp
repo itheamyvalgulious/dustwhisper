@@ -13,4 +13,3 @@
                 }
                 gas_delta[index] = 0;
             }
-            

@@ -6,6 +6,10 @@ uniform int tile_size;
 uniform int reservation_count;
 uniform bool use_reservation_count_buffer;
 uniform bool use_active_tile_dispatch;
+uniform bool use_bridge_inputs;
+#if {{POWDER_APPLY_INDEX_EPOCH}}
+uniform uint powder_apply_epoch;
+#endif
 
 struct PowderReservation {
     ivec2 source_xy;
@@ -35,6 +39,20 @@ layout(std430, binding=6) readonly buffer ActiveTileCountBuffer {
 layout(std430, binding=7) readonly buffer ActiveTileListBuffer {
     ivec2 active_tile_list[];
 };
+layout(std430, binding=8) readonly buffer BridgeIslandBuffer {
+    int bridge_island_id[];
+};
+layout(std430, binding=9) readonly buffer BridgeEntityBuffer {
+    int bridge_entity_id[];
+};
+layout(std430, binding=10) readonly buffer BridgeDisplacedBuffer {
+    int bridge_displaced[];
+};
+#if {{POWDER_APPLY_INDEX_EPOCH}}
+layout(std430, binding=11) readonly buffer PowderApplyEpoch {
+    uvec2 apply_epoch[];
+};
+#endif
 
 layout(binding=7) uniform sampler2D island_id_tex;
 layout(binding=8) uniform sampler2D entity_id_tex;
@@ -84,11 +102,21 @@ bool is_moving(PowderReservation reservation) {
 }
 
 int incoming_reservation_index(ivec2 cell) {
-    return apply_incoming[cell.y * cell_grid_size.x + cell.x];
+    int index = cell.y * cell_grid_size.x + cell.x;
+#if {{POWDER_APPLY_INDEX_EPOCH}}
+    return apply_epoch[index].x == powder_apply_epoch ? apply_incoming[index] : -1;
+#else
+    return apply_incoming[index];
+#endif
 }
 
 int outgoing_reservation_index(ivec2 cell) {
-    return apply_outgoing[cell.y * cell_grid_size.x + cell.x];
+    int index = cell.y * cell_grid_size.x + cell.x;
+#if {{POWDER_APPLY_INDEX_EPOCH}}
+    return apply_epoch[index].y == powder_apply_epoch ? apply_outgoing[index] : -1;
+#else
+    return apply_outgoing[index];
+#endif
 }
 
 void store_payload(ivec2 dst, float island_value, float entity_value, float displaced_value) {
@@ -98,11 +126,12 @@ void store_payload(ivec2 dst, float island_value, float entity_value, float disp
 }
 
 void store_original(ivec2 dst) {
+    int index = dst.y * cell_grid_size.x + dst.x;
     store_payload(
         dst,
-        texelFetch(island_id_tex, dst, 0).x,
-        texelFetch(entity_id_tex, dst, 0).x,
-        texelFetch(displaced_tex, dst, 0).x
+        use_bridge_inputs ? float(bridge_island_id[index]) : texelFetch(island_id_tex, dst, 0).x,
+        use_bridge_inputs ? float(bridge_entity_id[index]) : texelFetch(entity_id_tex, dst, 0).x,
+        use_bridge_inputs ? float(bridge_displaced[index]) : texelFetch(displaced_tex, dst, 0).x
     );
 }
 
@@ -112,11 +141,12 @@ void store_clear(ivec2 dst) {
 
 void store_incoming(ivec2 dst, PowderReservation reservation) {
     ivec2 src = reservation.source_xy;
+    int index = src.y * cell_grid_size.x + src.x;
     store_payload(
         dst,
-        texelFetch(island_id_tex, src, 0).x,
-        texelFetch(entity_id_tex, src, 0).x,
-        texelFetch(displaced_tex, src, 0).x
+        use_bridge_inputs ? float(bridge_island_id[index]) : texelFetch(island_id_tex, src, 0).x,
+        use_bridge_inputs ? float(bridge_entity_id[index]) : texelFetch(entity_id_tex, src, 0).x,
+        use_bridge_inputs ? float(bridge_displaced[index]) : texelFetch(displaced_tex, src, 0).x
     );
 }
 

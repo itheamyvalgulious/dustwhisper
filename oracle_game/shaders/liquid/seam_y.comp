@@ -1,4 +1,5 @@
 #version 430
+#define DIRECT_BRIDGE_AUX_INPUTS {{DIRECT_BRIDGE_AUX_INPUTS}}
 layout(local_size_x={{PASS_LOCAL_SIZE}}, local_size_y={{PASS_LOCAL_SIZE}}, local_size_z=1) in;
 const int TILE_SIZE = {{TILE_SIZE}};
 uniform ivec2 cell_grid_size;
@@ -7,16 +8,20 @@ uniform int active_ttl_reset;
 uniform int phase_liquid;
 uniform int phase_falling_island;
 uniform bool use_boundary_dispatch;
-layout(binding=0) uniform sampler2D material_in_tex;
-layout(binding=1) uniform sampler2D phase_in_tex;
-layout(binding=2) uniform sampler2D flags_in_tex;
-layout(binding=3) uniform sampler2D timer_in_tex;
+layout(binding=0) uniform usampler2D cell_state_in_tex;
+layout(binding=3) uniform usampler2D timer_in_tex;
 layout(binding=4) uniform sampler2D temp_in_tex;
 layout(binding=5) uniform sampler2D integrity_in_tex;
 layout(binding=6) uniform sampler2D velocity_in_tex;
 layout(binding=7) uniform sampler2D active_tile_tex;
 layout(binding=8) uniform sampler2D entity_in_tex;
 layout(binding=9) uniform sampler2D displaced_in_tex;
+layout(std430, binding=4) readonly buffer BridgeEntityBuffer {
+    int bridge_entity_id[];
+};
+layout(std430, binding=5) readonly buffer BridgeDisplacedBuffer {
+    int bridge_displaced_material[];
+};
 layout(std430, binding=0) buffer MaterialParams {
     vec4 material_params[{{MAX_MATERIALS}}];
 };
@@ -29,10 +34,8 @@ layout(std430, binding=2) readonly buffer AffectedTileCountBuffer {
 layout(std430, binding=3) readonly buffer AffectedTileListBuffer {
     ivec2 affected_tile_list[];
 };
-layout(r32f, binding=0) writeonly uniform image2D material_out_img;
-layout(r32f, binding=1) writeonly uniform image2D phase_out_img;
-layout(r32f, binding=2) writeonly uniform image2D flags_out_img;
-layout(rgba32f, binding=3) writeonly uniform image2D timer_out_img;
+layout(r32ui, binding=0) writeonly uniform uimage2D cell_state_out_img;
+layout(r32ui, binding=3) writeonly uniform uimage2D timer_out_img;
 layout(r32f, binding=4) writeonly uniform image2D temp_out_img;
 layout(r32f, binding=5) writeonly uniform image2D integrity_out_img;
 layout(rg32f, binding=6) writeonly uniform image2D velocity_out_img;
@@ -59,15 +62,17 @@ void store_state(
     float material,
     float phase,
     float flagsv,
-    vec4 timerv,
+    uint timerv,
     float tempv,
     float integrityv,
     vec2 velocityv
 ) {
-    imageStore(material_out_img, cell, vec4(material, 0.0, 0.0, 0.0));
-    imageStore(phase_out_img, cell, vec4(phase, 0.0, 0.0, 0.0));
-    imageStore(flags_out_img, cell, vec4(flagsv, 0.0, 0.0, 0.0));
-    imageStore(timer_out_img, cell, timerv);
+    uint material_id = uint(clamp(round(material), 0.0, 65535.0));
+    uint phase_id = uint(clamp(round(phase), 0.0, 255.0));
+    uint flags = uint(clamp(round(flagsv), 0.0, 255.0));
+    uint cell_state = material_id | (phase_id << 16u) | (flags << 24u);
+    imageStore(cell_state_out_img, cell, uvec4(cell_state, 0u, 0u, 0u));
+    imageStore(timer_out_img, cell, uvec4(timerv, 0u, 0u, 0u));
     imageStore(temp_out_img, cell, vec4(tempv, 0.0, 0.0, 0.0));
     imageStore(integrity_out_img, cell, vec4(integrityv, 0.0, 0.0, 0.0));
     imageStore(velocity_out_img, cell, vec4(velocityv, 0.0, 0.0));
@@ -86,9 +91,10 @@ bool is_tile_liquid(ivec2 cell) {
     if (!in_bounds(cell)) {
         return false;
     }
-    float material = texelFetch(material_in_tex, cell, 0).x;
-    float phase = texelFetch(phase_in_tex, cell, 0).x;
-    return material > 0.5 && int(phase + 0.5) == phase_liquid && liquid_kind_for(material) == 1;
+    uint cell_state = texelFetch(cell_state_in_tex, cell, 0).x;
+    float material = float(cell_state & 0xFFFFu);
+    int phase = int((cell_state >> 16u) & 0xFFu);
+    return material > 0.5 && phase == phase_liquid && liquid_kind_for(material) == 1;
 }
 
 bool is_placeholder_material(float material) {
@@ -100,16 +106,40 @@ bool is_reachable_empty(ivec2 cell) {
     if (!in_bounds(cell)) {
         return false;
     }
-    float material = texelFetch(material_in_tex, cell, 0).x;
-    int phase = int(texelFetch(phase_in_tex, cell, 0).x + 0.5);
-    float entity = texelFetch(entity_in_tex, cell, 0).x;
-    float displaced = texelFetch(displaced_in_tex, cell, 0).x;
+    uint cell_state = texelFetch(cell_state_in_tex, cell, 0).x;
+    float material = float(cell_state & 0xFFFFu);
+    int phase = int((cell_state >> 16u) & 0xFFu);
+    int cell_index = cell.y * cell_grid_size.x + cell.x;
+    float entity = (DIRECT_BRIDGE_AUX_INPUTS != 0)
+        ? float(bridge_entity_id[cell_index])
+        : texelFetch(entity_in_tex, cell, 0).x;
+    float displaced = (DIRECT_BRIDGE_AUX_INPUTS != 0)
+        ? float(bridge_displaced_material[cell_index])
+        : texelFetch(displaced_in_tex, cell, 0).x;
     return material < 0.5
         && phase != phase_liquid
         && phase != phase_falling_island
         && entity < 0.5
         && displaced < 0.5
         && !is_placeholder_material(material);
+}
+
+void store_cleared(ivec2 cell) {
+    store_state(cell, 0.0, 0.0, 0.0, 0u, 0.0, 0.0, vec2(0.0));
+}
+
+void store_from_source(ivec2 cell, ivec2 source) {
+    uint source_state = texelFetch(cell_state_in_tex, source, 0).x;
+    store_state(
+        cell,
+        float(source_state & 0xFFFFu),
+        float((source_state >> 16u) & 0xFFu),
+        float((source_state >> 24u) & 0xFFu),
+        texelFetch(timer_in_tex, source, 0).x,
+        texelFetch(temp_in_tex, source, 0).x,
+        texelFetch(integrity_in_tex, source, 0).x,
+        texelFetch(velocity_in_tex, source, 0).xy
+    );
 }
 
 void refresh_changed_cell(ivec2 changed_cell) {
@@ -258,7 +288,7 @@ bool try_apply_vertical_boundary(ivec2 gid, int boundary_y) {
     if (gid.y == boundary_y - 1) {
         if (down_move_from_liquid(row_start, row_end, gid.y, gid.x, source_base, target_base, move_count)) {
             if (is_tile_liquid(gid) && gid.x >= source_base && gid.x < source_base + move_count) {
-                store_state(gid, 0.0, 0.0, 0.0, vec4(0.0), 0.0, 0.0, vec2(0.0));
+                store_cleared(gid);
                 refresh_changed_cell(gid);
                 return true;
             }
@@ -270,16 +300,7 @@ bool try_apply_vertical_boundary(ivec2 gid, int boundary_y) {
             int target_offset = gid.x - target_base;
             if (target_offset >= 0 && target_offset < move_count && is_reachable_empty(gid)) {
                 ivec2 source = ivec2(source_base + target_offset, gid.y - 1);
-                store_state(
-                    gid,
-                    texelFetch(material_in_tex, source, 0).x,
-                    texelFetch(phase_in_tex, source, 0).x,
-                    texelFetch(flags_in_tex, source, 0).x,
-                    texelFetch(timer_in_tex, source, 0),
-                    texelFetch(temp_in_tex, source, 0).x,
-                    texelFetch(integrity_in_tex, source, 0).x,
-                    texelFetch(velocity_in_tex, source, 0).xy
-                );
+                store_from_source(gid, source);
                 refresh_changed_cell(source);
                 refresh_changed_cell(gid);
                 return true;
@@ -333,10 +354,11 @@ void main() {
             return;
         }
     }
-    float material = texelFetch(material_in_tex, gid, 0).x;
-    float phase = texelFetch(phase_in_tex, gid, 0).x;
-    float flagsv = texelFetch(flags_in_tex, gid, 0).x;
-    vec4 timerv = texelFetch(timer_in_tex, gid, 0);
+    uint cell_state = texelFetch(cell_state_in_tex, gid, 0).x;
+    float material = float(cell_state & 0xFFFFu);
+    float phase = float((cell_state >> 16u) & 0xFFu);
+    float flagsv = float((cell_state >> 24u) & 0xFFu);
+    uint timerv = texelFetch(timer_in_tex, gid, 0).x;
     float tempv = texelFetch(temp_in_tex, gid, 0).x;
     float integrityv = texelFetch(integrity_in_tex, gid, 0).x;
     vec2 velocityv = texelFetch(velocity_in_tex, gid, 0).xy;

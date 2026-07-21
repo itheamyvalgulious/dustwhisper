@@ -26,6 +26,7 @@ def _ensure_resources(pipeline, ctx: Any, width: int, height: int) -> GPUCollaps
     material_out_tex = ctx.texture((width, height), 1, dtype="f4")
     phase_tex = ctx.texture((width, height), 1, dtype="f4")
     phase_out_tex = ctx.texture((width, height), 1, dtype="f4")
+    pending_tex = ctx.texture((width, height), 1, dtype="f4")
     cell_flags_tex = ctx.texture((width, height), 1, dtype="f4")
     cell_flags_out_tex = ctx.texture((width, height), 1, dtype="f4")
     timer_tex = ctx.texture((width, height), 4, dtype="f4")
@@ -48,6 +49,7 @@ def _ensure_resources(pipeline, ctx: Any, width: int, height: int) -> GPUCollaps
         material_out_tex,
         phase_tex,
         phase_out_tex,
+        pending_tex,
         cell_flags_tex,
         cell_flags_out_tex,
         timer_tex,
@@ -79,10 +81,13 @@ def _ensure_resources(pipeline, ctx: Any, width: int, height: int) -> GPUCollaps
         structural_tex=structural_tex,
         support_ping=support_ping,
         support_pong=support_pong,
+        support_u8_ping=None,
+        support_u8_pong=None,
         material_tex=material_tex,
         material_out_tex=material_out_tex,
         phase_tex=phase_tex,
         phase_out_tex=phase_out_tex,
+        pending_tex=pending_tex,
         cell_flags_tex=cell_flags_tex,
         cell_flags_out_tex=cell_flags_out_tex,
         timer_tex=timer_tex,
@@ -102,9 +107,15 @@ def _ensure_resources(pipeline, ctx: Any, width: int, height: int) -> GPUCollaps
         component_island_ids=ctx.buffer(reserve=cell_count * 4, dynamic=True),
         component_metadata=ctx.buffer(reserve=cell_count * 5 * 4, dynamic=True),
         component_flags=ctx.buffer(reserve=cell_count * 4, dynamic=True),
+        component_invalid=ctx.buffer(reserve=cell_count * 4, dynamic=True),
         component_count=ctx.buffer(reserve=4, dynamic=True),
         component_dispatch_args=ctx.buffer(reserve=3 * 4, dynamic=True),
         region_flags=ctx.buffer(reserve=4, dynamic=True),
+        support_tile_union_roots=None,
+        support_tile_union_parent=None,
+        support_tile_union_seeded=None,
+        support_tile_union_edges=None,
+        support_tile_union_edge_count=None,
         connected_tile_row_masks=ctx.buffer(reserve=axis_mask_bytes, dynamic=True),
         connected_tile_column_masks=ctx.buffer(reserve=axis_mask_bytes, dynamic=True),
         material_structural=ctx.buffer(reserve=4, dynamic=True),
@@ -115,6 +126,20 @@ def _ensure_resources(pipeline, ctx: Any, width: int, height: int) -> GPUCollaps
         material_spawn_temperature=ctx.buffer(reserve=4, dynamic=True),
     )
     return pipeline.resources
+
+
+def _ensure_formal_connected_u8_support_textures(
+    pipeline,
+    ctx: Any,
+    resources: GPUCollapseResources,
+) -> tuple[Any, Any]:
+    if resources.support_u8_ping is None:
+        resources.support_u8_ping = ctx.texture(resources.signature, 1, dtype="u1")
+        resources.support_u8_ping.filter = (ctx.NEAREST, ctx.NEAREST)
+    if resources.support_u8_pong is None:
+        resources.support_u8_pong = ctx.texture(resources.signature, 1, dtype="u1")
+        resources.support_u8_pong.filter = (ctx.NEAREST, ctx.NEAREST)
+    return resources.support_u8_ping, resources.support_u8_pong
 
 
 def _write_dynamic_buffer(pipeline, ctx: Any, resources: GPUCollapseResources, name: str, data: np.ndarray) -> None:

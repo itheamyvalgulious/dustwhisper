@@ -2,14 +2,19 @@
             #version 430
             layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
             uniform ivec2 cell_grid_size;
-            uniform bool use_local_cell_meta;
+uniform bool use_local_cell_meta;
+uniform bool use_packed_local_cell_meta;
             layout(binding=0) uniform sampler2D cell_reset_tex;
             layout(binding=1) uniform sampler2D reaction_latched_tex;
             layout(binding=2) uniform sampler2D local_cell_meta_tex;
-            layout(r32f, binding=0) uniform image2D segment_cell_reset_img;
-            layout(r32f, binding=1) uniform image2D segment_reaction_latched_img;
+            layout(binding=3) uniform usampler2D packed_local_cell_meta_tex;
+            layout(rg32f, binding=0) uniform image2D segment_cell_meta_img;
 
             vec2 current_meta(ivec2 cell) {
+                if (use_packed_local_cell_meta) {
+                    uvec2 packed_meta = texelFetch(packed_local_cell_meta_tex, cell, 0).xy;
+                    return vec2(float(packed_meta.x >> 31u), float(packed_meta.y >> 31u));
+                }
                 if (use_local_cell_meta) {
                     return texelFetch(local_cell_meta_tex, cell, 0).xy;
                 }
@@ -27,13 +32,11 @@
                 vec2 meta = current_meta(gid);
                 float current_reset = meta.x;
                 float current_latched = meta.y;
-                float segment_reset = max(imageLoad(segment_cell_reset_img, gid).x, current_reset);
-                float segment_latched = imageLoad(segment_reaction_latched_img, gid).x;
+                vec2 segment_meta = imageLoad(segment_cell_meta_img, gid).xy;
+                segment_meta.x = max(segment_meta.x, current_reset);
                 if (current_reset > 0.5) {
-                    segment_latched = 0.0;
+                    segment_meta.y = 0.0;
                 }
-                segment_latched = max(segment_latched, current_latched);
-                imageStore(segment_cell_reset_img, gid, vec4(segment_reset, 0.0, 0.0, 0.0));
-                imageStore(segment_reaction_latched_img, gid, vec4(segment_latched, 0.0, 0.0, 0.0));
+                segment_meta.y = max(segment_meta.y, current_latched);
+                imageStore(segment_cell_meta_img, gid, vec4(segment_meta, 0.0, 0.0));
             }
-            

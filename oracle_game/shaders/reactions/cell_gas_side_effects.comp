@@ -9,13 +9,17 @@
             uniform int material_gas_rule_count;
             uniform uint modify_gas_layer_mask;
             uniform bool use_local_deferred_outputs;
+            uniform bool deferred_hi_valid;
+            #if {{FLOW_SOURCE_GENERATION_VALIDITY}}
+            uniform bool flow_source_generation_validity_enabled;
+            uniform uint flow_source_generation;
+            #endif
             layout(binding=0) uniform sampler2DArray gas_tex;
             layout(binding=1) uniform sampler2D action_lo_tex;
             layout(binding=2) uniform sampler2D action_hi_tex;
             layout(binding=3) uniform sampler2D scale_lo_tex;
             layout(binding=4) uniform sampler2D scale_hi_tex;
-            layout(binding=5) uniform sampler2D material_tex;
-            layout(binding=6) uniform sampler2D phase_tex;
+            layout(binding=5) uniform usampler2D cell_state_tex;
             layout(binding=7) uniform sampler2D temp_tex;
             layout(binding=8) uniform sampler2D active_cell_tex;
             layout(binding=9) uniform sampler2DArray deferred_lo_local_tex;
@@ -49,6 +53,27 @@
             };
             layout(r32f, binding=0) writeonly uniform image2DArray gas_out_img;
             layout(rgba32f, binding=1) writeonly uniform image2DArray flow_source_img;
+            #if {{FLOW_SOURCE_GENERATION_VALIDITY}}
+            layout({{FLOW_SOURCE_GENERATION_IMAGE_FORMAT}}, binding={{FLOW_SOURCE_GENERATION_BINDING}}) writeonly uniform uimage2DArray flow_source_generation_img;
+            #endif
+
+
+            void store_flow_source(ivec3 location, vec4 source) {
+                imageStore(flow_source_img, location, source);
+                #if {{FLOW_SOURCE_GENERATION_VALIDITY}}
+                if (flow_source_generation_validity_enabled) {
+                    imageStore(flow_source_generation_img, location, uvec4(flow_source_generation));
+                }
+                #endif
+            }
+
+            int material_id_at(ivec2 cell) {
+                return int(texelFetch(cell_state_tex, cell, 0).x & 0xFFFFu);
+            }
+
+            int phase_id_at(ivec2 cell) {
+                return int((texelFetch(cell_state_tex, cell, 0).x >> 16u) & 0xFFu);
+            }
 
             void write_flow_sources(ivec2 cell, ivec4 ai, vec4 af, float scale, int layer_base) {
                 if (ai.w == 0) {
@@ -61,19 +86,19 @@
                 }
                 int direction_id = ai.z;
                 if (direction_id == {{DIRECTION_RIGHT}}) {
-                    imageStore(flow_source_img, ivec3(cell, layer_base), vec4(1.0, 0.0, radius, strength));
+                    store_flow_source(ivec3(cell, layer_base), vec4(1.0, 0.0, radius, strength));
                 } else if (direction_id == {{DIRECTION_LEFT}}) {
-                    imageStore(flow_source_img, ivec3(cell, layer_base), vec4(-1.0, 0.0, radius, strength));
+                    store_flow_source(ivec3(cell, layer_base), vec4(-1.0, 0.0, radius, strength));
                 } else if (direction_id == {{DIRECTION_UP}}) {
-                    imageStore(flow_source_img, ivec3(cell, layer_base), vec4(0.0, -1.0, radius, strength));
+                    store_flow_source(ivec3(cell, layer_base), vec4(0.0, -1.0, radius, strength));
                 } else if (direction_id == {{DIRECTION_DOWN}}) {
-                    imageStore(flow_source_img, ivec3(cell, layer_base), vec4(0.0, 1.0, radius, strength));
+                    store_flow_source(ivec3(cell, layer_base), vec4(0.0, 1.0, radius, strength));
                 } else if (direction_id == {{DIRECTION_ALL}} && abs(af.w) > 1.0e-5) {
                     float flow_sign = af.w > 0.0 ? 1.0 : -1.0;
-                    imageStore(flow_source_img, ivec3(cell, layer_base), vec4(-flow_sign, 0.0, radius, strength));
-                    imageStore(flow_source_img, ivec3(cell, layer_base + 1), vec4(flow_sign, 0.0, radius, strength));
-                    imageStore(flow_source_img, ivec3(cell, layer_base + 2), vec4(0.0, -flow_sign, radius, strength));
-                    imageStore(flow_source_img, ivec3(cell, layer_base + 3), vec4(0.0, flow_sign, radius, strength));
+                    store_flow_source(ivec3(cell, layer_base), vec4(-flow_sign, 0.0, radius, strength));
+                    store_flow_source(ivec3(cell, layer_base + 1), vec4(flow_sign, 0.0, radius, strength));
+                    store_flow_source(ivec3(cell, layer_base + 2), vec4(0.0, -flow_sign, radius, strength));
+                    store_flow_source(ivec3(cell, layer_base + 3), vec4(0.0, flow_sign, radius, strength));
                 }
             }
 
@@ -110,7 +135,7 @@
                 if (texelFetch(active_cell_tex, cell, 0).x <= 0.5) {
                     return false;
                 }
-                int material_id = int(texelFetch(material_tex, cell, 0).x + 0.5);
+                int material_id = material_id_at(cell);
                 if (material_id <= 0) {
                     return false;
                 }
@@ -121,7 +146,7 @@
                 if (!mask_matches(material_tags[clamped_material].y, rt.x)) {
                     return false;
                 }
-                int phase_id = int(texelFetch(phase_tex, cell, 0).x + 0.5);
+                int phase_id = phase_id_at(cell);
                 int phase_mask = int(rt.z);
                 if (phase_mask != 0 && ((1 << phase_id) & phase_mask) == 0) {
                     return false;
@@ -182,6 +207,9 @@
 
             vec4 fetch_action_hi(ivec2 cell) {
                 if (use_local_deferred_outputs) {
+                    if (!deferred_hi_valid) {
+                        return vec4(0.0);
+                    }
                     return texelFetch(deferred_hi_local_tex, ivec3(cell, 0), 0);
                 }
                 return texelFetch(action_hi_tex, cell, 0);
@@ -196,6 +224,9 @@
 
             vec4 fetch_scale_hi(ivec2 cell) {
                 if (use_local_deferred_outputs) {
+                    if (!deferred_hi_valid) {
+                        return vec4(0.0);
+                    }
                     return texelFetch(deferred_hi_local_tex, ivec3(cell, 1), 0);
                 }
                 return texelFetch(scale_hi_tex, cell, 0);
@@ -264,4 +295,3 @@
                 }
                 imageStore(gas_out_img, gid, vec4(gas_value, 0.0, 0.0, 0.0));
             }
-            

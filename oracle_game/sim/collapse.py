@@ -6,7 +6,10 @@ import numpy as np
 
 from oracle_game.gpu import ISLAND_RUNTIME_DTYPE
 from oracle_game.sim.gpu_collapse import GPUCollapsePipeline
-from oracle_game.sim.gpu_collapse_dirty import has_pending_collapse_structure_dirty_tiles
+from oracle_game.sim.gpu_collapse_dirty import (
+    has_pending_collapse_structure_dirty_tiles,
+    mark_collapse_structure_dirty_tile_regions_on_gpu,
+)
 from oracle_game.types import CollapseBehavior, FallingIslandRecord, Phase
 from oracle_game.sim.cpu_base import material_table_row
 
@@ -121,6 +124,57 @@ class CollapseSolver:
         if gpu_dirty_tile_queue_pending:
             self.last_solve_region_count += 1
             self._solve_formal_gpu_dirty_tile_queue(world)
+
+    def advance_formal_gpu_dirty_epoch(self, world: "WorldEngine") -> None:
+        pipeline = self.gpu_pipeline
+        admitted_capacity = pipeline.advance_formal_runtime_admission(world)
+        if admitted_capacity is not None:
+            motion_pipeline = getattr(getattr(world, "motion_solver", None), "gpu_pipeline", None)
+            if motion_pipeline is not None:
+                motion_pipeline.last_published_island_runtime_capacity = max(
+                    int(motion_pipeline.last_published_island_runtime_capacity),
+                    int(admitted_capacity),
+                )
+        if pipeline.has_active_formal_dirty_epoch():
+            component_capacity = pipeline.advance_formal_connected_dirty_tile_queue(world)
+        else:
+            dirty_regions = list(world.collapse_dirty_regions)
+            deferred_regions = list(world.collapse_deferred_regions)
+            dirty_source_count = len(dirty_regions) + len(deferred_regions)
+            queue_was_pending = has_pending_collapse_structure_dirty_tiles(world)
+            if dirty_regions:
+                if not mark_collapse_structure_dirty_tile_regions_on_gpu(world, dirty_regions):
+                    raise RuntimeError("formal incremental collapse failed to enqueue CPU dirty regions")
+                world.collapse_dirty_regions.clear()
+            if deferred_regions:
+                if not mark_collapse_structure_dirty_tile_regions_on_gpu(
+                    world,
+                    deferred_regions,
+                    deferred=True,
+                ):
+                    raise RuntimeError("formal incremental collapse failed to enqueue deferred regions")
+                world.collapse_deferred_regions.clear()
+            if not has_pending_collapse_structure_dirty_tiles(world):
+                self.last_backend = "idle"
+                pipeline.last_incremental_collapse_phase = None
+                return
+            with pipeline._profile_pass(world, "solver_runtime_reset"):
+                self.reset_runtime_state(world)
+                self.last_solve_region_mask[:, :] = True
+            with pipeline._profile_pass(world, "formal_dirty_tile_queue_prepare"):
+                pipeline.clear_formal_deferred_region_requests(world)
+                self.last_backend = "gpu"
+                self.last_dirty_region_count_before = max(
+                    1,
+                    dirty_source_count + (1 if queue_was_pending else 0),
+                )
+                self.last_solve_region_count = 1
+            component_capacity = pipeline.advance_formal_connected_dirty_tile_queue(world)
+        if component_capacity is None:
+            return
+        motion_pipeline = getattr(getattr(world, "motion_solver", None), "gpu_pipeline", None)
+        if motion_pipeline is not None:
+            motion_pipeline.last_published_island_runtime_capacity = int(component_capacity)
 
     def release(self) -> None:
         self.gpu_pipeline.release()
@@ -728,6 +782,11 @@ class CollapseSolver:
 
     def reset_runtime_state(self, world: "WorldEngine" | None = None) -> None:
         cell_shape = (0, 0) if world is None else (world.height, world.width)
+        formal_gpu_frame = bool(
+            world is not None
+            and getattr(world, "simulation_backend", "") == "gpu"
+            and getattr(world, "_world_simulation_frame_active", False)
+        )
         if world is not None:
             world.bridge.clear_gpu_authoritative(
                 "collapse_structural_mask",
@@ -740,13 +799,14 @@ class CollapseSolver:
                 "collapse_component_label",
             )
         self.last_solve_region_mask = np.zeros(cell_shape, dtype=np.bool_)
-        self.last_structural_mask = np.zeros(cell_shape, dtype=np.bool_)
-        self.last_support_seed_mask = np.zeros(cell_shape, dtype=np.bool_)
-        self.last_supported_mask = np.zeros(cell_shape, dtype=np.bool_)
-        self.last_unsupported_mask = np.zeros(cell_shape, dtype=np.bool_)
-        self.last_delayed_pending_mask = np.zeros(cell_shape, dtype=np.bool_)
-        self.last_immune_unsupported_mask = np.zeros(cell_shape, dtype=np.bool_)
-        self.last_collapsed_cell_mask = np.zeros(cell_shape, dtype=np.bool_)
+        runtime_mask_shape = (0, 0) if formal_gpu_frame else cell_shape
+        self.last_structural_mask = np.zeros(runtime_mask_shape, dtype=np.bool_)
+        self.last_support_seed_mask = np.zeros(runtime_mask_shape, dtype=np.bool_)
+        self.last_supported_mask = np.zeros(runtime_mask_shape, dtype=np.bool_)
+        self.last_unsupported_mask = np.zeros(runtime_mask_shape, dtype=np.bool_)
+        self.last_delayed_pending_mask = np.zeros(runtime_mask_shape, dtype=np.bool_)
+        self.last_immune_unsupported_mask = np.zeros(runtime_mask_shape, dtype=np.bool_)
+        self.last_collapsed_cell_mask = np.zeros(runtime_mask_shape, dtype=np.bool_)
         self.last_collapsed_components: list[dict[str, int | tuple[int, int, int, int]]] = []
         self.last_dirty_region_count_before = 0
         self.last_solve_region_count = 0
@@ -759,7 +819,12 @@ class CollapseSolver:
         *,
         allow_gpu_sync_readback: bool,
     ) -> tuple[np.ndarray, bool, bool]:
-        mask = fallback.copy()
+        cell_shape = None if world is None else (int(world.height), int(world.width))
+        mask = (
+            np.zeros(cell_shape, dtype=np.bool_)
+            if cell_shape is not None and fallback.shape != cell_shape
+            else fallback.copy()
+        )
         if world is None or getattr(world, "simulation_backend", "") != "gpu":
             return mask, False, False
         bridge = world.bridge

@@ -8,8 +8,7 @@
             uniform int rule_count;
             layout(binding=0) uniform sampler2DArray gas_dose_tex;
             layout(binding=1) uniform sampler2DArray cell_dose_tex;
-            layout(binding=2) uniform sampler2D material_tex;
-            layout(binding=3) uniform sampler2D phase_tex;
+            layout(binding=2) uniform usampler2D cell_state_tex;
             layout(binding=4) uniform sampler2D temp_tex;
             layout(binding=5) uniform sampler2D active_cell_tex;
             layout(std430, binding=0) buffer MaterialLightRuleI {
@@ -26,6 +25,14 @@
             };
             layout(r32f, binding=6) writeonly uniform image2DArray gas_dose_out_img;
 
+            int material_id_at(ivec2 cell) {
+                return int(texelFetch(cell_state_tex, cell, 0).x & 0xFFFFu);
+            }
+
+            int phase_id_at(ivec2 cell) {
+                return int((texelFetch(cell_state_tex, cell, 0).x >> 16u) & 0xFFu);
+            }
+
             bool mask_matches(uint value, uint required) {
                 return required == 0u || (value & required) == required;
             }
@@ -34,7 +41,7 @@
                 if (texelFetch(active_cell_tex, cell, 0).x <= 0.5) {
                     return false;
                 }
-                int material_id = int(texelFetch(material_tex, cell, 0).x + 0.5);
+                int material_id = material_id_at(cell);
                 if (material_id <= 0) {
                     return false;
                 }
@@ -45,7 +52,7 @@
                 if (!mask_matches(material_tags[clamped_material].z, rt.x)) {
                     return false;
                 }
-                int phase_id = int(texelFetch(phase_tex, cell, 0).x + 0.5);
+                int phase_id = phase_id_at(cell);
                 int phase_mask = int(rt.z);
                 if (phase_mask != 0 && ((1 << phase_id) & phase_mask) == 0) {
                     return false;
@@ -96,4 +103,3 @@
                 float dose = texelFetch(gas_dose_tex, gid, 0).x;
                 imageStore(gas_dose_out_img, gid, vec4(max(0.0, dose - consumed), 0.0, 0.0, 0.0));
             }
-            

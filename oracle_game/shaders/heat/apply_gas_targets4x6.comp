@@ -1,0 +1,98 @@
+uniform int gas_species_count;
+uniform float dt;
+layout(std430, binding=3) buffer GasCondenseBuffer {
+    vec4 gas_params[{{MAX_GAS_SPECIES}}];
+};
+layout(binding=4) uniform sampler2DArray gas_tex;
+layout(binding=5) uniform sampler2D boil_target_tex;
+layout(binding=7) uniform sampler2D ambient_tex;
+layout(binding=8) uniform usampler2D cell_state_after_tex;
+layout(r32f, binding=0) writeonly uniform image2DArray gas_out_img;
+layout(r32f, binding=6) writeonly uniform image2DArray condense_target_img;
+
+void main() {
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    if (gid.x >= gas_grid_size.x || gid.y >= gas_grid_size.y) {
+        return;
+    }
+    bool is_active = solve_gas_cell_active(gid);
+    if (!is_active) {
+        for (int species = 0; species < 6; ++species) {
+            float value = texelFetch(gas_tex, ivec3(gid, species), 0).x;
+            imageStore(gas_out_img, ivec3(gid, species), vec4(value, 0.0, 0.0, 0.0));
+            imageStore(
+                condense_target_img,
+                ivec3(gid, species),
+                vec4(0.0, 0.0, 0.0, 0.0)
+            );
+        }
+        return;
+    }
+
+    int empty_count = 0;
+    int boil_count0 = 0;
+    int boil_count1 = 0;
+    int boil_count2 = 0;
+    int boil_count3 = 0;
+    int boil_count4 = 0;
+    int boil_count5 = 0;
+    ivec2 cell_origin = gid * 4;
+    for (int local_y = 0; local_y < 4; ++local_y) {
+        for (int local_x = 0; local_x < 4; ++local_x) {
+            ivec2 cell = cell_origin + ivec2(local_x, local_y);
+            if (cell.x >= cell_grid_size.x || cell.y >= cell_grid_size.y) {
+                continue;
+            }
+            uint cell_state = texelFetch(cell_state_after_tex, cell, 0).x;
+            if ((cell_state & 0xFFFFu) == 0u) {
+                empty_count += 1;
+            }
+            int boil_species = int(texelFetch(boil_target_tex, cell, 0).x + 0.5);
+            if (boil_species == 1) boil_count0 += 1;
+            else if (boil_species == 2) boil_count1 += 1;
+            else if (boil_species == 3) boil_count2 += 1;
+            else if (boil_species == 4) boil_count3 += 1;
+            else if (boil_species == 5) boil_count4 += 1;
+            else if (boil_species == 6) boil_count5 += 1;
+        }
+    }
+
+    float ambient = texelFetch(ambient_tex, gid, 0).x;
+    int condense_rank = 0;
+    for (int species = 0; species < 6; ++species) {
+        float original_value = texelFetch(gas_tex, ivec3(gid, species), 0).x;
+        vec4 species_param = gas_params[species];
+        float condense_point = species_param.x;
+        int target_material = int(species_param.y + 0.5);
+        bool condenses = !isnan(condense_point)
+            && target_material > 0
+            && ambient < condense_point
+            && original_value > 0.7;
+        imageStore(
+            condense_target_img,
+            ivec3(gid, species),
+            vec4(condenses ? 1.0 : 0.0, 0.0, 0.0, 0.0)
+        );
+
+        int boil_count = species == 0 ? boil_count0
+            : species == 1 ? boil_count1
+            : species == 2 ? boil_count2
+            : species == 3 ? boil_count3
+            : species == 4 ? boil_count4
+            : boil_count5;
+        float value = original_value;
+        value += float(boil_count) * 0.6 * dt;
+        if (target_material > 0 && condenses) {
+            condense_rank += 1;
+        }
+        if (
+            target_material > 0
+            && condenses
+            && condense_rank > 0
+            && empty_count >= condense_rank
+        ) {
+            value = max(0.0, value - 0.6);
+        }
+        imageStore(gas_out_img, ivec3(gid, species), vec4(value, 0.0, 0.0, 0.0));
+    }
+}

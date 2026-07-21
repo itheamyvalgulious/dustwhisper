@@ -16,6 +16,7 @@ from oracle_game.sim.gpu_reactions import (
     LOCAL_SIZE,
     MAX_EMITTED_LIGHTS,
 )
+from oracle_game.sim.gpu_timer_pack import unpack_cell_state, unpack_u8x4
 
 
 def _load_authoritative_bridge_inputs(
@@ -66,22 +67,19 @@ def _load_authoritative_bridge_inputs(
                 program["cell_grid_size"].value = (world.width, world.height)
                 bridge.buffers["cell_core"].bind_to_storage_buffer(binding=0)
                 if read_role_only_cell_core:
-                    material_tex, phase_tex, temp_tex, integrity_tex, _velocity_tex, _timer_tex = (
+                    cell_state_tex, _phase_tex, temp_tex, integrity_tex, _velocity_tex, _timer_tex = (
                         pipeline._current_cell_textures(resources)
                     )
-                    material_tex.bind_to_image(0, read=False, write=True)
-                    phase_tex.bind_to_image(1, read=False, write=True)
-                    temp_tex.bind_to_image(2, read=False, write=True)
-                    integrity_tex.bind_to_image(3, read=False, write=True)
+                    cell_state_tex.bind_to_image(0, read=False, write=True)
+                    temp_tex.bind_to_image(1, read=False, write=True)
+                    integrity_tex.bind_to_image(2, read=False, write=True)
                 else:
-                    resources.material_ping.bind_to_image(0, read=False, write=True)
-                    resources.material_pong.bind_to_image(1, read=False, write=True)
-                    resources.phase_ping.bind_to_image(2, read=False, write=True)
-                    resources.phase_pong.bind_to_image(3, read=False, write=True)
-                    resources.temp_ping.bind_to_image(4, read=False, write=True)
-                    resources.temp_pong.bind_to_image(5, read=False, write=True)
-                    resources.integrity_ping.bind_to_image(6, read=False, write=True)
-                    resources.integrity_pong.bind_to_image(7, read=False, write=True)
+                    resources.cell_state_ping.bind_to_image(0, read=False, write=True)
+                    resources.cell_state_pong.bind_to_image(1, read=False, write=True)
+                    resources.temp_ping.bind_to_image(2, read=False, write=True)
+                    resources.temp_pong.bind_to_image(3, read=False, write=True)
+                    resources.integrity_ping.bind_to_image(4, read=False, write=True)
+                    resources.integrity_pong.bind_to_image(5, read=False, write=True)
                 if light_dose_guard_buffer is not None:
                     pipeline._run_light_dose_guarded_dispatch(
                         world,
@@ -202,9 +200,11 @@ def _publish_bridge_cell_state(
     resources: GPUReactionResources,
     *,
     source_role: str | None = None,
+    source_velocity_role: str | None = None,
     cell_reset_texture: Any | None = None,
     reaction_latched_texture: Any | None = None,
     cell_meta_texture: Any | None = None,
+    packed_cell_meta_texture: Any | None = None,
     light_dose_guard_buffer: Any | None = None,
     mark_structure_dirty: bool = True,
 ) -> None:
@@ -215,10 +215,12 @@ def _publish_bridge_cell_state(
     if "cell_core" not in bridge.gpu_authoritative_resources:
         world._require_gpu_authoritative_resources("reaction output", "cell_core")
         bridge.sync_world(world)
-    material_tex, phase_tex, temp_tex, integrity_tex, velocity_tex, timer_tex = pipeline._cell_role_textures(
+    cell_state_tex, _phase_tex, temp_tex, integrity_tex, velocity_tex, timer_tex = pipeline._cell_role_textures(
         resources,
         source_role or "pong",
     )
+    if source_velocity_role is not None:
+        velocity_tex = pipeline._cell_role_textures(resources, source_velocity_role)[4]
     fuse_structure_dirty_mark = False
     dirty_buffer = None
     dirty_count = None
@@ -236,21 +238,22 @@ def _publish_bridge_cell_state(
     if mark_structure_dirty and not fuse_structure_dirty_mark:
         mark_collapse_structure_dirty_tiles_from_bridge_cell_core(
             world,
-            material_tex,
-            phase_tex,
+            None,
+            None,
             dispatch_guard_buffer=light_dose_guard_buffer,
+            cell_state_texture=cell_state_tex,
         )
     program = pipeline.programs["publish_bridge_cell"]
     program["cell_grid_size"].value = (world.width, world.height)
     program["use_cell_meta_texture"].value = cell_meta_texture is not None
+    program["use_packed_cell_meta_texture"].value = packed_cell_meta_texture is not None
     program["mark_structure_dirty"].value = bool(fuse_structure_dirty_mark)
     program["write_cell_core"].value = not bool(getattr(world, "phase_c_defer_cell_publish", False))
     program["tile_grid_size"].value = (int(world.active.tile_width), int(world.active.tile_height))
     program["tile_size"].value = int(world.active.tile_size)
     program["material_count"].value = int(material_count)
     program["phase_falling_island"].value = int(Phase.FALLING_ISLAND)
-    material_tex.use(location=0)
-    phase_tex.use(location=1)
+    cell_state_tex.use(location=0)
     temp_tex.use(location=2)
     integrity_tex.use(location=3)
     velocity_tex.use(location=4)
@@ -258,6 +261,7 @@ def _publish_bridge_cell_state(
     (cell_reset_texture or resources.cell_reset_tex).use(location=6)
     (reaction_latched_texture or resources.reaction_latched_tex).use(location=7)
     (cell_meta_texture or resources.local_cell_meta_out).use(location=8)
+    (packed_cell_meta_texture or resources.local_deferred_packed_out).use(location=9)
     bridge.textures["material"].bind_to_image(0, read=False, write=True)
     bridge.buffers["cell_core"].bind_to_storage_buffer(binding=0)
     if fuse_structure_dirty_mark:
@@ -416,8 +420,14 @@ def _apply_flow_sources_to_bridge_velocity(
     active_flow_source_layers = max(1, min(FLOW_SOURCE_LAYERS, int(flow_source_layers)))
     program["flow_source_layers"].value = active_flow_source_layers
     program["impulse_dt"].value = 1.0 / 60.0
+    generation_validity = pipeline._flow_source_generation_validity_active(world)
+    if pipeline._flow_source_generation_programs_enabled:
+        program["flow_source_generation_validity_enabled"].value = generation_validity
+        program["flow_source_generation"].value = int(resources.flow_source_generation)
     resources.flow_velocity_tex.use(location=0)
     resources.flow_source_tex.use(location=1)
+    if pipeline._flow_source_generation_programs_enabled:
+        resources.flow_source_generation_tex.use(location=2)
     bridge.textures["flow_velocity"].bind_to_image(2, read=False, write=True)
     bridge.buffers["active_tile_ttl"].bind_to_storage_buffer(binding=1)
     group_x = (world.gas_width + LOCAL_SIZE - 1) // LOCAL_SIZE
@@ -467,35 +477,51 @@ def _download_cell_state(
     resources: GPUReactionResources,
     *,
     direct_core_outputs: bool = False,
+    advance_velocity_role: bool = False,
+    packed_local_cell_meta: bool = False,
+    segment_cell_meta_already_accumulated: bool = False,
 ) -> None:
     if pipeline._formal_gpu_frame(world):
         rotate_formal_cell_roles = pipeline._formal_before_motion_cell_roles_active()
         if pipeline._formal_segment_batch_active():
-            pipeline._accumulate_segment_cell_transient_state(
-                world,
-                resources,
-                direct_core_outputs=direct_core_outputs,
-            )
+            if not segment_cell_meta_already_accumulated:
+                pipeline._accumulate_segment_cell_transient_state(
+                    world,
+                    resources,
+                    direct_core_outputs=direct_core_outputs,
+                    packed_local_cell_meta=packed_local_cell_meta,
+                )
             if rotate_formal_cell_roles:
                 pipeline._advance_formal_cell_read_role()
+                if advance_velocity_role:
+                    pipeline._advance_formal_velocity_read_role()
             else:
                 pipeline._promote_cell_pong_to_ping(world, resources)
             pipeline._mark_formal_bridge_publish_pending(world, resources, "cell")
         else:
             if rotate_formal_cell_roles:
                 source_role = pipeline._formal_cell_write_role()
+                source_velocity_role = (
+                    pipeline._formal_velocity_write_role()
+                    if advance_velocity_role
+                    else pipeline._formal_velocity_read_role()
+                )
                 pipeline._publish_bridge_cell_state(
                     world,
                     resources,
                     source_role=source_role,
+                    source_velocity_role=source_velocity_role,
                     cell_meta_texture=resources.local_cell_meta_out if direct_core_outputs else None,
+                    packed_cell_meta_texture=resources.local_deferred_packed_out if packed_local_cell_meta else None,
                 )
                 pipeline._set_formal_cell_read_role(source_role)
+                pipeline._set_formal_velocity_read_role(source_velocity_role)
             else:
                 pipeline._publish_bridge_cell_state(
                     world,
                     resources,
                     cell_meta_texture=resources.local_cell_meta_out if direct_core_outputs else None,
+                    packed_cell_meta_texture=resources.local_deferred_packed_out if packed_local_cell_meta else None,
                 )
                 pipeline._promote_cell_pong_to_ping(world, resources)
         pipeline.last_cpu_mirror_downloaded = False
@@ -504,17 +530,16 @@ def _download_cell_state(
     previous_material = world.material_id.copy()
     previous_phase = world.phase.copy()
     previous_island_id = world.island_id.copy()
-    world.material_id[:] = np.rint(
-        np.frombuffer(resources.material_pong.read(), dtype="f4").reshape((world.height, world.width))
-    ).astype(np.int32)
-    world.phase[:] = np.rint(
-        np.frombuffer(resources.phase_pong.read(), dtype="f4").reshape((world.height, world.width))
-    ).astype(np.uint8)
+    cell_state = np.frombuffer(resources.cell_state_pong.read(), dtype="u4").reshape((world.height, world.width))
+    material, phase, packed_flags = unpack_cell_state(cell_state)
+    world.material_id[:] = material
+    world.phase[:] = phase
+    world.cell_flags[:] = packed_flags
     world.cell_temperature[:] = np.frombuffer(resources.temp_pong.read(), dtype="f4").reshape((world.height, world.width))
     world.integrity[:] = np.frombuffer(resources.integrity_pong.read(), dtype="f4").reshape((world.height, world.width))
-    world.timer_pack[:] = np.rint(
-        np.frombuffer(resources.timer_pong.read(), dtype="f4").reshape((world.height, world.width, 4))
-    ).astype(np.uint8)
+    world.timer_pack[:] = unpack_u8x4(
+        np.frombuffer(resources.timer_pong.read(), dtype="u4").reshape((world.height, world.width))
+    )
     if hasattr(resources, "velocity_pong"):
         world.velocity[:] = np.frombuffer(resources.velocity_pong.read(), dtype="f4").reshape((world.height, world.width, 2))
     cell_reset_mask = np.frombuffer(resources.cell_reset_tex.read(), dtype="f4").reshape((world.height, world.width)) > 0.5
@@ -716,4 +741,3 @@ def _append_flow_sources_from_gpu(
     max_x = min(world.width, int(max(source.x for source in emitted)) + max_radius + 1)
     max_y = min(world.height, int(max(source.y for source in emitted)) + max_radius + 1)
     world._mark_active_rect_runtime(min_x, min_y, max_x, max_y)
-

@@ -95,6 +95,7 @@ from oracle_game.gpu.readback import (
 
 from oracle_game.gpu.bridge_resources import (
     ensure_world_resources,
+    ensure_cell_core_spare,
     _ensure_atlas_texture,
     release_resources,
     texture,
@@ -186,6 +187,10 @@ class GPUBridge:
     rule_table_signature: tuple[int, ...] | None = None
     atlas_grid: tuple[int, int] = (1, 1)
     atlas_dirty: bool = True
+    # Private ping-pong storage for liquid provenance publication.  Keep this
+    # out of ``buffers`` so authoritative names and readback resource lookup
+    # continue to refer only to the live ``cell_core`` buffer.
+    cell_core_spare: Any | None = None
 
     def __post_init__(self) -> None:
         if self.ctx is not None:
@@ -208,6 +213,12 @@ class GPUBridge:
         else:
             self._release_readback_programs()
             self._release_display_programs()
+            if self.cell_core_spare is not None:
+                try:
+                    self.cell_core_spare.release()
+                except Exception:
+                    pass
+                self.cell_core_spare = None
         self.ctx = ctx
         self.own_context = False
         self.enabled = True
@@ -238,6 +249,7 @@ class GPUBridge:
         self.owner_thread_id = None
 
     ensure_world_resources = ensure_world_resources
+    ensure_cell_core_spare = ensure_cell_core_spare
     _ensure_atlas_texture = _ensure_atlas_texture
     release_resources = release_resources
     texture = texture
@@ -288,4 +300,3 @@ class GPUBridge:
     _serialize_readback_layout = staticmethod(_serialize_readback_layout)
     _serialize_readback_slot = classmethod(_serialize_readback_slot)
     serialize_runtime_state = serialize_runtime_state
-

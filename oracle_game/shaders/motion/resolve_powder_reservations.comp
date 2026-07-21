@@ -7,6 +7,11 @@ uniform int phase_powder;
 uniform int phase_liquid;
 uniform int phase_falling_island;
 uniform bool use_bridge_authoritative_blockers;
+uniform bool generated_sources_prevalidated;
+uniform bool reuse_generated_reserved_path;
+uniform bool use_precomputed_fallback_blockers;
+uniform bool build_apply_dispatch;
+uniform uint apply_workgroups_per_tile;
 
 struct PowderReservation {
     ivec2 source_xy;
@@ -18,9 +23,24 @@ struct PowderReservation {
     int resolve_state;
 };
 
+#if {{POWDER_COMPACT_RESERVATION}}
+struct CompactPowderReservation {
+    uint source_xy;
+    uint desired_target_xy;
+    uint reserved_target_xy;
+    uint resolved_target_xy;
+    uint velocity_xy;
+    uint material_resolve;
+};
+
+layout(std430, binding=0) buffer PowderReservations {
+    CompactPowderReservation compact_reservations[];
+};
+#else
 layout(std430, binding=0) buffer PowderReservations {
     PowderReservation reservations[];
 };
+#endif
 layout(std430, binding=1) readonly buffer PowderReservationCount {
     int powder_reservation_count;
 };
@@ -30,27 +50,62 @@ layout(std430, binding=2) buffer MaterialParams {
 layout(std430, binding=3) buffer MaterialContactParams {
     vec4 contact_params[{{MAX_MATERIALS}}];
 };
-layout(std430, binding=4) readonly buffer PowderTargetWinners {
+layout(std430, binding=4) buffer PowderTargetWinners {
     int target_winners[];
 };
+layout(std430, binding=5) buffer PowderAffectedTileFlags {
+    uint affected_tile_flags[];
+};
+layout(std430, binding=6) buffer ActiveTileCountBuffer {
+    uint active_tile_count[];
+};
+layout(std430, binding=7) buffer ActiveTileListBuffer {
+    ivec2 active_tile_list[];
+};
+layout(std430, binding=12) buffer ActiveTileDispatchArgsBuffer {
+    uint active_tile_dispatch_args[];
+};
+#if {{POWDER_PROVISIONAL_MOVING_WORKLIST}}
+layout(std430, binding=13) buffer ProvisionalMovingCountBuffer {
+    uint provisional_moving_count[];
+};
+layout(std430, binding=14) writeonly buffer ProvisionalMovingIndexBuffer {
+    int provisional_moving_indices[];
+};
+#endif
 layout(std430, binding=8) readonly buffer BridgeCellCoreBuffer {
     uint bridge_cell_core[];
 };
+#if {{POWDER_NONTRIVIAL_RESOLVE_WORKLIST}}
+layout(std430, binding=9) readonly buffer NontrivialResolveIndexBuffer {
+    int nontrivial_resolve_indices[];
+};
+#else
 layout(std430, binding=9) readonly buffer BridgeIslandBuffer {
     int bridge_island_id[];
 };
+#endif
 layout(std430, binding=10) readonly buffer BridgeEntityBuffer {
     int bridge_entity_id[];
 };
 layout(std430, binding=11) readonly buffer BridgeDisplacedBuffer {
     int bridge_displaced_material[];
 };
+#if {{POWDER_NONTRIVIAL_RESOLVE_WORKLIST}}
+layout(std430, binding=15) readonly buffer NontrivialResolveCountBuffer {
+    uint nontrivial_resolve_count[];
+};
+#endif
 
-layout(binding=0) uniform sampler2D material_tex;
-layout(binding=1) uniform sampler2D phase_tex;
+layout(binding=0) uniform usampler2D cell_state_tex;
 layout(binding=3) uniform sampler2D active_tile_tex;
 layout(binding=5) uniform sampler2D entity_id_tex;
 layout(binding=6) uniform sampler2D displaced_tex;
+
+#if {{POWDER_APPLY_TILE_WORKGROUP_DEDUP}}
+const int APPLY_TILE_HASH_SLOTS = 256;
+shared int apply_tile_hash[APPLY_TILE_HASH_SLOTS];
+#endif
 
 bool in_bounds(ivec2 cell) {
     return cell.x >= 0 && cell.y >= 0 && cell.x < cell_grid_size.x && cell.y < cell_grid_size.y;
@@ -72,14 +127,14 @@ int material_at(ivec2 cell) {
     if (use_bridge_authoritative_blockers) {
         return int(bridge_cell_core[cell_index(cell) * 5] & 0xFFFFu);
     }
-    return int(texelFetch(material_tex, cell, 0).x + 0.5);
+    return int(texelFetch(cell_state_tex, cell, 0).x & 0xFFFFu);
 }
 
 int phase_at(ivec2 cell) {
     if (use_bridge_authoritative_blockers) {
         return int((bridge_cell_core[cell_index(cell) * 5] >> 16u) & 0xFFu);
     }
-    return int(texelFetch(phase_tex, cell, 0).x + 0.5);
+    return int((texelFetch(cell_state_tex, cell, 0).x >> 16u) & 0xFFu);
 }
 
 bool blocks_dda_target(ivec2 cell) {
@@ -98,12 +153,52 @@ bool blocks_dda_target(ivec2 cell) {
 }
 
 int active_reservation_count() {
+#if {{POWDER_NONTRIVIAL_RESOLVE_WORKLIST}}
+    return int(min(nontrivial_resolve_count[0], uint(cell_grid_size.x * cell_grid_size.y)));
+#else
     return clamp(powder_reservation_count, 0, cell_grid_size.x * cell_grid_size.y);
+#endif
 }
 
 bool same_cell(ivec2 lhs, ivec2 rhs) {
     return lhs.x == rhs.x && lhs.y == rhs.y;
 }
+
+#if {{POWDER_COMPACT_RESERVATION}}
+ivec2 unpack_compact_xy(uint word) {
+    return ivec2(int(word << 16u) >> 16, int(word) >> 16);
+}
+
+PowderReservation load_reservation(int index) {
+    CompactPowderReservation record = compact_reservations[index];
+    PowderReservation reservation;
+    reservation.source_xy = unpack_compact_xy(record.source_xy);
+    reservation.desired_target_xy = unpack_compact_xy(record.desired_target_xy);
+    reservation.reserved_target_xy = unpack_compact_xy(record.reserved_target_xy);
+    reservation.resolved_target_xy = unpack_compact_xy(record.resolved_target_xy);
+    reservation.velocity_xy = vec2(0.0);
+    reservation.material_id = int(record.material_resolve & 0xFFFFu);
+    reservation.resolve_state = int(record.material_resolve >> 16u);
+    return reservation;
+}
+
+void store_resolution(int index, ivec2 resolved, int resolve_state) {
+    compact_reservations[index].resolved_target_xy =
+        (uint(resolved.x) & 0xFFFFu) | ((uint(resolved.y) & 0xFFFFu) << 16u);
+    compact_reservations[index].material_resolve =
+        (compact_reservations[index].material_resolve & 0xFFFFu)
+        | ((uint(resolve_state) & 0xFFFFu) << 16u);
+}
+#else
+PowderReservation load_reservation(int index) {
+    return reservations[index];
+}
+
+void store_resolution(int index, ivec2 resolved, int resolve_state) {
+    reservations[index].resolved_target_xy = resolved;
+    reservations[index].resolve_state = resolve_state;
+}
+#endif
 
 bool path_is_clear(ivec2 source, ivec2 target) {
     ivec2 desired = target - source;
@@ -165,17 +260,31 @@ bool better_source(ivec2 candidate, ivec2 current_best) {
     return candidate.x < current_best.x;
 }
 
-bool reservation_has_live_source(PowderReservation reservation) {
+bool reservation_has_live_source(PowderReservation reservation, out int source_phase) {
     ivec2 source = reservation.source_xy;
+    source_phase = 0;
+    if (generated_sources_prevalidated) {
+        source_phase = phase_at(source);
+        return true;
+    }
     if (!in_bounds(source) || !solve_cell_active(source)) {
         return false;
     }
-    int material_id = material_at(source);
-    int phase_id = phase_at(source);
+    int material_id;
+    if (use_bridge_authoritative_blockers) {
+        uint core_word = bridge_cell_core[cell_index(source) * 5];
+        material_id = int(core_word & 0xFFFFu);
+        source_phase = int((core_word >> 16u) & 0xFFu);
+    } else {
+        uint cell_state = texelFetch(cell_state_tex, source, 0).x;
+        material_id = int(cell_state & 0xFFFFu);
+        source_phase = int((cell_state >> 16u) & 0xFFu);
+    }
     return material_id > 0
-        && (phase_id == phase_powder || phase_id == phase_liquid)
+        && (source_phase == phase_powder || source_phase == phase_liquid)
         && material_id == reservation.material_id;
 }
+
 
 int source_rank(ivec2 source) {
     int rank_y = (cell_grid_size.y - 1) - clamp(source.y, 0, cell_grid_size.y - 1);
@@ -193,6 +302,65 @@ int target_winner_rank(ivec2 target) {
     }
     return rank;
 }
+
+void append_apply_tile_index(int tile_index) {
+    ivec2 tile = ivec2(tile_index % tile_grid_size.x, tile_index / tile_grid_size.x);
+    uint previous = atomicExchange(affected_tile_flags[tile_index], 1u);
+    if (previous != 0u) {
+        return;
+    }
+    uint slot = atomicAdd(active_tile_count[0], 1u);
+    active_tile_list[int(slot)] = tile;
+    atomicMax(active_tile_dispatch_args[0], (slot + 1u) * max(apply_workgroups_per_tile, 1u));
+}
+
+int apply_tile_index(ivec2 cell) {
+    ivec2 tile = ivec2(
+        clamp(cell.x / tile_size, 0, tile_grid_size.x - 1),
+        clamp(cell.y / tile_size, 0, tile_grid_size.y - 1)
+    );
+    return tile.y * tile_grid_size.x + tile.x;
+}
+
+void stage_apply_tile(ivec2 cell) {
+    if (!build_apply_dispatch || !in_bounds(cell)) {
+        return;
+    }
+    int tile_index = apply_tile_index(cell);
+#if {{POWDER_APPLY_TILE_WORKGROUP_DEDUP}}
+    int slot = int((uint(tile_index) * 2654435761u) & uint(APPLY_TILE_HASH_SLOTS - 1));
+    for (int probe = 0; probe < APPLY_TILE_HASH_SLOTS; ++probe) {
+        int previous = atomicCompSwap(apply_tile_hash[slot], -1, tile_index);
+        if (previous == -1 || previous == tile_index) {
+            return;
+        }
+        slot = (slot + 1) & (APPLY_TILE_HASH_SLOTS - 1);
+    }
+#else
+    append_apply_tile_index(tile_index);
+#endif
+}
+
+#if {{POWDER_APPLY_TILE_WORKGROUP_DEDUP}}
+void initialize_apply_tile_hash() {
+    int lane = int(gl_LocalInvocationIndex);
+    for (int slot = lane; slot < APPLY_TILE_HASH_SLOTS; slot += int(gl_WorkGroupSize.x)) {
+        apply_tile_hash[slot] = -1;
+    }
+    barrier();
+}
+
+void publish_staged_apply_tiles() {
+    barrier();
+    int lane = int(gl_LocalInvocationIndex);
+    for (int slot = lane; slot < APPLY_TILE_HASH_SLOTS; slot += int(gl_WorkGroupSize.x)) {
+        int tile_index = apply_tile_hash[slot];
+        if (tile_index >= 0) {
+            append_apply_tile_index(tile_index);
+        }
+    }
+}
+#endif
 
 ivec2 resolved_path_prefix(PowderReservation reservation) {
     ivec2 source = reservation.source_xy;
@@ -237,24 +405,46 @@ ivec2 resolved_path_prefix(PowderReservation reservation) {
     return furthest;
 }
 
+
 void main() {
-    int index = int(gl_GlobalInvocationID.x);
+#if {{POWDER_APPLY_TILE_WORKGROUP_DEDUP}}
+    initialize_apply_tile_hash();
+#endif
+    int work_index = int(gl_GlobalInvocationID.x);
     int count = active_reservation_count();
-    if (index >= count) {
+#if !{{POWDER_APPLY_TILE_WORKGROUP_DEDUP}}
+    if (work_index >= count) {
         return;
     }
-    PowderReservation reservation = reservations[index];
+#endif
+    if (work_index < count) {
+#if {{POWDER_NONTRIVIAL_RESOLVE_WORKLIST}}
+    int index = nontrivial_resolve_indices[work_index];
+#else
+    int index = work_index;
+#endif
+    PowderReservation reservation = load_reservation(index);
     ivec2 source = reservation.source_xy;
     int material_id = clamp(reservation.material_id, 0, {{MAX_MATERIALS_MINUS_1}});
     ivec2 resolved = source;
     int resolve_state = {{POWDER_RESOLVE_BLOCKED}};
     ivec2 reserved = reservation.reserved_target_xy;
-    bool live_source = reservation_has_live_source(reservation);
+    int fallback_blocker_mask = (reservation.resolve_state >> 8) & 7;
+    bool trivial_blocked = false;
+#if {{POWDER_TRIVIAL_BLOCKED_CLASSIFICATION}} && {{POWDER_COMPACT_RESERVATION}}
+    trivial_blocked = generated_sources_prevalidated
+        && use_precomputed_fallback_blockers
+        && same_cell(reserved, source)
+        && fallback_blocker_mask == 7;
+#endif
+    if (!trivial_blocked) {
+    int source_phase = 0;
+    bool live_source = reservation_has_live_source(reservation, source_phase);
     if (
         live_source
         && !same_cell(reserved, source)
         && in_bounds(reserved)
-        && path_is_clear(source, reserved)
+        && (reuse_generated_reserved_path || path_is_clear(source, reserved))
     ) {
         ivec2 path_resolved = resolved_path_prefix(reservation);
         if (!same_cell(path_resolved, source)) {
@@ -264,16 +454,23 @@ void main() {
     }
     if (
         live_source
-        && phase_at(source) == phase_powder
+        && source_phase == phase_powder
         && int(contact_params[material_id].z + 0.5) != {{POWDER_SOLVER_SUSPENDED}}
     ) {
         for (int candidate_index = 0; candidate_index < 3; ++candidate_index) {
             ivec2 fallback = fallback_candidate(source, material_id, candidate_index);
+            bool fallback_in_bounds = in_bounds(fallback);
+            bool fallback_blocked = true;
+            if (resolve_state != {{POWDER_RESOLVE_DDA}} && fallback_in_bounds) {
+                fallback_blocked = use_precomputed_fallback_blockers
+                    ? (fallback_blocker_mask & (1 << candidate_index)) != 0
+                    : blocks_dda_target(fallback);
+            }
             if (
                 resolve_state != {{POWDER_RESOLVE_DDA}}
                 &&
-                in_bounds(fallback)
-                && !blocks_dda_target(fallback)
+                fallback_in_bounds
+                && !fallback_blocked
                 && target_winner_rank(fallback) < 0
             ) {
                 resolved = fallback;
@@ -282,6 +479,31 @@ void main() {
             }
         }
     }
-    reservations[index].resolved_target_xy = resolved;
-    reservations[index].resolve_state = resolve_state;
+    if (resolve_state == {{POWDER_RESOLVE_FALLBACK}} && in_bounds(resolved)) {
+        atomicMin(target_winners[resolved.y * cell_grid_size.x + resolved.x], source_rank(source));
+    }
+    }
+    store_resolution(index, resolved, resolve_state);
+#if {{POWDER_PROVISIONAL_MOVING_WORKLIST}}
+    if (
+        (resolve_state == {{POWDER_RESOLVE_DDA}} || resolve_state == {{POWDER_RESOLVE_FALLBACK}})
+        && !same_cell(source, resolved)
+    ) {
+        uint moving_slot = atomicAdd(provisional_moving_count[0], 1u);
+        provisional_moving_indices[moving_slot] = index;
+    }
+#endif
+#if !{{POWDER_SOURCE_TILE_PRODUCER}}
+    stage_apply_tile(source);
+#endif
+    if (
+        (resolve_state == {{POWDER_RESOLVE_DDA}} || resolve_state == {{POWDER_RESOLVE_FALLBACK}})
+        && !same_cell(source, resolved)
+    ) {
+        stage_apply_tile(resolved);
+    }
+    }
+#if {{POWDER_APPLY_TILE_WORKGROUP_DEDUP}}
+    publish_staged_apply_tiles();
+#endif
 }

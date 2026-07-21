@@ -6,6 +6,7 @@ uniform ivec2 tile_grid_size;
 uniform int tile_size;
 uniform int gas_cell_size;
 uniform float dt;
+uniform bool use_bridge_inputs;
 layout(std430, binding=0) buffer MaterialParamBuffer {
     vec4 params[{{MAX_MATERIALS}}];
 };
@@ -15,11 +16,16 @@ layout(std430, binding=1) readonly buffer ActiveTileCountBuffer {
 layout(std430, binding=2) readonly buffer ActiveTileListBuffer {
     ivec2 active_tile_list[];
 };
-layout(binding=1) uniform sampler2D material_tex;
+layout(std430, binding=6) buffer BridgeCellCoreBuffer {
+    uint bridge_cell_core[];
+};
+layout(binding=1) uniform usampler2D cell_state_tex;
 layout(binding=2) uniform sampler2D velocity_tex;
 layout(binding=3) uniform sampler2D flow_tex;
 layout(binding=4) uniform sampler2D active_tile_tex;
 layout(rg32f, binding=5) writeonly uniform image2D velocity_out_img;
+layout(r32ui, binding=6) writeonly uniform uimage2D cell_state_resident_img;
+layout(rg32f, binding=7) writeonly uniform image2D velocity_resident_img;
 
 bool active_dispatch_cell(out ivec2 cell) {
     int groups_per_tile_axis = max(1, (tile_size + {{LOCAL_SIZE_MINUS_1}}) / {{LOCAL_SIZE}});
@@ -47,8 +53,19 @@ void main() {
     if (!active_dispatch_cell(gid)) {
         return;
     }
-    vec2 velocity = texelFetch(velocity_tex, gid, 0).xy;
-    int material_id = int(texelFetch(material_tex, gid, 0).x + 0.5);
+    vec2 velocity;
+    int material_id;
+    uint cell_state;
+    if (use_bridge_inputs) {
+        int word_index = (gid.y * cell_grid_size.x + gid.x) * 5;
+        cell_state = bridge_cell_core[word_index];
+        material_id = int(cell_state & 0xffffu);
+        velocity = unpackHalf2x16(bridge_cell_core[word_index + 1]);
+    } else {
+        velocity = texelFetch(velocity_tex, gid, 0).xy;
+        cell_state = texelFetch(cell_state_tex, gid, 0).x;
+        material_id = int(cell_state & 0xffffu);
+    }
     if (material_id > 0) {
         material_id = clamp(material_id, 0, {{MAX_MATERIALS_MINUS_1}});
         vec4 material_params = params[material_id];
@@ -61,5 +78,12 @@ void main() {
         velocity += flow * material_params.z * dt * 4.0;
         velocity *= max(0.0, 1.0 - material_params.w * dt);
     }
-    imageStore(velocity_out_img, gid, vec4(velocity, 0.0, 0.0));
+    if (use_bridge_inputs) {
+        int word_index = (gid.y * cell_grid_size.x + gid.x) * 5;
+        bridge_cell_core[word_index + 1] = packHalf2x16(velocity);
+        imageStore(cell_state_resident_img, gid, uvec4(cell_state, 0u, 0u, 0u));
+        imageStore(velocity_resident_img, gid, vec4(velocity, 0.0, 0.0));
+    } else {
+        imageStore(velocity_out_img, gid, vec4(velocity, 0.0, 0.0));
+    }
 }

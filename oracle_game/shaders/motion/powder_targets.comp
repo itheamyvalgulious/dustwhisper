@@ -30,8 +30,7 @@ layout(std430, binding=10) readonly buffer BridgeEntityBuffer {
 layout(std430, binding=11) readonly buffer BridgeDisplacedBuffer {
     int bridge_displaced_material[];
 };
-layout(binding=1) uniform sampler2D material_tex;
-layout(binding=2) uniform sampler2D phase_tex;
+layout(binding=1) uniform usampler2D cell_state_tex;
 layout(binding=3) uniform sampler2D velocity_tex;
 layout(binding=4) uniform sampler2D active_tile_tex;
 layout(binding=6) uniform sampler2D entity_id_tex;
@@ -68,14 +67,14 @@ int material_at(ivec2 cell) {
     if (use_bridge_authoritative_blockers) {
         return int(bridge_cell_core[cell_index(cell) * 5] & 0xFFFFu);
     }
-    return int(texelFetch(material_tex, cell, 0).x + 0.5);
+    return int(texelFetch(cell_state_tex, cell, 0).x & 0xFFFFu);
 }
 
 int phase_at(ivec2 cell) {
     if (use_bridge_authoritative_blockers) {
         return int((bridge_cell_core[cell_index(cell) * 5] >> 16u) & 0xFFu);
     }
-    return int(texelFetch(phase_tex, cell, 0).x + 0.5);
+    return int((texelFetch(cell_state_tex, cell, 0).x >> 16u) & 0xFFu);
 }
 
 bool entity_blocks(ivec2 cell) {
@@ -143,8 +142,9 @@ void main() {
     }
     ivec2 target = gid;
     ivec2 raw_target = gid;
-    int material_id = int(texelFetch(material_tex, gid, 0).x + 0.5);
-    int phase_id = int(texelFetch(phase_tex, gid, 0).x + 0.5);
+    uint cell_state = texelFetch(cell_state_tex, gid, 0).x;
+    int material_id = int(cell_state & 0xFFFFu);
+    int phase_id = int((cell_state >> 16u) & 0xFFu);
     if (material_id > 0 && (phase_id == phase_powder || phase_id == phase_liquid)) {
         int max_step = int(params[material_id].x + 0.5);
         vec2 velocity = texelFetch(velocity_tex, gid, 0).xy;

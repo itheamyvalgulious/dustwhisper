@@ -313,4 +313,3 @@
 	                    imageStore(support_out_img, cell, vec4(final_supported ? 1.0 : 0.0, 0.0, 0.0, 0.0));
 	                }
             }
-            

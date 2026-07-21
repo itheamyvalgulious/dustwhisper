@@ -10,9 +10,6 @@ layout(std430, binding=0) readonly buffer ActiveTileCountBuffer {
 layout(std430, binding=1) readonly buffer ActiveTileListBuffer {
     ivec2 active_tile_list[];
 };
-layout(std430, binding=2) buffer PowderTargetWinners {
-    int target_winners[];
-};
 layout(std430, binding=3) buffer PowderApplyIncoming {
     int apply_incoming[];
 };
@@ -47,7 +44,6 @@ void main() {
         return;
     }
     int cell_index = cell.y * cell_grid_size.x + cell.x;
-    target_winners[cell_index] = 2147483647;
     apply_incoming[cell_index] = -1;
     apply_outgoing[cell_index] = -1;
 }

@@ -1,0 +1,205 @@
+uniform float dt;
+
+layout(binding=4) uniform sampler2D ambient_in_tex;
+layout(std430, binding=8) readonly buffer BridgeCellCoreBuffer {
+    uint bridge_cell_core[];
+};
+
+layout(r32ui, binding=0) writeonly uniform uimage2D cell_state_img;
+layout(r32f, binding=1) writeonly uniform image2D ambient_diffused_img;
+layout(rg32f, binding=3) writeonly uniform image2D velocity_img;
+layout(r32f, binding=4) writeonly uniform image2D temp_out_img;
+layout(r32ui, binding=5) writeonly uniform uimage2D timer_img;
+layout(r32f, binding=6) writeonly uniform image2D integrity_img;
+layout(r32f, binding=7) writeonly uniform image2D ambient_out_img;
+
+const int AMBIENT_ITERATIONS = 4;
+const int AMBIENT_CORE_SIZE = 2;
+const int AMBIENT_HALO = AMBIENT_ITERATIONS;
+const int AMBIENT_EXTENT = AMBIENT_CORE_SIZE + 2 * AMBIENT_HALO;
+const int AMBIENT_SAMPLE_COUNT = AMBIENT_EXTENT * AMBIENT_EXTENT;
+
+shared float ambient_a[AMBIENT_SAMPLE_COUNT];
+shared float ambient_b[AMBIENT_SAMPLE_COUNT];
+shared float feedback_deltas[{{LOCAL_SIZE}} * {{LOCAL_SIZE}}];
+
+int bridge_word_index(ivec2 cell) {
+    return (cell.y * cell_grid_size.x + cell.x) * 5;
+}
+
+float bridge_temperature(ivec2 cell) {
+    return uintBitsToFloat(bridge_cell_core[bridge_word_index(cell) + 2]);
+}
+
+int ambient_index(int x, int y) {
+    return y * AMBIENT_EXTENT + x;
+}
+
+void run_ambient_diffuse4(ivec2 group_gas_origin, int local_index) {
+    for (int index = local_index; index < AMBIENT_SAMPLE_COUNT; index += 64) {
+        ivec2 local_gas = ivec2(index % AMBIENT_EXTENT, index / AMBIENT_EXTENT);
+        ivec2 gas_cell = clamp(
+            group_gas_origin + local_gas - ivec2(AMBIENT_HALO),
+            ivec2(0),
+            gas_grid_size - ivec2(1)
+        );
+        ambient_a[index] = texelFetch(ambient_in_tex, gas_cell, 0).x;
+    }
+    barrier();
+
+    for (int iteration = 0; iteration < AMBIENT_ITERATIONS; ++iteration) {
+        int start = iteration + 1;
+        int extent = AMBIENT_EXTENT - 2 * start;
+        int output_count = extent * extent;
+        for (int slot = local_index; slot < output_count; slot += 64) {
+            int x = start + slot % extent;
+            int y = start + slot / extent;
+            int index = ambient_index(x, y);
+            ivec2 gas_cell = clamp(
+                group_gas_origin + ivec2(x, y) - ivec2(AMBIENT_HALO),
+                ivec2(0),
+                gas_grid_size - ivec2(1)
+            );
+            ivec2 center_local = gas_cell - group_gas_origin + ivec2(AMBIENT_HALO);
+            ivec2 left_local = ivec2(max(gas_cell.x - 1, 0), gas_cell.y)
+                - group_gas_origin + ivec2(AMBIENT_HALO);
+            ivec2 right_local = ivec2(min(gas_cell.x + 1, gas_grid_size.x - 1), gas_cell.y)
+                - group_gas_origin + ivec2(AMBIENT_HALO);
+            ivec2 down_local = ivec2(gas_cell.x, max(gas_cell.y - 1, 0))
+                - group_gas_origin + ivec2(AMBIENT_HALO);
+            ivec2 up_local = ivec2(gas_cell.x, min(gas_cell.y + 1, gas_grid_size.y - 1))
+                - group_gas_origin + ivec2(AMBIENT_HALO);
+            int center_index = ambient_index(center_local.x, center_local.y);
+            int left_index = ambient_index(left_local.x, left_local.y);
+            int right_index = ambient_index(right_local.x, right_local.y);
+            int down_index = ambient_index(down_local.x, down_local.y);
+            int up_index = ambient_index(up_local.x, up_local.y);
+            float ambient;
+            float lap;
+            if ((iteration & 1) == 0) {
+                ambient = ambient_a[center_index];
+                lap = (
+                    ambient_a[left_index] +
+                    ambient_a[right_index] +
+                    ambient_a[down_index] +
+                    ambient_a[up_index] -
+                    4.0 * ambient
+                );
+                ambient_b[index] = solve_gas_cell_active(gas_cell)
+                    ? ambient + 0.08 * lap
+                    : ambient;
+            } else {
+                ambient = ambient_b[center_index];
+                lap = (
+                    ambient_b[left_index] +
+                    ambient_b[right_index] +
+                    ambient_b[down_index] +
+                    ambient_b[up_index] -
+                    4.0 * ambient
+                );
+                ambient_a[index] = solve_gas_cell_active(gas_cell)
+                    ? ambient + 0.08 * lap
+                    : ambient;
+            }
+        }
+        barrier();
+    }
+}
+
+void main() {
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 local_id = ivec2(gl_LocalInvocationID.xy);
+    int local_index = int(gl_LocalInvocationIndex);
+    ivec2 group_gas_origin = ivec2(gl_WorkGroupID.xy) * AMBIENT_CORE_SIZE;
+    run_ambient_diffuse4(group_gas_origin, local_index);
+
+    ivec2 local_gas = local_id / 4;
+    ivec2 gas_cell = group_gas_origin + local_gas;
+    int gas_shared_index = ambient_index(
+        AMBIENT_HALO + local_gas.x,
+        AMBIENT_HALO + local_gas.y
+    );
+    float ambient = ambient_a[gas_shared_index];
+    bool cell_in_bounds = gid.x < cell_grid_size.x && gid.y < cell_grid_size.y;
+    float feedback_delta = 0.0;
+
+    if (cell_in_bounds) {
+        int word_index = bridge_word_index(gid);
+        uint word0 = bridge_cell_core[word_index];
+        uint velocity_word = bridge_cell_core[word_index + 1];
+        uint temperature_word = bridge_cell_core[word_index + 2];
+        uint timer_word = bridge_cell_core[word_index + 3];
+        uint integrity_word = bridge_cell_core[word_index + 4];
+        int material_id = int(word0 & 0xFFFFu);
+        float center = uintBitsToFloat(temperature_word);
+        float conducted = center;
+        bool active_cell = solve_cell_active(gid);
+
+        if (active_cell) {
+            float conductivity = params[material_id].x;
+            ivec2 left = ivec2(max(gid.x - 1, 0), gid.y);
+            ivec2 right = ivec2(min(gid.x + 1, cell_grid_size.x - 1), gid.y);
+            ivec2 down = ivec2(gid.x, max(gid.y - 1, 0));
+            ivec2 up = ivec2(gid.x, min(gid.y + 1, cell_grid_size.y - 1));
+            float avg_neighbors = (
+                bridge_temperature(left) +
+                bridge_temperature(right) +
+                bridge_temperature(down) +
+                bridge_temperature(up)
+            ) * 0.25;
+            float heat_capacity = max(response_params[material_id].x, 1.0e-4);
+            conducted = center
+                + (conductivity / heat_capacity) * (avg_neighbors - center) * dt * 0.35;
+        }
+
+        float exchange = params[material_id].y;
+        float heat_capacity = max(response_params[material_id].x, 1.0e-4);
+        feedback_delta = (ambient - conducted) * (exchange / heat_capacity) * dt;
+        float updated = conducted;
+        if (active_cell) {
+            updated = conducted + (ambient - conducted) * (exchange / heat_capacity) * dt;
+        }
+
+        imageStore(cell_state_img, gid, uvec4(word0, 0u, 0u, 0u));
+        imageStore(velocity_img, gid, vec4(unpackHalf2x16(velocity_word), 0.0, 0.0));
+        imageStore(temp_out_img, gid, vec4(updated, 0.0, 0.0, 0.0));
+        imageStore(timer_img, gid, uvec4(timer_word, 0u, 0u, 0u));
+        imageStore(integrity_img, gid, vec4(float(integrity_word & 0xFFFFu), 0.0, 0.0, 0.0));
+    }
+
+    feedback_deltas[local_index] = feedback_delta;
+    barrier();
+
+    if ((local_id.x & 3) != 0 || (local_id.y & 3) != 0) {
+        return;
+    }
+    if (gas_cell.x >= gas_grid_size.x || gas_cell.y >= gas_grid_size.y) {
+        return;
+    }
+
+    imageStore(ambient_diffused_img, gas_cell, vec4(ambient, 0.0, 0.0, 0.0));
+    if (!solve_gas_cell_active(gas_cell)) {
+        imageStore(ambient_out_img, gas_cell, vec4(ambient, 0.0, 0.0, 0.0));
+        return;
+    }
+
+    float accum = 0.0;
+    int count = 0;
+    for (int local_y = 0; local_y < 4; ++local_y) {
+        for (int local_x = 0; local_x < 4; ++local_x) {
+            ivec2 cell = gas_cell * 4 + ivec2(local_x, local_y);
+            if (cell.x >= cell_grid_size.x || cell.y >= cell_grid_size.y) {
+                continue;
+            }
+            int shared_index = (local_id.y + local_y) * {{LOCAL_SIZE}} + local_id.x + local_x;
+            accum += -feedback_deltas[shared_index] * 0.02;
+            count += 1;
+        }
+    }
+
+    float updated = ambient;
+    if (count > 0) {
+        updated += accum / float(count);
+    }
+    imageStore(ambient_out_img, gas_cell, vec4(updated, 0.0, 0.0, 0.0));
+}

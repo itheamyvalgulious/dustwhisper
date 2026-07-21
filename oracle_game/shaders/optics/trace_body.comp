@@ -21,6 +21,56 @@
             layout(std430, binding=7) buffer IllumAccum {
                 uint illum_accum[];
             };
+            #if {{TILE_SEEDED_BUILD}}
+            uniform ivec2 cell_sparse_tile_grid_size;
+            uniform ivec2 gas_sparse_tile_grid_size;
+            uniform uint sparse_generation;
+            layout(std430, binding=8) buffer SparseCellTileMarks {
+                uint sparse_cell_tile_marks[];
+            };
+            layout(std430, binding=9) buffer SparseGasTileMarks {
+                uint sparse_gas_tile_marks[];
+            };
+            layout(std430, binding=10) writeonly buffer SparseCellTileList {
+                uint sparse_cell_tile_list[];
+            };
+            layout(std430, binding=11) writeonly buffer SparseGasTileList {
+                uint sparse_gas_tile_list[];
+            };
+            layout(std430, binding=12) buffer SparseRuntime {
+                uint sparse_runtime[];
+            };
+            int last_sparse_cell_tile = -1;
+            int last_sparse_gas_tile = -1;
+            void publish_sparse_cell_tile(ivec2 cell) {
+                ivec2 tile = cell / {{LOCAL_SIZE}};
+                int tile_index = tile.y * cell_sparse_tile_grid_size.x + tile.x;
+                if (tile_index == last_sparse_cell_tile) {
+                    return;
+                }
+                last_sparse_cell_tile = tile_index;
+                if (atomicExchange(sparse_cell_tile_marks[tile_index], sparse_generation) == sparse_generation) {
+                    return;
+                }
+                uint slot = atomicAdd(sparse_runtime[16], 1u);
+                sparse_cell_tile_list[slot] = uint(tile_index);
+                atomicMax(sparse_runtime[20], slot + 1u);
+            }
+            void publish_sparse_gas_tile(ivec2 gas_cell) {
+                ivec2 tile = gas_cell / {{LOCAL_SIZE}};
+                int tile_index = tile.y * gas_sparse_tile_grid_size.x + tile.x;
+                if (tile_index == last_sparse_gas_tile) {
+                    return;
+                }
+                last_sparse_gas_tile = tile_index;
+                if (atomicExchange(sparse_gas_tile_marks[tile_index], sparse_generation) == sparse_generation) {
+                    return;
+                }
+                uint slot = atomicAdd(sparse_runtime[17], 1u);
+                sparse_gas_tile_list[slot] = uint(tile_index);
+                atomicMax(sparse_runtime[24], slot + 1u);
+            }
+            #endif
             const float CELL_ACCUM_SCALE = {{CELL_ACCUM_SCALE}};
             const float GAS_ACCUM_SCALE = {{GAS_ACCUM_SCALE}};
             const float ILLUM_ACCUM_SCALE = {{ILLUM_ACCUM_SCALE}};
@@ -30,9 +80,12 @@
             }
             bool deposit_light(ivec2 cell, int dose_channel, float energy, float absorbed) {
                 bool deposited_dose = false;
+                bool deposited_cell_illumination = false;
+                bool deposited_gas_dose = false;
                 if (solve_cell_active(cell)) {
                     int cell_index = (dose_channel * cell_grid_size.y + cell.y) * cell_grid_size.x + cell.x;
                     atomicAdd(illum_accum[cell_index], quantize_accum(energy, ILLUM_ACCUM_SCALE));
+                    deposited_cell_illumination = true;
                     if (absorbed > 0.0) {
                         atomicAdd(cell_dose_accum[cell_index], quantize_accum(absorbed, CELL_ACCUM_SCALE));
                         deposited_dose = true;
@@ -43,7 +96,16 @@
                     int gas_index = (dose_channel * gas_grid_size.y + gas_cell.y) * gas_grid_size.x + gas_cell.x;
                     atomicAdd(gas_dose_accum[gas_index], quantize_accum(energy * 0.08, GAS_ACCUM_SCALE));
                     deposited_dose = true;
+                    deposited_gas_dose = true;
                 }
+                #if {{TILE_SEEDED_BUILD}}
+                if (deposited_cell_illumination) {
+                    publish_sparse_cell_tile(cell);
+                }
+                if (deposited_gas_dose) {
+                    publish_sparse_gas_tile(gas_cell);
+                }
+                #endif
                 return deposited_dose;
             }
             const float SCATTER_ROT_COS = 0.8253356149096783;
@@ -211,4 +273,3 @@
                     atomicExchange(light_dose_guard[0], 1u);
                 }
             }
-            

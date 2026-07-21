@@ -1,0 +1,157 @@
+#version 430
+layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+uniform ivec2 cell_grid_size;
+uniform ivec2 gas_grid_size;
+uniform ivec2 tile_grid_size;
+uniform int tile_size;
+uniform int gas_cell_size;
+uniform int material_count;
+uniform int phase_falling_island;
+uniform float dt;
+uniform bool use_cell_state_texture;
+uniform bool use_base_flags_texture;
+uniform bool apply_reaction_meta;
+uniform bool clear_reaction_latched;
+
+layout(binding=0) uniform sampler2D material_tex;
+layout(binding=1) uniform sampler2D phase_tex;
+layout(binding=2) uniform sampler2D temp_tex;
+layout(binding=3) uniform sampler2D integrity_tex;
+layout(binding=4) uniform sampler2D velocity_tex;
+layout(binding=5) uniform usampler2D timer_tex;
+layout(binding=6) uniform sampler2D reaction_meta_tex;
+layout(binding=8) uniform sampler2D flow_tex;
+layout(binding=9) uniform sampler2D active_tile_tex;
+layout(binding=10) uniform sampler2D base_flags_tex;
+layout(binding=11) uniform usampler2D cell_state_tex;
+
+layout(r32f, binding=0) writeonly uniform image2D bridge_material_img;
+
+layout(std430, binding=0) buffer BridgeCellCoreBuffer {
+    uint bridge_cell_core[];
+};
+layout(std430, binding=1) readonly buffer MotionMaterialParamBuffer {
+    vec4 motion_params[{{MAX_MATERIALS}}];
+};
+layout(std430, binding=2) readonly buffer MaterialParticipationBuffer {
+    uint material_participates[];
+};
+layout(std430, binding=3) buffer DirtyTileMaskBuffer {
+    uint dirty_tile_mask[];
+};
+layout(std430, binding=4) buffer DirtyTileCountBuffer {
+    uint dirty_tile_count[];
+};
+layout(std430, binding=5) buffer DirtyTileListBuffer {
+    ivec2 dirty_tile_list[];
+};
+layout(std430, binding=6) buffer DirtyTileDispatchArgsBuffer {
+    uint dirty_tile_dispatch_args[];
+};
+
+bool cell_active(ivec2 cell) {
+    ivec2 tile = ivec2(
+        clamp(cell.x / tile_size, 0, tile_grid_size.x - 1),
+        clamp(cell.y / tile_size, 0, tile_grid_size.y - 1)
+    );
+    return texelFetch(active_tile_tex, tile, 0).x > 0.5;
+}
+
+uint structure_flags(int material_id, int phase_value) {
+    if (material_id <= 0 || material_id >= material_count || phase_value == phase_falling_island) {
+        return 0u;
+    }
+    return material_participates[material_id];
+}
+
+void append_dirty_tile(ivec2 tile) {
+    if (tile.x < 0 || tile.y < 0 || tile.x >= tile_grid_size.x || tile.y >= tile_grid_size.y) {
+        return;
+    }
+    int tile_index = tile.y * tile_grid_size.x + tile.x;
+    uint previous = atomicOr(dirty_tile_mask[tile_index], 1u);
+    if ((previous & 1u) != 0u) {
+        return;
+    }
+    uint slot = atomicAdd(dirty_tile_count[0], 1u);
+    dirty_tile_list[int(slot)] = tile;
+    atomicMax(dirty_tile_dispatch_args[0], slot + 1u);
+}
+
+void mark_dirty_if_structure_changed(ivec2 cell, uint previous_word, uint material, uint phase) {
+    int old_material = int(previous_word & 0xFFFFu);
+    int old_phase = int((previous_word >> 16u) & 0xFFu);
+    if (structure_flags(old_material, old_phase) == structure_flags(int(material), int(phase))) {
+        return;
+    }
+    ivec2 tile = cell / tile_size;
+    ivec2 local_cell = cell - tile * tile_size;
+    append_dirty_tile(tile);
+    if (local_cell.x == 0) append_dirty_tile(tile + ivec2(-1, 0));
+    if (local_cell.x + 1 >= tile_size) append_dirty_tile(tile + ivec2(1, 0));
+    if (local_cell.y == 0) append_dirty_tile(tile + ivec2(0, -1));
+    if (local_cell.y + 1 >= tile_size) append_dirty_tile(tile + ivec2(0, 1));
+}
+
+void main() {
+    ivec2 cell = ivec2(gl_GlobalInvocationID.xy);
+    if (cell.x >= cell_grid_size.x || cell.y >= cell_grid_size.y) {
+        return;
+    }
+    int cell_index = cell.y * cell_grid_size.x + cell.x;
+    int word_index = cell_index * 5;
+    uint previous_word = bridge_cell_core[word_index];
+    uint input_cell_state = use_cell_state_texture
+        ? texelFetch(cell_state_tex, cell, 0).x
+        : 0u;
+    uint flags = use_cell_state_texture
+        ? ((input_cell_state >> 24u) & 0xFFu)
+        : (
+            use_base_flags_texture
+                ? uint(clamp(round(texelFetch(base_flags_tex, cell, 0).x), 0.0, 255.0))
+                : ((previous_word >> 24u) & 0xFFu)
+        );
+    if (apply_reaction_meta) {
+        vec2 reaction_meta = texelFetch(reaction_meta_tex, cell, 0).xy;
+        if (reaction_meta.x > 0.5) {
+            flags = 0u;
+        }
+        if (reaction_meta.y > 0.5) {
+            flags |= uint({{REACTION_LATCHED_FLAG}});
+        }
+    }
+    if (clear_reaction_latched) {
+        flags &= ~uint({{REACTION_LATCHED_FLAG}});
+    }
+
+    uint material = use_cell_state_texture
+        ? (input_cell_state & 0xFFFFu)
+        : uint(clamp(round(texelFetch(material_tex, cell, 0).x), 0.0, 65535.0));
+    uint phase = use_cell_state_texture
+        ? ((input_cell_state >> 16u) & 0xFFu)
+        : uint(clamp(round(texelFetch(phase_tex, cell, 0).x), 0.0, 255.0));
+    vec2 velocity = unpackHalf2x16(packHalf2x16(texelFetch(velocity_tex, cell, 0).xy));
+    if (cell_active(cell)) {
+        int material_id = clamp(int(material), 0, {{MAX_MATERIALS_MINUS_1}});
+        if (material_id > 0) {
+            vec4 params = motion_params[material_id];
+            velocity.y += params.y * dt * 24.0;
+            ivec2 gas_cell = ivec2(
+                min(cell.x / gas_cell_size, gas_grid_size.x - 1),
+                min(cell.y / gas_cell_size, gas_grid_size.y - 1)
+            );
+            velocity += texelFetch(flow_tex, gas_cell, 0).xy * params.z * dt * 4.0;
+            velocity *= max(0.0, 1.0 - params.w * dt);
+        }
+    }
+
+    float temperature = texelFetch(temp_tex, cell, 0).x;
+    uint integrity = uint(clamp(round(texelFetch(integrity_tex, cell, 0).x), 0.0, 65535.0));
+    mark_dirty_if_structure_changed(cell, previous_word, material, phase);
+    bridge_cell_core[word_index] = material | (phase << 16u) | (flags << 24u);
+    bridge_cell_core[word_index + 1] = packHalf2x16(velocity);
+    bridge_cell_core[word_index + 2] = floatBitsToUint(temperature);
+    bridge_cell_core[word_index + 3] = texelFetch(timer_tex, cell, 0).x;
+    bridge_cell_core[word_index + 4] = integrity;
+    imageStore(bridge_material_img, cell, vec4(float(material), 0.0, 0.0, 0.0));
+}

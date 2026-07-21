@@ -31,7 +31,7 @@ layout(std430, binding=2) buffer IslandReservationSourceIndex {
     int reservation_source_index[];
 };
 
-layout(binding=0) uniform sampler2D material_tex;
+layout(binding=0) uniform usampler2D cell_state_tex;
 layout(binding=1) uniform sampler2D island_id_tex;
 
 int active_reservation_count() {
@@ -55,7 +55,7 @@ bool source_matches(FallingIslandReservation reservation, ivec2 cell) {
         return false;
     }
     int island_id = int(texelFetch(island_id_tex, cell, 0).x + 0.5);
-    int material_id = int(texelFetch(material_tex, cell, 0).x + 0.5);
+    int material_id = int(texelFetch(cell_state_tex, cell, 0).x & 0xFFFFu);
     return island_id == reservation.island_id && material_id > 0;
 }
 

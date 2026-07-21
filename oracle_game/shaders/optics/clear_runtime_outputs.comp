@@ -4,9 +4,6 @@
             uniform ivec2 cell_grid_size;
             uniform ivec2 gas_grid_size;
             uniform int dose_channel_count;
-            layout(r32f, binding=0) writeonly uniform image2DArray cell_dose_img;
-            layout(r32f, binding=1) writeonly uniform image2DArray gas_dose_img;
-            layout(r32f, binding=2) writeonly uniform image2DArray illum_layer_img;
             layout(std430, binding=0) buffer CellDoseAccum {
                 uint cell_dose_accum[];
             };
@@ -35,13 +32,9 @@
                     int cell_index = (channel * cell_grid_size.y + gid.y) * cell_grid_size.x + gid.x;
                     cell_dose_accum[cell_index] = 0u;
                     illum_accum[cell_index] = 0u;
-                    imageStore(cell_dose_img, ivec3(gid, channel), vec4(0.0, 0.0, 0.0, 0.0));
-                    imageStore(illum_layer_img, ivec3(gid, channel), vec4(0.0, 0.0, 0.0, 0.0));
                 }
                 if (gid.x < gas_grid_size.x && gid.y < gas_grid_size.y) {
                     int gas_index = (channel * gas_grid_size.y + gid.y) * gas_grid_size.x + gid.x;
                     gas_dose_accum[gas_index] = 0u;
-                    imageStore(gas_dose_img, ivec3(gid, channel), vec4(0.0, 0.0, 0.0, 0.0));
                 }
             }
-            

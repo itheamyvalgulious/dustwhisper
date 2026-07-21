@@ -1,6 +1,9 @@
 #version 430
 layout(local_size_x={{POWDER_RESERVATION_LOCAL_SIZE}}, local_size_y=1, local_size_z=1) in;
 uniform ivec2 cell_grid_size;
+#if {{POWDER_APPLY_INDEX_EPOCH}}
+uniform uint powder_apply_epoch;
+#endif
 
 struct PowderReservation {
     ivec2 source_xy;
@@ -27,6 +30,11 @@ layout(std430, binding=3) buffer PowderApplyIncoming {
 layout(std430, binding=4) buffer PowderApplyOutgoing {
     int apply_outgoing[];
 };
+#if {{POWDER_APPLY_INDEX_EPOCH}}
+layout(std430, binding=5) buffer PowderApplyEpoch {
+    uvec2 apply_epoch[];
+};
+#endif
 
 bool in_bounds(ivec2 cell) {
     return cell.x >= 0 && cell.y >= 0 && cell.x < cell_grid_size.x && cell.y < cell_grid_size.y;
@@ -71,6 +79,10 @@ void main() {
     if (target_winners[target_index] == source_rank(reservation.source_xy)) {
         apply_outgoing[source_index] = index;
         apply_incoming[target_index] = index;
+#if {{POWDER_APPLY_INDEX_EPOCH}}
+        apply_epoch[source_index].y = powder_apply_epoch;
+        apply_epoch[target_index].x = powder_apply_epoch;
+#endif
     } else {
         reservations[index].resolved_target_xy = reservation.source_xy;
         reservations[index].resolve_state = {{POWDER_RESOLVE_BLOCKED}};

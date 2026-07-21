@@ -21,11 +21,11 @@
                     int(cell_index % uint(cell_grid_size.x)),
                     int(cell_index / uint(cell_grid_size.x))
                 );
-                float material_value = texelFetch(material_tex, gid, 0).x;
-                float phase_value = texelFetch(phase_tex, gid, 0).x;
+                float material_value = material_value_at(gid);
+                float phase_value = phase_value_at(gid);
                 float temp_value = texelFetch(temp_tex, gid, 0).x;
                 float integrity_value = texelFetch(integrity_tex, gid, 0).x;
-                vec4 timer_value = texelFetch(timer_tex, gid, 0);
+                vec4 timer_value = unpack_timer(texelFetch(timer_tex, gid, 0).x);
                 vec4 deferred_action_lo = vec4(0.0);
                 vec4 deferred_action_hi = vec4(0.0);
                 vec4 deferred_scale_lo = vec4(0.0);
@@ -78,4 +78,3 @@
                     reaction_latched_value
                 );
             }
-            

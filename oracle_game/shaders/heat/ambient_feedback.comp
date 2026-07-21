@@ -36,4 +36,3 @@
                 }
                 imageStore(ambient_out_img, gid, vec4(updated, 0.0, 0.0, 0.0));
             }
-            

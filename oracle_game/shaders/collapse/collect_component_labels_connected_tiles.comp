@@ -9,6 +9,9 @@ uniform ivec2 tile_grid_size;
 uniform int tile_size;
 uniform int component_capacity;
 uniform ivec2 empty_min;
+uniform bool reject_invalid_components;
+uniform uint invalid_generation;
+#define INVALID_COMPONENT_GENERATION_VALIDITY {{INVALID_COMPONENT_GENERATION_VALIDITY}}
 
 layout(binding=0) uniform sampler2D label_tex;
 
@@ -32,6 +35,9 @@ layout(std430, binding=5) readonly buffer ConnectedTileCount {
 };
 layout(std430, binding=6) readonly buffer ConnectedTileList {
     ivec2 connected_tile_list[];
+};
+layout(std430, binding=7) readonly buffer InvalidComponents {
+    uint invalid_components[];
 };
 
 void main() {
@@ -60,6 +66,15 @@ void main() {
     int cell_index = cell.y * cell_grid_size.x + cell.x;
     int label = int(texelFetch(label_tex, cell, 0).x + 0.5);
     if (label <= 0 || label > component_capacity || label != cell_index + 1) {
+        return;
+    }
+    uint invalid_value = invalid_components[uint(label - 1)];
+#if INVALID_COMPONENT_GENERATION_VALIDITY
+    bool invalid_component = invalid_value == invalid_generation;
+#else
+    bool invalid_component = invalid_value != 0u;
+#endif
+    if (reject_invalid_components && invalid_component) {
         return;
     }
     uint output_index = atomicAdd(component_count, 1u);

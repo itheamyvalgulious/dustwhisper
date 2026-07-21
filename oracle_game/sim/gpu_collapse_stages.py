@@ -342,7 +342,7 @@ def resolve_unsupported_outcome_textures(
     pending_region = world.collapse_delay_pending[y0 : y0 + height, x0 : x0 + width]
     resources.structural_tex.write(unsupported.astype("f4", copy=False).tobytes())
     resources.support_ping.write(behavior_region.astype("f4", copy=False).tobytes())
-    resources.phase_tex.write(pending_region.astype("f4", copy=False).tobytes())
+    resources.pending_tex.write(pending_region.astype("f4", copy=False).tobytes())
     pipeline._load_authoritative_bridge_pending_region(world, resources, x0, y0, width, height)
 
     program = pipeline.programs["resolve_outcomes"]
@@ -352,7 +352,7 @@ def resolve_unsupported_outcome_textures(
     program["behavior_immune"].value = int(CollapseBehavior.IMMUNE)
     resources.structural_tex.use(location=0)
     resources.support_ping.use(location=1)
-    resources.phase_tex.use(location=2)
+    resources.pending_tex.use(location=2)
     resources.support_pong.bind_to_image(3, read=False, write=True)
     resources.material_out_tex.bind_to_image(4, read=False, write=True)
     resources.phase_out_tex.bind_to_image(5, read=False, write=True)
@@ -409,6 +409,13 @@ def resolve_supported_outcome_textures(
     *,
     eligibility_texture: Any | None = None,
     tile_mask_name: str | None = None,
+    publish_runtime_masks: bool = False,
+    publish_outputs: bool = True,
+    pending_already_loaded: bool = False,
+    publish_immune_direct: bool = False,
+    publish_delayed_direct: bool = False,
+    packed_material_snapshot: bool = False,
+    initialize_label_tile_union: bool = False,
 ) -> tuple[GPUCollapseResources, int, int]:
     ctx = world.bridge.ctx
     if ctx is None:
@@ -416,7 +423,15 @@ def resolve_supported_outcome_textures(
     if width == 0 or height == 0:
         raise ValueError("resolve_supported_outcome_textures requires a non-empty region")
     connected_tiles = pipeline._formal_gpu_frame(world) and tile_mask_name is not None
-    if connected_tiles and "collapse_delay_pending" in world.bridge.gpu_authoritative_resources:
+    publish_immune_direct = bool(publish_immune_direct and connected_tiles)
+    publish_delayed_direct = bool(publish_delayed_direct and connected_tiles)
+    if publish_delayed_direct and not publish_immune_direct:
+        raise ValueError("direct delayed publish requires direct immune publication")
+    if (publish_immune_direct or publish_delayed_direct) and publish_outputs:
+        raise ValueError("direct outcome publish requires deferred formal output publication")
+    if pending_already_loaded:
+        pass
+    elif connected_tiles and "collapse_delay_pending" in world.bridge.gpu_authoritative_resources:
         assert tile_mask_name is not None
         pipeline._load_authoritative_bridge_connected_tile_pending(
             world,
@@ -429,12 +444,59 @@ def resolve_supported_outcome_textures(
         )
     else:
         pending_region = world.collapse_delay_pending[y0 : y0 + height, x0 : x0 + width]
-        resources.phase_tex.write(pending_region.astype("f4", copy=False).tobytes())
+        resources.pending_tex.write(pending_region.astype("f4", copy=False).tobytes())
         pipeline._load_authoritative_bridge_pending_region(world, resources, x0, y0, width, height)
 
-    program = pipeline.programs[
-        "resolve_outcomes_from_supported_connected_tiles" if connected_tiles else "resolve_outcomes_from_supported"
-    ]
+    direct_behavior_inputs = bool(
+        connected_tiles
+        and pipeline._classification_bridge_hydration_fusion_enabled
+        and "cell_core" in world.bridge.gpu_authoritative_resources
+    )
+    if packed_material_snapshot and not (
+        connected_tiles
+        and direct_behavior_inputs
+        and publish_delayed_direct
+        and not publish_runtime_masks
+    ):
+        raise ValueError("packed material snapshot requires the incremental direct-outcome path")
+    if connected_tiles:
+        program_suffix = "_bridge" if direct_behavior_inputs else ""
+        if publish_runtime_masks:
+            program_suffix += "_publish"
+        if publish_delayed_direct:
+            program_suffix += "_outcomes"
+        elif publish_immune_direct:
+            program_suffix += "_immune"
+        if packed_material_snapshot:
+            program_suffix += "_packed"
+        use_u8 = (
+            supported_texture is resources.support_u8_ping
+            or supported_texture is resources.support_u8_pong
+        )
+        if initialize_label_tile_union:
+            supported_configuration = bool(
+                direct_behavior_inputs
+                and use_u8
+                and not publish_runtime_masks
+                and publish_immune_direct
+                and publish_delayed_direct
+                and not packed_material_snapshot
+            )
+            if not supported_configuration:
+                raise ValueError(
+                    "fused outcome/label-local initialization requires the direct U8 "
+                    "incremental outcome path"
+                )
+            program = pipeline.programs[
+                "resolve_outcomes_from_supported_connected_tiles_bridge_outcomes_u8_label_local"
+            ]
+        else:
+            program = pipeline.programs[
+                f"resolve_outcomes_from_supported_connected_tiles{program_suffix}"
+                f"{'_u8' if use_u8 else ''}"
+            ]
+    else:
+        program = pipeline.programs["resolve_outcomes_from_supported"]
     if connected_tiles and not hasattr(program, "run_indirect"):
         raise RuntimeError("formal connected outcome resolve requires ComputeShader.run_indirect")
     program["region_size"].value = (width, height)
@@ -442,7 +504,12 @@ def resolve_supported_outcome_textures(
     program["behavior_delayed"].value = int(CollapseBehavior.DELAYED)
     program["behavior_immune"].value = int(CollapseBehavior.IMMUNE)
     program["use_eligibility"].value = eligibility_texture is not None
+    if direct_behavior_inputs:
+        program["material_count"].value = int(resources.material_collapse_behavior.size // 4)
     if connected_tiles:
+        if publish_runtime_masks or publish_immune_direct or publish_delayed_direct:
+            program["region_origin"].value = (int(x0), int(y0))
+            program["cell_grid_size"].value = (int(world.width), int(world.height))
         program["tile_grid_size"].value = (
             int(getattr(world.active, "tile_width", 1)),
             int(getattr(world.active, "tile_height", 1)),
@@ -453,8 +520,10 @@ def resolve_supported_outcome_textures(
     resources.structural_tex.use(location=0)
     supported_texture.use(location=1)
     resources.material_out_tex.use(location=2)
-    resources.phase_tex.use(location=3)
+    resources.pending_tex.use(location=3)
     (eligibility_texture if eligibility_texture is not None else resources.structural_tex).use(location=7)
+    if direct_behavior_inputs and not packed_material_snapshot:
+        resources.material_tex.use(location=8)
     resources.temp_out_tex.bind_to_image(4, read=False, write=True)
     resources.integrity_out_tex.bind_to_image(5, read=False, write=True)
     resources.phase_out_tex.bind_to_image(6, read=False, write=True)
@@ -463,13 +532,41 @@ def resolve_supported_outcome_textures(
         world.bridge.buffers[tile_mask_name].bind_to_storage_buffer(binding=0)
         world.bridge.buffers[FORMAL_CONNECTED_TILE_COUNT_BUFFER].bind_to_storage_buffer(binding=1)
         world.bridge.buffers[FORMAL_CONNECTED_TILE_LIST_BUFFER].bind_to_storage_buffer(binding=2)
+        if publish_runtime_masks:
+            world.bridge.buffers["collapse_supported_mask"].bind_to_storage_buffer(binding=3)
+            world.bridge.buffers["collapse_unsupported_mask"].bind_to_storage_buffer(binding=4)
+        if direct_behavior_inputs:
+            resources.material_collapse_behavior.bind_to_storage_buffer(binding=5)
+        if publish_immune_direct:
+            world.bridge.buffers["collapse_immune_unsupported_mask"].bind_to_storage_buffer(binding=6)
+        if publish_delayed_direct:
+            world.bridge.buffers["collapse_delay_pending"].bind_to_storage_buffer(binding=7)
+            world.bridge.buffers["collapse_delayed_pending_mask"].bind_to_storage_buffer(binding=8)
+        if packed_material_snapshot:
+            resources.component_labels.bind_to_storage_buffer(binding=9)
+        if initialize_label_tile_union:
+            roots = resources.support_tile_union_roots
+            parents = resources.support_tile_union_parent
+            if roots is None or parents is None:
+                raise RuntimeError("fused outcome/label-local buffers were not allocated")
+            roots.bind_to_storage_buffer(binding=10)
+            parents.bind_to_storage_buffer(binding=11)
         program.run_indirect(world.bridge.buffers[FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER])
     else:
         group_x = (width + LOCAL_SIZE - 1) // LOCAL_SIZE
         group_y = (height + LOCAL_SIZE - 1) // LOCAL_SIZE
         program.run(group_x, group_y, 1)
-    ctx.memory_barrier(ctx.SHADER_IMAGE_ACCESS_BARRIER_BIT | ctx.TEXTURE_FETCH_BARRIER_BIT)
-    if pipeline._formal_gpu_frame(world):
+    barrier_bits = ctx.SHADER_IMAGE_ACCESS_BARRIER_BIT | ctx.TEXTURE_FETCH_BARRIER_BIT
+    if publish_runtime_masks or publish_immune_direct or publish_delayed_direct:
+        barrier_bits |= ctx.SHADER_STORAGE_BARRIER_BIT
+    if publish_runtime_masks:
+        world.bridge.mark_gpu_authoritative("collapse_supported_mask", "collapse_unsupported_mask")
+    if publish_immune_direct:
+        world.bridge.mark_gpu_authoritative("collapse_immune_unsupported_mask")
+    if publish_delayed_direct:
+        world.bridge.mark_gpu_authoritative("collapse_delay_pending", "collapse_delayed_pending_mask")
+    ctx.memory_barrier(barrier_bits)
+    if pipeline._formal_gpu_frame(world) and publish_outputs:
         pipeline._publish_bridge_pending_region_outputs_from_texture(
             world,
             resources,
@@ -513,7 +610,11 @@ def resolve_supported_outcome_textures(
             height,
             tile_mask_name=tile_mask_name if connected_tiles else None,
         )
-    else:
+    elif not pipeline._formal_gpu_frame(world):
+        # Formal GPU callers keep the result on-device. The barrier above is
+        # sufficient for dependent texture reads; a client-side finish here
+        # only drains the queue and prevents the rest of the frame from being
+        # submitted while outcome resolution is still running.
         ctx.finish()
     return resources, width, height
 
@@ -550,16 +651,24 @@ def _run_pass(
 
 
 def release(pipeline) -> None:
+    pipeline._component_invalid_generation = 0
+    pipeline._active_component_flag_generation = 0
+    pipeline._formal_dirty_epoch = None
+    pipeline._pending_formal_runtime_admission = None
+    pipeline._invalidate_persistent_dense_tile_worklist()
     if pipeline.resources is None:
         return
     for resource in (
         pipeline.resources.structural_tex,
         pipeline.resources.support_ping,
         pipeline.resources.support_pong,
+        pipeline.resources.support_u8_ping,
+        pipeline.resources.support_u8_pong,
         pipeline.resources.material_tex,
         pipeline.resources.material_out_tex,
         pipeline.resources.phase_tex,
         pipeline.resources.phase_out_tex,
+        pipeline.resources.pending_tex,
         pipeline.resources.cell_flags_tex,
         pipeline.resources.cell_flags_out_tex,
         pipeline.resources.timer_tex,
@@ -579,9 +688,15 @@ def release(pipeline) -> None:
         pipeline.resources.component_island_ids,
         pipeline.resources.component_metadata,
         pipeline.resources.component_flags,
+        pipeline.resources.component_invalid,
         pipeline.resources.component_count,
         pipeline.resources.component_dispatch_args,
         pipeline.resources.region_flags,
+        pipeline.resources.support_tile_union_roots,
+        pipeline.resources.support_tile_union_parent,
+        pipeline.resources.support_tile_union_seeded,
+        pipeline.resources.support_tile_union_edges,
+        pipeline.resources.support_tile_union_edge_count,
         pipeline.resources.connected_tile_row_masks,
         pipeline.resources.connected_tile_column_masks,
         pipeline.resources.material_structural,
@@ -591,6 +706,8 @@ def release(pipeline) -> None:
         pipeline.resources.material_base_integrity,
         pipeline.resources.material_spawn_temperature,
     ):
+        if resource is None:
+            continue
         try:
             resource.release()
         except Exception:

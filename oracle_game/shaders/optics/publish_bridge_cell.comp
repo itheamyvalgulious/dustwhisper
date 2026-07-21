@@ -3,12 +3,18 @@
             layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
             uniform ivec2 cell_grid_size;
             uniform int dose_channel_count;
+            uniform bool publish_cell_dose;
+            uniform bool clear_reaction_latches;
+            uniform uint reaction_latched_flag_shifted;
             layout(binding=0) uniform sampler2D visible_tex;
             layout(binding=1) uniform sampler2DArray cell_dose_tex;
             layout(rgba32f, binding=2) writeonly uniform image2D bridge_light_img;
             layout(rgba32f, binding=3) writeonly uniform image2D bridge_visible_img;
             layout(std430, binding=4) writeonly buffer BridgeCellDoseBuffer {
                 float bridge_cell_dose[];
+            };
+            layout(std430, binding=5) buffer BridgeCellCoreBuffer {
+                uint bridge_cell_core[];
             };
             void main() {
                 ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
@@ -20,8 +26,14 @@
                     vec3 visible = texelFetch(visible_tex, gid, 0).xyz;
                     imageStore(bridge_light_img, gid, vec4(visible, 1.0));
                     imageStore(bridge_visible_img, gid, vec4(visible, 1.0));
+                    if (clear_reaction_latches) {
+                        int cell_index = gid.y * cell_grid_size.x + gid.x;
+                        int word_index = cell_index * 5;
+                        bridge_cell_core[word_index] &= ~reaction_latched_flag_shifted;
+                    }
                 }
-                int dst_index = (channel * cell_grid_size.y + gid.y) * cell_grid_size.x + gid.x;
-                bridge_cell_dose[dst_index] = texelFetch(cell_dose_tex, ivec3(gid, channel), 0).x;
+                if (publish_cell_dose) {
+                    int dst_index = (channel * cell_grid_size.y + gid.y) * cell_grid_size.x + gid.x;
+                    bridge_cell_dose[dst_index] = texelFetch(cell_dose_tex, ivec3(gid, channel), 0).x;
+                }
             }
-            

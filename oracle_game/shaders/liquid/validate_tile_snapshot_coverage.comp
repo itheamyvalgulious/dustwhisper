@@ -1,0 +1,47 @@
+#version 430
+layout(local_size_x=256, local_size_y=1, local_size_z=1) in;
+uniform ivec2 tile_grid_size;
+layout(std430, binding=0) buffer TileSnapshotTokenBuffer {
+    uint tile_snapshot_state[];
+};
+layout(std430, binding=1) readonly buffer TileSnapshotTileTokenBuffer {
+    uvec2 tile_snapshot_tile_tokens[];
+};
+layout(std430, binding=2) readonly buffer ActiveTileCountBuffer {
+    uint active_tile_count[];
+};
+layout(std430, binding=3) readonly buffer ActiveTileListBuffer {
+    ivec2 active_tile_list[];
+};
+shared uint coverage_invalid;
+
+void main() {
+    uint lane = gl_LocalInvocationIndex;
+    uvec2 token = uvec2(tile_snapshot_state[0], tile_snapshot_state[1]);
+    if (lane == 0u) {
+        coverage_invalid = any(notEqual(token, uvec2(0u))) ? 0u : 1u;
+    }
+    barrier();
+    for (uint index = lane; index < active_tile_count[0]; index += 256u) {
+        ivec2 tile = active_tile_list[index];
+        if (
+            tile.x < 0
+            || tile.y < 0
+            || tile.x >= tile_grid_size.x
+            || tile.y >= tile_grid_size.y
+        ) {
+            atomicOr(coverage_invalid, 1u);
+        } else {
+            int tile_index = tile.y * tile_grid_size.x + tile.x;
+            if (any(notEqual(tile_snapshot_tile_tokens[tile_index], token))) {
+                atomicOr(coverage_invalid, 1u);
+            }
+        }
+    }
+    barrier();
+    if (lane == 0u) {
+        tile_snapshot_state[2] = token.x;
+        tile_snapshot_state[3] = token.y;
+        tile_snapshot_state[4] = coverage_invalid;
+    }
+}

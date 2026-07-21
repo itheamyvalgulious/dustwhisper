@@ -113,7 +113,14 @@ def _active_masks_for_cell_reaction_upload(
 
 def _reaction_state_segment(pipeline, reaction_group: str | None) -> str | None:
     if (
-        reaction_group in {"material_material", "material_gas", "material_light", "gas_gas", "gas_light"}
+        reaction_group in {
+            "material_material",
+            "material_gas",
+            "material_pair_fused",
+            "material_light",
+            "gas_gas",
+            "gas_light",
+        }
         and pipeline._formal_segment_batch_base_key is not None
         and len(pipeline._formal_segment_batch_base_key) >= 3
         and pipeline._formal_segment_batch_base_key[2] in {"before_motion", "after_optics"}
@@ -124,6 +131,7 @@ def _reaction_state_segment(pipeline, reaction_group: str | None) -> str | None:
         "self",
         "material_material",
         "material_gas",
+        "material_pair_fused",
         "material_light",
         "gas_gas",
         "gas_light",
@@ -191,6 +199,7 @@ def _formal_reaction_active_mask_cache_key(
     *,
     expansion_radius: int,
     load_cell_mask: bool = True,
+    load_expanded_tile_mask: bool = False,
     load_gas_mask: bool = True,
 ) -> tuple[object, ...] | None:
     segment = pipeline._reaction_state_segment(reaction_group)
@@ -205,9 +214,18 @@ def _formal_reaction_active_mask_cache_key(
         id(world.bridge.buffers.get("active_chunk_mask")),
         id(world.bridge.buffers.get("active_meta")),
         bool(load_cell_mask),
+        bool(load_expanded_tile_mask),
         bool(load_gas_mask),
     )
 
+
+def _can_use_expanded_active_tile_mask(pipeline, world: "WorldEngine") -> bool:
+    return bool(
+        pipeline._expanded_active_tile_mask_enabled
+        and pipeline._formal_gpu_frame(world)
+        and pipeline._active_scheduler_gpu_authoritative(world)
+        and int(world.active.tile_size) == 32
+    )
 
 
 def _formal_reaction_state_cache_active(pipeline) -> bool:
@@ -220,6 +238,17 @@ def _formal_segment_batch_active(pipeline) -> bool:
         pipeline._formal_segment_batch_key is not None
         and pipeline._formal_state_cache_key is not None
         and pipeline._formal_segment_batch_key == pipeline._formal_state_cache_key
+    )
+
+
+
+def _formal_terminal_gas_publish_fusion_pending(pipeline) -> bool:
+    return bool(
+        pipeline._terminal_gas_publish_fusion_enabled
+        and pipeline._formal_segment_batch_active()
+        and pipeline._formal_segment_batch_key[2] == "before_motion"
+        and pipeline._formal_pending_gas_delta_key
+        == pipeline._formal_segment_batch_key
     )
 
 
@@ -272,12 +301,59 @@ def _reset_formal_cell_read_role(pipeline) -> None:
     pipeline._formal_cell_state_read_role = "ping"
 
 
+def _formal_velocity_read_role(pipeline) -> str:
+    """Return the resident velocity role for the current formal segment.
+
+    Velocity is immutable for reaction passes unless an EMIT_MATERIAL side
+    effect runs.  Before the role cache is initialized, fall back to the cell
+    role for compatibility with callers that construct a cache manually.
+    """
+    if not pipeline._formal_state_key_is_before_motion():
+        return "ping"
+    if pipeline._formal_velocity_state_role_key != pipeline._formal_state_cache_key:
+        return pipeline._formal_cell_read_role()
+    return pipeline._formal_velocity_state_read_role
+
+
+def _formal_velocity_write_role(pipeline) -> str:
+    return "pong" if pipeline._formal_velocity_read_role() == "ping" else "ping"
+
+
+def _set_formal_velocity_read_role(pipeline, role: str) -> None:
+    if role not in {"ping", "pong"}:
+        raise ValueError(f"unsupported velocity state role {role!r}")
+    if not pipeline._formal_state_key_is_before_motion():
+        return
+    pipeline._formal_velocity_state_role_key = pipeline._formal_state_cache_key
+    pipeline._formal_velocity_state_read_role = role
+
+
+def _advance_formal_velocity_read_role(pipeline) -> None:
+    pipeline._set_formal_velocity_read_role(pipeline._formal_velocity_write_role())
+
+
+def _reset_formal_velocity_read_role(pipeline) -> None:
+    pipeline._formal_velocity_state_role_key = None
+    pipeline._formal_velocity_state_read_role = "ping"
+
+
+def _clear_formal_external_cell_state(pipeline) -> None:
+    pipeline._formal_external_cell_state_key = None
+    pipeline._formal_external_cell_state_textures = None
+    pipeline._formal_external_cell_flags_texture = None
+
+
 
 def _cell_role_textures(pipeline, resources: GPUReactionResources, role: str) -> tuple[Any, Any, Any, Any, Any, Any]:
     if role == "ping":
+        if (
+            pipeline._formal_external_cell_state_key == pipeline._formal_state_cache_key
+            and pipeline._formal_external_cell_state_textures is not None
+        ):
+            return pipeline._formal_external_cell_state_textures
         return (
-            resources.material_ping,
-            resources.phase_ping,
+            resources.cell_state_ping,
+            resources.cell_state_ping,
             resources.temp_ping,
             resources.integrity_ping,
             resources.velocity_ping,
@@ -285,8 +361,8 @@ def _cell_role_textures(pipeline, resources: GPUReactionResources, role: str) ->
         )
     if role == "pong":
         return (
-            resources.material_pong,
-            resources.phase_pong,
+            resources.cell_state_pong,
+            resources.cell_state_pong,
             resources.temp_pong,
             resources.integrity_pong,
             resources.velocity_pong,
@@ -297,14 +373,22 @@ def _cell_role_textures(pipeline, resources: GPUReactionResources, role: str) ->
 
 
 def _current_cell_textures(pipeline, resources: GPUReactionResources) -> tuple[Any, Any, Any, Any, Any, Any]:
-    return pipeline._cell_role_textures(resources, pipeline._formal_cell_read_role())
+    cell_role = pipeline._formal_cell_read_role()
+    velocity_role = pipeline._formal_velocity_read_role()
+    material, phase, temp, integrity, _velocity, timer = pipeline._cell_role_textures(resources, cell_role)
+    velocity = pipeline._cell_role_textures(resources, velocity_role)[4]
+    return material, phase, temp, integrity, velocity, timer
 
 
 
 def _next_cell_textures(pipeline, resources: GPUReactionResources) -> tuple[Any, Any, Any, Any, Any, Any]:
     if not pipeline._formal_before_motion_cell_roles_active():
         return pipeline._cell_role_textures(resources, "pong")
-    return pipeline._cell_role_textures(resources, pipeline._formal_cell_write_role())
+    cell_role = pipeline._formal_cell_write_role()
+    velocity_role = pipeline._formal_velocity_write_role()
+    material, phase, temp, integrity, _velocity, timer = pipeline._cell_role_textures(resources, cell_role)
+    velocity = pipeline._cell_role_textures(resources, velocity_role)[4]
+    return material, phase, temp, integrity, velocity, timer
 
 
 
@@ -314,6 +398,9 @@ def begin_formal_reaction_segment(pipeline, world: "WorldEngine", segment: str) 
         return False
     pipeline._formal_segment_batch_base_key = base_key
     pipeline._formal_segment_batch_key = None
+    pipeline._reset_formal_segment_meta_lazy_zero()
+    pipeline.last_terminal_segment_meta_lazy_zero_used = False
+    pipeline.last_segment_meta_lazy_clear_skipped = False
     pipeline._formal_light_counters_cleared_key = None
     pipeline._formal_pending_bridge_publish_key = None
     pipeline._formal_pending_bridge_publish.clear()
@@ -322,7 +409,11 @@ def begin_formal_reaction_segment(pipeline, world: "WorldEngine", segment: str) 
     pipeline._formal_loaded_bridge_inputs_key = None
     pipeline._formal_loaded_bridge_inputs.clear()
     pipeline._reset_formal_cell_read_role()
+    pipeline._reset_formal_velocity_read_role()
+    pipeline._clear_formal_external_cell_state()
     pipeline._phase_c_rxn_candidate = None
+    pipeline._motion_handoff_candidate = None
+    pipeline.last_terminal_gas_publish_fusion_used = False
     return True
 
 
@@ -333,6 +424,7 @@ def end_formal_reaction_segment(pipeline, world: "WorldEngine", segment: str) ->
         return
     pipeline._formal_segment_batch_base_key = None
     pipeline._formal_segment_batch_key = None
+    pipeline._reset_formal_segment_meta_lazy_zero()
     pipeline._formal_light_counters_cleared_key = None
     pipeline._formal_pending_bridge_publish_key = None
     pipeline._formal_pending_bridge_publish.clear()
@@ -341,6 +433,8 @@ def end_formal_reaction_segment(pipeline, world: "WorldEngine", segment: str) ->
     pipeline._formal_loaded_bridge_inputs_key = None
     pipeline._formal_loaded_bridge_inputs.clear()
     pipeline._reset_formal_cell_read_role()
+    pipeline._reset_formal_velocity_read_role()
+    pipeline._clear_formal_external_cell_state()
 
 
 
@@ -376,28 +470,71 @@ def flush_formal_reaction_segment(pipeline, world: "WorldEngine", segment: str) 
         pipeline._formal_pending_bridge_publish_key = None
         return gas_delta_flushed
     if "cell" in pending:
-        if bool(getattr(world, "phase_c_defer_cell_publish", False)):
-            role = pipeline._formal_cell_read_role() if pipeline._formal_before_motion_cell_roles_active() else "pong"
-            mt, pt, tp, it, vt, tm = pipeline._cell_role_textures(pipeline.resources, role)
-            pipeline._phase_c_rxn_candidate = {
-                "material": mt, "phase": pt, "temp": tp, "integrity": it,
-                "velocity": vt, "timer": tm,
-                "latched": pipeline.resources.segment_reaction_latched_tex,
-            }
+        defer_phase_c = bool(getattr(world, "phase_c_defer_cell_publish", False))
+        motion_pipeline = getattr(getattr(world, "motion_solver", None), "gpu_pipeline", None)
+        terminal_handoff = bool(
+            isinstance(pipeline._motion_handoff_candidate, dict)
+            and pipeline._motion_handoff_candidate.get("terminal_integrated") is True
+            and int(pipeline._motion_handoff_candidate.get("frame_id", -1))
+            == int(getattr(world, "frame_id", 0))
+        )
+        if not terminal_handoff:
+            pipeline._ensure_formal_segment_meta_physical_zero(
+                world,
+                pipeline.resources,
+            )
+        defer_to_motion = bool(
+            terminal_handoff
+            or (
+                not defer_phase_c
+                and segment == "before_motion"
+                and motion_pipeline is not None
+                and motion_pipeline.can_consume_reaction_handoff(world)
+            )
+        )
+        if defer_phase_c or defer_to_motion:
+            if not terminal_handoff:
+                role = pipeline._formal_cell_read_role() if pipeline._formal_before_motion_cell_roles_active() else "pong"
+                mt, pt, tp, it, _vt, tm = pipeline._cell_role_textures(pipeline.resources, role)
+                vt = pipeline._cell_role_textures(
+                    pipeline.resources,
+                    pipeline._formal_velocity_read_role()
+                    if pipeline._formal_before_motion_cell_roles_active()
+                    else role,
+                )[4]
+                candidate = {
+                    "cell_state": mt,
+                    "material": mt, "phase": pt, "temp": tp, "integrity": it,
+                    "velocity": vt, "timer": tm,
+                    "base_flags": pipeline._formal_external_cell_flags_texture,
+                    "meta": pipeline.resources.segment_cell_meta_tex,
+                    "frame_id": int(getattr(world, "frame_id", 0)),
+                }
+                if defer_phase_c:
+                    pipeline._phase_c_rxn_candidate = candidate
+                if defer_to_motion:
+                    pipeline._motion_handoff_candidate = candidate
         with pipeline._profile_pass(world, "publish_bridge_cell"):
-            if not bool(getattr(world, "phase_c_defer_cell_publish", False)):
+            if not defer_phase_c and not defer_to_motion:
                 pipeline._publish_bridge_cell_state(
                     world,
                     pipeline.resources,
                     source_role=pipeline._formal_cell_read_role()
                     if pipeline._formal_before_motion_cell_roles_active()
                     else None,
-                    cell_reset_texture=pipeline.resources.segment_cell_reset_tex,
-                    reaction_latched_texture=pipeline.resources.segment_reaction_latched_tex,
+                    source_velocity_role=pipeline._formal_velocity_read_role()
+                    if pipeline._formal_before_motion_cell_roles_active()
+                    else None,
+                    cell_meta_texture=pipeline.resources.segment_cell_meta_tex,
                 )
     if "gas" in pending:
         with pipeline._profile_pass(world, "publish_bridge_gas"):
-            pipeline._publish_bridge_gas_state(world, pipeline.resources)
+            pipeline._publish_bridge_gas_state(
+                world,
+                pipeline.resources,
+                gas_texture=pipeline.resources.gas_ping,
+                ambient_texture=pipeline.resources.ambient_ping,
+            )
     if "dose" in pending:
         with pipeline._profile_pass(world, "publish_bridge_dose"):
             pipeline._publish_bridge_dose_state(world, pipeline.resources)
@@ -421,11 +558,12 @@ def _clear_formal_segment_gas_delta(
     ctx = world.bridge.ctx
     assert ctx is not None
     gas_delta_count = int(world.gas_width * world.gas_height * world.gas_concentration.shape[0])
+    clear_local_size = LOCAL_SIZE
     clear_program = pipeline.programs["clear_cell_gas_delta"]
     clear_program["delta_count"].value = gas_delta_count
     resources.gas_delta_buffer.bind_to_storage_buffer(binding=0)
     with pipeline._profile_pass(world, "cell_gas_action_delta_segment_clear"):
-        clear_program.run((gas_delta_count + LOCAL_SIZE - 1) // LOCAL_SIZE, 1, 1)
+        clear_program.run((gas_delta_count + clear_local_size - 1) // clear_local_size, 1, 1)
         ctx.memory_barrier(ctx.SHADER_STORAGE_BARRIER_BIT)
     pipeline._formal_pending_gas_delta_key = segment_key
 
@@ -441,20 +579,48 @@ def _flush_formal_segment_gas_delta(
         return False
     ctx = world.bridge.ctx
     assert ctx is not None
-    apply_program = pipeline.programs["apply_cell_gas_delta"]
+    fused_bridge_publish = pipeline._formal_terminal_gas_publish_fusion_pending()
+    apply_program = pipeline.programs[
+        "apply_cell_gas_delta_publish_bridge"
+        if fused_bridge_publish
+        else "apply_cell_gas_delta"
+    ]
     apply_program["gas_grid_size"].value = (world.gas_width, world.gas_height)
     apply_program["gas_count"].value = int(world.gas_concentration.shape[0])
     resources.gas_ping.use(location=0)
     resources.gas_delta_buffer.bind_to_storage_buffer(binding=0)
     resources.gas_pong.bind_to_image(0, read=False, write=True)
+    if fused_bridge_publish:
+        resources.ambient_ping.use(location=1)
+        world.bridge.buffers["gas_concentration"].bind_to_storage_buffer(binding=1)
+        world.bridge.textures["ambient_temperature"].bind_to_image(
+            1,
+            read=False,
+            write=True,
+        )
     with pipeline._profile_pass(world, "cell_gas_action_delta_segment_apply"):
         apply_program.run(
             (world.gas_width + LOCAL_SIZE - 1) // LOCAL_SIZE,
             (world.gas_height + LOCAL_SIZE - 1) // LOCAL_SIZE,
             int(world.gas_concentration.shape[0]),
         )
-        pipeline._sync_compute_writes(ctx)
+        if fused_bridge_publish:
+            ctx.memory_barrier(
+                ctx.SHADER_IMAGE_ACCESS_BARRIER_BIT
+                | ctx.SHADER_STORAGE_BARRIER_BIT
+                | ctx.TEXTURE_FETCH_BARRIER_BIT,
+            )
+        else:
+            pipeline._sync_compute_writes(ctx)
     pipeline._download_gas_state(world, resources)
+    if fused_bridge_publish:
+        world.bridge.mark_gpu_authoritative(
+            "gas_concentration",
+            "ambient_temperature",
+        )
+        if pipeline._formal_pending_bridge_publish_key == segment_key:
+            pipeline._formal_pending_bridge_publish.discard("gas")
+        pipeline.last_terminal_gas_publish_fusion_used = True
     pipeline._formal_pending_gas_delta_key = None
     return True
 
@@ -493,29 +659,48 @@ def _upload_active_masks(
     light_dose_guard_buffer: Any | None = None,
     load_cell_mask: bool = True,
     load_gas_mask: bool = True,
+    use_expanded_tile_mask: bool = False,
 ) -> None:
     active_authoritative = pipeline._active_scheduler_gpu_authoritative(world)
     pipeline.last_cpu_active_upload_skipped = bool(active_authoritative)
+    use_expanded_tile_mask = bool(
+        use_expanded_tile_mask
+        and load_cell_mask
+        and pipeline._can_use_expanded_active_tile_mask(world)
+    )
+    pipeline.last_expanded_active_tile_mask_used = use_expanded_tile_mask
     if active_authoritative:
+        load_expanded_tile_mask = use_expanded_tile_mask
+        load_cell_mask = bool(load_cell_mask and not load_expanded_tile_mask)
         cache_key = pipeline._formal_reaction_active_mask_cache_key(
             world,
             resources,
             reaction_group,
             expansion_radius=1,
             load_cell_mask=load_cell_mask,
+            load_expanded_tile_mask=load_expanded_tile_mask,
             load_gas_mask=load_gas_mask,
         )
         existing_cache_key = pipeline._formal_active_mask_cache_key
-        if cache_key is not None and existing_cache_key is not None and existing_cache_key[:-2] == cache_key[:-2]:
-            existing_load_cell = bool(existing_cache_key[-2])
+        if cache_key is not None and existing_cache_key is not None and existing_cache_key[:-3] == cache_key[:-3]:
+            existing_load_cell = bool(existing_cache_key[-3])
+            existing_load_expanded_tile = bool(existing_cache_key[-2])
             existing_load_gas = bool(existing_cache_key[-1])
-            if (not load_cell_mask or existing_load_cell) and (not load_gas_mask or existing_load_gas):
+            if (
+                (not load_cell_mask or existing_load_cell)
+                and (not load_expanded_tile_mask or existing_load_expanded_tile)
+                and (not load_gas_mask or existing_load_gas)
+            ):
                 return
             load_cell_mask = bool(load_cell_mask and not existing_load_cell)
+            load_expanded_tile_mask = bool(
+                load_expanded_tile_mask and not existing_load_expanded_tile
+            )
             load_gas_mask = bool(load_gas_mask and not existing_load_gas)
             cache_key = (
-                *cache_key[:-2],
+                *cache_key[:-3],
                 bool(load_cell_mask or existing_load_cell),
+                bool(load_expanded_tile_mask or existing_load_expanded_tile),
                 bool(load_gas_mask or existing_load_gas),
             )
         elif cache_key is not None and existing_cache_key == cache_key:
@@ -526,6 +711,7 @@ def _upload_active_masks(
             expansion_radius=1,
             light_dose_guard_buffer=light_dose_guard_buffer,
             load_cell_mask=load_cell_mask,
+            load_expanded_tile_mask=load_expanded_tile_mask,
             load_gas_mask=load_gas_mask,
         )
         pipeline._formal_active_mask_cache_key = cache_key
@@ -550,6 +736,7 @@ def _load_authoritative_active_masks(
     expansion_radius: int,
     light_dose_guard_buffer: Any | None = None,
     load_cell_mask: bool = True,
+    load_expanded_tile_mask: bool = False,
     load_gas_mask: bool = True,
 ) -> None:
     bridge = world.bridge
@@ -559,6 +746,15 @@ def _load_authoritative_active_masks(
     active_mask_loads = []
     if load_cell_mask:
         active_mask_loads.append(("load_active_cell", resources.active_cell_tex, world.width, world.height))
+    if load_expanded_tile_mask:
+        active_mask_loads.append(
+            (
+                "load_expanded_active_tiles",
+                resources.expanded_active_tile_tex,
+                world.active.tile_width,
+                world.active.tile_height,
+            )
+        )
     if load_gas_mask:
         active_mask_loads.append(("load_active_gas", resources.active_gas_tex, world.gas_width, world.gas_height))
     for name, texture, width, height in active_mask_loads:
@@ -586,5 +782,6 @@ def _load_authoritative_active_masks(
                 )
             else:
                 program.run(group_x, group_y, 1)
+            if name == "load_expanded_active_tiles":
+                pipeline.expanded_active_tile_mask_build_count += 1
     pipeline._sync_compute_writes(bridge.ctx)
-

@@ -2,7 +2,7 @@
             #version 430
             layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
             uniform ivec2 cell_grid_size;
-            layout(binding=0) uniform sampler2D material_tex;
+            layout(binding=0) uniform usampler2D cell_state_tex;
             layout(binding=1) uniform sampler2D velocity_tex;
             layout(binding=2) uniform sampler2D temp_tex;
             layout(binding=3) uniform sampler2DArray deferred_lo_local_tex;
@@ -28,13 +28,21 @@
             layout(std430, binding=15) buffer ReactionCounters {
                 uint reaction_counts[16];
             };
-            layout(r32f, binding=0) writeonly uniform image2D material_out_img;
-            layout(r32f, binding=1) writeonly uniform image2D phase_out_img;
+            layout(r32ui, binding=0) writeonly uniform uimage2D cell_state_out_img;
             layout(r32f, binding=2) writeonly uniform image2D temp_out_img;
             layout(r32f, binding=3) writeonly uniform image2D integrity_out_img;
             layout(rg32f, binding=4) writeonly uniform image2D velocity_out_img;
-            layout(rgba32f, binding=5) writeonly uniform image2D timer_out_img;
+            layout(r32ui, binding=5) writeonly uniform uimage2D timer_out_img;
             layout(r32f, binding=6) writeonly uniform image2D emitted_material_mask_img;
+
+            uint material_id_at(ivec2 cell) {
+                return texelFetch(cell_state_tex, cell, 0).x & 0xFFFFu;
+            }
+
+            uint pack_emitted_cell_state(int material_id, float phase) {
+                uint phase_id = uint(clamp(int(round(phase)), 0, 255));
+                return (uint(material_id) & 0xFFFFu) | (phase_id << 16u);
+            }
 
             uint linear_thread_index() {
                 return uint(gl_GlobalInvocationID.y) * (uint(gl_NumWorkGroups.x) * uint(gl_WorkGroupSize.x))
@@ -130,14 +138,13 @@
                 float target_integrity = material_params[material_id].x;
                 float current_temp = texelFetch(temp_tex, target, 0).x;
                 float spawn_temp = material_params[material_id].z;
-                imageStore(material_out_img, target, vec4(float(material_id), 0.0, 0.0, 0.0));
-                imageStore(phase_out_img, target, vec4(target_phase, 0.0, 0.0, 0.0));
+                imageStore(cell_state_out_img, target, uvec4(pack_emitted_cell_state(material_id, target_phase), 0u, 0u, 0u));
                 imageStore(integrity_out_img, target, vec4(target_integrity, 0.0, 0.0, 0.0));
                 if (spawn_temp == spawn_temp) {
                     imageStore(temp_out_img, target, vec4(max(current_temp, spawn_temp), 0.0, 0.0, 0.0));
                 }
                 imageStore(velocity_out_img, target, vec4(emitted_velocity(source, target, ai, af), 0.0, 0.0));
-                imageStore(timer_out_img, target, vec4(0.0));
+                imageStore(timer_out_img, target, uvec4(0u));
                 imageStore(emitted_material_mask_img, target, vec4(1.0, 0.0, 0.0, 0.0));
                 atomicAdd(reaction_counts[1], 1u);
                 atomicAdd(reaction_counts[1 + {{TYPE_EMIT_MATERIAL}}], 1u);
@@ -153,7 +160,10 @@
                     int(target_index % uint(cell_grid_size.x)),
                     int(target_index / uint(cell_grid_size.x))
                 );
-                if (texelFetch(material_tex, target, 0).x > 0.5) {
+                // In-place candidates may have consumed their own material.
+                // Such a target was occupied in the pre-action snapshot and
+                // must remain ineligible for same-pass emission.
+                if (material_id_at(target) != 0u || source_is_timed_candidate(target)) {
                     return;
                 }
                 for (int sy = max(0, target.y - 1); sy <= min(cell_grid_size.y - 1, target.y + 1); ++sy) {
@@ -181,4 +191,3 @@
                     }
                 }
             }
-            

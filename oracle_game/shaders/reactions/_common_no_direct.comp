@@ -9,13 +9,12 @@
             uniform int random_target_count;
             uniform bool direct_gas_delta_enabled;
             uniform uint direct_modify_gas_layer_mask;
-            layout(binding=0) uniform sampler2D material_tex;
-            layout(binding=1) uniform sampler2D phase_tex;
+            layout(binding=0) uniform usampler2D cell_state_tex;
             layout(binding=2) uniform sampler2D temp_tex;
             layout(binding=3) uniform sampler2D integrity_tex;
             layout(binding=4) uniform sampler2DArray gas_tex;
             layout(binding=5) uniform sampler2DArray dose_tex;
-            layout(binding=6) uniform sampler2D timer_tex;
+            layout(binding=6) uniform usampler2D timer_tex;
             layout(binding=7) uniform sampler2D active_cell_tex;
             layout(binding=8) uniform sampler2D velocity_tex;
             layout(std430, binding=0) buffer MaterialParams {
@@ -37,7 +36,7 @@
             layout(std430, binding=5) buffer RuleTags {
                 uvec4 rule_tags[{{MAX_RULES}}];
             };
-        
+
             layout(std430, binding=6) buffer MaterialTags {
                 uvec4 material_tags[{{MAX_MATERIALS}}];
             };
@@ -65,6 +64,30 @@
             const uint CONSUME_POLICY_LHS_ID = {{CONSUME_POLICY_LHS}}u;
             const uint CONSUME_POLICY_RHS_ID = {{CONSUME_POLICY_RHS}}u;
             const uint CONSUME_POLICY_BOTH_ID = {{CONSUME_POLICY_BOTH}}u;
+            float material_value_at(ivec2 cell) {
+                return float(texelFetch(cell_state_tex, cell, 0).x & 0xFFFFu);
+            }
+            float phase_value_at(ivec2 cell) {
+                return float((texelFetch(cell_state_tex, cell, 0).x >> 16u) & 0xFFu);
+            }
+            uint pack_cell_state_at(ivec2 cell, float material_value, float phase_value) {
+                uint flags = texelFetch(cell_state_tex, cell, 0).x & 0xFF000000u;
+                uint material = uint(clamp(round(material_value), 0.0, 65535.0));
+                uint phase = uint(clamp(round(phase_value), 0.0, 255.0));
+                return material | (phase << 16u) | flags;
+            }
+            vec4 unpack_timer(uint timer) {
+                return vec4(
+                    float(timer & 0xFFu),
+                    float((timer >> 8u) & 0xFFu),
+                    float((timer >> 16u) & 0xFFu),
+                    float((timer >> 24u) & 0xFFu)
+                );
+            }
+            uint pack_timer(vec4 timer) {
+                uvec4 value = uvec4(clamp(round(timer), vec4(0.0), vec4(255.0)));
+                return value.x | (value.y << 8u) | (value.z << 16u) | (value.w << 24u);
+            }
             bool mask_matches(uint value, uint required) {
                 return required == 0u || (value & required) == required;
             }
@@ -380,4 +403,3 @@
                     timer_value = vec4(0.0);
                 }
             }
-        

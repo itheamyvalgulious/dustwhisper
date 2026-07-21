@@ -9,15 +9,16 @@
             uniform int random_target_count;
             uniform bool direct_gas_delta_enabled;
             uniform uint direct_modify_gas_layer_mask;
-            layout(binding=0) uniform sampler2D material_tex;
-            layout(binding=1) uniform sampler2D phase_tex;
+            layout(binding=0) uniform usampler2D cell_state_tex;
+            layout(binding=1) uniform usampler2D expanded_active_tile_tex;
             layout(binding=2) uniform sampler2D temp_tex;
             layout(binding=3) uniform sampler2D integrity_tex;
             layout(binding=4) uniform sampler2DArray gas_tex;
             layout(binding=5) uniform sampler2DArray dose_tex;
-            layout(binding=6) uniform sampler2D timer_tex;
+            layout(binding=6) uniform usampler2D timer_tex;
             layout(binding=7) uniform sampler2D active_cell_tex;
             layout(binding=8) uniform sampler2D velocity_tex;
+            uniform bool use_expanded_active_tile_mask;
             layout(std430, binding=0) buffer MaterialParams {
                 vec4 material_params[{{MAX_MATERIALS}}];
             };
@@ -27,13 +28,14 @@
             layout(std430, binding=2) buffer ActionF {
                 vec4 action_f[{{MAX_ACTIONS}}];
             };
-            
             layout(std430, binding=6) buffer MaterialTags {
                 uvec4 material_tags[{{MAX_MATERIALS}}];
             };
+            #if !{{SELF_FUSED_GAS_OUTPUT}}
             layout(std430, binding=7) buffer GasTags {
                 uvec4 gas_tags[{{MAX_MATERIALS}}];
             };
+            #endif
             layout(std430, binding=8) buffer MaterialSlotsLo {
                 ivec4 material_slots_lo[{{MAX_MATERIALS}}];
             };
@@ -49,12 +51,41 @@
             layout(std430, binding=14) buffer LightEmitterBuffer {
                 vec4 light_emitters[{{MAX_EMITTED_LIGHTS_TIMES_2}}];
             };
+            #if {{SELF_FUSED_GAS_OUTPUT}}
+            layout(std430, binding={{SELF_FUSED_GAS_DELTA_BINDING}}) buffer SelfFusedGasDelta {
+                int self_fused_gas_delta[];
+            };
+            #endif
             layout(std430, binding=15) buffer ReactionCounters {
                 uint reaction_counts[16];
             };
             const uint CONSUME_POLICY_LHS_ID = {{CONSUME_POLICY_LHS}}u;
             const uint CONSUME_POLICY_RHS_ID = {{CONSUME_POLICY_RHS}}u;
             const uint CONSUME_POLICY_BOTH_ID = {{CONSUME_POLICY_BOTH}}u;
+            float material_value_at(ivec2 cell) {
+                return float(texelFetch(cell_state_tex, cell, 0).x & 0xFFFFu);
+            }
+            float phase_value_at(ivec2 cell) {
+                return float((texelFetch(cell_state_tex, cell, 0).x >> 16u) & 0xFFu);
+            }
+            uint pack_cell_state_at(ivec2 cell, float material_value, float phase_value) {
+                uint flags = texelFetch(cell_state_tex, cell, 0).x & 0xFF000000u;
+                uint material = uint(clamp(round(material_value), 0.0, 65535.0));
+                uint phase = uint(clamp(round(phase_value), 0.0, 255.0));
+                return material | (phase << 16u) | flags;
+            }
+            vec4 unpack_timer(uint timer) {
+                return vec4(
+                    float(timer & 0xFFu),
+                    float((timer >> 8u) & 0xFFu),
+                    float((timer >> 16u) & 0xFFu),
+                    float((timer >> 24u) & 0xFFu)
+                );
+            }
+            uint pack_timer(vec4 timer) {
+                uvec4 value = uvec4(clamp(round(timer), vec4(0.0), vec4(255.0)));
+                return value.x | (value.y << 8u) | (value.z << 16u) | (value.w << 24u);
+            }
             bool mask_matches(uint value, uint required) {
                 return required == 0u || (value & required) == required;
             }
@@ -88,6 +119,9 @@
                 return required_id >= 0 || required_mask != 0u;
             }
             bool solve_active(ivec2 cell) {
+                if (use_expanded_active_tile_mask) {
+                    return texelFetch(expanded_active_tile_tex, cell >> 5, 0).x != 0u;
+                }
                 return texelFetch(active_cell_tex, cell, 0).x > 0.5;
             }
             void append_deferred(
@@ -370,4 +404,3 @@
                     timer_value = vec4(0.0);
                 }
             }
-        

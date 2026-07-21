@@ -127,6 +127,7 @@ from oracle_game.sim.reactions_runners import (
     _advance_timed_slots,
     _run_self_rules,
     _run_material_material,
+    _try_run_material_pair_fused,
     _run_material_gas,
     _run_material_light,
     _run_gas_gas,
@@ -158,6 +159,7 @@ class ReactionSolver:
     _advance_timed_slots = _advance_timed_slots
     _run_self_rules = _run_self_rules
     _run_material_material = _run_material_material
+    _try_run_material_pair_fused = _try_run_material_pair_fused
     _run_material_gas = _run_material_gas
     _run_material_light = _run_material_light
     _run_gas_gas = _run_gas_gas

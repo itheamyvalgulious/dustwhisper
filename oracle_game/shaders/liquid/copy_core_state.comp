@@ -4,10 +4,8 @@ uniform ivec2 cell_grid_size;
 uniform ivec2 tile_grid_size;
 uniform int tile_size;
 uniform bool use_active_tile_dispatch;
-layout(binding=0) uniform sampler2D material_in_tex;
-layout(binding=1) uniform sampler2D phase_in_tex;
-layout(binding=2) uniform sampler2D flags_in_tex;
-layout(binding=3) uniform sampler2D timer_in_tex;
+layout(binding=0) uniform usampler2D cell_state_in_tex;
+layout(binding=3) uniform usampler2D timer_in_tex;
 layout(binding=4) uniform sampler2D temp_in_tex;
 layout(binding=5) uniform sampler2D integrity_in_tex;
 layout(binding=6) uniform sampler2D velocity_in_tex;
@@ -17,10 +15,8 @@ layout(std430, binding=0) readonly buffer ActiveTileCountBuffer {
 layout(std430, binding=1) readonly buffer ActiveTileListBuffer {
     ivec2 active_tile_list[];
 };
-layout(r32f, binding=0) writeonly uniform image2D material_out_img;
-layout(r32f, binding=1) writeonly uniform image2D phase_out_img;
-layout(r32f, binding=2) writeonly uniform image2D flags_out_img;
-layout(rgba32f, binding=3) writeonly uniform image2D timer_out_img;
+layout(r32ui, binding=0) writeonly uniform uimage2D cell_state_out_img;
+layout(r32ui, binding=3) writeonly uniform uimage2D timer_out_img;
 layout(r32f, binding=4) writeonly uniform image2D temp_out_img;
 layout(r32f, binding=5) writeonly uniform image2D integrity_out_img;
 layout(rg32f, binding=6) writeonly uniform image2D velocity_out_img;
@@ -58,9 +54,7 @@ void main() {
             return;
         }
     }
-    imageStore(material_out_img, gid, vec4(texelFetch(material_in_tex, gid, 0).x, 0.0, 0.0, 0.0));
-    imageStore(phase_out_img, gid, vec4(texelFetch(phase_in_tex, gid, 0).x, 0.0, 0.0, 0.0));
-    imageStore(flags_out_img, gid, vec4(texelFetch(flags_in_tex, gid, 0).x, 0.0, 0.0, 0.0));
+    imageStore(cell_state_out_img, gid, texelFetch(cell_state_in_tex, gid, 0));
     imageStore(timer_out_img, gid, texelFetch(timer_in_tex, gid, 0));
     imageStore(temp_out_img, gid, vec4(texelFetch(temp_in_tex, gid, 0).x, 0.0, 0.0, 0.0));
     imageStore(integrity_out_img, gid, vec4(texelFetch(integrity_in_tex, gid, 0).x, 0.0, 0.0, 0.0));

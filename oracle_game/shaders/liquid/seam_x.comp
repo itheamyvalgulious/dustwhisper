@@ -1,5 +1,17 @@
 #version 430
+#define SEAM_SNAPSHOT_INPUT {{SEAM_SNAPSHOT_INPUT}}
+#define SEAM_COMPACT_SNAPSHOT {{SEAM_COMPACT_SNAPSHOT}}
+#define SEAM_ROW_LEADER {{SEAM_ROW_LEADER}}
+#define SEAM_ROWS_PER_GROUP {{SEAM_ROWS_PER_GROUP}}
+#define TILE_SNAPSHOT_PRE_STATE {{TILE_SNAPSHOT_PRE_STATE}}
+#define TILE_SNAPSHOT_STATE_ELISION {{TILE_SNAPSHOT_STATE_ELISION}}
+#define DIRECT_BRIDGE_AUX_INPUTS {{DIRECT_BRIDGE_AUX_INPUTS}}
+#define LIQUID_PROVENANCE {{LIQUID_PROVENANCE}}
+#if SEAM_ROW_LEADER
+layout(local_size_x={{TILE_SIZE}}, local_size_y={{SEAM_ROWS_PER_GROUP}}, local_size_z=1) in;
+#else
 layout(local_size_x={{PASS_LOCAL_SIZE}}, local_size_y={{PASS_LOCAL_SIZE}}, local_size_z=1) in;
+#endif
 const int TILE_SIZE = {{TILE_SIZE}};
 uniform ivec2 cell_grid_size;
 uniform ivec2 tile_grid_size;
@@ -7,10 +19,8 @@ uniform int active_ttl_reset;
 uniform int phase_liquid;
 uniform int phase_falling_island;
 uniform bool use_boundary_dispatch;
-layout(binding=0) uniform sampler2D material_in_tex;
-layout(binding=1) uniform sampler2D phase_in_tex;
-layout(binding=2) uniform sampler2D flags_in_tex;
-layout(binding=3) uniform sampler2D timer_in_tex;
+layout(binding=0) uniform usampler2D cell_state_in_tex;
+layout(binding=3) uniform usampler2D timer_in_tex;
 layout(binding=4) uniform sampler2D temp_in_tex;
 layout(binding=5) uniform sampler2D integrity_in_tex;
 layout(binding=6) uniform sampler2D velocity_in_tex;
@@ -29,13 +39,64 @@ layout(std430, binding=2) readonly buffer AffectedTileCountBuffer {
 layout(std430, binding=3) readonly buffer AffectedTileListBuffer {
     ivec2 affected_tile_list[];
 };
-layout(r32f, binding=0) writeonly uniform image2D material_out_img;
-layout(r32f, binding=1) writeonly uniform image2D phase_out_img;
-layout(r32f, binding=2) writeonly uniform image2D flags_out_img;
-layout(rgba32f, binding=3) writeonly uniform image2D timer_out_img;
+#if SEAM_SNAPSHOT_INPUT
+layout(std430, binding=4) readonly buffer TileSolveSnapshotBuffer {
+    uint tile_solve_snapshot[];
+};
+layout(std430, binding=5) readonly buffer BridgeCellCoreBuffer {
+    uint bridge_cell_core[];
+};
+layout(std430, binding=6) readonly buffer BridgeEntityBuffer {
+    int bridge_entity_id[];
+};
+layout(std430, binding=7) readonly buffer BridgeDisplacedBuffer {
+    int bridge_displaced_material[];
+};
+int snapshot_boundary_x;
+bool snapshot_left_active;
+bool snapshot_right_active;
+#elif {{DIRECT_BRIDGE_AUX_INPUTS}}
+layout(std430, binding=4) readonly buffer BridgeEntityAuxBuffer {
+    int bridge_entity_aux[];
+};
+layout(std430, binding=5) readonly buffer BridgeDisplacedAuxBuffer {
+    int bridge_displaced_aux[];
+};
+#endif
+#if LIQUID_PROVENANCE
+layout(std430, binding=8) buffer LiquidProvenanceBuffer {
+    uint liquid_provenance[];
+};
+const uint PROVENANCE_EMPTY = 0xFFFFFFFFu;
+const uint PROVENANCE_TEXTURE = 0xFFFFFFFEu;
+#endif
+layout(r32ui, binding=0) writeonly uniform uimage2D cell_state_out_img;
+layout(r32ui, binding=3) writeonly uniform uimage2D timer_out_img;
 layout(r32f, binding=4) writeonly uniform image2D temp_out_img;
 layout(r32f, binding=5) writeonly uniform image2D integrity_out_img;
 layout(rg32f, binding=6) writeonly uniform image2D velocity_out_img;
+
+#if SEAM_ROW_LEADER
+#if SEAM_ROWS_PER_GROUP > 1
+shared int row_move_direction[SEAM_ROWS_PER_GROUP];
+shared int row_source_base[SEAM_ROWS_PER_GROUP];
+shared int row_target_base[SEAM_ROWS_PER_GROUP];
+shared int row_move_count[SEAM_ROWS_PER_GROUP];
+#define ROW_MOVE_DIRECTION(slot) row_move_direction[slot]
+#define ROW_SOURCE_BASE(slot) row_source_base[slot]
+#define ROW_TARGET_BASE(slot) row_target_base[slot]
+#define ROW_MOVE_COUNT(slot) row_move_count[slot]
+#else
+shared int row_move_direction;
+shared int row_source_base;
+shared int row_target_base;
+shared int row_move_count;
+#define ROW_MOVE_DIRECTION(slot) row_move_direction
+#define ROW_SOURCE_BASE(slot) row_source_base
+#define ROW_TARGET_BASE(slot) row_target_base
+#define ROW_MOVE_COUNT(slot) row_move_count
+#endif
+#endif
 
 bool boundary_active(ivec2 cell) {
     int tile_y = min(tile_grid_size.y - 1, max(0, cell.y / TILE_SIZE));
@@ -70,15 +131,17 @@ void store_state(
     float material,
     float phase,
     float flagsv,
-    vec4 timerv,
+    uint timerv,
     float tempv,
     float integrityv,
     vec2 velocityv
 ) {
-    imageStore(material_out_img, cell, vec4(material, 0.0, 0.0, 0.0));
-    imageStore(phase_out_img, cell, vec4(phase, 0.0, 0.0, 0.0));
-    imageStore(flags_out_img, cell, vec4(flagsv, 0.0, 0.0, 0.0));
-    imageStore(timer_out_img, cell, timerv);
+    uint material_id = uint(clamp(round(material), 0.0, 65535.0));
+    uint phase_id = uint(clamp(round(phase), 0.0, 255.0));
+    uint flags = uint(clamp(round(flagsv), 0.0, 255.0));
+    uint cell_state = material_id | (phase_id << 16u) | (flags << 24u);
+    imageStore(cell_state_out_img, cell, uvec4(cell_state, 0u, 0u, 0u));
+    imageStore(timer_out_img, cell, uvec4(timerv, 0u, 0u, 0u));
     imageStore(temp_out_img, cell, vec4(tempv, 0.0, 0.0, 0.0));
     imageStore(integrity_out_img, cell, vec4(integrityv, 0.0, 0.0, 0.0));
     imageStore(velocity_out_img, cell, vec4(velocityv, 0.0, 0.0));
@@ -93,13 +156,222 @@ bool in_bounds(ivec2 cell) {
     return cell.x >= 0 && cell.y >= 0 && cell.x < cell_grid_size.x && cell.y < cell_grid_size.y;
 }
 
+#if SEAM_SNAPSHOT_INPUT
+bool snapshot_tile_active(ivec2 cell) {
+    return cell.x < snapshot_boundary_x ? snapshot_left_active : snapshot_right_active;
+}
+
+int snapshot_word_index(ivec2 cell) {
+#if SEAM_COMPACT_SNAPSHOT
+#if TILE_SNAPSHOT_STATE_ELISION
+    return cell.y * cell_grid_size.x + cell.x;
+#else
+    return (cell.y * cell_grid_size.x + cell.x) * 2;
+#endif
+#else
+    return (cell.y * cell_grid_size.x + cell.x) * 6;
+#endif
+}
+
+int bridge_word_index(ivec2 cell) {
+    return (cell.y * cell_grid_size.x + cell.x) * 5;
+}
+
+#if SEAM_COMPACT_SNAPSHOT
+int compact_snapshot_source_id(ivec2 cell) {
+#if TILE_SNAPSHOT_STATE_ELISION
+    uint source_word = tile_solve_snapshot[snapshot_word_index(cell)];
+#else
+    uint source_word = tile_solve_snapshot[snapshot_word_index(cell) + 1];
+#endif
+#if TILE_SNAPSHOT_PRE_STATE
+    uint packed_source = source_word & 0xFFFFu;
+    return packed_source == 0xFFFFu ? -1 : int(packed_source);
+#else
+    return int(source_word);
+#endif
+}
+
+uint snapshot_source_word(ivec2 cell, int word_offset) {
+    int source_id = compact_snapshot_source_id(cell);
+    if (source_id < 0) {
+        return 0u;
+    }
+    ivec2 tile_origin = (cell / TILE_SIZE) * TILE_SIZE;
+    ivec2 source = tile_origin + ivec2(source_id % TILE_SIZE, source_id / TILE_SIZE);
+    return bridge_cell_core[bridge_word_index(source) + word_offset];
+}
+#endif
+#endif
+
+#if LIQUID_PROVENANCE
+uint input_provenance(ivec2 cell) {
+#if SEAM_SNAPSHOT_INPUT
+    if (!snapshot_tile_active(cell)) {
+        return uint(cell.y * cell_grid_size.x + cell.x);
+    }
+    int source_id = compact_snapshot_source_id(cell);
+    if (source_id < 0) {
+        return PROVENANCE_EMPTY;
+    }
+    ivec2 tile_origin = (cell / TILE_SIZE) * TILE_SIZE;
+    ivec2 source = tile_origin + ivec2(source_id % TILE_SIZE, source_id / TILE_SIZE);
+    return uint(source.y * cell_grid_size.x + source.x);
+#else
+    return uint(cell.y * cell_grid_size.x + cell.x);
+#endif
+}
+
+void store_provenance(ivec2 cell, uint source) {
+    liquid_provenance[cell.y * cell_grid_size.x + cell.x] = source;
+}
+#endif
+
+uint input_cell_state(ivec2 cell) {
+#if SEAM_SNAPSHOT_INPUT
+#if TILE_SNAPSHOT_STATE_ELISION
+    return snapshot_tile_active(cell)
+        ? texelFetch(cell_state_in_tex, cell, 0).x
+        : bridge_cell_core[bridge_word_index(cell)];
+#else
+    return snapshot_tile_active(cell)
+        ? tile_solve_snapshot[snapshot_word_index(cell)]
+        : bridge_cell_core[bridge_word_index(cell)];
+#endif
+#else
+    return texelFetch(cell_state_in_tex, cell, 0).x;
+#endif
+}
+
+uint input_timer(ivec2 cell) {
+#if SEAM_SNAPSHOT_INPUT
+#if SEAM_COMPACT_SNAPSHOT
+    return snapshot_tile_active(cell)
+        ? snapshot_source_word(cell, 3)
+        : bridge_cell_core[bridge_word_index(cell) + 3];
+#else
+    return snapshot_tile_active(cell)
+        ? tile_solve_snapshot[snapshot_word_index(cell) + 1]
+        : bridge_cell_core[bridge_word_index(cell) + 3];
+#endif
+#else
+    return texelFetch(timer_in_tex, cell, 0).x;
+#endif
+}
+
+float input_temp(ivec2 cell) {
+#if SEAM_SNAPSHOT_INPUT
+#if SEAM_COMPACT_SNAPSHOT
+    return uintBitsToFloat(
+        snapshot_tile_active(cell)
+            ? snapshot_source_word(cell, 2)
+            : bridge_cell_core[bridge_word_index(cell) + 2]
+    );
+#else
+    return uintBitsToFloat(
+        snapshot_tile_active(cell)
+            ? tile_solve_snapshot[snapshot_word_index(cell) + 2]
+            : bridge_cell_core[bridge_word_index(cell) + 2]
+    );
+#endif
+#else
+    return texelFetch(temp_in_tex, cell, 0).x;
+#endif
+}
+
+float input_integrity(ivec2 cell) {
+#if SEAM_SNAPSHOT_INPUT
+#if SEAM_COMPACT_SNAPSHOT
+    return snapshot_tile_active(cell)
+        ? float(snapshot_source_word(cell, 4) & 0xFFFFu)
+        : float(bridge_cell_core[bridge_word_index(cell) + 4] & 0xFFFFu);
+#else
+    return snapshot_tile_active(cell)
+        ? uintBitsToFloat(tile_solve_snapshot[snapshot_word_index(cell) + 3])
+        : float(bridge_cell_core[bridge_word_index(cell) + 4] & 0xFFFFu);
+#endif
+#else
+    return texelFetch(integrity_in_tex, cell, 0).x;
+#endif
+}
+
+vec2 input_velocity(ivec2 cell) {
+#if SEAM_SNAPSHOT_INPUT
+#if SEAM_COMPACT_SNAPSHOT
+    return snapshot_tile_active(cell)
+        ? unpackHalf2x16(snapshot_source_word(cell, 1))
+        : unpackHalf2x16(bridge_cell_core[bridge_word_index(cell) + 1]);
+#else
+    if (snapshot_tile_active(cell)) {
+        int word_index = snapshot_word_index(cell);
+        return vec2(
+            uintBitsToFloat(tile_solve_snapshot[word_index + 4]),
+            uintBitsToFloat(tile_solve_snapshot[word_index + 5])
+        );
+    }
+    return unpackHalf2x16(bridge_cell_core[bridge_word_index(cell) + 1]);
+#endif
+#else
+    return texelFetch(velocity_in_tex, cell, 0).xy;
+#endif
+}
+
+float input_entity(ivec2 cell) {
+#if SEAM_SNAPSHOT_INPUT
+    return float(bridge_entity_id[cell.y * cell_grid_size.x + cell.x]);
+#elif {{DIRECT_BRIDGE_AUX_INPUTS}}
+    return float(bridge_entity_aux[cell.y * cell_grid_size.x + cell.x]);
+#else
+    return texelFetch(entity_in_tex, cell, 0).x;
+#endif
+}
+
+float input_displaced(ivec2 cell) {
+#if SEAM_SNAPSHOT_INPUT
+    return float(bridge_displaced_material[cell.y * cell_grid_size.x + cell.x]);
+#elif {{DIRECT_BRIDGE_AUX_INPUTS}}
+    return float(bridge_displaced_aux[cell.y * cell_grid_size.x + cell.x]);
+#else
+    return texelFetch(displaced_in_tex, cell, 0).x;
+#endif
+}
+
+void store_cleared(ivec2 cell) {
+#if LIQUID_PROVENANCE
+    imageStore(cell_state_out_img, cell, uvec4(0u));
+    store_provenance(cell, PROVENANCE_EMPTY);
+#else
+    store_state(cell, 0.0, 0.0, 0.0, 0u, 0.0, 0.0, vec2(0.0));
+#endif
+}
+
+void store_from_source(ivec2 cell, ivec2 source) {
+    uint source_state = input_cell_state(source);
+#if LIQUID_PROVENANCE
+    imageStore(cell_state_out_img, cell, uvec4(source_state, 0u, 0u, 0u));
+    store_provenance(cell, input_provenance(source));
+#else
+    store_state(
+        cell,
+        float(source_state & 0xFFFFu),
+        float((source_state >> 16u) & 0xFFu),
+        float((source_state >> 24u) & 0xFFu),
+        input_timer(source),
+        input_temp(source),
+        input_integrity(source),
+        input_velocity(source)
+    );
+#endif
+}
+
 bool is_tile_liquid(ivec2 cell) {
     if (!in_bounds(cell)) {
         return false;
     }
-    float material = texelFetch(material_in_tex, cell, 0).x;
-    float phase = texelFetch(phase_in_tex, cell, 0).x;
-    return material > 0.5 && int(phase + 0.5) == phase_liquid && liquid_kind_for(material) == 1;
+    uint cell_state = input_cell_state(cell);
+    float material = float(cell_state & 0xFFFFu);
+    int phase = int((cell_state >> 16u) & 0xFFu);
+    return material > 0.5 && phase == phase_liquid && liquid_kind_for(material) == 1;
 }
 
 bool is_placeholder_material(float material) {
@@ -111,10 +383,11 @@ bool is_reachable_empty(ivec2 cell) {
     if (!in_bounds(cell)) {
         return false;
     }
-    float material = texelFetch(material_in_tex, cell, 0).x;
-    int phase = int(texelFetch(phase_in_tex, cell, 0).x + 0.5);
-    float entity = texelFetch(entity_in_tex, cell, 0).x;
-    float displaced = texelFetch(displaced_in_tex, cell, 0).x;
+    uint cell_state = input_cell_state(cell);
+    float material = float(cell_state & 0xFFFFu);
+    int phase = int((cell_state >> 16u) & 0xFFu);
+    float entity = input_entity(cell);
+    float displaced = input_displaced(cell);
     return material < 0.5
         && phase != phase_liquid
         && phase != phase_falling_island
@@ -219,23 +492,14 @@ bool try_apply_horizontal_boundary(ivec2 gid, int boundary_x) {
     int move_count;
     if (left_to_right_move(boundary_x, gid.y, source_base, target_base, move_count)) {
         if (is_tile_liquid(gid) && gid.x >= source_base && gid.x < source_base + move_count) {
-            store_state(gid, 0.0, 0.0, 0.0, vec4(0.0), 0.0, 0.0, vec2(0.0));
+            store_cleared(gid);
             refresh_changed_cell(gid);
             return true;
         }
         int target_offset = gid.x - target_base;
         if (is_reachable_empty(gid) && target_offset >= 0 && target_offset < move_count) {
             ivec2 source = ivec2(source_base + target_offset, gid.y);
-            store_state(
-                gid,
-                texelFetch(material_in_tex, source, 0).x,
-                texelFetch(phase_in_tex, source, 0).x,
-                texelFetch(flags_in_tex, source, 0).x,
-                texelFetch(timer_in_tex, source, 0),
-                texelFetch(temp_in_tex, source, 0).x,
-                texelFetch(integrity_in_tex, source, 0).x,
-                texelFetch(velocity_in_tex, source, 0).xy
-            );
+            store_from_source(gid, source);
             refresh_changed_cell(source);
             refresh_changed_cell(gid);
             return true;
@@ -243,23 +507,14 @@ bool try_apply_horizontal_boundary(ivec2 gid, int boundary_x) {
     }
     if (right_to_left_move(boundary_x, gid.y, source_base, target_base, move_count)) {
         if (is_tile_liquid(gid) && gid.x >= source_base && gid.x < source_base + move_count) {
-            store_state(gid, 0.0, 0.0, 0.0, vec4(0.0), 0.0, 0.0, vec2(0.0));
+            store_cleared(gid);
             refresh_changed_cell(gid);
             return true;
         }
         int target_offset = gid.x - target_base;
         if (is_reachable_empty(gid) && target_offset >= 0 && target_offset < move_count) {
             ivec2 source = ivec2(source_base + target_offset, gid.y);
-            store_state(
-                gid,
-                texelFetch(material_in_tex, source, 0).x,
-                texelFetch(phase_in_tex, source, 0).x,
-                texelFetch(flags_in_tex, source, 0).x,
-                texelFetch(timer_in_tex, source, 0),
-                texelFetch(temp_in_tex, source, 0).x,
-                texelFetch(integrity_in_tex, source, 0).x,
-                texelFetch(velocity_in_tex, source, 0).xy
-            );
+            store_from_source(gid, source);
             refresh_changed_cell(source);
             refresh_changed_cell(gid);
             return true;
@@ -267,6 +522,111 @@ bool try_apply_horizontal_boundary(ivec2 gid, int boundary_x) {
     }
     return false;
 }
+
+#if SEAM_ROW_LEADER
+void apply_row_leader_move(ivec2 gid) {
+#if SEAM_ROWS_PER_GROUP > 1
+    int row_slot = int(gl_LocalInvocationID.y);
+#endif
+    if (
+        gid.x >= ROW_SOURCE_BASE(row_slot)
+        && gid.x < ROW_SOURCE_BASE(row_slot) + ROW_MOVE_COUNT(row_slot)
+    ) {
+        store_cleared(gid);
+        refresh_changed_cell(gid);
+        return;
+    }
+    int target_offset = gid.x - ROW_TARGET_BASE(row_slot);
+    if (target_offset < 0 || target_offset >= ROW_MOVE_COUNT(row_slot)) {
+        return;
+    }
+    ivec2 source = ivec2(ROW_SOURCE_BASE(row_slot) + target_offset, gid.y);
+    store_from_source(gid, source);
+    refresh_changed_cell(source);
+    refresh_changed_cell(gid);
+}
+
+void run_row_leader_boundary() {
+#if SEAM_ROWS_PER_GROUP > 1
+    uint boundary_index = gl_WorkGroupID.x;
+    int row_group = int(gl_WorkGroupID.y);
+    int row_slot = int(gl_LocalInvocationID.y);
+    int row = row_group * SEAM_ROWS_PER_GROUP + row_slot;
+#else
+    uint boundary_index = gl_WorkGroupID.x / uint(TILE_SIZE);
+    int row = int(gl_WorkGroupID.x % uint(TILE_SIZE));
+#endif
+    if (boundary_index >= affected_tile_count[0]) {
+        return;
+    }
+    ivec2 boundary_tile = affected_tile_list[int(boundary_index)];
+    if (
+        boundary_tile.x < 0
+        || boundary_tile.y < 0
+        || boundary_tile.x + 1 >= tile_grid_size.x
+        || boundary_tile.y >= tile_grid_size.y
+    ) {
+        return;
+    }
+    int boundary_x = (boundary_tile.x + 1) * TILE_SIZE;
+    int y = boundary_tile.y * TILE_SIZE + row;
+#if SEAM_ROWS_PER_GROUP > 1
+    bool row_valid = row < TILE_SIZE && y < cell_grid_size.y;
+#else
+    if (y >= cell_grid_size.y) {
+        return;
+    }
+    bool row_valid = true;
+#endif
+#if SEAM_SNAPSHOT_INPUT
+    snapshot_boundary_x = boundary_x;
+    snapshot_left_active = texelFetch(active_tile_tex, boundary_tile, 0).x > 0.5;
+    snapshot_right_active = texelFetch(
+        active_tile_tex,
+        boundary_tile + ivec2(1, 0),
+        0
+    ).x > 0.5;
+#endif
+    if (gl_LocalInvocationID.x == 0u) {
+        int source_base;
+        int target_base;
+        int move_count;
+        ROW_MOVE_DIRECTION(row_slot) = 0;
+        ROW_SOURCE_BASE(row_slot) = 0;
+        ROW_TARGET_BASE(row_slot) = 0;
+        ROW_MOVE_COUNT(row_slot) = 0;
+        if (row_valid) {
+            if (left_to_right_move(boundary_x, y, source_base, target_base, move_count)) {
+                ROW_MOVE_DIRECTION(row_slot) = 1;
+                ROW_SOURCE_BASE(row_slot) = source_base;
+                ROW_TARGET_BASE(row_slot) = target_base;
+                ROW_MOVE_COUNT(row_slot) = move_count;
+            } else if (right_to_left_move(boundary_x, y, source_base, target_base, move_count)) {
+                ROW_MOVE_DIRECTION(row_slot) = -1;
+                ROW_SOURCE_BASE(row_slot) = source_base;
+                ROW_TARGET_BASE(row_slot) = target_base;
+                ROW_MOVE_COUNT(row_slot) = move_count;
+            }
+        }
+    }
+    memoryBarrierShared();
+    barrier();
+    if (!row_valid || ROW_MOVE_DIRECTION(row_slot) == 0) {
+        return;
+    }
+    int lane = int(gl_LocalInvocationID.x);
+    int origin_x = boundary_tile.x * TILE_SIZE;
+    int region_end_x = min(origin_x + TILE_SIZE * 2, cell_grid_size.x);
+    ivec2 left_cell = ivec2(origin_x + lane, y);
+    if (left_cell.x < region_end_x) {
+        apply_row_leader_move(left_cell);
+    }
+    ivec2 right_cell = ivec2(origin_x + TILE_SIZE + lane, y);
+    if (right_cell.x < region_end_x) {
+        apply_row_leader_move(right_cell);
+    }
+}
+#endif
 
 bool boundary_dispatch_cell(out ivec2 cell, out int boundary_x) {
     int groups_x = max(1, (TILE_SIZE * 2 + {{PASS_LOCAL_SIZE_MINUS_1}}) / {{PASS_LOCAL_SIZE}});
@@ -288,6 +648,11 @@ bool boundary_dispatch_cell(out ivec2 cell, out int boundary_x) {
     ) {
         return false;
     }
+#if SEAM_SNAPSHOT_INPUT
+    snapshot_boundary_x = (boundary_tile.x + 1) * TILE_SIZE;
+    snapshot_left_active = texelFetch(active_tile_tex, boundary_tile, 0).x > 0.5;
+    snapshot_right_active = texelFetch(active_tile_tex, boundary_tile + ivec2(1, 0), 0).x > 0.5;
+#endif
     ivec2 origin = ivec2(boundary_tile.x * TILE_SIZE, boundary_tile.y * TILE_SIZE);
     ivec2 local_cell = subtile_xy * {{PASS_LOCAL_SIZE}} + ivec2(gl_LocalInvocationID.xy);
     cell = origin + local_cell;
@@ -297,6 +662,12 @@ bool boundary_dispatch_cell(out ivec2 cell, out int boundary_x) {
 }
 
 void main() {
+#if SEAM_ROW_LEADER
+    if (use_boundary_dispatch) {
+        run_row_leader_boundary();
+        return;
+    }
+#endif
     ivec2 gid;
     int dispatch_boundary_x = -1;
     if (use_boundary_dispatch) {
@@ -309,13 +680,16 @@ void main() {
             return;
         }
     }
-    float material = texelFetch(material_in_tex, gid, 0).x;
-    float phase = texelFetch(phase_in_tex, gid, 0).x;
-    float flagsv = texelFetch(flags_in_tex, gid, 0).x;
-    vec4 timerv = texelFetch(timer_in_tex, gid, 0);
-    float tempv = texelFetch(temp_in_tex, gid, 0).x;
-    float integrityv = texelFetch(integrity_in_tex, gid, 0).x;
-    vec2 velocityv = texelFetch(velocity_in_tex, gid, 0).xy;
+    uint cell_state = input_cell_state(gid);
+    float material = float(cell_state & 0xFFFFu);
+    float phase = float((cell_state >> 16u) & 0xFFu);
+    float flagsv = float((cell_state >> 24u) & 0xFFu);
+#if !LIQUID_PROVENANCE
+    uint timerv = input_timer(gid);
+    float tempv = input_temp(gid);
+    float integrityv = input_integrity(gid);
+    vec2 velocityv = input_velocity(gid);
+#endif
     if (use_boundary_dispatch) {
         if (try_apply_horizontal_boundary(gid, dispatch_boundary_x)) {
             return;
@@ -334,5 +708,10 @@ void main() {
             return;
         }
     }
+#if LIQUID_PROVENANCE
+    imageStore(cell_state_out_img, gid, uvec4(cell_state, 0u, 0u, 0u));
+    store_provenance(gid, input_provenance(gid));
+#else
     store_state(gid, material, phase, flagsv, timerv, tempv, integrityv, velocityv);
+#endif
 }

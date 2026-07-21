@@ -1,0 +1,17 @@
+#version 430
+layout(local_size_x=1, local_size_y=1, local_size_z=1) in;
+uniform uvec2 full_grid_groups;
+uniform uint total_tile_count;
+layout(std430, binding=0) readonly buffer ActiveTileCountBuffer {
+    uint active_tile_count[];
+};
+layout(std430, binding=1) buffer ProvenanceInitDispatchBuffer {
+    uint provenance_init_dispatch[];
+};
+
+void main() {
+    bool full_active = active_tile_count[0] >= total_tile_count;
+    provenance_init_dispatch[0] = full_active ? 0u : full_grid_groups.x;
+    provenance_init_dispatch[1] = full_active ? 1u : full_grid_groups.y;
+    provenance_init_dispatch[2] = 1u;
+}

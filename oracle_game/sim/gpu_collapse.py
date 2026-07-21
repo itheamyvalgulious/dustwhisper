@@ -27,6 +27,26 @@ FORMAL_CONNECTED_TILE_LOCAL_SIZE = 32
 _SHADER_SUBS: dict[str, Any] = {
     "LOCAL_SIZE": LOCAL_SIZE,
     "FORMAL_CONNECTED_TILE_LOCAL_SIZE": FORMAL_CONNECTED_TILE_LOCAL_SIZE,
+    "PUBLISH_RUNTIME_MASKS": 0,
+    "PUBLISH_CLASSIFICATION_MASKS": 0,
+    "DIRECT_BRIDGE_INPUTS": 0,
+    "DIRECT_BEHAVIOR_INPUTS": 0,
+    "SNAPSHOT_PENDING": 0,
+    "PUBLISH_COMPONENT_LABELS": 0,
+    "PUBLISH_IMMUNE_DIRECT": 0,
+    "PUBLISH_DELAYED_DIRECT": 0,
+    "PACKED_INCREMENTAL_SNAPSHOT": 0,
+    "SUPPORT_JFA_ROW_MAJOR_OUTPUT": 0,
+    "SUPPORT_JFA_U8": 0,
+    "SUPPORT_JFA_PROPAGATED_SOURCE_MASK_ELISION": 0,
+    "SUPPORT_TEXTURE_U8": 0,
+    "SUMMARIZE_COMPONENT_METADATA": 0,
+    "WRITE_FILTERED_COMPONENT_LABELS": 0,
+    "INITIALIZE_LABEL_TILE_UNION": 0,
+    "INVALID_COMPONENT_GENERATION_VALIDITY": 0,
+    "COMPONENT_FLAG_GENERATION_VALIDITY": 0,
+    "SUPPORT_JFA_NV32_ROW_HYDRATE": 0,
+    "SUPPORT_JFA_EXTENSIONS": "",
 }
 FORMAL_DEFERRED_REGION_REQUEST_CAPACITY = 256
 FORMAL_DEFERRED_REGION_REQUEST_COUNT_BUFFER = "collapse_deferred_region_request_count"
@@ -66,10 +86,13 @@ class GPUCollapseResources:
     structural_tex: Any
     support_ping: Any
     support_pong: Any
+    support_u8_ping: Any | None
+    support_u8_pong: Any | None
     material_tex: Any
     material_out_tex: Any
     phase_tex: Any
     phase_out_tex: Any
+    pending_tex: Any
     cell_flags_tex: Any
     cell_flags_out_tex: Any
     timer_tex: Any
@@ -89,9 +112,15 @@ class GPUCollapseResources:
     component_island_ids: Any
     component_metadata: Any
     component_flags: Any
+    component_invalid: Any
     component_count: Any
     component_dispatch_args: Any
     region_flags: Any
+    support_tile_union_roots: Any | None
+    support_tile_union_parent: Any | None
+    support_tile_union_seeded: Any | None
+    support_tile_union_edges: Any | None
+    support_tile_union_edge_count: Any | None
     connected_tile_row_masks: Any
     connected_tile_column_masks: Any
     material_structural: Any
@@ -104,6 +133,7 @@ class GPUCollapseResources:
 
 from oracle_game.sim.gpu_collapse_resources import (
     _ensure_resources,
+    _ensure_formal_connected_u8_support_textures,
     _write_dynamic_buffer,
     _materialize_material_params,
     _classification_material_params
@@ -144,6 +174,8 @@ from oracle_game.sim.gpu_collapse_formal import (
     _ensure_formal_deferred_region_request_buffers,
     _ensure_formal_connected_frontier_buffers,
     _ensure_formal_connected_frontier_buffers_impl,
+    _invalidate_persistent_dense_tile_worklist,
+    _persistent_dense_tile_worklist_signature,
     _seed_formal_texture_region_tile_worklist,
     _clear_formal_connected_cell_buffer_names,
     _clear_formal_connected_tile_mask_buffers,
@@ -201,6 +233,8 @@ from oracle_game.sim.gpu_collapse_frontier import (
     _expand_formal_connected_cell_frontier,
     _copy_formal_connected_buffer_to_texture,
     _solve_formal_connected_tile_support_textures,
+    _begin_formal_connected_tile_support,
+    _run_formal_connected_tile_support_slice,
     _seed_formal_connected_tile_support_frontier,
     _expand_formal_connected_tile_support_frontier,
     _run_formal_connected_tile_support_pass,
@@ -233,6 +267,14 @@ from oracle_game.sim.gpu_collapse_labeling_formal import (
     _label_component_texture,
     _label_component_texture_connected_tiles_from_texture_init,
     _label_component_texture_connected_tiles,
+    _begin_formal_connected_component_labeling,
+    _run_formal_connected_component_label_slice,
+    _publish_formal_connected_component_labels,
+    _ensure_formal_connected_component_label_union_buffers,
+    _begin_formal_connected_component_label_union,
+    _run_formal_connected_component_label_union_slice,
+    _materialize_formal_connected_component_label_union,
+    _seed_formal_component_labels_and_axis_masks,
     _seed_formal_component_label_frontier,
     _expand_formal_component_label_frontier,
     _run_formal_connected_component_label_pass,
@@ -255,6 +297,12 @@ from oracle_game.sim.gpu_collapse_stages import (
     _run_pass,
     release
 )
+from oracle_game.sim.gpu_collapse_incremental import (
+    advance_formal_connected_dirty_tile_queue,
+    advance_formal_runtime_admission,
+    has_active_formal_dirty_epoch,
+    _validate_and_collect_formal_dirty_epoch_labels,
+)
 
 
 class GPUCollapsePipeline(GPUPipelineBase):
@@ -274,6 +322,67 @@ class GPUCollapsePipeline(GPUPipelineBase):
         self.last_pass_profile: dict[str, Any] = {"passes": [], "summary": {}}
         self._last_formal_connected_tile_mask_name: str | None = None
         self._formal_connected_cell_frontier_generation = 0
+        self._persistent_dense_tile_worklist_enabled = True
+        self._persistent_dense_tile_worklist_signature: tuple[int, ...] | None = None
+        self.persistent_dense_tile_worklist_hits = 0
+        self.persistent_dense_tile_worklist_rebuilds = 0
+        self.persistent_dense_tile_worklist_invalidations = 0
+        self._support_outcome_publish_fusion_enabled = True
+        self._classification_mask_publish_fusion_enabled = True
+        self._classification_bridge_hydration_fusion_enabled = True
+        self._label_seed_materialize_axis_fusion_enabled = True
+        self._support_tile_union_enabled = False
+        self._support_tile_union_atomic_union_enabled = False
+        self._support_jfa_image_barrier_elision_enabled = False
+        # Experimental: write each support tile row-major so a warp stores a
+        # contiguous image row instead of issuing a vertical-stride store.
+        # Keep the canonical traversal available until frame-level A/B proves
+        # a stable win on the target GPU.
+        self._support_jfa_row_major_output_enabled = True
+        self._incremental_support_jfa_u8_enabled = True
+        self._support_jfa_u8_propagated_source_mask_elision_enabled = True
+        # A 32-lane NV warp hydrates one structural tile row per lane and
+        # ballots support texels into row masks. Other devices keep the
+        # canonical scalar row scan.
+        self._support_jfa_nv32_row_hydrate_enabled = True
+        self._support_jfa_nv32_row_hydrate_supported = False
+        self._incremental_classification_support_axis_u8_fusion_enabled = True
+        self._outcome_label_tile_union_enabled = True
+        self._incremental_collapse_pipeline_enabled = True
+        self._incremental_jfa_four_frame_balance_enabled = True
+        # Balance the coarse support and terminal label work across the four
+        # epoch phases so the worst frame does not carry both peaks.
+        self._incremental_phase_peak_v3_balance_enabled = True
+        self._incremental_support_outcome_publish_fusion_enabled = False
+        self._incremental_direct_immune_publish_enabled = True
+        self._incremental_direct_delayed_publish_enabled = True
+        self._incremental_packed_cell_snapshot_enabled = False
+        self._incremental_materialize_metadata_fusion_enabled = True
+        self._incremental_materialize_filter_fusion_enabled = True
+        self._incremental_label_union_materialize_validation_fusion_enabled = True
+        # Incremental validation normally clears one uint per possible label.
+        # A generation token makes prior invalid marks semantically stale.
+        self._incremental_component_invalid_generation_enabled = True
+        self._component_invalid_generation = 0
+        self._incremental_component_flag_generation_enabled = True
+        self._active_component_flag_generation = 0
+        # Initialize label-union tile roots in the outcome resolve workgroup
+        # while preserving the canonical outcome texture for other consumers.
+        self._incremental_outcome_label_local_fusion_enabled = True
+        self._runtime_admission_stride_dispatch_enabled = True
+        self._formal_dirty_epoch: Any | None = None
+        self._pending_formal_runtime_admission: Any | None = None
+        self.incremental_collapse_epoch_sequence = 0
+        self.incremental_collapse_epochs_started = 0
+        self.incremental_collapse_epochs_completed = 0
+        self.incremental_collapse_epochs_aborted = 0
+        self.last_incremental_collapse_phase: int | None = None
+        self.last_incremental_collapse_epoch_id: int | None = None
+        self.last_incremental_collapse_epoch_started_frame_id: int | None = None
+        self.last_incremental_runtime_admission_slot: int | None = None
+        self.incremental_collapse_runtime_admissions_started = 0
+        self.incremental_collapse_runtime_admissions_completed = 0
+        self.incremental_collapse_runtime_admissions_aborted = 0
 
     # ``reset_pass_profile`` inherited from GPUPipelineBase.
     # ``_profile_pass`` inherited from GPUPipelineBase.
@@ -295,6 +404,67 @@ class GPUCollapsePipeline(GPUPipelineBase):
         self.programs["seed_formal_connected_tile_frontier_from_dirty_queue"] = build_compute_shader(ctx, "collapse/seed_formal_connected_tile_frontier_from_dirty_queue.comp", _SHADER_SUBS)
         self.programs["expand_formal_connected_tiles"] = build_compute_shader(ctx, "collapse/expand_formal_connected_tiles.comp", _SHADER_SUBS)
         self.programs["classify_formal_connected_tiles"] = build_compute_shader(ctx, "collapse/classify_formal_connected_tiles.comp", _SHADER_SUBS)
+        self.programs["classify_formal_connected_tiles_publish"] = build_compute_shader(
+            ctx,
+            "collapse/classify_formal_connected_tiles.comp",
+            {**_SHADER_SUBS, "PUBLISH_CLASSIFICATION_MASKS": 1},
+        )
+        self.programs["classify_formal_connected_tiles_bridge"] = build_compute_shader(
+            ctx,
+            "collapse/classify_formal_connected_tiles.comp",
+            {**_SHADER_SUBS, "DIRECT_BRIDGE_INPUTS": 1},
+        )
+        self.programs["classify_formal_connected_tiles_bridge_publish"] = build_compute_shader(
+            ctx,
+            "collapse/classify_formal_connected_tiles.comp",
+            {
+                **_SHADER_SUBS,
+                "DIRECT_BRIDGE_INPUTS": 1,
+                "PUBLISH_CLASSIFICATION_MASKS": 1,
+            },
+        )
+        self.programs["classify_formal_connected_tiles_bridge_publish_incremental"] = build_compute_shader(
+            ctx,
+            "collapse/classify_formal_connected_tiles.comp",
+            {
+                **_SHADER_SUBS,
+                "DIRECT_BRIDGE_INPUTS": 1,
+                "PUBLISH_CLASSIFICATION_MASKS": 1,
+                "SNAPSHOT_PENDING": 1,
+            },
+        )
+        self.programs["classify_formal_connected_tiles_bridge_publish_incremental_packed"] = build_compute_shader(
+            ctx,
+            "collapse/classify_formal_connected_tiles.comp",
+            {
+                **_SHADER_SUBS,
+                "DIRECT_BRIDGE_INPUTS": 1,
+                "PUBLISH_CLASSIFICATION_MASKS": 1,
+                "SNAPSHOT_PENDING": 1,
+                "PACKED_INCREMENTAL_SNAPSHOT": 1,
+            },
+        )
+        self.programs["classify_formal_connected_tiles_bridge_publish_incremental_axis_u8"] = build_compute_shader(
+            ctx,
+            "collapse/classify_formal_connected_tiles_support_axis_u8.comp",
+            {
+                **_SHADER_SUBS,
+                "DIRECT_BRIDGE_INPUTS": 1,
+                "PUBLISH_CLASSIFICATION_MASKS": 1,
+                "SNAPSHOT_PENDING": 1,
+            },
+        )
+        self.programs["classify_formal_connected_tiles_bridge_publish_incremental_packed_axis_u8"] = build_compute_shader(
+            ctx,
+            "collapse/classify_formal_connected_tiles_support_axis_u8.comp",
+            {
+                **_SHADER_SUBS,
+                "DIRECT_BRIDGE_INPUTS": 1,
+                "PUBLISH_CLASSIFICATION_MASKS": 1,
+                "SNAPSHOT_PENDING": 1,
+                "PACKED_INCREMENTAL_SNAPSHOT": 1,
+            },
+        )
         self.programs["clear_formal_connected_tile_worklist"] = build_compute_shader(ctx, "collapse/clear_formal_connected_tile_worklist.comp", _SHADER_SUBS)
         self.programs["compact_formal_connected_tile_mask"] = build_compute_shader(ctx, "collapse/compact_formal_connected_tile_mask.comp", _SHADER_SUBS)
         self.programs["clear_formal_connected_cell_buffer"] = build_compute_shader(ctx, "collapse/clear_formal_connected_cell_buffer.comp", _SHADER_SUBS)
@@ -318,15 +488,260 @@ class GPUCollapsePipeline(GPUPipelineBase):
         self.programs["seed_internal_boundary_region"] = build_compute_shader(ctx, "collapse/seed_internal_boundary_region.comp", _SHADER_SUBS)
         self.programs["exclude_boundary_connected_mask"] = build_compute_shader(ctx, "collapse/exclude_boundary_connected_mask.comp", _SHADER_SUBS)
         self.programs["build_formal_connected_axis_masks"] = build_compute_shader(ctx, "collapse/build_formal_connected_axis_masks.comp", _SHADER_SUBS)
-        self.programs["propagate_formal_connected_tiles"] = build_compute_shader(ctx, "collapse/propagate_formal_connected_tiles.comp", _SHADER_SUBS)
+        self.programs["build_formal_connected_axis_masks_u8"] = build_compute_shader(
+            ctx,
+            "collapse/build_formal_connected_axis_masks.comp",
+            {**_SHADER_SUBS, "SUPPORT_JFA_U8": 1},
+        )
+        self.programs["propagate_formal_connected_tiles"] = build_compute_shader(
+            ctx,
+            "collapse/propagate_formal_connected_tile_rows.comp",
+            _SHADER_SUBS,
+        )
+        self.programs["propagate_formal_connected_tiles_row_major"] = build_compute_shader(
+            ctx,
+            "collapse/propagate_formal_connected_tile_rows.comp",
+            {**_SHADER_SUBS, "SUPPORT_JFA_ROW_MAJOR_OUTPUT": 1},
+        )
+        self.programs["propagate_formal_connected_tiles_u8"] = build_compute_shader(
+            ctx,
+            "collapse/propagate_formal_connected_tile_rows.comp",
+            {**_SHADER_SUBS, "SUPPORT_JFA_U8": 1},
+        )
+        self.programs["propagate_formal_connected_tiles_u8_row_major"] = build_compute_shader(
+            ctx,
+            "collapse/propagate_formal_connected_tile_rows.comp",
+            {
+                **_SHADER_SUBS,
+                "SUPPORT_JFA_U8": 1,
+                "SUPPORT_JFA_ROW_MAJOR_OUTPUT": 1,
+            },
+        )
+        self.programs["propagate_formal_connected_tiles_u8_source_mask_elision"] = (
+            build_compute_shader(
+                ctx,
+                "collapse/propagate_formal_connected_tile_rows.comp",
+                {
+                    **_SHADER_SUBS,
+                    "SUPPORT_JFA_U8": 1,
+                    "SUPPORT_JFA_PROPAGATED_SOURCE_MASK_ELISION": 1,
+                },
+            )
+        )
+        self.programs["propagate_formal_connected_tiles_u8_row_major_source_mask_elision"] = (
+            build_compute_shader(
+                ctx,
+                "collapse/propagate_formal_connected_tile_rows.comp",
+                {
+                    **_SHADER_SUBS,
+                    "SUPPORT_JFA_U8": 1,
+                    "SUPPORT_JFA_ROW_MAJOR_OUTPUT": 1,
+                    "SUPPORT_JFA_PROPAGATED_SOURCE_MASK_ELISION": 1,
+                },
+            )
+        )
+        required_support_ballot_extensions = {
+            "GL_NV_gpu_shader5",
+            "GL_NV_shader_thread_group",
+        }
+        available_extensions = set(getattr(ctx, "extensions", ()))
+        support_warp_size = 0
+        if (
+            self._support_jfa_nv32_row_hydrate_enabled
+            and required_support_ballot_extensions.issubset(available_extensions)
+        ):
+            warp_size_program = build_compute_shader(
+                ctx,
+                "heat/query_nv_warp_size.comp",
+            )
+            warp_size_buffer = ctx.buffer(reserve=np.dtype(np.uint32).itemsize)
+            try:
+                warp_size_buffer.bind_to_storage_buffer(binding=0)
+                warp_size_program.run(1, 1, 1)
+                ctx.memory_barrier(ctx.SHADER_STORAGE_BARRIER_BIT)
+                support_warp_size = int(
+                    np.frombuffer(
+                        warp_size_buffer.read(),
+                        dtype=np.uint32,
+                        count=1,
+                    )[0]
+                )
+            finally:
+                warp_size_buffer.release()
+                warp_size_program.release()
+        self._support_jfa_nv32_row_hydrate_supported = support_warp_size == 32
+        if self._support_jfa_nv32_row_hydrate_supported:
+            self.programs[
+                "propagate_formal_connected_tiles_u8_row_major_source_mask_elision_nv32"
+            ] = build_compute_shader(
+                ctx,
+                "collapse/propagate_formal_connected_tile_rows.comp",
+                {
+                    **_SHADER_SUBS,
+                    "SUPPORT_JFA_U8": 1,
+                    "SUPPORT_JFA_ROW_MAJOR_OUTPUT": 1,
+                    "SUPPORT_JFA_PROPAGATED_SOURCE_MASK_ELISION": 1,
+                    "SUPPORT_JFA_NV32_ROW_HYDRATE": 1,
+                    "SUPPORT_JFA_EXTENSIONS": "\n".join(
+                        (
+                            "#extension GL_NV_gpu_shader5 : require",
+                            "#extension GL_NV_shader_thread_group : require",
+                        )
+                    ),
+                },
+            )
+        self.programs["support_tile_union_local"] = build_compute_shader(
+            ctx,
+            "collapse/support_tile_union_local.comp",
+            _SHADER_SUBS,
+        )
+        self.programs["support_tile_union_edges"] = build_compute_shader(
+            ctx,
+            "collapse/support_tile_union_edges.comp",
+            _SHADER_SUBS,
+        )
+        self.programs["support_tile_union_hook"] = build_compute_shader(
+            ctx,
+            "collapse/support_tile_union_hook.comp",
+            _SHADER_SUBS,
+        )
+        self.programs["support_tile_union_shortcut"] = build_compute_shader(
+            ctx,
+            "collapse/support_tile_union_shortcut.comp",
+            _SHADER_SUBS,
+        )
+        self.programs["support_tile_union_atomic_hook"] = build_compute_shader(
+            ctx,
+            "collapse/support_tile_union_atomic_hook.comp",
+            _SHADER_SUBS,
+        )
+        self.programs["support_tile_union_atomic_shortcut"] = build_compute_shader(
+            ctx,
+            "collapse/support_tile_union_atomic_shortcut.comp",
+            _SHADER_SUBS,
+        )
+        self.programs["support_tile_union_seed"] = build_compute_shader(
+            ctx,
+            "collapse/support_tile_union_seed.comp",
+            _SHADER_SUBS,
+        )
+        self.programs["support_tile_union_materialize"] = build_compute_shader(
+            ctx,
+            "collapse/support_tile_union_materialize.comp",
+            _SHADER_SUBS,
+        )
+        self.programs["label_tile_union_local"] = build_compute_shader(
+            ctx,
+            "collapse/label_tile_union_local.comp",
+            _SHADER_SUBS,
+        )
+        self.programs["label_tile_union_hook"] = build_compute_shader(
+            ctx,
+            "collapse/label_tile_union_hook.comp",
+            _SHADER_SUBS,
+        )
+        self.programs["label_tile_union_build_dispatch"] = build_compute_shader(
+            ctx,
+            "collapse/label_tile_union_build_dispatch.comp",
+            _SHADER_SUBS,
+        )
+        self.programs["label_tile_union_materialize"] = build_compute_shader(
+            ctx,
+            "collapse/label_tile_union_materialize.comp",
+            _SHADER_SUBS,
+        )
         self.programs["propagate_formal_connected_component_labels"] = build_compute_shader(ctx, "collapse/propagate_formal_connected_component_labels.comp", _SHADER_SUBS)
         self.programs["component_label_propagate"] = build_compute_shader(ctx, "collapse/component_label_propagate.comp", _SHADER_SUBS)
         self.programs["seed_formal_component_label_frontier"] = build_compute_shader(ctx, "collapse/seed_formal_component_label_frontier.comp", _SHADER_SUBS)
+        self.programs["seed_formal_component_labels_and_axis_masks"] = build_compute_shader(
+            ctx,
+            "collapse/seed_formal_component_labels_and_axis_masks.comp",
+            _SHADER_SUBS,
+        )
         self.programs["expand_formal_component_label_frontier"] = build_compute_shader(ctx, "collapse/expand_formal_component_label_frontier.comp", _SHADER_SUBS)
         self.programs["copy_formal_component_label_buffer_to_texture"] = build_compute_shader(ctx, "collapse/copy_formal_component_label_buffer_to_texture.comp", _SHADER_SUBS)
         self.programs["collect_component_labels"] = build_compute_shader(ctx, "collapse/collect_component_labels.comp", _SHADER_SUBS)
         self.programs["clear_component_label_flags_connected_tiles"] = build_compute_shader(ctx, "collapse/clear_component_label_flags_connected_tiles.comp", _SHADER_SUBS)
         self.programs["collect_component_labels_connected_tiles"] = build_compute_shader(ctx, "collapse/collect_component_labels_connected_tiles.comp", _SHADER_SUBS)
+        self.programs["collect_component_labels_connected_tiles_generation"] = build_compute_shader(
+            ctx,
+            "collapse/collect_component_labels_connected_tiles.comp",
+            {**_SHADER_SUBS, "INVALID_COMPONENT_GENERATION_VALIDITY": 1},
+        )
+        self.programs["clear_incremental_component_invalid"] = build_compute_shader(
+            ctx,
+            "collapse/clear_incremental_component_invalid.comp",
+            _SHADER_SUBS,
+        )
+        self.programs["validate_incremental_component_labels"] = build_compute_shader(
+            ctx,
+            "collapse/validate_incremental_component_labels.comp",
+            _SHADER_SUBS,
+        )
+        self.programs["validate_incremental_component_labels_packed"] = build_compute_shader(
+            ctx,
+            "collapse/validate_incremental_component_labels.comp",
+            {**_SHADER_SUBS, "PACKED_INCREMENTAL_SNAPSHOT": 1},
+        )
+        self.programs["validate_incremental_component_labels_union_materialize"] = build_compute_shader(
+            ctx,
+            "collapse/validate_incremental_component_labels_union_materialize.comp",
+            _SHADER_SUBS,
+        )
+        self.programs["validate_incremental_component_labels_union_materialize_generation"] = build_compute_shader(
+            ctx,
+            "collapse/validate_incremental_component_labels_union_materialize.comp",
+            {**_SHADER_SUBS, "INVALID_COMPONENT_GENERATION_VALIDITY": 1},
+        )
+        self.programs["validate_incremental_component_labels_union_materialize_packed"] = build_compute_shader(
+            ctx,
+            "collapse/validate_incremental_component_labels_union_materialize.comp",
+            {**_SHADER_SUBS, "PACKED_INCREMENTAL_SNAPSHOT": 1},
+        )
+        self.programs["filter_incremental_component_labels"] = build_compute_shader(
+            ctx,
+            "collapse/filter_incremental_component_labels.comp",
+            _SHADER_SUBS,
+        )
+        self.programs["materialize_incremental_components_bridge"] = build_compute_shader(
+            ctx,
+            "collapse/materialize_incremental_components_bridge.comp",
+            _SHADER_SUBS,
+        )
+        self.programs["materialize_incremental_components_bridge_metadata"] = build_compute_shader(
+            ctx,
+            "collapse/materialize_incremental_components_bridge.comp",
+            {**_SHADER_SUBS, "SUMMARIZE_COMPONENT_METADATA": 1},
+        )
+        self.programs["materialize_incremental_components_bridge_filter"] = build_compute_shader(
+            ctx,
+            "collapse/materialize_incremental_components_bridge.comp",
+            {**_SHADER_SUBS, "WRITE_FILTERED_COMPONENT_LABELS": 1},
+        )
+        self.programs["materialize_incremental_components_bridge_metadata_filter"] = build_compute_shader(
+            ctx,
+            "collapse/materialize_incremental_components_bridge.comp",
+            {
+                **_SHADER_SUBS,
+                "SUMMARIZE_COMPONENT_METADATA": 1,
+                "WRITE_FILTERED_COMPONENT_LABELS": 1,
+            },
+        )
+        self.programs["materialize_incremental_components_bridge_metadata_filter_generation"] = build_compute_shader(
+            ctx,
+            "collapse/materialize_incremental_components_bridge.comp",
+            {
+                **_SHADER_SUBS,
+                "SUMMARIZE_COMPONENT_METADATA": 1,
+                "WRITE_FILTERED_COMPONENT_LABELS": 1,
+                "COMPONENT_FLAG_GENERATION_VALIDITY": 1,
+            },
+        )
+        self.programs["publish_incremental_outcome_masks"] = build_compute_shader(
+            ctx,
+            "collapse/publish_incremental_outcome_masks.comp",
+            _SHADER_SUBS,
+        )
         self.programs["build_component_dispatch_args"] = build_compute_shader(ctx, "collapse/build_component_dispatch_args.comp", _SHADER_SUBS)
         self.programs["index_compact_component_labels"] = build_compute_shader(ctx, "collapse/index_compact_component_labels.comp", _SHADER_SUBS)
         self.programs["summarize_compact_components"] = build_compute_shader(ctx, "collapse/summarize_compact_components.comp", _SHADER_SUBS)
@@ -335,6 +750,195 @@ class GPUCollapsePipeline(GPUPipelineBase):
         self.programs["resolve_outcomes"] = build_compute_shader(ctx, "collapse/resolve_outcomes.comp", _SHADER_SUBS)
         self.programs["resolve_outcomes_from_supported"] = build_compute_shader(ctx, "collapse/resolve_outcomes_from_supported.comp", _SHADER_SUBS)
         self.programs["resolve_outcomes_from_supported_connected_tiles"] = build_compute_shader(ctx, "collapse/resolve_outcomes_from_supported_connected_tiles.comp", _SHADER_SUBS)
+        self.programs["resolve_outcomes_from_supported_connected_tiles_publish"] = build_compute_shader(
+            ctx,
+            "collapse/resolve_outcomes_from_supported_connected_tiles.comp",
+            {**_SHADER_SUBS, "PUBLISH_RUNTIME_MASKS": 1},
+        )
+        self.programs["resolve_outcomes_from_supported_connected_tiles_bridge"] = build_compute_shader(
+            ctx,
+            "collapse/resolve_outcomes_from_supported_connected_tiles.comp",
+            {**_SHADER_SUBS, "DIRECT_BEHAVIOR_INPUTS": 1},
+        )
+        self.programs["resolve_outcomes_from_supported_connected_tiles_bridge_publish"] = build_compute_shader(
+            ctx,
+            "collapse/resolve_outcomes_from_supported_connected_tiles.comp",
+            {
+                **_SHADER_SUBS,
+                "DIRECT_BEHAVIOR_INPUTS": 1,
+                "PUBLISH_RUNTIME_MASKS": 1,
+            },
+        )
+        self.programs["resolve_outcomes_from_supported_connected_tiles_immune"] = build_compute_shader(
+            ctx,
+            "collapse/resolve_outcomes_from_supported_connected_tiles.comp",
+            {**_SHADER_SUBS, "PUBLISH_IMMUNE_DIRECT": 1},
+        )
+        self.programs["resolve_outcomes_from_supported_connected_tiles_publish_immune"] = build_compute_shader(
+            ctx,
+            "collapse/resolve_outcomes_from_supported_connected_tiles.comp",
+            {
+                **_SHADER_SUBS,
+                "PUBLISH_RUNTIME_MASKS": 1,
+                "PUBLISH_IMMUNE_DIRECT": 1,
+            },
+        )
+        self.programs["resolve_outcomes_from_supported_connected_tiles_bridge_immune"] = build_compute_shader(
+            ctx,
+            "collapse/resolve_outcomes_from_supported_connected_tiles.comp",
+            {
+                **_SHADER_SUBS,
+                "DIRECT_BEHAVIOR_INPUTS": 1,
+                "PUBLISH_IMMUNE_DIRECT": 1,
+            },
+        )
+        self.programs["resolve_outcomes_from_supported_connected_tiles_bridge_publish_immune"] = build_compute_shader(
+            ctx,
+            "collapse/resolve_outcomes_from_supported_connected_tiles.comp",
+            {
+                **_SHADER_SUBS,
+                "DIRECT_BEHAVIOR_INPUTS": 1,
+                "PUBLISH_RUNTIME_MASKS": 1,
+                "PUBLISH_IMMUNE_DIRECT": 1,
+            },
+        )
+        self.programs["resolve_outcomes_from_supported_connected_tiles_outcomes"] = build_compute_shader(
+            ctx,
+            "collapse/resolve_outcomes_from_supported_connected_tiles.comp",
+            {
+                **_SHADER_SUBS,
+                "PUBLISH_IMMUNE_DIRECT": 1,
+                "PUBLISH_DELAYED_DIRECT": 1,
+            },
+        )
+        self.programs["resolve_outcomes_from_supported_connected_tiles_publish_outcomes"] = build_compute_shader(
+            ctx,
+            "collapse/resolve_outcomes_from_supported_connected_tiles.comp",
+            {
+                **_SHADER_SUBS,
+                "PUBLISH_RUNTIME_MASKS": 1,
+                "PUBLISH_IMMUNE_DIRECT": 1,
+                "PUBLISH_DELAYED_DIRECT": 1,
+            },
+        )
+        self.programs["resolve_outcomes_from_supported_connected_tiles_bridge_outcomes"] = build_compute_shader(
+            ctx,
+            "collapse/resolve_outcomes_from_supported_connected_tiles.comp",
+            {
+                **_SHADER_SUBS,
+                "DIRECT_BEHAVIOR_INPUTS": 1,
+                "PUBLISH_IMMUNE_DIRECT": 1,
+                "PUBLISH_DELAYED_DIRECT": 1,
+            },
+        )
+        self.programs["resolve_outcomes_from_supported_connected_tiles_bridge_outcomes_packed"] = build_compute_shader(
+            ctx,
+            "collapse/resolve_outcomes_from_supported_connected_tiles.comp",
+            {
+                **_SHADER_SUBS,
+                "DIRECT_BEHAVIOR_INPUTS": 1,
+                "PUBLISH_IMMUNE_DIRECT": 1,
+                "PUBLISH_DELAYED_DIRECT": 1,
+                "PACKED_INCREMENTAL_SNAPSHOT": 1,
+            },
+        )
+        self.programs["resolve_outcomes_from_supported_connected_tiles_bridge_publish_outcomes"] = build_compute_shader(
+            ctx,
+            "collapse/resolve_outcomes_from_supported_connected_tiles.comp",
+            {
+                **_SHADER_SUBS,
+                "DIRECT_BEHAVIOR_INPUTS": 1,
+                "PUBLISH_RUNTIME_MASKS": 1,
+                "PUBLISH_IMMUNE_DIRECT": 1,
+                "PUBLISH_DELAYED_DIRECT": 1,
+            },
+        )
+        support_u8_outcome_variants = (
+            ("", {}),
+            ("_publish", {"PUBLISH_RUNTIME_MASKS": 1}),
+            ("_bridge", {"DIRECT_BEHAVIOR_INPUTS": 1}),
+            (
+                "_bridge_publish",
+                {"DIRECT_BEHAVIOR_INPUTS": 1, "PUBLISH_RUNTIME_MASKS": 1},
+            ),
+            ("_immune", {"PUBLISH_IMMUNE_DIRECT": 1}),
+            (
+                "_publish_immune",
+                {"PUBLISH_RUNTIME_MASKS": 1, "PUBLISH_IMMUNE_DIRECT": 1},
+            ),
+            (
+                "_bridge_immune",
+                {"DIRECT_BEHAVIOR_INPUTS": 1, "PUBLISH_IMMUNE_DIRECT": 1},
+            ),
+            (
+                "_bridge_publish_immune",
+                {
+                    "DIRECT_BEHAVIOR_INPUTS": 1,
+                    "PUBLISH_RUNTIME_MASKS": 1,
+                    "PUBLISH_IMMUNE_DIRECT": 1,
+                },
+            ),
+            (
+                "_outcomes",
+                {"PUBLISH_IMMUNE_DIRECT": 1, "PUBLISH_DELAYED_DIRECT": 1},
+            ),
+            (
+                "_publish_outcomes",
+                {
+                    "PUBLISH_RUNTIME_MASKS": 1,
+                    "PUBLISH_IMMUNE_DIRECT": 1,
+                    "PUBLISH_DELAYED_DIRECT": 1,
+                },
+            ),
+            (
+                "_bridge_outcomes",
+                {
+                    "DIRECT_BEHAVIOR_INPUTS": 1,
+                    "PUBLISH_IMMUNE_DIRECT": 1,
+                    "PUBLISH_DELAYED_DIRECT": 1,
+                },
+            ),
+            (
+                "_bridge_outcomes_packed",
+                {
+                    "DIRECT_BEHAVIOR_INPUTS": 1,
+                    "PUBLISH_IMMUNE_DIRECT": 1,
+                    "PUBLISH_DELAYED_DIRECT": 1,
+                    "PACKED_INCREMENTAL_SNAPSHOT": 1,
+                },
+            ),
+            (
+                "_bridge_publish_outcomes",
+                {
+                    "DIRECT_BEHAVIOR_INPUTS": 1,
+                    "PUBLISH_RUNTIME_MASKS": 1,
+                    "PUBLISH_IMMUNE_DIRECT": 1,
+                    "PUBLISH_DELAYED_DIRECT": 1,
+                },
+            ),
+        )
+        for program_suffix, substitutions in support_u8_outcome_variants:
+            self.programs[
+                f"resolve_outcomes_from_supported_connected_tiles{program_suffix}_u8"
+            ] = build_compute_shader(
+                ctx,
+                "collapse/resolve_outcomes_from_supported_connected_tiles.comp",
+                {**_SHADER_SUBS, **substitutions, "SUPPORT_TEXTURE_U8": 1},
+            )
+        self.programs[
+            "resolve_outcomes_from_supported_connected_tiles_bridge_outcomes_u8_label_local"
+        ] = build_compute_shader(
+            ctx,
+            "collapse/resolve_outcomes_from_supported_connected_tiles.comp",
+            {
+                **_SHADER_SUBS,
+                "DIRECT_BEHAVIOR_INPUTS": 1,
+                "PUBLISH_IMMUNE_DIRECT": 1,
+                "PUBLISH_DELAYED_DIRECT": 1,
+                "SUPPORT_TEXTURE_U8": 1,
+                "INITIALIZE_LABEL_TILE_UNION": 1,
+            },
+        )
         self.programs["materialize_components"] = build_compute_shader(ctx, "collapse/materialize_components.comp", _SHADER_SUBS)
         self.programs["materialize_components_aux"] = build_compute_shader(ctx, "collapse/materialize_components_aux.comp", _SHADER_SUBS)
         self.programs["materialize_compact_components"] = build_compute_shader(ctx, "collapse/materialize_compact_components.comp", _SHADER_SUBS)
@@ -354,16 +958,27 @@ class GPUCollapsePipeline(GPUPipelineBase):
         self.programs["load_bridge_connected_tile_pending"] = build_compute_shader(ctx, "collapse/load_bridge_connected_tile_pending.comp", _SHADER_SUBS)
         self.programs["publish_bridge_region_cell"] = build_compute_shader(ctx, "collapse/publish_bridge_region_cell.comp", _SHADER_SUBS)
         self.programs["publish_bridge_region_cell_connected_tiles"] = build_compute_shader(ctx, "collapse/publish_bridge_region_cell_connected_tiles.comp", _SHADER_SUBS)
+        self.programs["publish_bridge_region_cell_connected_tiles_incremental"] = build_compute_shader(
+            ctx,
+            "collapse/publish_bridge_region_cell_connected_tiles.comp",
+            {**_SHADER_SUBS, "PUBLISH_COMPONENT_LABELS": 1},
+        )
         self.programs["load_bridge_region_pending"] = build_compute_shader(ctx, "collapse/load_bridge_region_pending.comp", _SHADER_SUBS)
         self.programs["publish_bridge_region_pending"] = build_compute_shader(ctx, "collapse/publish_bridge_region_pending.comp", _SHADER_SUBS)
         self.programs["publish_bridge_region_pending_connected_tiles"] = build_compute_shader(ctx, "collapse/publish_bridge_region_pending_connected_tiles.comp", _SHADER_SUBS)
         self.programs["publish_bridge_region_mask"] = build_compute_shader(ctx, "collapse/publish_bridge_region_mask.comp", _SHADER_SUBS)
         self.programs["publish_bridge_region_mask_connected_tiles"] = build_compute_shader(ctx, "collapse/publish_bridge_region_mask_connected_tiles.comp", _SHADER_SUBS)
         self.programs["publish_bridge_supported_unsupported_masks_connected_tiles"] = build_compute_shader(ctx, "collapse/publish_bridge_supported_unsupported_masks_connected_tiles.comp", _SHADER_SUBS)
+        self.programs["publish_bridge_supported_unsupported_masks_connected_tiles_u8"] = build_compute_shader(
+            ctx,
+            "collapse/publish_bridge_supported_unsupported_masks_connected_tiles.comp",
+            {**_SHADER_SUBS, "SUPPORT_TEXTURE_U8": 1},
+        )
         self.programs["publish_bridge_region_labels"] = build_compute_shader(ctx, "collapse/publish_bridge_region_labels.comp", _SHADER_SUBS)
         self.programs["publish_bridge_region_labels_connected_tiles"] = build_compute_shader(ctx, "collapse/publish_bridge_region_labels_connected_tiles.comp", _SHADER_SUBS)
 
     _ensure_resources = _ensure_resources
+    _ensure_formal_connected_u8_support_textures = _ensure_formal_connected_u8_support_textures
     _write_dynamic_buffer = _write_dynamic_buffer
     _materialize_material_params = _materialize_material_params
     _classification_material_params = _classification_material_params
@@ -402,6 +1017,8 @@ class GPUCollapsePipeline(GPUPipelineBase):
     _ensure_formal_deferred_region_request_buffers = _ensure_formal_deferred_region_request_buffers
     _ensure_formal_connected_frontier_buffers = _ensure_formal_connected_frontier_buffers
     _ensure_formal_connected_frontier_buffers_impl = _ensure_formal_connected_frontier_buffers_impl
+    _invalidate_persistent_dense_tile_worklist = _invalidate_persistent_dense_tile_worklist
+    _persistent_dense_tile_worklist_signature_for = _persistent_dense_tile_worklist_signature
     _seed_formal_texture_region_tile_worklist = _seed_formal_texture_region_tile_worklist
     _clear_formal_connected_cell_buffer_names = _clear_formal_connected_cell_buffer_names
     _clear_formal_connected_tile_mask_buffers = _clear_formal_connected_tile_mask_buffers
@@ -413,6 +1030,10 @@ class GPUCollapsePipeline(GPUPipelineBase):
     clear_formal_deferred_region_requests = clear_formal_deferred_region_requests
     execute_formal_connected_expansion = execute_formal_connected_expansion
     execute_formal_connected_dirty_tile_queue = execute_formal_connected_dirty_tile_queue
+    advance_formal_connected_dirty_tile_queue = advance_formal_connected_dirty_tile_queue
+    advance_formal_runtime_admission = advance_formal_runtime_admission
+    has_active_formal_dirty_epoch = has_active_formal_dirty_epoch
+    _validate_and_collect_formal_dirty_epoch_labels = _validate_and_collect_formal_dirty_epoch_labels
 
     solve_formal_connected_region_textures = solve_formal_connected_region_textures
     _solve_formal_connected_dirty_tile_textures = _solve_formal_connected_dirty_tile_textures
@@ -457,6 +1078,8 @@ class GPUCollapsePipeline(GPUPipelineBase):
     _expand_formal_connected_cell_frontier = _expand_formal_connected_cell_frontier
     _copy_formal_connected_buffer_to_texture = _copy_formal_connected_buffer_to_texture
     _solve_formal_connected_tile_support_textures = _solve_formal_connected_tile_support_textures
+    _begin_formal_connected_tile_support = _begin_formal_connected_tile_support
+    _run_formal_connected_tile_support_slice = _run_formal_connected_tile_support_slice
     _seed_formal_connected_tile_support_frontier = _seed_formal_connected_tile_support_frontier
     _expand_formal_connected_tile_support_frontier = _expand_formal_connected_tile_support_frontier
     _run_formal_connected_tile_support_pass = _run_formal_connected_tile_support_pass
@@ -487,6 +1110,14 @@ class GPUCollapsePipeline(GPUPipelineBase):
     _label_component_texture = _label_component_texture
     _label_component_texture_connected_tiles_from_texture_init = _label_component_texture_connected_tiles_from_texture_init
     _label_component_texture_connected_tiles = _label_component_texture_connected_tiles
+    _begin_formal_connected_component_labeling = _begin_formal_connected_component_labeling
+    _run_formal_connected_component_label_slice = _run_formal_connected_component_label_slice
+    _publish_formal_connected_component_labels = _publish_formal_connected_component_labels
+    _ensure_formal_connected_component_label_union_buffers = _ensure_formal_connected_component_label_union_buffers
+    _begin_formal_connected_component_label_union = _begin_formal_connected_component_label_union
+    _run_formal_connected_component_label_union_slice = _run_formal_connected_component_label_union_slice
+    _materialize_formal_connected_component_label_union = _materialize_formal_connected_component_label_union
+    _seed_formal_component_labels_and_axis_masks = _seed_formal_component_labels_and_axis_masks
     _seed_formal_component_label_frontier = _seed_formal_component_label_frontier
     _expand_formal_component_label_frontier = _expand_formal_component_label_frontier
     _run_formal_connected_component_label_pass = _run_formal_connected_component_label_pass
@@ -507,4 +1138,3 @@ class GPUCollapsePipeline(GPUPipelineBase):
     resolve_supported_outcome_textures = resolve_supported_outcome_textures
     _run_pass = _run_pass
     release = release
-

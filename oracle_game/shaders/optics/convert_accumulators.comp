@@ -4,6 +4,9 @@
             uniform ivec2 cell_grid_size;
             uniform ivec2 gas_grid_size;
             uniform int dose_channel_count;
+            uniform bool publish_bridge_dose;
+            uniform bool write_cell_dose_texture;
+            uniform bool write_visual_textures;
             layout(std430, binding=0) readonly buffer CellDoseAccum {
                 uint cell_dose_accum[];
             };
@@ -16,6 +19,12 @@
             layout(r32f, binding=3) writeonly uniform image2DArray cell_dose_img;
             layout(r32f, binding=4) writeonly uniform image2DArray gas_dose_img;
             layout(r32f, binding=5) writeonly uniform image2DArray illum_layer_img;
+            layout(std430, binding=3) writeonly buffer BridgeCellDoseBuffer {
+                float bridge_cell_dose[];
+            };
+            layout(std430, binding=4) writeonly buffer BridgeGasDoseBuffer {
+                float bridge_gas_dose[];
+            };
             const float CELL_ACCUM_INV_SCALE = {{CELL_ACCUM_INV_SCALE}};
             const float GAS_ACCUM_INV_SCALE = {{GAS_ACCUM_INV_SCALE}};
             const float ILLUM_ACCUM_INV_SCALE = {{ILLUM_ACCUM_INV_SCALE}};
@@ -27,24 +36,37 @@
                 }
                 if (gid.x < cell_grid_size.x && gid.y < cell_grid_size.y) {
                     int cell_index = (channel * cell_grid_size.y + gid.y) * cell_grid_size.x + gid.x;
-                    imageStore(
-                        cell_dose_img,
-                        ivec3(gid, channel),
-                        vec4(float(cell_dose_accum[cell_index]) * CELL_ACCUM_INV_SCALE, 0.0, 0.0, 0.0)
-                    );
-                    imageStore(
-                        illum_layer_img,
-                        ivec3(gid, channel),
-                        vec4(float(illum_accum[cell_index]) * ILLUM_ACCUM_INV_SCALE, 0.0, 0.0, 0.0)
-                    );
+                    float cell_dose = float(cell_dose_accum[cell_index]) * CELL_ACCUM_INV_SCALE;
+                    if (write_cell_dose_texture) {
+                        imageStore(
+                            cell_dose_img,
+                            ivec3(gid, channel),
+                            vec4(cell_dose, 0.0, 0.0, 0.0)
+                        );
+                    }
+                    if (publish_bridge_dose) {
+                        bridge_cell_dose[cell_index] = cell_dose;
+                    }
+                    if (write_visual_textures) {
+                        imageStore(
+                            illum_layer_img,
+                            ivec3(gid, channel),
+                            vec4(float(illum_accum[cell_index]) * ILLUM_ACCUM_INV_SCALE, 0.0, 0.0, 0.0)
+                        );
+                    }
                 }
                 if (gid.x < gas_grid_size.x && gid.y < gas_grid_size.y) {
                     int gas_index = (channel * gas_grid_size.y + gid.y) * gas_grid_size.x + gid.x;
-                    imageStore(
-                        gas_dose_img,
-                        ivec3(gid, channel),
-                        vec4(float(gas_dose_accum[gas_index]) * GAS_ACCUM_INV_SCALE, 0.0, 0.0, 0.0)
-                    );
+                    float gas_dose = float(gas_dose_accum[gas_index]) * GAS_ACCUM_INV_SCALE;
+                    if (write_visual_textures) {
+                        imageStore(
+                            gas_dose_img,
+                            ivec3(gid, channel),
+                            vec4(gas_dose, 0.0, 0.0, 0.0)
+                        );
+                    }
+                    if (publish_bridge_dose) {
+                        bridge_gas_dose[gas_index] = gas_dose;
+                    }
                 }
             }
-            

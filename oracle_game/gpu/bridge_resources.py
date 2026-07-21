@@ -93,6 +93,7 @@ def ensure_world_resources(bridge, world: "WorldEngine") -> None:
     bridge.buffers["island_runtime"] = bridge.ctx.buffer(reserve=max(4, ISLAND_RUNTIME_DTYPE.itemsize), dynamic=True)
     bridge.buffers["island_runtime_count"] = bridge.ctx.buffer(reserve=4, dynamic=True)
     bridge.buffers["powder_reservation"] = bridge.ctx.buffer(reserve=4, dynamic=True)
+    bridge.buffers["powder_reservation_compact"] = bridge.ctx.buffer(reserve=4, dynamic=True)
     bridge.buffers["powder_reservation_count"] = bridge.ctx.buffer(reserve=4, dynamic=True)
     bridge.buffers["island_reservation"] = bridge.ctx.buffer(reserve=4, dynamic=True)
     bridge.buffers["island_reservation_count"] = bridge.ctx.buffer(reserve=4, dynamic=True)
@@ -338,6 +339,30 @@ def ensure_world_resources(bridge, world: "WorldEngine") -> None:
     bridge._ensure_atlas_texture(world)
 
 
+def ensure_cell_core_spare(bridge, world: "WorldEngine") -> Any:
+    """Return a private cell-core-sized buffer for ping-pong publication.
+
+    The spare is intentionally not registered in ``bridge.buffers``: all
+    authoritative and readback paths must continue to resolve the live core
+    through the stable ``"cell_core"`` name.  Allocation is lazy so the
+    normal pipeline does not pay the extra core-sized allocation.
+    """
+    if not bridge.enabled or bridge.ctx is None:
+        raise RuntimeError("GPU bridge cell-core spare requires an enabled context")
+    required_size = max(4, int(world.width) * int(world.height) * 5 * 4)
+    spare = bridge.cell_core_spare
+    if spare is not None and int(getattr(spare, "size", 0)) >= required_size:
+        return spare
+    if spare is not None:
+        try:
+            spare.release()
+        except Exception:
+            pass
+    spare = bridge.ctx.buffer(reserve=required_size, dynamic=True)
+    bridge.cell_core_spare = spare
+    return spare
+
+
 def _ensure_atlas_texture(bridge, world: "WorldEngine") -> None:
     if not bridge.enabled or bridge.ctx is None or not bridge.atlas_dirty:
         return
@@ -363,6 +388,13 @@ def _ensure_atlas_texture(bridge, world: "WorldEngine") -> None:
 
 
 def release_resources(bridge) -> None:
+    spare = bridge.cell_core_spare
+    if spare is not None:
+        try:
+            spare.release()
+        except Exception:
+            pass
+        bridge.cell_core_spare = None
     for texture in bridge.textures.values():
         try:
             texture.release()

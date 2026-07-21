@@ -1,0 +1,259 @@
+#version 430
+layout(local_size_x={{POWDER_RESERVATION_LOCAL_SIZE}}, local_size_y=1, local_size_z=1) in;
+uniform ivec2 cell_grid_size;
+uniform ivec2 tile_grid_size;
+uniform int tile_size;
+uniform int active_ttl_reset;
+
+struct PowderReservation {
+    ivec2 source_xy;
+    ivec2 desired_target_xy;
+    ivec2 reserved_target_xy;
+    ivec2 resolved_target_xy;
+    vec2 velocity_xy;
+    int material_id;
+    int resolve_state;
+};
+
+#if {{POWDER_COMPACT_RESERVATION}}
+struct CompactPowderReservation {
+    uint source_xy;
+    uint desired_target_xy;
+    uint reserved_target_xy;
+    uint resolved_target_xy;
+    uint velocity_xy;
+    uint material_resolve;
+};
+
+layout(std430, binding=0) buffer PowderReservations {
+    CompactPowderReservation compact_reservations[];
+};
+#if !{{POWDER_COMPACT_LAZY_EXPAND}}
+layout(std430, binding=9) writeonly buffer ExpandedPowderReservations {
+    PowderReservation expanded_reservations[];
+};
+#endif
+#else
+layout(std430, binding=0) buffer PowderReservations {
+    PowderReservation reservations[];
+};
+#endif
+layout(std430, binding=1) readonly buffer PowderReservationCount {
+    int powder_reservation_count;
+};
+layout(std430, binding=2) readonly buffer MaterialContactParams {
+    vec4 contact_params[{{MAX_MATERIALS}}];
+};
+layout(std430, binding=3) readonly buffer PowderTargetWinners {
+    int target_winners[];
+};
+layout(std430, binding=4) buffer ActiveTileTTLBuffer {
+    int active_tile_ttl[];
+};
+layout(std430, binding=5) buffer BridgeCellCoreBuffer {
+    uint bridge_cell_core[];
+};
+layout(std430, binding=6) buffer BridgeIslandBuffer {
+    int bridge_island_id[];
+};
+layout(std430, binding=7) buffer BridgeEntityBuffer {
+    int bridge_entity_id[];
+};
+layout(std430, binding=8) buffer BridgeDisplacedBuffer {
+    int bridge_displaced[];
+};
+#if {{POWDER_PROVISIONAL_MOVING_WORKLIST}}
+layout(std430, binding=10) readonly buffer ProvisionalMovingCountBuffer {
+    uint provisional_moving_count[];
+};
+layout(std430, binding=11) readonly buffer ProvisionalMovingIndexBuffer {
+    int provisional_moving_indices[];
+};
+#endif
+layout(r32f, binding=0) writeonly uniform image2D bridge_material_img;
+
+bool in_bounds(ivec2 cell) {
+    return cell.x >= 0 && cell.y >= 0
+        && cell.x < cell_grid_size.x && cell.y < cell_grid_size.y;
+}
+
+bool same_cell(ivec2 lhs, ivec2 rhs) {
+    return lhs.x == rhs.x && lhs.y == rhs.y;
+}
+
+#if {{POWDER_COMPACT_RESERVATION}}
+ivec2 unpack_compact_xy(uint word) {
+    return ivec2(int(word << 16u) >> 16, int(word) >> 16);
+}
+
+PowderReservation load_reservation(int index) {
+    CompactPowderReservation record = compact_reservations[index];
+    PowderReservation reservation;
+    reservation.source_xy = unpack_compact_xy(record.source_xy);
+    reservation.desired_target_xy = unpack_compact_xy(record.desired_target_xy);
+    reservation.reserved_target_xy = unpack_compact_xy(record.reserved_target_xy);
+    reservation.resolved_target_xy = unpack_compact_xy(record.resolved_target_xy);
+    reservation.velocity_xy = unpackHalf2x16(record.velocity_xy);
+    reservation.material_id = int(record.material_resolve & 0xFFFFu);
+    reservation.resolve_state = int(record.material_resolve >> 16u);
+    return reservation;
+}
+
+void store_blocked(int index, inout PowderReservation reservation) {
+    reservation.resolved_target_xy = reservation.source_xy;
+    reservation.resolve_state = {{POWDER_RESOLVE_BLOCKED}};
+    compact_reservations[index].resolved_target_xy = compact_reservations[index].source_xy;
+    compact_reservations[index].material_resolve =
+        compact_reservations[index].material_resolve & 0xFFFFu;
+}
+
+void publish_reservation(int index, PowderReservation reservation) {
+#if !{{POWDER_COMPACT_LAZY_EXPAND}}
+    expanded_reservations[index] = reservation;
+#endif
+}
+#else
+PowderReservation load_reservation(int index) {
+    return reservations[index];
+}
+
+void store_blocked(int index, inout PowderReservation reservation) {
+    reservation.resolved_target_xy = reservation.source_xy;
+    reservation.resolve_state = {{POWDER_RESOLVE_BLOCKED}};
+    reservations[index] = reservation;
+}
+
+void publish_reservation(int index, PowderReservation reservation) {
+}
+#endif
+
+bool is_moving(PowderReservation reservation) {
+    return (
+        (reservation.resolve_state == {{POWDER_RESOLVE_DDA}}
+            || reservation.resolve_state == {{POWDER_RESOLVE_FALLBACK}})
+        && !same_cell(reservation.source_xy, reservation.resolved_target_xy)
+    );
+}
+
+int cell_index(ivec2 cell) {
+    return cell.y * cell_grid_size.x + cell.x;
+}
+
+int source_rank(ivec2 source) {
+    int rank_y = (cell_grid_size.y - 1) - clamp(source.y, 0, cell_grid_size.y - 1);
+    int rank_x = clamp(source.x, 0, cell_grid_size.x - 1);
+    return rank_y * cell_grid_size.x + rank_x;
+}
+
+vec2 collision_response(vec2 velocity, ivec2 attempted_delta, ivec2 actual_delta, int material_id) {
+    material_id = clamp(material_id, 0, {{MAX_MATERIALS_MINUS_1}});
+    float friction = clamp(contact_params[material_id].x, 0.0, 1.0);
+    float elasticity = max(0.0, contact_params[material_id].y);
+    float tangential_scale = max(0.0, 1.0 - friction);
+    float vx = velocity.x;
+    float vy = velocity.y;
+    if (attempted_delta.x != actual_delta.x && attempted_delta.x != 0) {
+        float normal_vx = abs(vx) > 1.0e-6 ? vx : float(attempted_delta.x);
+        vx = -normal_vx * elasticity;
+        vy *= tangential_scale;
+    }
+    if (attempted_delta.y != actual_delta.y && attempted_delta.y != 0) {
+        float normal_vy = abs(vy) > 1.0e-6 ? vy : float(attempted_delta.y);
+        vy = -normal_vy * elasticity;
+        vx *= tangential_scale;
+    }
+    if (abs(vx) < 1.0e-6) vx = 0.0;
+    if (abs(vy) < 1.0e-6) vy = 0.0;
+    return vec2(vx, vy);
+}
+
+void refresh_changed_cell(ivec2 cell) {
+    ivec2 tile = ivec2(
+        clamp(cell.x / tile_size, 0, tile_grid_size.x - 1),
+        clamp(cell.y / tile_size, 0, tile_grid_size.y - 1)
+    );
+    active_tile_ttl[tile.y * tile_grid_size.x + tile.x] = active_ttl_reset;
+}
+
+void main() {
+#if {{POWDER_PROVISIONAL_MOVING_WORKLIST}}
+    int moving_index = int(gl_GlobalInvocationID.x);
+    int moving_count = int(min(provisional_moving_count[0], uint(cell_grid_size.x * cell_grid_size.y)));
+    if (moving_index >= moving_count) {
+        return;
+    }
+    int reservation_index = provisional_moving_indices[moving_index];
+#else
+    int reservation_index = int(gl_GlobalInvocationID.x);
+    int count = clamp(powder_reservation_count, 0, cell_grid_size.x * cell_grid_size.y);
+    if (reservation_index >= count) {
+        return;
+    }
+#endif
+    PowderReservation reservation = load_reservation(reservation_index);
+    ivec2 source = reservation.source_xy;
+    ivec2 target = reservation.resolved_target_xy;
+    bool moving = is_moving(reservation);
+    if (!moving || !in_bounds(source) || !in_bounds(target)) {
+        publish_reservation(reservation_index, reservation);
+        return;
+    }
+    int target_index = cell_index(target);
+    if (target_winners[target_index] != source_rank(source)) {
+        store_blocked(reservation_index, reservation);
+        publish_reservation(reservation_index, reservation);
+        return;
+    }
+    publish_reservation(reservation_index, reservation);
+
+    int source_index = cell_index(source);
+    int source_word = source_index * 5;
+    int target_word = target_index * 5;
+    uint core0 = bridge_cell_core[source_word];
+    uint core1 = bridge_cell_core[source_word + 1];
+    uint core2 = bridge_cell_core[source_word + 2];
+    uint core3 = bridge_cell_core[source_word + 3];
+    uint core4 = bridge_cell_core[source_word + 4];
+    int island = int(round(float(bridge_island_id[source_index])));
+    int entity = int(round(float(bridge_entity_id[source_index])));
+    int displaced = int(round(float(bridge_displaced[source_index])));
+
+    // The canonical texture-to-bridge publisher tags an incoming entity with
+    // the sign bit before the float round-trip.  On NVIDIA that conversion
+    // materializes as the INT_MAX ownership sentinel; mirror it here so the
+    // direct bridge path is byte-identical.
+    if (entity >= 0) {
+        entity = 2147483647;
+    }
+
+    int material_id = int(core0 & 0xFFFFu);
+    vec2 velocity = unpackHalf2x16(core1);
+    ivec2 desired_delta = reservation.desired_target_xy - source;
+    ivec2 actual_delta = target - source;
+    if (material_id != 0
+        && (desired_delta.x != actual_delta.x || desired_delta.y != actual_delta.y)) {
+        velocity = collision_response(velocity, desired_delta, actual_delta, material_id);
+    }
+
+    bridge_cell_core[source_word] = 0u;
+    bridge_cell_core[source_word + 1] = 0u;
+    bridge_cell_core[source_word + 2] = 0u;
+    bridge_cell_core[source_word + 3] = 0u;
+    bridge_cell_core[source_word + 4] = 0u;
+    bridge_island_id[source_index] = 0;
+    bridge_entity_id[source_index] = 0;
+    bridge_displaced[source_index] = 0;
+    imageStore(bridge_material_img, source, vec4(0.0));
+
+    bridge_cell_core[target_word] = core0;
+    bridge_cell_core[target_word + 1] = packHalf2x16(velocity);
+    bridge_cell_core[target_word + 2] = core2;
+    bridge_cell_core[target_word + 3] = core3;
+    bridge_cell_core[target_word + 4] = core4 & 0xFFFFu;
+    bridge_island_id[target_index] = island;
+    bridge_entity_id[target_index] = entity;
+    bridge_displaced[target_index] = displaced;
+    imageStore(bridge_material_img, target, vec4(float(core0 & 0xFFFFu), 0.0, 0.0, 0.0));
+    refresh_changed_cell(source);
+    refresh_changed_cell(target);
+}

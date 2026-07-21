@@ -64,6 +64,9 @@ def _skip_budgeted_gpu_stage(engine: "WorldEngine", stage: str) -> bool:
 def _should_run_formal_collapse_this_frame(engine: "WorldEngine") -> bool:
     if engine.simulation_backend != "gpu":
         return True
+    pipeline = getattr(getattr(engine, "collapse_solver", None), "gpu_pipeline", None)
+    if pipeline is not None and pipeline.has_active_formal_dirty_epoch():
+        return True
     interval = max(1, int(getattr(engine, "formal_collapse_interval_frames", 1)))
     if interval <= 1:
         return True

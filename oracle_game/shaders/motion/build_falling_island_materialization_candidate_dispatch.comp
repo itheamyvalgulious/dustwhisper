@@ -6,7 +6,7 @@ uniform int tile_size;
 uniform int phase_falling_island;
 uniform uint workgroups_per_tile;
 
-layout(binding=0) uniform sampler2D phase_tex;
+layout(binding=0) uniform usampler2D cell_state_tex;
 layout(binding=1) uniform sampler2D island_id_tex;
 
 layout(std430, binding=0) readonly buffer ActiveTileCountBuffer {
@@ -28,7 +28,7 @@ layout(std430, binding=4) buffer CandidateDispatchArgsBuffer {
 shared uint tile_has_candidate;
 
 bool candidate_cell(ivec2 cell) {
-    int phase_id = int(texelFetch(phase_tex, cell, 0).x + 0.5);
+    int phase_id = int((texelFetch(cell_state_tex, cell, 0).x >> 16u) & 0xFFu);
     int island_id = int(texelFetch(island_id_tex, cell, 0).x + 0.5);
     return phase_id == phase_falling_island || island_id > 0;
 }

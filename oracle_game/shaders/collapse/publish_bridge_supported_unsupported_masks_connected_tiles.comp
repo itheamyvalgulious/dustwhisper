@@ -10,7 +10,11 @@ uniform ivec2 cell_grid_size;
 uniform ivec2 tile_grid_size;
 uniform int tile_size;
 
+#if {{SUPPORT_TEXTURE_U8}}
+layout(binding=0) uniform usampler2D supported_tex;
+#else
 layout(binding=0) uniform sampler2D supported_tex;
+#endif
 layout(binding=1) uniform sampler2D structural_tex;
 layout(std430, binding=0) writeonly buffer BridgeSupportedMaskBuffer {
     int bridge_supported_mask[];
@@ -61,7 +65,11 @@ void main() {
         return;
     }
     int cell_index = world_cell.y * cell_grid_size.x + world_cell.x;
+#if {{SUPPORT_TEXTURE_U8}}
+    bool supported = texelFetch(supported_tex, local_cell, 0).x != 0u;
+#else
     bool supported = texelFetch(supported_tex, local_cell, 0).x > 0.5;
+#endif
     bool unsupported = texelFetch(structural_tex, local_cell, 0).x > 0.5 && !supported;
     bridge_supported_mask[cell_index] = supported ? 1 : 0;
     bridge_unsupported_mask[cell_index] = unsupported ? 1 : 0;

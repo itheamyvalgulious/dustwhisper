@@ -1,0 +1,15 @@
+#version 430
+layout(local_size_x=256, local_size_y=1, local_size_z=1) in;
+uniform uint cell_count;
+uniform uint reaction_latched_flag_shifted;
+layout(std430, binding=0) buffer BridgeCellCore {
+    uint bridge_cell_core[];
+};
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= cell_count) {
+        return;
+    }
+    bridge_cell_core[index * 5u] &= ~reaction_latched_flag_shifted;
+}

@@ -1,0 +1,66 @@
+#version 430
+layout(
+    local_size_x={{FORMAL_CONNECTED_TILE_LOCAL_SIZE}},
+    local_size_y={{FORMAL_CONNECTED_TILE_LOCAL_SIZE}},
+    local_size_z=1
+) in;
+uniform ivec2 cell_grid_size;
+uniform ivec2 world_grid_size;
+uniform ivec2 region_origin;
+uniform ivec2 tile_grid_size;
+uniform int tile_size;
+uniform bool publish_delayed;
+uniform bool publish_immune;
+layout(binding=0) uniform sampler2D delayed_pending_tex;
+layout(binding=1) uniform sampler2D immune_unsupported_tex;
+layout(std430, binding=0) writeonly buffer BridgePendingBuffer {
+    int bridge_pending[];
+};
+layout(std430, binding=1) writeonly buffer BridgeDelayedPendingMaskBuffer {
+    int bridge_delayed_pending[];
+};
+layout(std430, binding=2) writeonly buffer BridgeImmuneUnsupportedMaskBuffer {
+    int bridge_immune_unsupported[];
+};
+layout(std430, binding=3) readonly buffer ConnectedTileMask {
+    int connected_tiles[];
+};
+layout(std430, binding=4) readonly buffer ConnectedTileCount {
+    uint connected_tile_count[];
+};
+layout(std430, binding=5) readonly buffer ConnectedTileList {
+    ivec2 connected_tile_list[];
+};
+void main() {
+    uint work_index = gl_WorkGroupID.x;
+    if (work_index >= connected_tile_count[0]) {
+        return;
+    }
+    ivec2 tile = connected_tile_list[int(work_index)];
+    if (tile.x < 0 || tile.y < 0 || tile.x >= tile_grid_size.x || tile.y >= tile_grid_size.y) {
+        return;
+    }
+    int tile_index = tile.y * tile_grid_size.x + tile.x;
+    if (connected_tiles[tile_index] == 0) {
+        return;
+    }
+    ivec2 local_cell = ivec2(gl_LocalInvocationID.xy);
+    ivec2 cell = tile * tile_size + local_cell;
+    if (
+        local_cell.x >= tile_size || local_cell.y >= tile_size ||
+        cell.x >= cell_grid_size.x || cell.y >= cell_grid_size.y
+    ) {
+        return;
+    }
+    ivec2 world_cell = region_origin + cell;
+    int world_index = world_cell.y * world_grid_size.x + world_cell.x;
+    if (publish_delayed) {
+        int delayed = texelFetch(delayed_pending_tex, cell, 0).x > 0.5 ? 1 : 0;
+        bridge_pending[world_index] = delayed;
+        bridge_delayed_pending[world_index] = delayed;
+    }
+    if (publish_immune) {
+        int immune = texelFetch(immune_unsupported_tex, cell, 0).x > 0.5 ? 1 : 0;
+        bridge_immune_unsupported[world_index] = immune;
+    }
+}

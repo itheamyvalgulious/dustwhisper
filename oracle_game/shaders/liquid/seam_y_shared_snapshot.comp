@@ -1,0 +1,332 @@
+#version 430
+#define DIRECT_BRIDGE_AUX_INPUTS {{DIRECT_BRIDGE_AUX_INPUTS}}
+#define LIQUID_PROVENANCE {{LIQUID_PROVENANCE}}
+layout(local_size_x={{TILE_SIZE}}, local_size_y=1, local_size_z=1) in;
+const int TILE_SIZE = {{TILE_SIZE}};
+uniform ivec2 cell_grid_size;
+uniform ivec2 tile_grid_size;
+uniform int active_ttl_reset;
+uniform int phase_liquid;
+uniform int phase_falling_island;
+uniform bool use_boundary_dispatch;
+layout(binding=0) uniform usampler2D cell_state_in_tex;
+layout(binding=3) uniform usampler2D timer_in_tex;
+layout(binding=4) uniform sampler2D temp_in_tex;
+layout(binding=5) uniform sampler2D integrity_in_tex;
+layout(binding=6) uniform sampler2D velocity_in_tex;
+layout(binding=7) uniform sampler2D active_tile_tex;
+layout(binding=8) uniform sampler2D entity_in_tex;
+layout(binding=9) uniform sampler2D displaced_in_tex;
+layout(std430, binding=4) readonly buffer BridgeEntityBuffer {
+    int bridge_entity_id[];
+};
+layout(std430, binding=5) readonly buffer BridgeDisplacedBuffer {
+    int bridge_displaced_material[];
+};
+#if LIQUID_PROVENANCE
+layout(std430, binding=8) buffer LiquidProvenanceBuffer {
+    uint liquid_provenance[];
+};
+const uint PROVENANCE_EMPTY = 0xFFFFFFFFu;
+#endif
+layout(std430, binding=0) buffer MaterialParams {
+    vec4 material_params[{{MAX_MATERIALS}}];
+};
+layout(std430, binding=1) buffer ActiveTileTTLBuffer {
+    int active_tile_ttl[];
+};
+layout(std430, binding=2) readonly buffer AffectedTileCountBuffer {
+    uint affected_tile_count[];
+};
+layout(std430, binding=3) readonly buffer AffectedTileListBuffer {
+    ivec2 affected_tile_list[];
+};
+layout(r32ui, binding=0) writeonly uniform uimage2D cell_state_out_img;
+layout(r32ui, binding=3) writeonly uniform uimage2D timer_out_img;
+layout(r32f, binding=4) writeonly uniform image2D temp_out_img;
+layout(r32f, binding=5) writeonly uniform image2D integrity_out_img;
+layout(rg32f, binding=6) writeonly uniform image2D velocity_out_img;
+
+shared uint s_cell_state[2][TILE_SIZE];
+shared uint s_timer[2][TILE_SIZE];
+shared float s_temp[2][TILE_SIZE];
+shared float s_integrity[2][TILE_SIZE];
+shared vec2 s_velocity[2][TILE_SIZE];
+shared float s_entity[2][TILE_SIZE];
+shared float s_displaced[2][TILE_SIZE];
+#if LIQUID_PROVENANCE
+shared uint s_provenance[2][TILE_SIZE];
+#endif
+shared int s_valid_width;
+
+uint material_of(uint cell_state) {
+    return cell_state & 0xFFFFu;
+}
+
+uint phase_of(uint cell_state) {
+    return (cell_state >> 16u) & 0xFFu;
+}
+
+int liquid_kind_for(uint material) {
+    int material_id = clamp(int(material), 0, {{MAX_MATERIALS_MINUS_1}});
+    return int(material_params[material_id].z + 0.5);
+}
+
+bool is_tile_liquid(int row, int x) {
+    if (x < 0 || x >= s_valid_width) {
+        return false;
+    }
+    uint cell_state = s_cell_state[row][x];
+    uint material = material_of(cell_state);
+    return material > 0u
+        && phase_of(cell_state) == uint(phase_liquid)
+        && liquid_kind_for(material) == 1;
+}
+
+bool is_placeholder_material(uint material) {
+    int material_id = clamp(int(material), 0, {{MAX_MATERIALS_MINUS_1}});
+    return int(material_params[material_id].w + 0.5) == 7;
+}
+
+bool is_reachable_empty(int row, int x) {
+    if (x < 0 || x >= s_valid_width) {
+        return false;
+    }
+    uint cell_state = s_cell_state[row][x];
+    uint material = material_of(cell_state);
+    uint phase = phase_of(cell_state);
+    return material == 0u
+        && phase != uint(phase_liquid)
+        && phase != uint(phase_falling_island)
+        && s_entity[row][x] < 0.5
+        && s_displaced[row][x] < 0.5
+        && !is_placeholder_material(material);
+}
+
+bool down_move_from_liquid(
+    int probe_x,
+    out int source_base,
+    out int target_base,
+    out int move_count
+) {
+    source_base = 0;
+    target_base = 0;
+    move_count = 0;
+    if (!is_tile_liquid(0, probe_x)) {
+        return false;
+    }
+    int liquid_start = probe_x;
+    while (liquid_start > 0 && is_tile_liquid(0, liquid_start - 1)) {
+        liquid_start -= 1;
+    }
+    int liquid_end = probe_x + 1;
+    while (liquid_end < s_valid_width && is_tile_liquid(0, liquid_end)) {
+        liquid_end += 1;
+    }
+    int empty_start = -1;
+    int empty_end = -1;
+    for (int x = liquid_start; x < liquid_end; ++x) {
+        if (is_reachable_empty(1, x)) {
+            empty_start = x;
+            while (empty_start > 0 && is_reachable_empty(1, empty_start - 1)) {
+                empty_start -= 1;
+            }
+            empty_end = x + 1;
+            while (empty_end < s_valid_width && is_reachable_empty(1, empty_end)) {
+                empty_end += 1;
+            }
+            break;
+        }
+    }
+    if (empty_start < 0) {
+        return false;
+    }
+    move_count = min(liquid_end - liquid_start, empty_end - empty_start);
+    if (move_count <= 0) {
+        return false;
+    }
+    source_base = liquid_start;
+    target_base = clamp(liquid_start, empty_start, empty_end - move_count);
+    return true;
+}
+
+bool down_move_from_empty(
+    int probe_x,
+    out int source_base,
+    out int target_base,
+    out int move_count
+) {
+    source_base = 0;
+    target_base = 0;
+    move_count = 0;
+    if (!is_reachable_empty(1, probe_x)) {
+        return false;
+    }
+    int empty_start = probe_x;
+    while (empty_start > 0 && is_reachable_empty(1, empty_start - 1)) {
+        empty_start -= 1;
+    }
+    int empty_end = probe_x + 1;
+    while (empty_end < s_valid_width && is_reachable_empty(1, empty_end)) {
+        empty_end += 1;
+    }
+    int liquid_probe = -1;
+    for (int x = empty_start; x < empty_end; ++x) {
+        if (is_tile_liquid(0, x)) {
+            liquid_probe = x;
+            break;
+        }
+    }
+    if (liquid_probe < 0) {
+        return false;
+    }
+    int liquid_start = liquid_probe;
+    while (liquid_start > 0 && is_tile_liquid(0, liquid_start - 1)) {
+        liquid_start -= 1;
+    }
+    int liquid_end = liquid_probe + 1;
+    while (liquid_end < s_valid_width && is_tile_liquid(0, liquid_end)) {
+        liquid_end += 1;
+    }
+    empty_start = -1;
+    empty_end = -1;
+    for (int x = liquid_start; x < liquid_end; ++x) {
+        if (is_reachable_empty(1, x)) {
+            empty_start = x;
+            while (empty_start > 0 && is_reachable_empty(1, empty_start - 1)) {
+                empty_start -= 1;
+            }
+            empty_end = x + 1;
+            while (empty_end < s_valid_width && is_reachable_empty(1, empty_end)) {
+                empty_end += 1;
+            }
+            break;
+        }
+    }
+    if (empty_start < 0) {
+        return false;
+    }
+    move_count = min(liquid_end - liquid_start, empty_end - empty_start);
+    if (move_count <= 0) {
+        return false;
+    }
+    source_base = liquid_start;
+    target_base = clamp(liquid_start, empty_start, empty_end - move_count);
+    return true;
+}
+
+void store_value(ivec2 cell, int source_row, int source_x) {
+    imageStore(cell_state_out_img, cell, uvec4(s_cell_state[source_row][source_x], 0u, 0u, 0u));
+#if !LIQUID_PROVENANCE
+    imageStore(timer_out_img, cell, uvec4(s_timer[source_row][source_x], 0u, 0u, 0u));
+    imageStore(temp_out_img, cell, vec4(s_temp[source_row][source_x], 0.0, 0.0, 0.0));
+    imageStore(integrity_out_img, cell, vec4(s_integrity[source_row][source_x], 0.0, 0.0, 0.0));
+    imageStore(velocity_out_img, cell, vec4(s_velocity[source_row][source_x], 0.0, 0.0));
+#else
+    liquid_provenance[cell.y * cell_grid_size.x + cell.x] = s_provenance[source_row][source_x];
+#endif
+}
+
+void store_cleared(ivec2 cell) {
+    imageStore(cell_state_out_img, cell, uvec4(0u));
+#if !LIQUID_PROVENANCE
+    imageStore(timer_out_img, cell, uvec4(0u));
+    imageStore(temp_out_img, cell, vec4(0.0));
+    imageStore(integrity_out_img, cell, vec4(0.0));
+    imageStore(velocity_out_img, cell, vec4(0.0));
+#else
+    liquid_provenance[cell.y * cell_grid_size.x + cell.x] = PROVENANCE_EMPTY;
+#endif
+}
+
+void refresh_changed_cell(ivec2 cell) {
+    ivec2 tile = ivec2(
+        clamp(cell.x / TILE_SIZE, 0, tile_grid_size.x - 1),
+        clamp(cell.y / TILE_SIZE, 0, tile_grid_size.y - 1)
+    );
+    active_tile_ttl[tile.y * tile_grid_size.x + tile.x] = active_ttl_reset;
+}
+
+void main() {
+    uint boundary_index = gl_WorkGroupID.x;
+    if (!use_boundary_dispatch || boundary_index >= affected_tile_count[0]) {
+        return;
+    }
+    ivec2 boundary_tile = affected_tile_list[int(boundary_index)];
+    if (
+        boundary_tile.x < 0
+        || boundary_tile.y < 0
+        || boundary_tile.x >= tile_grid_size.x
+        || boundary_tile.y + 1 >= tile_grid_size.y
+    ) {
+        return;
+    }
+
+    int lane = int(gl_LocalInvocationID.x);
+    int origin_x = boundary_tile.x * TILE_SIZE;
+    int boundary_y = (boundary_tile.y + 1) * TILE_SIZE;
+    int x = origin_x + lane;
+    bool valid = x < cell_grid_size.x && boundary_y < cell_grid_size.y;
+    if (lane == 0) {
+        s_valid_width = clamp(cell_grid_size.x - origin_x, 0, TILE_SIZE);
+    }
+    for (int row = 0; row < 2; ++row) {
+        ivec2 cell = ivec2(x, boundary_y - 1 + row);
+        s_cell_state[row][lane] = valid ? texelFetch(cell_state_in_tex, cell, 0).x : 0u;
+#if !LIQUID_PROVENANCE
+        s_timer[row][lane] = valid ? texelFetch(timer_in_tex, cell, 0).x : 0u;
+        s_temp[row][lane] = valid ? texelFetch(temp_in_tex, cell, 0).x : 0.0;
+        s_integrity[row][lane] = valid ? texelFetch(integrity_in_tex, cell, 0).x : 0.0;
+        s_velocity[row][lane] = valid ? texelFetch(velocity_in_tex, cell, 0).xy : vec2(0.0);
+#endif
+        int cell_index = cell.y * cell_grid_size.x + cell.x;
+        s_entity[row][lane] = valid
+            ? ((DIRECT_BRIDGE_AUX_INPUTS != 0)
+                ? float(bridge_entity_id[cell_index])
+                : texelFetch(entity_in_tex, cell, 0).x)
+            : 0.0;
+        s_displaced[row][lane] = valid
+            ? ((DIRECT_BRIDGE_AUX_INPUTS != 0)
+                ? float(bridge_displaced_material[cell_index])
+                : texelFetch(displaced_in_tex, cell, 0).x)
+            : 0.0;
+#if LIQUID_PROVENANCE
+        s_provenance[row][lane] = valid
+            ? liquid_provenance[cell_index]
+            : PROVENANCE_EMPTY;
+#endif
+    }
+    memoryBarrierShared();
+    barrier();
+    if (!valid) {
+        return;
+    }
+
+    int source_base;
+    int target_base;
+    int move_count;
+    ivec2 top_cell = ivec2(x, boundary_y - 1);
+    if (
+        down_move_from_liquid(lane, source_base, target_base, move_count)
+        && lane >= source_base
+        && lane < source_base + move_count
+    ) {
+        store_cleared(top_cell);
+        refresh_changed_cell(top_cell);
+    } else {
+        store_value(top_cell, 0, lane);
+    }
+
+    ivec2 bottom_cell = ivec2(x, boundary_y);
+    if (down_move_from_empty(lane, source_base, target_base, move_count)) {
+        int target_offset = lane - target_base;
+        if (target_offset >= 0 && target_offset < move_count && is_reachable_empty(1, lane)) {
+            int source_x = source_base + target_offset;
+            store_value(bottom_cell, 0, source_x);
+            refresh_changed_cell(ivec2(origin_x + source_x, boundary_y - 1));
+            refresh_changed_cell(bottom_cell);
+            return;
+        }
+    }
+    store_value(bottom_cell, 1, lane);
+}

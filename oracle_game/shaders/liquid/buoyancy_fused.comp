@@ -1,0 +1,500 @@
+#version 430
+#define LIQUID_PROVENANCE {{LIQUID_PROVENANCE}}
+#define FUSE_CLEANUP {{FUSE_CLEANUP}}
+#define TILE_SNAPSHOT_PRE_STATE {{TILE_SNAPSHOT_PRE_STATE}}
+#define TILE_SNAPSHOT_STATE_ELISION {{TILE_SNAPSHOT_STATE_ELISION}}
+#define BUOYANCY_SHARED_SINK_CACHE {{BUOYANCY_SHARED_SINK_CACHE}}
+layout(local_size_x={{PASS_LOCAL_SIZE}}, local_size_y={{PASS_LOCAL_SIZE}}, local_size_z=1) in;
+uniform ivec2 cell_grid_size;
+uniform ivec2 tile_grid_size;
+uniform int tile_size;
+uniform int active_ttl_reset;
+uniform int phase_liquid;
+uniform int phase_powder;
+uniform int phase_falling_island;
+layout(binding=0) uniform usampler2D cell_state_in_tex;
+layout(binding=3) uniform usampler2D timer_in_tex;
+layout(binding=4) uniform sampler2D temp_in_tex;
+layout(binding=5) uniform sampler2D integrity_in_tex;
+layout(binding=6) uniform sampler2D velocity_in_tex;
+layout(binding=7) uniform sampler2D active_tile_tex;
+layout(binding=8) uniform usampler2D cell_state_sink_fallback_tex;
+layout(binding=9) uniform usampler2D timer_sink_fallback_tex;
+layout(binding=10) uniform sampler2D temp_sink_fallback_tex;
+layout(binding=11) uniform sampler2D integrity_sink_fallback_tex;
+layout(binding=12) uniform sampler2D velocity_sink_fallback_tex;
+layout(std430, binding=0) buffer MaterialParams {
+    vec4 material_params[{{MAX_MATERIALS}}];
+};
+layout(std430, binding=1) buffer ActiveTileTTLBuffer {
+    int active_tile_ttl[];
+};
+layout(std430, binding=2) readonly buffer ActiveTileCountBuffer {
+    uint active_tile_count[];
+};
+layout(std430, binding=3) readonly buffer ActiveTileListBuffer {
+    ivec2 active_tile_list[];
+};
+#if LIQUID_PROVENANCE
+layout(std430, binding=8) readonly buffer LiquidProvenanceInBuffer {
+    uint liquid_provenance_in[];
+};
+layout(std430, binding=9) writeonly buffer LiquidProvenanceOutBuffer {
+    uint liquid_provenance_out[];
+};
+#endif
+#if FUSE_CLEANUP
+layout(std430, binding=4) readonly buffer BridgeCellCoreBuffer {
+    uint bridge_cell_core[];
+};
+layout(std430, binding=5) buffer BridgeIslandBuffer {
+    int bridge_island_id[];
+};
+layout(std430, binding=6) buffer BridgeEntityBuffer {
+    int bridge_entity_id[];
+};
+layout(std430, binding=7) buffer BridgeDisplacedBuffer {
+    int bridge_displaced[];
+};
+#if TILE_SNAPSHOT_PRE_STATE
+layout(std430, binding=10) readonly buffer TileSolveSnapshotBuffer {
+    uint tile_solve_snapshot[];
+};
+layout(std430, binding=11) readonly buffer TileSnapshotTokenBuffer {
+    uint tile_snapshot_state[];
+};
+#endif
+#endif
+layout(r32ui, binding=0) writeonly uniform uimage2D cell_state_out_img;
+layout(r32ui, binding=3) writeonly uniform uimage2D timer_out_img;
+layout(r32f, binding=4) writeonly uniform image2D temp_out_img;
+layout(r32f, binding=5) writeonly uniform image2D integrity_out_img;
+layout(rg32f, binding=6) writeonly uniform image2D velocity_out_img;
+
+struct CellValue {
+    uint cell_state;
+    uint timer;
+    float temp;
+    float integrity;
+    vec2 velocity;
+#if LIQUID_PROVENANCE
+    uint provenance;
+#endif
+};
+
+#if BUOYANCY_SHARED_SINK_CACHE
+const int SINK_CACHE_WIDTH = {{PASS_LOCAL_SIZE}};
+const int SINK_INPUT_ROWS = {{PASS_LOCAL_SIZE}} + 4;
+const int SINK_QUERY_ROWS = {{PASS_LOCAL_SIZE}} + 2;
+shared uint shared_sink_input[SINK_INPUT_ROWS][SINK_CACHE_WIDTH];
+shared uint shared_sink_state[SINK_QUERY_ROWS][SINK_CACHE_WIDTH];
+shared uint shared_sink_meta[SINK_QUERY_ROWS][SINK_CACHE_WIDTH];
+shared uint shared_sink_cache_enabled;
+shared ivec2 shared_sink_origin;
+#endif
+
+bool in_bounds(ivec2 cell) {
+    return cell.x >= 0 && cell.y >= 0 && cell.x < cell_grid_size.x && cell.y < cell_grid_size.y;
+}
+
+#if FUSE_CLEANUP
+#if TILE_SNAPSHOT_PRE_STATE
+uint cleanup_pre_state(ivec2 cell, int cell_index) {
+    uvec2 token = uvec2(tile_snapshot_state[0], tile_snapshot_state[1]);
+    uvec2 validated_token = uvec2(tile_snapshot_state[2], tile_snapshot_state[3]);
+    if (
+        any(notEqual(token, uvec2(0u)))
+        && all(equal(validated_token, token))
+        && tile_snapshot_state[4] == 0u
+    ) {
+#if TILE_SNAPSHOT_STATE_ELISION
+        uint packed_pre = tile_solve_snapshot[cell_index] >> 16u;
+#else
+        uint packed_pre = tile_solve_snapshot[cell_index * 2 + 1] >> 16u;
+#endif
+        uint pre_material = packed_pre & 0xFFu;
+        uint pre_phase = (packed_pre >> 8u) & 0xFFu;
+        return pre_material | (pre_phase << 16u);
+    }
+    return bridge_cell_core[cell_index * 5];
+}
+#endif
+
+bool is_placeholder_material(uint material) {
+    int material_id = clamp(int(material), 0, {{MAX_MATERIALS_MINUS_1}});
+    return int(material_params[material_id].w + 0.5) == 7;
+}
+
+void cleanup_bridge_aux(ivec2 cell, uint final_state) {
+    int cell_index = cell.y * cell_grid_size.x + cell.x;
+#if TILE_SNAPSHOT_PRE_STATE
+    uint pre_state = cleanup_pre_state(cell, cell_index);
+#else
+    uint pre_state = bridge_cell_core[cell_index * 5];
+#endif
+    uint pre_material = pre_state & 0xFFFFu;
+    uint pre_phase = (pre_state >> 16u) & 0xFFu;
+    uint final_material = final_state & 0xFFFFu;
+    uint final_phase = (final_state >> 16u) & 0xFFu;
+    bool changed = pre_material != final_material || pre_phase != final_phase;
+    if (!changed) {
+        return;
+    }
+    if (!is_placeholder_material(final_material)) {
+        bridge_entity_id[cell_index] = 0;
+        bridge_displaced[cell_index] = 0;
+    }
+    if (
+        bridge_island_id[cell_index] > 0
+        && (final_phase != uint(phase_falling_island) || final_material == 0u)
+    ) {
+        bridge_island_id[cell_index] = 0;
+    }
+}
+#endif
+
+bool tile_active(ivec2 cell) {
+    ivec2 tile = ivec2(
+        clamp(cell.x / tile_size, 0, tile_grid_size.x - 1),
+        clamp(cell.y / tile_size, 0, tile_grid_size.y - 1)
+    );
+    return texelFetch(active_tile_tex, tile, 0).x > 0.5;
+}
+
+uint material_of(CellValue value) {
+    return value.cell_state & 0xFFFFu;
+}
+
+uint phase_of(CellValue value) {
+    return (value.cell_state >> 16u) & 0xFFu;
+}
+
+float density_for(uint material) {
+    int material_id = clamp(int(material), 0, {{MAX_MATERIALS_MINUS_1}});
+    return material_params[material_id].x;
+}
+
+#if LIQUID_PROVENANCE
+uint provenance_at(ivec2 cell) {
+    if (!tile_active(cell)) {
+        return uint(cell.y * cell_grid_size.x + cell.x);
+    }
+    return liquid_provenance_in[cell.y * cell_grid_size.x + cell.x];
+}
+#endif
+
+CellValue load_selected(ivec2 cell, uint cell_state, bool use_fallback) {
+    if (use_fallback) {
+#if LIQUID_PROVENANCE
+        return CellValue(
+            cell_state,
+            0u,
+            0.0,
+            0.0,
+            vec2(0.0),
+            provenance_at(cell)
+        );
+#else
+        return CellValue(
+            cell_state,
+            texelFetch(timer_sink_fallback_tex, cell, 0).x,
+            texelFetch(temp_sink_fallback_tex, cell, 0).x,
+            texelFetch(integrity_sink_fallback_tex, cell, 0).x,
+            texelFetch(velocity_sink_fallback_tex, cell, 0).xy
+        );
+#endif
+    }
+#if LIQUID_PROVENANCE
+    return CellValue(
+        cell_state,
+        0u,
+        0.0,
+        0.0,
+        vec2(0.0),
+        provenance_at(cell)
+    );
+#else
+    return CellValue(
+        cell_state,
+        texelFetch(timer_in_tex, cell, 0).x,
+        texelFetch(temp_in_tex, cell, 0).x,
+        texelFetch(integrity_in_tex, cell, 0).x,
+        texelFetch(velocity_in_tex, cell, 0).xy
+    );
+#endif
+}
+
+uint sink_state(
+    ivec2 cell,
+    out bool changed,
+    out ivec2 source,
+    out bool source_uses_fallback
+) {
+    changed = false;
+    source = cell;
+    if (!tile_active(cell)) {
+        source_uses_fallback = true;
+        return texelFetch(cell_state_sink_fallback_tex, cell, 0).x;
+    }
+    source_uses_fallback = false;
+    uint cell_state = texelFetch(cell_state_in_tex, cell, 0).x;
+    uint material = cell_state & 0xFFFFu;
+    uint phase = (cell_state >> 16u) & 0xFFu;
+    if (cell.y + 1 < cell_grid_size.y && material > 0u && phase == uint(phase_powder)) {
+        ivec2 below = cell + ivec2(0, 1);
+        uint below_state = texelFetch(cell_state_in_tex, below, 0).x;
+        uint below_material = below_state & 0xFFFFu;
+        if (
+            below_material > 0u
+            && ((below_state >> 16u) & 0xFFu) == uint(phase_liquid)
+            && density_for(material) > density_for(below_material)
+        ) {
+            changed = true;
+            source = below;
+            return below_state;
+        }
+    }
+    if (cell.y > 0 && material > 0u && phase == uint(phase_liquid)) {
+        ivec2 above = cell - ivec2(0, 1);
+        uint above_state = texelFetch(cell_state_in_tex, above, 0).x;
+        uint above_material = above_state & 0xFFFFu;
+        if (
+            above_material > 0u
+            && ((above_state >> 16u) & 0xFFu) == uint(phase_powder)
+            && density_for(above_material) > density_for(material)
+        ) {
+            changed = true;
+            source = above;
+            return above_state;
+        }
+    }
+    return cell_state;
+}
+
+#if BUOYANCY_SHARED_SINK_CACHE
+void initialize_shared_sink_cache(ivec2 group_origin) {
+    if (gl_LocalInvocationIndex == 0u) {
+        shared_sink_cache_enabled = active_tile_count[0]
+            >= uint(tile_grid_size.x * tile_grid_size.y)
+            ? 1u
+            : 0u;
+        shared_sink_origin = group_origin;
+    }
+    barrier();
+    if (shared_sink_cache_enabled == 0u) {
+        return;
+    }
+
+    uint lane = gl_LocalInvocationIndex;
+    uint input_count = uint(SINK_INPUT_ROWS * SINK_CACHE_WIDTH);
+    for (uint slot = lane; slot < input_count; slot += gl_WorkGroupSize.x * gl_WorkGroupSize.y) {
+        int x = int(slot % uint(SINK_CACHE_WIDTH));
+        int y = int(slot / uint(SINK_CACHE_WIDTH));
+        ivec2 cell = group_origin + ivec2(x, y - 2);
+        shared_sink_input[y][x] = in_bounds(cell)
+            ? texelFetch(cell_state_in_tex, cell, 0).x
+            : 0u;
+    }
+    barrier();
+
+    uint query_count = uint(SINK_QUERY_ROWS * SINK_CACHE_WIDTH);
+    for (uint slot = lane; slot < query_count; slot += gl_WorkGroupSize.x * gl_WorkGroupSize.y) {
+        int x = int(slot % uint(SINK_CACHE_WIDTH));
+        int query_y = int(slot / uint(SINK_CACHE_WIDTH));
+        ivec2 cell = group_origin + ivec2(x, query_y - 1);
+        int input_y = query_y + 1;
+        uint result = shared_sink_input[input_y][x];
+        uint source_code = 0u;
+        bool changed = false;
+        uint material = result & 0xFFFFu;
+        uint phase = (result >> 16u) & 0xFFu;
+        if (
+            cell.y + 1 < cell_grid_size.y
+            && material > 0u
+            && phase == uint(phase_powder)
+        ) {
+            uint below_state = shared_sink_input[input_y + 1][x];
+            uint below_material = below_state & 0xFFFFu;
+            if (
+                below_material > 0u
+                && ((below_state >> 16u) & 0xFFu) == uint(phase_liquid)
+                && density_for(material) > density_for(below_material)
+            ) {
+                result = below_state;
+                source_code = 1u;
+                changed = true;
+            }
+        }
+        if (
+            !changed
+            && cell.y > 0
+            && material > 0u
+            && phase == uint(phase_liquid)
+        ) {
+            uint above_state = shared_sink_input[input_y - 1][x];
+            uint above_material = above_state & 0xFFFFu;
+            if (
+                above_material > 0u
+                && ((above_state >> 16u) & 0xFFu) == uint(phase_powder)
+                && density_for(above_material) > density_for(material)
+            ) {
+                result = above_state;
+                source_code = 2u;
+                changed = true;
+            }
+        }
+        shared_sink_state[query_y][x] = result;
+        shared_sink_meta[query_y][x] = source_code | (changed ? 4u : 0u);
+    }
+    barrier();
+}
+
+uint cached_sink_state(
+    ivec2 cell,
+    out bool changed,
+    out ivec2 source,
+    out bool source_uses_fallback
+) {
+    ivec2 local = cell - shared_sink_origin + ivec2(0, 1);
+    uint meta = shared_sink_meta[local.y][local.x];
+    uint source_code = meta & 3u;
+    changed = (meta & 4u) != 0u;
+    source = cell + (
+        source_code == 1u
+        ? ivec2(0, 1)
+        : source_code == 2u
+        ? ivec2(0, -1)
+        : ivec2(0)
+    );
+    source_uses_fallback = false;
+    return shared_sink_state[local.y][local.x];
+}
+#endif
+
+uint selected_sink_state(
+    ivec2 cell,
+    out bool changed,
+    out ivec2 source,
+    out bool source_uses_fallback
+) {
+#if BUOYANCY_SHARED_SINK_CACHE
+    if (shared_sink_cache_enabled != 0u) {
+        return cached_sink_state(cell, changed, source, source_uses_fallback);
+    }
+#endif
+    return sink_state(cell, changed, source, source_uses_fallback);
+}
+
+CellValue sink_value(ivec2 cell, out bool changed, out ivec2 source) {
+    bool source_uses_fallback;
+    uint cell_state = selected_sink_state(cell, changed, source, source_uses_fallback);
+    return load_selected(source, cell_state, source_uses_fallback);
+}
+
+void refresh_changed_cell(ivec2 cell) {
+    if (!in_bounds(cell)) {
+        return;
+    }
+    ivec2 tile = ivec2(
+        clamp(cell.x / tile_size, 0, tile_grid_size.x - 1),
+        clamp(cell.y / tile_size, 0, tile_grid_size.y - 1)
+    );
+    active_tile_ttl[tile.y * tile_grid_size.x + tile.x] = active_ttl_reset;
+}
+
+bool active_dispatch_cell(out ivec2 cell) {
+    int groups_per_tile_axis = max(1, (tile_size + {{PASS_LOCAL_SIZE_MINUS_1}}) / {{PASS_LOCAL_SIZE}});
+    int workgroups_per_tile = groups_per_tile_axis * groups_per_tile_axis;
+    uint group_index = gl_WorkGroupID.x;
+    uint active_tile_index = group_index / uint(workgroups_per_tile);
+    if (active_tile_index >= active_tile_count[0]) {
+        return false;
+    }
+    int subtile = int(group_index % uint(workgroups_per_tile));
+    ivec2 subtile_xy = ivec2(subtile % groups_per_tile_axis, subtile / groups_per_tile_axis);
+    ivec2 tile = active_tile_list[int(active_tile_index)];
+    if (tile.x < 0 || tile.y < 0 || tile.x >= tile_grid_size.x || tile.y >= tile_grid_size.y) {
+        return false;
+    }
+    ivec2 tile_origin = tile * tile_size;
+    ivec2 local_cell = subtile_xy * {{PASS_LOCAL_SIZE}} + ivec2(gl_LocalInvocationID.xy);
+    cell = tile_origin + local_cell;
+    ivec2 tile_end = min(tile_origin + ivec2(tile_size), cell_grid_size);
+    return cell.x < tile_end.x && cell.y < tile_end.y;
+}
+
+void store_value(ivec2 cell, CellValue value) {
+    imageStore(cell_state_out_img, cell, uvec4(value.cell_state, 0u, 0u, 0u));
+#if LIQUID_PROVENANCE
+    liquid_provenance_out[cell.y * cell_grid_size.x + cell.x] = value.provenance;
+#else
+    imageStore(timer_out_img, cell, uvec4(value.timer, 0u, 0u, 0u));
+    imageStore(temp_out_img, cell, vec4(value.temp, 0.0, 0.0, 0.0));
+    imageStore(integrity_out_img, cell, vec4(value.integrity, 0.0, 0.0, 0.0));
+    imageStore(velocity_out_img, cell, vec4(value.velocity, 0.0, 0.0));
+#endif
+#if FUSE_CLEANUP
+    cleanup_bridge_aux(cell, value.cell_state);
+#endif
+}
+
+void main() {
+    ivec2 gid;
+    bool gid_valid = active_dispatch_cell(gid);
+#if BUOYANCY_SHARED_SINK_CACHE
+    initialize_shared_sink_cache(gid - ivec2(gl_LocalInvocationID.xy));
+#endif
+    if (!gid_valid) {
+        return;
+    }
+
+    bool sink_changed;
+    ivec2 sink_source;
+    CellValue value = sink_value(gid, sink_changed, sink_source);
+    if (sink_changed) {
+        refresh_changed_cell(gid);
+        refresh_changed_cell(sink_source);
+    }
+
+    uint material = material_of(value);
+    uint phase = phase_of(value);
+    if (gid.y + 1 < cell_grid_size.y && material > 0u && phase == uint(phase_liquid)) {
+        ivec2 below = gid + ivec2(0, 1);
+        bool ignored_changed;
+        ivec2 ignored_source;
+        bool ignored_fallback;
+        uint below_state = selected_sink_state(below, ignored_changed, ignored_source, ignored_fallback);
+        uint below_material = below_state & 0xFFFFu;
+        if (
+            below_material > 0u
+            && ((below_state >> 16u) & 0xFFu) == uint(phase_powder)
+            && density_for(below_material) < density_for(material)
+        ) {
+            CellValue below_value = load_selected(ignored_source, below_state, ignored_fallback);
+            store_value(gid, below_value);
+            refresh_changed_cell(gid);
+            refresh_changed_cell(below);
+            return;
+        }
+    }
+    if (gid.y > 0 && material > 0u && phase == uint(phase_powder)) {
+        ivec2 above = gid - ivec2(0, 1);
+        bool ignored_changed;
+        ivec2 ignored_source;
+        bool ignored_fallback;
+        uint above_state = selected_sink_state(above, ignored_changed, ignored_source, ignored_fallback);
+        uint above_material = above_state & 0xFFFFu;
+        if (
+            above_material > 0u
+            && ((above_state >> 16u) & 0xFFu) == uint(phase_liquid)
+            && density_for(material) < density_for(above_material)
+        ) {
+            CellValue above_value = load_selected(ignored_source, above_state, ignored_fallback);
+            store_value(gid, above_value);
+            refresh_changed_cell(gid);
+            refresh_changed_cell(above);
+            return;
+        }
+    }
+    store_value(gid, value);
+}

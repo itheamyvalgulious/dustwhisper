@@ -1,22 +1,38 @@
+            layout(std430, binding=7) readonly buffer GasTags {
+                uvec4 gas_tags[{{MAX_MATERIALS}}];
+            };
 
-            layout(r32f, binding=0) writeonly uniform image2D material_out_img;
-            layout(r32f, binding=1) writeonly uniform image2D phase_out_img;
+            layout(r32ui, binding=0) writeonly uniform uimage2D cell_state_out_img;
             layout(r32f, binding=2) writeonly uniform image2D temp_out_img;
             layout(r32f, binding=3) writeonly uniform image2D integrity_out_img;
-            layout(rgba32f, binding=4) writeonly uniform image2D timer_out_img;
+            layout(r32ui, binding=4) writeonly uniform uimage2D timer_out_img;
             layout(rgba32f, binding=5) writeonly uniform image2DArray deferred_lo_img;
             layout(rgba32f, binding=6) writeonly uniform image2DArray deferred_hi_img;
-            layout(rg32f, binding=7) writeonly uniform image2D cell_meta_out_img;
+            layout(rg32f, binding=7) uniform image2D cell_meta_out_img;
+            uniform bool accumulate_segment_cell_meta;
+            void store_cell_meta(ivec2 cell, float current_reset, float current_latched) {
+                vec2 meta = vec2(current_reset, current_latched);
+                if (accumulate_segment_cell_meta) {
+                    meta = imageLoad(cell_meta_out_img, cell).xy;
+                    meta.x = max(meta.x, current_reset);
+                    if (current_reset > 0.5) {
+                        meta.y = 0.0;
+                    }
+                    meta.y = max(meta.y, current_latched);
+                }
+                imageStore(cell_meta_out_img, cell, vec4(meta, 0.0, 0.0));
+            }
+            uniform bool write_deferred_outputs;
             void main() {
                 ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
                 if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
                     return;
                 }
-                float material_value = texelFetch(material_tex, gid, 0).x;
-                float phase_value = texelFetch(phase_tex, gid, 0).x;
+                float material_value = material_value_at(gid);
+                float phase_value = phase_value_at(gid);
                 float temp_value = texelFetch(temp_tex, gid, 0).x;
                 float integrity_value = texelFetch(integrity_tex, gid, 0).x;
-                vec4 timer_value = texelFetch(timer_tex, gid, 0);
+                vec4 timer_value = unpack_timer(texelFetch(timer_tex, gid, 0).x);
                 vec4 deferred_action_lo = vec4(0.0);
                 vec4 deferred_action_hi = vec4(0.0);
                 vec4 deferred_scale_lo = vec4(0.0);
@@ -25,16 +41,17 @@
                 float reaction_latched_value = 0.0;
                 int deferred_count = 0;
                 if (!solve_active(gid)) {
-                    imageStore(material_out_img, gid, vec4(material_value, 0.0, 0.0, 0.0));
-                    imageStore(phase_out_img, gid, vec4(phase_value, 0.0, 0.0, 0.0));
+                    imageStore(cell_state_out_img, gid, uvec4(pack_cell_state_at(gid, material_value, phase_value), 0u, 0u, 0u));
                     imageStore(temp_out_img, gid, vec4(temp_value, 0.0, 0.0, 0.0));
                     imageStore(integrity_out_img, gid, vec4(integrity_value, 0.0, 0.0, 0.0));
-                    imageStore(timer_out_img, gid, timer_value);
-                    imageStore(deferred_lo_img, ivec3(gid, 0), deferred_action_lo);
-                    imageStore(deferred_lo_img, ivec3(gid, 1), deferred_scale_lo);
-                    imageStore(deferred_hi_img, ivec3(gid, 0), deferred_action_hi);
-                    imageStore(deferred_hi_img, ivec3(gid, 1), deferred_scale_hi);
-                    imageStore(cell_meta_out_img, gid, vec4(0.0, 0.0, 0.0, 0.0));
+                    imageStore(timer_out_img, gid, uvec4(pack_timer(timer_value), 0u, 0u, 0u));
+                    if (write_deferred_outputs) {
+                        imageStore(deferred_lo_img, ivec3(gid, 0), deferred_action_lo);
+                        imageStore(deferred_lo_img, ivec3(gid, 1), deferred_scale_lo);
+                        imageStore(deferred_hi_img, ivec3(gid, 0), deferred_action_hi);
+                        imageStore(deferred_hi_img, ivec3(gid, 1), deferred_scale_hi);
+                    }
+                    store_cell_meta(gid, 0.0, 0.0);
                     return;
                 }
                 ivec2 gas_cell = ivec2(
@@ -42,9 +59,14 @@
                     min(gid.y / gas_cell_size, textureSize(gas_tex, 0).y - 1)
                 );
                 int material_id = int(material_value + 0.5);
+                #ifdef AUTHORITATIVE_LHS_CANDIDATE_MASKS
+                bool legacy_lhs_fallback = material_id >= {{MAX_MATERIALS}};
+                #endif
                 if (material_id > 0) {
                     int phase_id = int(phase_value + 0.5);
+                    #ifndef AUTHORITATIVE_LHS_CANDIDATE_MASKS
                     uint material_reaction_tags = material_tags[clamp_material_id(material_id)].y;
+                    #endif
                     for (int word_index = 0; word_index < rule_candidate_word_count; ++word_index) {
                         uint candidate_bits = lhs_rule_candidate_word(material_id, word_index);
                         while (candidate_bits != 0u) {
@@ -57,12 +79,24 @@
                             ivec4 ri = rule_i[rule_index];
                             vec4 rf = rule_f[rule_index];
                             uvec4 rt = rule_tags[rule_index];
+                            #ifdef AUTHORITATIVE_LHS_CANDIDATE_MASKS
+                            if (legacy_lhs_fallback) {
+                                if (ri.x >= 0 && material_id != ri.x) {
+                                    continue;
+                                }
+                                uint fallback_tags = material_tags[clamp_material_id(material_id)].y;
+                                if (!mask_matches(fallback_tags, rt.x)) {
+                                    continue;
+                                }
+                            }
+                            #else
                             if (ri.x >= 0 && material_id != ri.x) {
                                 continue;
                             }
                             if (!mask_matches(material_reaction_tags, rt.x)) {
                                 continue;
                             }
+                            #endif
                             int phase_mask = int(rt.z);
                             float rule_scale = rf.w;
                             if (phase_mask != 0 && ((1 << phase_id) & phase_mask) == 0) {
@@ -139,15 +173,15 @@
                         }
                     }
                 }
-                imageStore(material_out_img, gid, vec4(material_value, 0.0, 0.0, 0.0));
-                imageStore(phase_out_img, gid, vec4(phase_value, 0.0, 0.0, 0.0));
+                imageStore(cell_state_out_img, gid, uvec4(pack_cell_state_at(gid, material_value, phase_value), 0u, 0u, 0u));
                 imageStore(temp_out_img, gid, vec4(temp_value, 0.0, 0.0, 0.0));
                 imageStore(integrity_out_img, gid, vec4(integrity_value, 0.0, 0.0, 0.0));
-                imageStore(timer_out_img, gid, timer_value);
-                imageStore(deferred_lo_img, ivec3(gid, 0), deferred_action_lo);
-                imageStore(deferred_lo_img, ivec3(gid, 1), deferred_scale_lo);
-                imageStore(deferred_hi_img, ivec3(gid, 0), deferred_action_hi);
-                imageStore(deferred_hi_img, ivec3(gid, 1), deferred_scale_hi);
-                imageStore(cell_meta_out_img, gid, vec4(cell_reset_value, reaction_latched_value, 0.0, 0.0));
+                imageStore(timer_out_img, gid, uvec4(pack_timer(timer_value), 0u, 0u, 0u));
+                if (write_deferred_outputs) {
+                    imageStore(deferred_lo_img, ivec3(gid, 0), deferred_action_lo);
+                    imageStore(deferred_lo_img, ivec3(gid, 1), deferred_scale_lo);
+                    imageStore(deferred_hi_img, ivec3(gid, 0), deferred_action_hi);
+                    imageStore(deferred_hi_img, ivec3(gid, 1), deferred_scale_hi);
+                }
+                store_cell_meta(gid, cell_reset_value, reaction_latched_value);
             }
-            

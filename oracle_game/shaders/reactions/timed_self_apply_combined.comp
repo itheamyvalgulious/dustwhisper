@@ -1,0 +1,178 @@
+            uniform int self_rule_count;
+            uniform bool use_self_rule_material_spans;
+            layout(std430, binding=12) buffer SelfRuleI {
+                ivec4 self_rule_i[{{MAX_SELF_RULES}}];
+            };
+            layout(std430, binding=13) buffer SelfRuleF {
+                vec4 self_rule_f[{{MAX_SELF_RULES}}];
+            };
+
+            void store_combined_cell_outputs(
+                ivec2 gid,
+                float material_value,
+                float phase_value,
+                float temp_value,
+                float integrity_value,
+                vec4 timer_value,
+                vec4 timed_action_lo,
+                vec4 timed_action_hi,
+                vec4 timed_scale_lo,
+                vec4 timed_scale_hi,
+                vec4 self_action_lo,
+                vec4 self_action_hi,
+                vec4 self_scale_lo,
+                vec4 self_scale_hi,
+                float cell_reset_value,
+                float reaction_latched_value
+            ) {
+                store_timed_deferred_outputs(
+                    gid,
+                    timed_action_lo,
+                    timed_action_hi,
+                    timed_scale_lo,
+                    timed_scale_hi
+                );
+                store_cell_outputs(
+                    gid,
+                    material_value,
+                    phase_value,
+                    temp_value,
+                    integrity_value,
+                    timer_value,
+                    self_action_lo,
+                    self_action_hi,
+                    self_scale_lo,
+                    self_scale_hi,
+                    cell_reset_value,
+                    reaction_latched_value
+                );
+            }
+
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
+                    return;
+                }
+                float material_value = material_value_at(gid);
+                float phase_value = phase_value_at(gid);
+                float temp_value = texelFetch(temp_tex, gid, 0).x;
+                float integrity_value = texelFetch(integrity_tex, gid, 0).x;
+                vec4 timer_value = unpack_timer(texelFetch(timer_tex, gid, 0).x);
+                vec4 timed_action_lo = vec4(0.0);
+                vec4 timed_action_hi = vec4(0.0);
+                vec4 timed_scale_lo = vec4(0.0);
+                vec4 timed_scale_hi = vec4(0.0);
+                vec4 self_action_lo = vec4(0.0);
+                vec4 self_action_hi = vec4(0.0);
+                vec4 self_scale_lo = vec4(0.0);
+                vec4 self_scale_hi = vec4(0.0);
+                float cell_reset_value = 0.0;
+                float reaction_latched_value = 0.0;
+                int timed_deferred_count = 0;
+                int self_deferred_count = 0;
+                if (!solve_active(gid)) {
+                    store_combined_cell_outputs(
+                        gid, material_value, phase_value, temp_value, integrity_value,
+                        timer_value, timed_action_lo, timed_action_hi, timed_scale_lo,
+                        timed_scale_hi, self_action_lo, self_action_hi, self_scale_lo,
+                        self_scale_hi, cell_reset_value, reaction_latched_value
+                    );
+                    return;
+                }
+
+                // Stage order is intentional: self rules observe every timed
+                // core mutation (including timer decrement and conversion).
+                int timed_material_id = clamp_material_id(int(material_value + 0.5));
+                ivec4 slots = material_slots_lo[timed_material_id];
+                vec4 timed_triggers = vec4(0.0);
+                bool has_timed_trigger = false;
+                for (int slot_index = 0; slot_index < 4; ++slot_index) {
+                    int timer_count = int(round(timer_value[slot_index]));
+                    if (timer_count <= 0) {
+                        continue;
+                    }
+                    int action_index = slots[slot_index];
+                    if (action_index > 0) {
+                        has_timed_trigger = true;
+                        timed_triggers[slot_index] = float(action_index);
+                    }
+                    timer_value[slot_index] = float(max(0, timer_count - 1));
+                }
+                if (has_timed_trigger) {
+                    apply_trigger_vector(
+                        material_value, phase_value, temp_value, integrity_value,
+                        timer_value, cell_reset_value, reaction_latched_value,
+                        timed_action_lo, timed_action_hi, timed_scale_lo, timed_scale_hi,
+                        timed_deferred_count, gid, timed_triggers
+                    );
+                }
+
+                int material_id = int(material_value + 0.5);
+                if (material_id > 0) {
+                    int phase_id = int(phase_value + 0.5);
+                    material_id = clamp_material_id(material_id);
+                    vec4 self_triggers_lo = vec4(0.0);
+                    vec4 self_triggers_hi = vec4(0.0);
+                    uint self_rule_span = material_tags[material_id].w;
+                    int self_rule_begin = use_self_rule_material_spans
+                        ? int(self_rule_span & 0xFFFFu)
+                        : 0;
+                    int self_rule_end = use_self_rule_material_spans
+                        ? min(self_rule_count, self_rule_begin + int(self_rule_span >> 16u))
+                        : self_rule_count;
+                    for (int rule_index = self_rule_begin; rule_index < self_rule_end; ++rule_index) {
+                        ivec4 ri = self_rule_i[rule_index];
+                        vec4 rf = self_rule_f[rule_index];
+                        if (ri.x != material_id) {
+                            continue;
+                        }
+                        if (ri.z != 0 && ((1 << phase_id) & ri.z) == 0) {
+                            continue;
+                        }
+                        if (temp_value < rf.x || temp_value > rf.y) {
+                            continue;
+                        }
+                        if ((ri.w & 1) != 0 && integrity_value > rf.z) {
+                            continue;
+                        }
+                        if ((ri.w & 2) != 0 && integrity_value < rf.w) {
+                            continue;
+                        }
+                        int slot_index = ri.y;
+                        int action_index = slot_action(material_id, slot_index);
+                        if (action_index <= 0) {
+                            continue;
+                        }
+                        if (slot_index < 4) {
+                            if (timer_value[slot_index] <= 0.5) {
+                                int duration = action_meta[action_index].x;
+                                if (duration > 0) {
+                                    timer_value[slot_index] = float(duration);
+                                }
+                                self_triggers_lo[slot_index] = float(action_index);
+                            }
+                        } else if (slot_index < 8) {
+                            self_triggers_hi[slot_index - 4] = float(action_index);
+                        }
+                    }
+                    apply_trigger_vector(
+                        material_value, phase_value, temp_value, integrity_value,
+                        timer_value, cell_reset_value, reaction_latched_value,
+                        self_action_lo, self_action_hi, self_scale_lo, self_scale_hi,
+                        self_deferred_count, gid, self_triggers_lo
+                    );
+                    apply_trigger_vector(
+                        material_value, phase_value, temp_value, integrity_value,
+                        timer_value, cell_reset_value, reaction_latched_value,
+                        self_action_lo, self_action_hi, self_scale_lo, self_scale_hi,
+                        self_deferred_count, gid, self_triggers_hi
+                    );
+                    collect_self_emit_material_targets(gid, self_action_lo, self_action_hi);
+                }
+                store_combined_cell_outputs(
+                    gid, material_value, phase_value, temp_value, integrity_value,
+                    timer_value, timed_action_lo, timed_action_hi, timed_scale_lo,
+                    timed_scale_hi, self_action_lo, self_action_hi, self_scale_lo,
+                    self_scale_hi, cell_reset_value, reaction_latched_value
+                );
+            }

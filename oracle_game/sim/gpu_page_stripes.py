@@ -554,6 +554,10 @@ class GPUPageStripePipeline(GPUPipelineBase):
             stripe_axis=gas_dose_axis,
             ranges=gas_ranges,
         )
+        optics_pipeline = getattr(getattr(world, "optics_solver", None), "gpu_pipeline", None)
+        invalidate_sparse = getattr(optics_pipeline, "invalidate_sparse_runtime", None)
+        if callable(invalidate_sparse):
+            invalidate_sparse()
         bridge.mark_gpu_authoritative(
             "cell_core",
             "material",

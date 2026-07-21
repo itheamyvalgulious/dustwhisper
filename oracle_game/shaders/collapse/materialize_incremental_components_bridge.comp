@@ -1,0 +1,188 @@
+#version 430
+layout(
+    local_size_x={{FORMAL_CONNECTED_TILE_LOCAL_SIZE}},
+    local_size_y={{FORMAL_CONNECTED_TILE_LOCAL_SIZE}},
+    local_size_z=1
+) in;
+
+uniform ivec2 cell_grid_size;
+uniform ivec2 region_origin;
+uniform ivec2 world_grid_size;
+uniform ivec2 tile_grid_size;
+uniform int tile_size;
+uniform int label_capacity;
+uniform int island_id_base;
+uniform int material_count;
+uniform int phase_falling_island;
+uniform uint component_flag_generation;
+const bool SUMMARIZE_COMPONENT_METADATA = {{SUMMARIZE_COMPONENT_METADATA}} != 0;
+const bool WRITE_FILTERED_COMPONENT_LABELS = {{WRITE_FILTERED_COMPONENT_LABELS}} != 0;
+#define COMPONENT_FLAG_GENERATION_VALIDITY {{COMPONENT_FLAG_GENERATION_VALIDITY}}
+
+layout(binding=0) uniform sampler2D component_label_tex;
+layout(r32f, binding=0) writeonly uniform image2D bridge_material_img;
+layout(r32f, binding=1) writeonly uniform image2D filtered_component_label_img;
+
+layout(std430, binding=0) readonly buffer CollapseGenerationIds {
+    int collapse_generation_ids[];
+};
+layout(std430, binding=1) readonly buffer BaseIntegrityValues {
+    float base_integrity_values[];
+};
+layout(std430, binding=2) readonly buffer SpawnTemperatureValues {
+    float spawn_temperature_values[];
+};
+layout(std430, binding=3) readonly buffer ComponentLabelIndices {
+    uint component_label_indices[];
+};
+layout(std430, binding=4) readonly buffer ConnectedTileMask {
+    int connected_tiles[];
+};
+layout(std430, binding=5) readonly buffer ConnectedTileCount {
+    uint connected_tile_count[];
+};
+layout(std430, binding=6) readonly buffer ConnectedTileList {
+    ivec2 connected_tile_list[];
+};
+layout(std430, binding=7) buffer BridgeCellCoreBuffer {
+    uint bridge_cell_core[];
+};
+layout(std430, binding=8) buffer BridgeIslandBuffer {
+    int bridge_island_id[];
+};
+layout(std430, binding=9) buffer BridgeEntityBuffer {
+    int bridge_entity_id[];
+};
+layout(std430, binding=10) buffer BridgeDisplacedBuffer {
+    int bridge_displaced[];
+};
+layout(std430, binding=11) writeonly buffer BridgeComponentLabelBuffer {
+    int bridge_component_label[];
+};
+layout(std430, binding=12) writeonly buffer BridgeCollapsedCellMaskBuffer {
+    int bridge_collapsed_cell_mask[];
+};
+layout(std430, binding=13) buffer ComponentMetadataBuffer {
+    int component_metadata[];
+};
+layout(std430, binding=14) readonly buffer InvalidComponentsBuffer {
+    uint invalid_components[];
+};
+
+uint component_slot_for_label(int label) {
+    if (label <= 0 || label > label_capacity) {
+        return 0u;
+    }
+#if COMPONENT_FLAG_GENERATION_VALIDITY
+    if (invalid_components[uint(label - 1)] == component_flag_generation) {
+        return 0u;
+    }
+#endif
+    return component_label_indices[uint(label - 1)];
+}
+
+int collapse_generation_id(int material_id) {
+    if (material_id <= 0 || material_id >= material_count) {
+        return 0;
+    }
+    return collapse_generation_ids[material_id];
+}
+
+float base_integrity_for(int material_id) {
+    if (material_id <= 0 || material_id >= material_count) {
+        return 0.0;
+    }
+    return base_integrity_values[material_id];
+}
+
+float spawn_temperature_for(int material_id) {
+    if (material_id <= 0 || material_id >= material_count) {
+        return -340282346638528859811704183484516925440.0;
+    }
+    return spawn_temperature_values[material_id];
+}
+
+void main() {
+    uint work_index = gl_WorkGroupID.x;
+    if (work_index >= connected_tile_count[0]) {
+        return;
+    }
+    ivec2 tile = connected_tile_list[int(work_index)];
+    if (tile.x < 0 || tile.y < 0 || tile.x >= tile_grid_size.x || tile.y >= tile_grid_size.y) {
+        return;
+    }
+    int tile_index = tile.y * tile_grid_size.x + tile.x;
+    if (connected_tiles[tile_index] == 0) {
+        return;
+    }
+
+    ivec2 tile_local = ivec2(gl_LocalInvocationID.xy);
+    ivec2 local_cell = tile * tile_size + tile_local;
+    if (
+        tile_local.x >= tile_size || tile_local.y >= tile_size ||
+        local_cell.x >= cell_grid_size.x || local_cell.y >= cell_grid_size.y
+    ) {
+        return;
+    }
+    int label = int(texelFetch(component_label_tex, local_cell, 0).x + 0.5);
+    uint slot_plus_one = component_slot_for_label(label);
+    int filtered_label = slot_plus_one != 0u ? label : 0;
+    if (WRITE_FILTERED_COMPONENT_LABELS) {
+        imageStore(
+            filtered_component_label_img,
+            local_cell,
+            vec4(float(filtered_label), 0.0, 0.0, 0.0)
+        );
+    }
+
+    ivec2 world_cell = region_origin + local_cell;
+    if (
+        world_cell.x < 0 || world_cell.y < 0 ||
+        world_cell.x >= world_grid_size.x || world_cell.y >= world_grid_size.y
+    ) {
+        return;
+    }
+
+    int cell_index = world_cell.y * world_grid_size.x + world_cell.x;
+    int word_index = cell_index * 5;
+    uint cell_state = bridge_cell_core[word_index];
+    int source_material = int(cell_state & 0xFFFFu);
+    int final_material = source_material;
+    int next_island_id = slot_plus_one != 0u
+        ? island_id_base + int(slot_plus_one) - 1
+        : 0;
+
+    if (next_island_id > 0) {
+        if (SUMMARIZE_COMPONENT_METADATA) {
+            int metadata_base = int(slot_plus_one - 1u) * 5;
+            atomicMin(component_metadata[metadata_base + 0], world_cell.x);
+            atomicMin(component_metadata[metadata_base + 1], world_cell.y);
+            atomicMax(component_metadata[metadata_base + 2], world_cell.x + 1);
+            atomicMax(component_metadata[metadata_base + 3], world_cell.y + 1);
+            atomicAdd(component_metadata[metadata_base + 4], 1);
+        }
+        int generated_material = collapse_generation_id(source_material);
+        final_material = generated_material > 0 ? generated_material : source_material;
+        uint flags = generated_material > 0 ? 0u : ((cell_state >> 24u) & 0xFFu);
+        bridge_cell_core[word_index] =
+            uint(final_material) | (uint(phase_falling_island) << 16u) | (flags << 24u);
+        if (generated_material > 0) {
+            float temperature = uintBitsToFloat(bridge_cell_core[word_index + 2]);
+            temperature = max(temperature, spawn_temperature_for(generated_material));
+            bridge_cell_core[word_index + 2] = floatBitsToUint(temperature);
+            bridge_cell_core[word_index + 3] = 0u;
+            bridge_cell_core[word_index + 4] = uint(clamp(
+                round(base_integrity_for(generated_material)),
+                0.0,
+                65535.0
+            ));
+        }
+        bridge_island_id[cell_index] = next_island_id;
+        bridge_entity_id[cell_index] = 0;
+        bridge_displaced[cell_index] = 0;
+    }
+
+    bridge_component_label[cell_index] = filtered_label;
+    bridge_collapsed_cell_mask[cell_index] = filtered_label > 0 ? 1 : 0;
+    imageStore(bridge_material_img, world_cell, vec4(float(final_material), 0.0, 0.0, 0.0));
+}

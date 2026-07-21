@@ -1,0 +1,870 @@
+            #if !{{MATERIAL_PAIR_TERMINAL_HANDOFF}}
+            layout(std430, binding=7) readonly buffer GasTags {
+                uvec4 gas_tags[{{MAX_MATERIALS}}];
+            };
+            #endif
+
+            #if {{MATERIAL_PAIR_TERMINAL_HANDOFF}}
+            layout(r32f, binding=0) writeonly uniform image2D bridge_material_img;
+            #if !{{MATERIAL_PAIR_TERMINAL_SEGMENT_META_ZERO}}
+            layout(binding=9) uniform sampler2D terminal_segment_meta_tex;
+            #endif
+            layout(binding=10) uniform sampler2D terminal_flow_tex;
+            layout(std430, binding=6) buffer TerminalBridgeCellCore {
+                uint bridge_cell_core[];
+            };
+            layout(std430, binding=7) buffer TerminalDirtyTileMask {
+                uint terminal_dirty_tile_mask[];
+            };
+            layout(std430, binding=8) buffer TerminalDirtyTileCount {
+                uint terminal_dirty_tile_count[];
+            };
+            layout(std430, binding=9) buffer TerminalDirtyTileList {
+                ivec2 terminal_dirty_tile_list[];
+            };
+            layout(std430, binding=10) buffer TerminalDirtyDispatchArgs {
+                uint terminal_dirty_dispatch_args[];
+            };
+            layout(std430, binding=11) readonly buffer TerminalActiveTileTTL {
+                int terminal_active_tile_ttl[];
+            };
+            uniform ivec2 terminal_tile_grid_size;
+            uniform int terminal_tile_size;
+            uniform int terminal_material_count;
+            uniform int terminal_phase_falling_island;
+            uniform float terminal_dt;
+            uniform bool terminal_clear_reaction_latched;
+            #if {{MATERIAL_PAIR_TERMINAL_SHARED_TRANSPOSE}}
+            shared uint terminal_bridge_words[{{LOCAL_SIZE}} * {{LOCAL_SIZE}} * 5];
+            #endif
+            #else
+            layout(r32ui, binding=0) writeonly uniform uimage2D cell_state_out_img;
+            layout(r32f, binding=2) writeonly uniform image2D temp_out_img;
+            layout(r32f, binding=3) writeonly uniform image2D integrity_out_img;
+            layout(r32ui, binding=4) writeonly uniform uimage2D timer_out_img;
+            layout(rgba32f, binding=5) writeonly uniform image2DArray deferred_lo_img;
+            layout(rgba32f, binding=6) writeonly uniform image2DArray deferred_hi_img;
+            layout(rg32f, binding=7) uniform image2D cell_meta_out_img;
+            #endif
+
+            uniform int material_material_rule_count;
+            uniform int material_gas_rule_offset;
+            uniform int material_light_rule_count;
+            uniform int material_light_rule_candidate_word_count;
+            uniform int material_light_rule_offset;
+            uniform int material_light_candidate_vec_offset;
+            uniform int material_light_guard_rule_index;
+            uniform bool use_material_light_packed_descriptors;
+            uniform bool use_material_pair_packed_descriptors;
+            uniform bool write_deferred_outputs;
+
+            layout(std430, binding={{BRIDGE_CELL_DOSE_BINDING}}) readonly buffer BridgeCellDoseBuffer {
+                float bridge_cell_dose[];
+            };
+
+            uint low_rule_bits(int count) {
+                if (count <= 0) {
+                    return 0u;
+                }
+                if (count >= 32) {
+                    return 0xFFFFFFFFu;
+                }
+                return (1u << uint(count)) - 1u;
+            }
+
+            uint candidate_rule_range(int material_id, int word_index, int begin, int end) {
+                int word_begin = word_index * 32;
+                uint range_mask = low_rule_bits(end - word_begin) & ~low_rule_bits(begin - word_begin);
+                return lhs_rule_candidate_word(material_id, word_index) & range_mask;
+            }
+
+            uint material_light_candidate_word(int material_id, int word_index) {
+                if (word_index < 0 || word_index >= RULE_CANDIDATE_WORDS) {
+                    return 0u;
+                }
+                material_id = clamp_material_id(material_id);
+                uvec4 packed_words = rule_lhs_candidate_masks[
+                    material_light_candidate_vec_offset
+                    + material_id * RULE_CANDIDATE_VECS
+                    + (word_index / 4)
+                ];
+                return packed_words[word_index & 3];
+            }
+
+            float bridge_cell_dose_at(ivec2 cell, int layer) {
+                int cell_count = cell_grid_size.x * cell_grid_size.y;
+                int cell_index = cell.y * cell_grid_size.x + cell.x;
+                return bridge_cell_dose[layer * cell_count + cell_index];
+            }
+
+            void accumulate_stage_meta(inout vec2 meta, float current_reset, float current_latched) {
+                meta.x = max(meta.x, current_reset);
+                if (current_reset > 0.5) {
+                    meta.y = 0.0;
+                }
+                meta.y = max(meta.y, current_latched);
+            }
+
+            #if {{MATERIAL_PAIR_TERMINAL_HANDOFF}}
+            bool terminal_motion_active(ivec2 cell) {
+                ivec2 tile = ivec2(
+                    clamp(cell.x / terminal_tile_size, 0, terminal_tile_grid_size.x - 1),
+                    clamp(cell.y / terminal_tile_size, 0, terminal_tile_grid_size.y - 1)
+                );
+                return terminal_active_tile_ttl[tile.y * terminal_tile_grid_size.x + tile.x] > 0;
+            }
+
+            uint terminal_structure_flags(int material_id, int phase_value) {
+                if (
+                    material_id <= 0
+                    || material_id >= terminal_material_count
+                    || phase_value == terminal_phase_falling_island
+                ) {
+                    return 0u;
+                }
+                return material_participates[material_id];
+            }
+
+            void terminal_append_dirty_tile(ivec2 tile) {
+                if (
+                    tile.x < 0 || tile.y < 0
+                    || tile.x >= terminal_tile_grid_size.x
+                    || tile.y >= terminal_tile_grid_size.y
+                ) {
+                    return;
+                }
+                int tile_index = tile.y * terminal_tile_grid_size.x + tile.x;
+                uint previous = atomicOr(terminal_dirty_tile_mask[tile_index], 1u);
+                if ((previous & 1u) != 0u) {
+                    return;
+                }
+                uint slot = atomicAdd(terminal_dirty_tile_count[0], 1u);
+                terminal_dirty_tile_list[int(slot)] = tile;
+                atomicMax(terminal_dirty_dispatch_args[0], slot + 1u);
+            }
+
+            void terminal_mark_structure_dirty(
+                ivec2 cell,
+                uint previous_word,
+                uint material,
+                uint phase
+            ) {
+                int old_material = int(previous_word & 0xFFFFu);
+                int old_phase = int((previous_word >> 16u) & 0xFFu);
+                #if {{MATERIAL_PAIR_TERMINAL_DIRTY_FAST_EQUAL}}
+                if (old_material == int(material) && old_phase == int(phase)) {
+                    return;
+                }
+                #endif
+                if (
+                    terminal_structure_flags(old_material, old_phase)
+                    == terminal_structure_flags(int(material), int(phase))
+                ) {
+                    return;
+                }
+                ivec2 tile = cell / terminal_tile_size;
+                ivec2 local_cell = cell - tile * terminal_tile_size;
+                terminal_append_dirty_tile(tile);
+                if (local_cell.x == 0) terminal_append_dirty_tile(tile + ivec2(-1, 0));
+                if (local_cell.x + 1 >= terminal_tile_size) terminal_append_dirty_tile(tile + ivec2(1, 0));
+                if (local_cell.y == 0) terminal_append_dirty_tile(tile + ivec2(0, -1));
+                if (local_cell.y + 1 >= terminal_tile_size) terminal_append_dirty_tile(tile + ivec2(0, 1));
+            }
+
+            void terminal_publish_cell(
+                ivec2 cell,
+                float material_value,
+                float phase_value,
+                float temp_value,
+                float integrity_value,
+                vec4 timer_value,
+                vec2 segment_meta
+            ) {
+                int cell_index = cell.y * cell_grid_size.x + cell.x;
+                int word_index = cell_index * 5;
+                uint previous_word = bridge_cell_core[word_index];
+                uint packed_cell = pack_cell_state_at(cell, material_value, phase_value);
+                uint material = packed_cell & 0xFFFFu;
+                uint phase = (packed_cell >> 16u) & 0xFFu;
+                uint flags = (packed_cell >> 24u) & 0xFFu;
+                if (segment_meta.x > 0.5) {
+                    flags = 0u;
+                }
+                if (segment_meta.y > 0.5) {
+                    flags |= uint({{REACTION_LATCHED_FLAG}});
+                }
+                if (terminal_clear_reaction_latched) {
+                    flags &= ~uint({{REACTION_LATCHED_FLAG}});
+                }
+
+                vec2 velocity = unpackHalf2x16(packHalf2x16(texelFetch(velocity_tex, cell, 0).xy));
+                if (terminal_motion_active(cell)) {
+                    int material_id = clamp(int(material), 0, {{MAX_MATERIALS_MINUS_1}});
+                    if (material_id > 0) {
+                        vec4 params = motion_params[material_id];
+                        velocity.y += params.y * terminal_dt * 24.0;
+                        ivec2 gas_cell = ivec2(
+                            min(cell.x / gas_cell_size, gas_grid_size.x - 1),
+                            min(cell.y / gas_cell_size, gas_grid_size.y - 1)
+                        );
+                        velocity += texelFetch(terminal_flow_tex, gas_cell, 0).xy * params.z * terminal_dt * 4.0;
+                        velocity *= max(0.0, 1.0 - params.w * terminal_dt);
+                    }
+                }
+
+                uint integrity = uint(clamp(round(integrity_value), 0.0, 65535.0));
+                terminal_mark_structure_dirty(cell, previous_word, material, phase);
+                #if {{MATERIAL_PAIR_TERMINAL_SHARED_TRANSPOSE}}
+                int local_word_index = int(gl_LocalInvocationIndex) * 5;
+                terminal_bridge_words[local_word_index] = material | (phase << 16u) | (flags << 24u);
+                terminal_bridge_words[local_word_index + 1] = packHalf2x16(velocity);
+                terminal_bridge_words[local_word_index + 2] = floatBitsToUint(temp_value);
+                terminal_bridge_words[local_word_index + 3] = pack_timer(timer_value);
+                terminal_bridge_words[local_word_index + 4] = integrity;
+                #else
+                bridge_cell_core[word_index] = material | (phase << 16u) | (flags << 24u);
+                bridge_cell_core[word_index + 1] = packHalf2x16(velocity);
+                bridge_cell_core[word_index + 2] = floatBitsToUint(temp_value);
+                bridge_cell_core[word_index + 3] = pack_timer(timer_value);
+                bridge_cell_core[word_index + 4] = integrity;
+                #endif
+                imageStore(bridge_material_img, cell, vec4(float(material), 0.0, 0.0, 0.0));
+            }
+            #if {{MATERIAL_PAIR_TERMINAL_SHARED_TRANSPOSE}}
+            void terminal_flush_shared_bridge_words() {
+                memoryBarrierShared();
+                barrier();
+                int local_word = int(gl_LocalInvocationIndex);
+                int row_word_count = {{LOCAL_SIZE_X}} * 5;
+                int total_invocation_count = {{LOCAL_SIZE_X}} * {{LOCAL_SIZE_Y}};
+                int total_word_count = total_invocation_count * 5;
+                for (; local_word < total_word_count; local_word += total_invocation_count) {
+                    int local_row = local_word / row_word_count;
+                    int local_row_word = local_word - local_row * row_word_count;
+                    int global_x = int(gl_WorkGroupID.x) * {{LOCAL_SIZE_X}} + local_row_word / 5;
+                    int global_y = int(gl_WorkGroupID.y) * {{LOCAL_SIZE_Y}} + local_row;
+                    if (
+                        global_x < cell_grid_size.x
+                        && global_y < cell_grid_size.y
+                    ) {
+                        int row_base = (global_y * cell_grid_size.x + int(gl_WorkGroupID.x) * {{LOCAL_SIZE_X}}) * 5;
+                        bridge_cell_core[row_base + local_row_word] = terminal_bridge_words[local_word];
+                    }
+                }
+            }
+            #endif
+            #endif
+
+            void apply_material_material_rules(
+                ivec2 gid,
+                inout float material_value,
+                inout float phase_value,
+                inout float temp_value,
+                inout float integrity_value,
+                inout vec4 timer_value,
+                inout float cell_reset_value,
+                inout float reaction_latched_value,
+                inout vec4 deferred_action_lo,
+                inout vec4 deferred_action_hi,
+                inout vec4 deferred_scale_lo,
+                inout vec4 deferred_scale_hi,
+                inout int deferred_count
+            ) {
+                int material_id = int(material_value + 0.5);
+                if (material_id <= 0) {
+                    return;
+                }
+                int phase_id = int(phase_value + 0.5);
+                if (use_material_pair_packed_descriptors && material_id < {{MAX_MATERIALS}}) {
+                    uvec4 header = uvec4(rule_i[
+                        {{MATERIAL_PAIR_PACKED_HEADER_OFFSET}} + material_id
+                    ]);
+                    uint span = header.x;
+                    int descriptor_count = min(
+                        int(span >> 16u),
+                        {{MAX_MATERIAL_PAIR_PACKED_RULES}}
+                    );
+                    if (descriptor_count <= 0) {
+                        return;
+                    }
+                    int descriptor_offset = int(span & 0xFFFFu);
+                    ivec2 left = ivec2(max(gid.x - 1, 0), gid.y);
+                    ivec2 right = ivec2(min(gid.x + 1, cell_grid_size.x - 1), gid.y);
+                    ivec2 down = ivec2(gid.x, max(gid.y - 1, 0));
+                    ivec2 up = ivec2(gid.x, min(gid.y + 1, cell_grid_size.y - 1));
+                    ivec4 neighbor_materials = ivec4(
+                        int(material_value_at(left) + 0.5),
+                        int(material_value_at(right) + 0.5),
+                        int(material_value_at(down) + 0.5),
+                        int(material_value_at(up) + 0.5)
+                    );
+                    for (int descriptor_index = 0; descriptor_index < descriptor_count; ++descriptor_index) {
+                        uvec4 descriptor = uvec4(rule_i[
+                            {{MATERIAL_PAIR_PACKED_DESCRIPTOR_OFFSET}}
+                            + descriptor_offset
+                            + descriptor_index
+                        ]);
+                        if (
+                            temp_value < uintBitsToFloat(descriptor.y)
+                            || temp_value > uintBitsToFloat(descriptor.z)
+                        ) {
+                            continue;
+                        }
+                        uint packed_operation = descriptor.x;
+                        int rhs_material = int((packed_operation >> 9u) & 0xFFu);
+                        if (!any(equal(neighbor_materials, ivec4(rhs_material)))) {
+                            continue;
+                        }
+                        int operation_index = int(packed_operation & 0xFFu);
+                        if ((packed_operation & 0x100u) != 0u) {
+                            apply_action(
+                                material_value, phase_value, temp_value, integrity_value, timer_value,
+                                cell_reset_value, reaction_latched_value,
+                                deferred_action_lo, deferred_action_hi,
+                                deferred_scale_lo, deferred_scale_hi, deferred_count,
+                                gid, operation_index, 1.0
+                            );
+                        } else {
+                            apply_slot_trigger(
+                                material_value, phase_value, temp_value, integrity_value, timer_value,
+                                cell_reset_value, reaction_latched_value,
+                                deferred_action_lo, deferred_action_hi,
+                                deferred_scale_lo, deferred_scale_hi, deferred_count,
+                                gid, operation_index, 1.0
+                            );
+                        }
+                    }
+                    return;
+                }
+                bool legacy_lhs_fallback = material_id >= {{MAX_MATERIALS}};
+                int word_begin = 0;
+                int word_end = (material_material_rule_count + 31) / 32;
+                for (int word_index = word_begin; word_index < word_end; ++word_index) {
+                    uint candidate_bits = candidate_rule_range(
+                        material_id,
+                        word_index,
+                        0,
+                        material_material_rule_count
+                    );
+                    while (candidate_bits != 0u) {
+                        int bit_index = findLSB(candidate_bits);
+                        int rule_index = word_index * 32 + bit_index;
+                        candidate_bits &= candidate_bits - 1u;
+                        ivec4 ri = rule_i[rule_index];
+                        vec4 rf = rule_f[rule_index];
+                        uvec4 rt = rule_tags[rule_index];
+                        if (legacy_lhs_fallback) {
+                            if (ri.x >= 0 && material_id != ri.x) {
+                                continue;
+                            }
+                            uint fallback_tags = material_tags[clamp_material_id(material_id)].x;
+                            if (!mask_matches(fallback_tags, rt.x)) {
+                                continue;
+                            }
+                        }
+                        int phase_mask = int(rt.z);
+                        if (phase_mask != 0 && ((1 << phase_id) & phase_mask) == 0) {
+                            continue;
+                        }
+                        if (temp_value < rf.x || temp_value > rf.y) {
+                            continue;
+                        }
+                        ivec2 left = ivec2(max(gid.x - 1, 0), gid.y);
+                        ivec2 right = ivec2(min(gid.x + 1, cell_grid_size.x - 1), gid.y);
+                        ivec2 down = ivec2(gid.x, max(gid.y - 1, 0));
+                        ivec2 up = ivec2(gid.x, min(gid.y + 1, cell_grid_size.y - 1));
+                        bool matched = false;
+                        matched = matched || match_material_selector(int(material_value_at(left) + 0.5), ri.y, rt.y);
+                        matched = matched || match_material_selector(int(material_value_at(right) + 0.5), ri.y, rt.y);
+                        matched = matched || match_material_selector(int(material_value_at(down) + 0.5), ri.y, rt.y);
+                        matched = matched || match_material_selector(int(material_value_at(up) + 0.5), ri.y, rt.y);
+                        if (!matched) {
+                            continue;
+                        }
+                        if (ri.w >= 0) {
+                            apply_slot_trigger(
+                                material_value, phase_value, temp_value, integrity_value, timer_value,
+                                cell_reset_value, reaction_latched_value,
+                                deferred_action_lo, deferred_action_hi,
+                                deferred_scale_lo, deferred_scale_hi, deferred_count,
+                                gid, ri.w, rf.w
+                            );
+                        } else if (ri.z >= 0) {
+                            apply_action(
+                                material_value, phase_value, temp_value, integrity_value, timer_value,
+                                cell_reset_value, reaction_latched_value,
+                                deferred_action_lo, deferred_action_hi,
+                                deferred_scale_lo, deferred_scale_hi, deferred_count,
+                                gid, ri.z, rf.w
+                            );
+                        }
+                        if (rt.w == CONSUME_POLICY_LHS_ID || rt.w == CONSUME_POLICY_BOTH_ID) {
+                            consume_current_material(
+                                material_value, phase_value, integrity_value, timer_value,
+                                cell_reset_value, reaction_latched_value, rf.w
+                            );
+                        }
+                    }
+                }
+            }
+
+            void apply_material_gas_rules(
+                ivec2 gid,
+                inout float material_value,
+                inout float phase_value,
+                inout float temp_value,
+                inout float integrity_value,
+                inout vec4 timer_value,
+                inout float cell_reset_value,
+                inout float reaction_latched_value,
+                inout vec4 deferred_action_lo,
+                inout vec4 deferred_action_hi,
+                inout vec4 deferred_scale_lo,
+                inout vec4 deferred_scale_hi,
+                inout int deferred_count
+            ) {
+                int material_id = int(material_value + 0.5);
+                if (material_id <= 0) {
+                    return;
+                }
+                int phase_id = int(phase_value + 0.5);
+                ivec2 gas_cell = ivec2(
+                    min(gid.x / gas_cell_size, textureSize(gas_tex, 0).x - 1),
+                    min(gid.y / gas_cell_size, textureSize(gas_tex, 0).y - 1)
+                );
+                bool legacy_lhs_fallback = material_id >= {{MAX_MATERIALS}};
+                if (use_material_pair_packed_descriptors && material_id < {{MAX_MATERIALS}}) {
+                    uvec4 header = uvec4(rule_i[
+                        {{MATERIAL_PAIR_PACKED_HEADER_OFFSET}} + material_id
+                    ]);
+                    uint span = header.y;
+                    int descriptor_count = min(
+                        int(span >> 16u),
+                        {{MAX_MATERIAL_PAIR_PACKED_RULES}}
+                    );
+                    if (descriptor_count <= 0) {
+                        return;
+                    }
+                    int descriptor_offset = int(span & 0xFFFFu);
+                    vec4 gas_cache = vec4(0.0);
+                    int packed_gas_count = min(int(header.w), 4);
+                    for (int gas_slot = 0; gas_slot < packed_gas_count; ++gas_slot) {
+                        int species_id = int((header.z >> uint(gas_slot * 8)) & 0xFFu);
+                        gas_cache[gas_slot] = texelFetch(
+                            gas_tex,
+                            ivec3(gas_cell, species_id),
+                            0
+                        ).x;
+                    }
+                    for (int descriptor_index = 0; descriptor_index < descriptor_count; ++descriptor_index) {
+                        uvec4 descriptor = uvec4(rule_i[
+                            {{MATERIAL_PAIR_PACKED_DESCRIPTOR_OFFSET}}
+                            + descriptor_offset
+                            + descriptor_index
+                        ]);
+                        if (
+                            temp_value < uintBitsToFloat(descriptor.y)
+                            || temp_value > uintBitsToFloat(descriptor.z)
+                        ) {
+                            continue;
+                        }
+                        uint packed_operation = descriptor.x;
+                        int gas_slot = int((packed_operation >> 17u) & 0x3u);
+                        float concentration = gas_cache[gas_slot];
+                        if (concentration < uintBitsToFloat(descriptor.w)) {
+                            continue;
+                        }
+                        float scale = concentration * 1.0;
+                        int operation_index = int(packed_operation & 0xFFu);
+                        if ((packed_operation & 0x100u) != 0u) {
+                            apply_action(
+                                material_value, phase_value, temp_value, integrity_value, timer_value,
+                                cell_reset_value, reaction_latched_value,
+                                deferred_action_lo, deferred_action_hi,
+                                deferred_scale_lo, deferred_scale_hi, deferred_count,
+                                gid, operation_index, scale
+                            );
+                        } else {
+                            apply_slot_trigger(
+                                material_value, phase_value, temp_value, integrity_value, timer_value,
+                                cell_reset_value, reaction_latched_value,
+                                deferred_action_lo, deferred_action_hi,
+                                deferred_scale_lo, deferred_scale_hi, deferred_count,
+                                gid, operation_index, scale
+                            );
+                        }
+                    }
+                    return;
+                }
+                int word_begin = material_gas_rule_offset / 32;
+                int word_end = (rule_count + 31) / 32;
+                for (int word_index = word_begin; word_index < word_end; ++word_index) {
+                    uint candidate_bits = candidate_rule_range(
+                        material_id,
+                        word_index,
+                        material_gas_rule_offset,
+                        rule_count
+                    );
+                    while (candidate_bits != 0u) {
+                        int bit_index = findLSB(candidate_bits);
+                        int rule_index = word_index * 32 + bit_index;
+                        candidate_bits &= candidate_bits - 1u;
+                        ivec4 ri = rule_i[rule_index];
+                        vec4 rf = rule_f[rule_index];
+                        uvec4 rt = rule_tags[rule_index];
+                        if (legacy_lhs_fallback) {
+                            if (ri.x >= 0 && material_id != ri.x) {
+                                continue;
+                            }
+                            uint fallback_tags = material_tags[clamp_material_id(material_id)].y;
+                            if (!mask_matches(fallback_tags, rt.x)) {
+                                continue;
+                            }
+                        }
+                        int phase_mask = int(rt.z);
+                        if (phase_mask != 0 && ((1 << phase_id) & phase_mask) == 0) {
+                            continue;
+                        }
+                        if (temp_value < rf.x || temp_value > rf.y) {
+                            continue;
+                        }
+                        float concentration = 0.0;
+                        if (ri.y >= 0) {
+                            if (mask_matches(gas_tags[ri.y].x, rt.y)) {
+                                concentration = texelFetch(gas_tex, ivec3(gas_cell, ri.y), 0).x;
+                            }
+                        } else if (rt.y != 0u) {
+                            for (int species_id = 0; species_id < gas_count; ++species_id) {
+                                if (mask_matches(gas_tags[species_id].x, rt.y)) {
+                                    concentration = max(
+                                        concentration,
+                                        texelFetch(gas_tex, ivec3(gas_cell, species_id), 0).x
+                                    );
+                                }
+                            }
+                        } else {
+                            continue;
+                        }
+                        if (concentration < rf.z) {
+                            continue;
+                        }
+                        float scale = concentration * rf.w;
+                        if (ri.w >= 0) {
+                            apply_slot_trigger(
+                                material_value, phase_value, temp_value, integrity_value, timer_value,
+                                cell_reset_value, reaction_latched_value,
+                                deferred_action_lo, deferred_action_hi,
+                                deferred_scale_lo, deferred_scale_hi, deferred_count,
+                                gid, ri.w, scale
+                            );
+                        } else if (ri.z >= 0) {
+                            apply_action(
+                                material_value, phase_value, temp_value, integrity_value, timer_value,
+                                cell_reset_value, reaction_latched_value,
+                                deferred_action_lo, deferred_action_hi,
+                                deferred_scale_lo, deferred_scale_hi, deferred_count,
+                                gid, ri.z, scale
+                            );
+                        }
+                        if (rt.w == CONSUME_POLICY_LHS_ID || rt.w == CONSUME_POLICY_BOTH_ID) {
+                            consume_current_material(
+                                material_value, phase_value, integrity_value, timer_value,
+                                cell_reset_value, reaction_latched_value, scale
+                            );
+                        }
+                    }
+                }
+            }
+
+            void apply_material_light_rules(
+                ivec2 gid,
+                inout float material_value,
+                inout float phase_value,
+                inout float temp_value,
+                inout float integrity_value,
+                inout vec4 timer_value,
+                inout float cell_reset_value,
+                inout float reaction_latched_value,
+                inout vec4 deferred_action_lo,
+                inout vec4 deferred_action_hi,
+                inout vec4 deferred_scale_lo,
+                inout vec4 deferred_scale_hi,
+                inout int deferred_count
+            ) {
+                int material_id = int(material_value + 0.5);
+                if (material_id <= 0) {
+                    return;
+                }
+                int phase_id = int(phase_value + 0.5);
+                bool legacy_lhs_fallback = material_id >= {{MAX_MATERIALS}};
+                for (int word_index = 0; word_index < material_light_rule_candidate_word_count; ++word_index) {
+                    uint candidate_bits = material_light_candidate_word(material_id, word_index);
+                    while (candidate_bits != 0u) {
+                        int bit_index = findLSB(candidate_bits);
+                        int rule_index = word_index * 32 + bit_index;
+                        candidate_bits &= candidate_bits - 1u;
+                        if (rule_index >= material_light_rule_count) {
+                            continue;
+                        }
+                        int packed_rule_index = material_light_rule_offset + rule_index;
+                        ivec4 ri = rule_i[packed_rule_index];
+                        vec4 rf = rule_f[packed_rule_index];
+                        uvec4 rt = rule_tags[packed_rule_index];
+                        if (legacy_lhs_fallback) {
+                            if (ri.x >= 0 && material_id != ri.x) {
+                                continue;
+                            }
+                            uint fallback_tags = material_tags[clamp_material_id(material_id)].z;
+                            if (!mask_matches(fallback_tags, rt.x)) {
+                                continue;
+                            }
+                        }
+                        int phase_mask = int(rt.z);
+                        if (phase_mask != 0 && ((1 << phase_id) & phase_mask) == 0) {
+                            continue;
+                        }
+                        if (temp_value < rf.x || temp_value > rf.y || ri.y < 0) {
+                            continue;
+                        }
+                        float dose = bridge_cell_dose_at(gid, ri.y);
+                        if (dose < rf.z) {
+                            continue;
+                        }
+                        float scale = dose * rf.w;
+                        if (ri.w >= 0) {
+                            apply_slot_trigger(
+                                material_value, phase_value, temp_value, integrity_value, timer_value,
+                                cell_reset_value, reaction_latched_value,
+                                deferred_action_lo, deferred_action_hi,
+                                deferred_scale_lo, deferred_scale_hi, deferred_count,
+                                gid, ri.w, scale
+                            );
+                        } else if (ri.z >= 0) {
+                            apply_action(
+                                material_value, phase_value, temp_value, integrity_value, timer_value,
+                                cell_reset_value, reaction_latched_value,
+                                deferred_action_lo, deferred_action_hi,
+                                deferred_scale_lo, deferred_scale_hi, deferred_count,
+                                gid, ri.z, scale
+                            );
+                        }
+                        if (rt.w == CONSUME_POLICY_LHS_ID || rt.w == CONSUME_POLICY_BOTH_ID) {
+                            consume_current_material(
+                                material_value, phase_value, integrity_value, timer_value,
+                                cell_reset_value, reaction_latched_value, scale
+                            );
+                        }
+                    }
+                }
+            }
+
+            void apply_material_light_packed_rules(
+                ivec2 gid,
+                inout float material_value,
+                inout float phase_value,
+                inout float temp_value,
+                inout float integrity_value,
+                inout vec4 timer_value,
+                inout float cell_reset_value,
+                inout float reaction_latched_value,
+                inout vec4 deferred_action_lo,
+                inout vec4 deferred_action_hi,
+                inout vec4 deferred_scale_lo,
+                inout vec4 deferred_scale_hi,
+                inout int deferred_count
+            ) {
+                int material_id = int(material_value + 0.5);
+                if (material_id <= 0 || material_id >= {{MAX_MATERIALS}}) {
+                    return;
+                }
+                uvec4 header = uvec4(rule_i[
+                    {{MATERIAL_LIGHT_PACKED_HEADER_OFFSET}} + material_id
+                ]);
+                int descriptor_count = min(
+                    int(header.x),
+                    {{MAX_MATERIAL_LIGHT_PACKED_RULES}}
+                );
+                if (descriptor_count <= 0) {
+                    return;
+                }
+                vec4 dose_cache = vec4(0.0);
+                if ((header.y & 1u) != 0u) dose_cache.x = bridge_cell_dose_at(gid, 0);
+                if ((header.y & 2u) != 0u) dose_cache.y = bridge_cell_dose_at(gid, 1);
+                if ((header.y & 4u) != 0u) dose_cache.z = bridge_cell_dose_at(gid, 2);
+                if ((header.y & 8u) != 0u) dose_cache.w = bridge_cell_dose_at(gid, 3);
+                int descriptor_offset = int(header.z);
+                for (int descriptor_index = 0; descriptor_index < descriptor_count; ++descriptor_index) {
+                    uvec4 descriptor = uvec4(rule_i[
+                        {{MATERIAL_LIGHT_PACKED_DESCRIPTOR_OFFSET}}
+                        + descriptor_offset
+                        + descriptor_index
+                    ]);
+                    uint packed_operation = descriptor.x;
+                    int operation_index = int(packed_operation & 0xFFu);
+                    bool direct_action = (packed_operation & 0x100u) != 0u;
+                    int dose_channel = int((packed_operation >> 9u) & 0x3u);
+                    float dose = dose_cache[dose_channel];
+                    float threshold = uintBitsToFloat(descriptor.y);
+                    if (dose < threshold) {
+                        continue;
+                    }
+                    float scale = dose * uintBitsToFloat(descriptor.z);
+                    if (direct_action) {
+                        apply_action(
+                            material_value, phase_value, temp_value, integrity_value, timer_value,
+                            cell_reset_value, reaction_latched_value,
+                            deferred_action_lo, deferred_action_hi,
+                            deferred_scale_lo, deferred_scale_hi, deferred_count,
+                            gid, operation_index, scale
+                        );
+                    } else {
+                        apply_slot_trigger(
+                            material_value, phase_value, temp_value, integrity_value, timer_value,
+                            cell_reset_value, reaction_latched_value,
+                            deferred_action_lo, deferred_action_hi,
+                            deferred_scale_lo, deferred_scale_hi, deferred_count,
+                            gid, operation_index, scale
+                        );
+                    }
+                }
+            }
+
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                #if {{MATERIAL_PAIR_TERMINAL_HANDOFF}} && {{MATERIAL_PAIR_TERMINAL_SHARED_TRANSPOSE}}
+                bool terminal_valid_invocation = (
+                    gid.x < cell_grid_size.x && gid.y < cell_grid_size.y
+                );
+                if (!terminal_valid_invocation) {
+                    int invalid_word_index = int(gl_LocalInvocationIndex) * 5;
+                    terminal_bridge_words[invalid_word_index] = 0u;
+                    terminal_bridge_words[invalid_word_index + 1] = 0u;
+                    terminal_bridge_words[invalid_word_index + 2] = 0u;
+                    terminal_bridge_words[invalid_word_index + 3] = 0u;
+                    terminal_bridge_words[invalid_word_index + 4] = 0u;
+                }
+                if (terminal_valid_invocation) {
+                #else
+                if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
+                    return;
+                }
+                #endif
+                float material_value = material_value_at(gid);
+                float phase_value = phase_value_at(gid);
+                float temp_value = texelFetch(temp_tex, gid, 0).x;
+                float integrity_value = texelFetch(integrity_tex, gid, 0).x;
+                vec4 timer_value = unpack_timer(texelFetch(timer_tex, gid, 0).x);
+                vec4 deferred_action_lo = vec4(0.0);
+                vec4 deferred_action_hi = vec4(0.0);
+                vec4 deferred_scale_lo = vec4(0.0);
+                vec4 deferred_scale_hi = vec4(0.0);
+                int deferred_count = 0;
+                vec2 segment_meta;
+                #if {{MATERIAL_PAIR_TERMINAL_HANDOFF}} && {{MATERIAL_PAIR_TERMINAL_SEGMENT_META_ZERO}}
+                segment_meta = vec2(0.0);
+                #elif {{MATERIAL_PAIR_TERMINAL_HANDOFF}}
+                segment_meta = texelFetch(terminal_segment_meta_tex, gid, 0).xy;
+                #else
+                segment_meta = imageLoad(cell_meta_out_img, gid).xy;
+                #endif
+
+                if (solve_active(gid)) {
+                    float cell_reset_value = 0.0;
+                    float reaction_latched_value = 0.0;
+                    apply_material_material_rules(
+                        gid, material_value, phase_value, temp_value, integrity_value, timer_value,
+                        cell_reset_value, reaction_latched_value,
+                        deferred_action_lo, deferred_action_hi,
+                        deferred_scale_lo, deferred_scale_hi, deferred_count
+                    );
+                    accumulate_stage_meta(segment_meta, cell_reset_value, reaction_latched_value);
+
+                    // Match the integer image boundary between the original passes.
+                    uint staged_cell = pack_cell_state_at(gid, material_value, phase_value);
+                    material_value = float(staged_cell & 0xFFFFu);
+                    phase_value = float((staged_cell >> 16u) & 0xFFu);
+                    timer_value = unpack_timer(pack_timer(timer_value));
+                    deferred_action_lo = vec4(0.0);
+                    deferred_action_hi = vec4(0.0);
+                    deferred_scale_lo = vec4(0.0);
+                    deferred_scale_hi = vec4(0.0);
+                    deferred_count = 0;
+                    cell_reset_value = 0.0;
+                    reaction_latched_value = 0.0;
+
+                    apply_material_gas_rules(
+                        gid, material_value, phase_value, temp_value, integrity_value, timer_value,
+                        cell_reset_value, reaction_latched_value,
+                        deferred_action_lo, deferred_action_hi,
+                        deferred_scale_lo, deferred_scale_hi, deferred_count
+                    );
+                    accumulate_stage_meta(segment_meta, cell_reset_value, reaction_latched_value);
+
+                    if (
+                        material_light_rule_count > 0
+                        && rule_tags[material_light_guard_rule_index].x != 0u
+                    ) {
+                        // Match the integer image boundary before the original light pass.
+                        staged_cell = pack_cell_state_at(gid, material_value, phase_value);
+                        material_value = float(staged_cell & 0xFFFFu);
+                        phase_value = float((staged_cell >> 16u) & 0xFFu);
+                        timer_value = unpack_timer(pack_timer(timer_value));
+                        deferred_action_lo = vec4(0.0);
+                        deferred_action_hi = vec4(0.0);
+                        deferred_scale_lo = vec4(0.0);
+                        deferred_scale_hi = vec4(0.0);
+                        deferred_count = 0;
+                        cell_reset_value = 0.0;
+                        reaction_latched_value = 0.0;
+
+                        if (use_material_light_packed_descriptors) {
+                            apply_material_light_packed_rules(
+                                gid, material_value, phase_value, temp_value, integrity_value, timer_value,
+                                cell_reset_value, reaction_latched_value,
+                                deferred_action_lo, deferred_action_hi,
+                                deferred_scale_lo, deferred_scale_hi, deferred_count
+                            );
+                        } else {
+                            apply_material_light_rules(
+                                gid, material_value, phase_value, temp_value, integrity_value, timer_value,
+                                cell_reset_value, reaction_latched_value,
+                                deferred_action_lo, deferred_action_hi,
+                                deferred_scale_lo, deferred_scale_hi, deferred_count
+                            );
+                        }
+                        accumulate_stage_meta(segment_meta, cell_reset_value, reaction_latched_value);
+                    }
+                }
+
+                #if {{MATERIAL_PAIR_TERMINAL_HANDOFF}}
+                terminal_publish_cell(
+                    gid,
+                    material_value,
+                    phase_value,
+                    temp_value,
+                    integrity_value,
+                    timer_value,
+                    segment_meta
+                );
+                #if {{MATERIAL_PAIR_TERMINAL_SHARED_TRANSPOSE}}
+                }
+                terminal_flush_shared_bridge_words();
+                #endif
+                #else
+                imageStore(
+                    cell_state_out_img,
+                    gid,
+                    uvec4(pack_cell_state_at(gid, material_value, phase_value), 0u, 0u, 0u)
+                );
+                imageStore(temp_out_img, gid, vec4(temp_value, 0.0, 0.0, 0.0));
+                imageStore(integrity_out_img, gid, vec4(integrity_value, 0.0, 0.0, 0.0));
+                imageStore(timer_out_img, gid, uvec4(pack_timer(timer_value), 0u, 0u, 0u));
+                if (write_deferred_outputs) {
+                    imageStore(deferred_lo_img, ivec3(gid, 0), deferred_action_lo);
+                    imageStore(deferred_lo_img, ivec3(gid, 1), deferred_scale_lo);
+                    imageStore(deferred_hi_img, ivec3(gid, 0), deferred_action_hi);
+                    imageStore(deferred_hi_img, ivec3(gid, 1), deferred_scale_hi);
+                }
+                imageStore(cell_meta_out_img, gid, vec4(segment_meta, 0.0, 0.0));
+                #endif
+            }

@@ -2,24 +2,36 @@
             #version 430
             layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
             uniform ivec2 cell_grid_size;
-            layout(binding=0) uniform sampler2D material_tex;
-            layout(binding=1) uniform sampler2D timer_in_tex;
+            layout(binding=0) uniform usampler2D cell_state_tex;
+            layout(binding=1) uniform usampler2D timer_in_tex;
             layout(binding=2) uniform sampler2D active_cell_tex;
             layout(std430, binding=0) buffer MaterialSlotsLo {
                 ivec4 material_slots_lo[{{MAX_MATERIALS}}];
             };
             layout(rgba32f, binding=3) writeonly uniform image2D trigger_lo_img;
-            layout(rgba32f, binding=4) writeonly uniform image2D timer_out_img;
+            layout(r32ui, binding=4) writeonly uniform uimage2D timer_out_img;
+            vec4 unpack_timer(uint timer) {
+                return vec4(
+                    float(timer & 0xFFu),
+                    float((timer >> 8u) & 0xFFu),
+                    float((timer >> 16u) & 0xFFu),
+                    float((timer >> 24u) & 0xFFu)
+                );
+            }
+            uint pack_timer(vec4 timer) {
+                uvec4 value = uvec4(clamp(round(timer), vec4(0.0), vec4(255.0)));
+                return value.x | (value.y << 8u) | (value.z << 16u) | (value.w << 24u);
+            }
             void main() {
                 ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
                 if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
                     return;
                 }
-                int material_id = int(texelFetch(material_tex, gid, 0).x + 0.5);
-                vec4 timers = texelFetch(timer_in_tex, gid, 0);
+                int material_id = int(texelFetch(cell_state_tex, gid, 0).x & 0xFFFFu);
+                vec4 timers = unpack_timer(texelFetch(timer_in_tex, gid, 0).x);
                 if (texelFetch(active_cell_tex, gid, 0).x <= 0.5) {
                     imageStore(trigger_lo_img, gid, vec4(0.0));
-                    imageStore(timer_out_img, gid, timers);
+                    imageStore(timer_out_img, gid, uvec4(pack_timer(timers), 0u, 0u, 0u));
                     return;
                 }
                 vec4 updated = timers;
@@ -35,6 +47,5 @@
                     }
                 }
                 imageStore(trigger_lo_img, gid, triggered);
-                imageStore(timer_out_img, gid, updated);
+                imageStore(timer_out_img, gid, uvec4(pack_timer(updated), 0u, 0u, 0u));
             }
-            

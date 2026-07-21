@@ -11,4 +11,3 @@
                 bool is_active = force_all_active || expanded_tile_active(tile) || emitter_reaches_cell(gid);
                 imageStore(active_cell_img, gid, vec4(is_active ? 1.0 : 0.0, 0.0, 0.0, 0.0));
             }
-            

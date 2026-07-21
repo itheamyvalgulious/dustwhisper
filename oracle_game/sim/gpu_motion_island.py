@@ -20,6 +20,7 @@ from oracle_game.sim.gpu_motion import (
     FALLING_ISLAND_RESERVATION_DTYPE,
     ISLAND_RESOLVE_STALE
 )
+from oracle_game.sim.gpu_motion_bridge import _pack_cell_state_texture
 
 
 def _dispatch_index_falling_island_reservation_sources(
@@ -44,7 +45,7 @@ def _dispatch_index_falling_island_reservation_sources(
         resources.island_reservations.bind_to_storage_buffer(binding=0)
         resources.island_reservation_count.bind_to_storage_buffer(binding=1)
         resources.island_reservation_source_index.bind_to_storage_buffer(binding=2)
-        resources.material_tex.use(location=0)
+        resources.cell_state_tex.use(location=0)
         resources.island_id_tex.use(location=1)
         pipeline._run_island_reservation_indirect(
             world,
@@ -81,8 +82,7 @@ def _dispatch_index_falling_island_apply(
         resources.island_reservation_count.bind_to_storage_buffer(binding=1)
         resources.island_apply_incoming.bind_to_storage_buffer(binding=2)
         resources.island_apply_outgoing.bind_to_storage_buffer(binding=3)
-        resources.material_tex.use(location=0)
-        resources.phase_tex.use(location=1)
+        resources.cell_state_tex.use(location=0)
         resources.island_id_tex.use(location=7)
         pipeline._run_island_reservation_indirect(
             world,
@@ -118,8 +118,7 @@ def _dispatch_index_falling_island_materialization(
         resources.island_reservations.bind_to_storage_buffer(binding=0)
         resources.island_reservation_count.bind_to_storage_buffer(binding=1)
         resources.island_materialization_index.bind_to_storage_buffer(binding=2)
-        resources.material_tex.use(location=0)
-        resources.phase_tex.use(location=1)
+        resources.cell_state_tex.use(location=0)
         resources.island_id_tex.use(location=7)
         pipeline._run_island_reservation_indirect(
             world,
@@ -229,6 +228,17 @@ def _dispatch_apply_falling_island_materialization(
     group_x = (world.width + LOCAL_SIZE - 1) // LOCAL_SIZE
     group_y = (world.height + LOCAL_SIZE - 1) // LOCAL_SIZE
     formal_mode_zero = formal_frame and int(mode) == 0
+    direct_bridge_outputs = bool(
+        formal_frame
+        and pipeline._falling_island_materialization_bridge_fusion_enabled
+        and pipeline._bridge_context_active(world)
+        and not bool(getattr(world, "phase_c_defer_cell_publish", False))
+    )
+    use_minimal_hydration = bool(
+        direct_bridge_outputs
+        and pipeline._falling_island_materialization_minimal_hydration_enabled
+        and pipeline._bridge_authoritative_powder_inputs(world)
+    )
     if formal_frame:
         if formal_mode_zero and inputs_already_loaded:
             if not pipeline._active_scheduler_gpu_authoritative(world):
@@ -248,13 +258,22 @@ def _dispatch_apply_falling_island_materialization(
         reuse_active_dispatch = bool(
             formal_frame and (not formal_mode_zero or use_existing_active_tile_dispatch)
         )
-        pipeline._load_authoritative_bridge_inputs(
-            world,
-            resources,
-            group_x,
-            group_y,
-            use_existing_active_tile_dispatch=reuse_active_dispatch,
-        )
+        if use_minimal_hydration:
+            with pipeline._profile_pass(world, "island_materialization_minimal_load"):
+                if not pipeline._load_authoritative_materialization_inputs(
+                    world,
+                    resources,
+                    use_existing_active_tile_dispatch=reuse_active_dispatch,
+                ):
+                    raise RuntimeError("minimal materialization hydration requires authoritative bridge inputs")
+        else:
+            pipeline._load_authoritative_bridge_inputs(
+                world,
+                resources,
+                group_x,
+                group_y,
+                use_existing_active_tile_dispatch=reuse_active_dispatch,
+            )
     materialization_tile_count_buffer = resources.active_tile_count
     materialization_tile_list_buffer = resources.active_tile_list
     materialization_dispatch_args = resources.active_tile_dispatch_args
@@ -269,7 +288,15 @@ def _dispatch_apply_falling_island_materialization(
             resources,
             reservation_count=int(reservation_count),
         )
-    program = pipeline.programs["apply_falling_island_materialization"]
+    if direct_bridge_outputs:
+        program_name = (
+            "apply_falling_island_materialization_bridge_changed_only"
+            if pipeline._falling_island_materialization_changed_only_enabled
+            else "apply_falling_island_materialization_bridge"
+        )
+    else:
+        program_name = "apply_falling_island_materialization"
+    program = pipeline.programs[program_name]
     program["cell_grid_size"].value = (world.width, world.height)
     program["tile_grid_size"].value = (world.active.tile_width, world.active.tile_height)
     program["tile_size"].value = int(world.active.tile_size)
@@ -281,16 +308,21 @@ def _dispatch_apply_falling_island_materialization(
     program["active_ttl_reset"].value = int(world.active.active_ttl_reset)
     program["use_reservation_count_buffer"].value = bool(formal_frame)
     program["use_active_tile_dispatch"].value = bool(formal_frame)
+    program["use_bridge_payload_inputs"].value = bool(use_minimal_hydration)
     resources.island_reservations.bind_to_storage_buffer(binding=0)
     resources.material_falling_params.bind_to_storage_buffer(binding=1)
     resources.island_reservation_count.bind_to_storage_buffer(binding=2)
     world.bridge.buffers["active_tile_ttl"].bind_to_storage_buffer(binding=3)
     resources.island_materialization_index.bind_to_storage_buffer(binding=4)
+    if direct_bridge_outputs:
+        world.bridge.buffers["cell_core"].bind_to_storage_buffer(binding=5)
     materialization_tile_count_buffer.bind_to_storage_buffer(binding=6)
     materialization_tile_list_buffer.bind_to_storage_buffer(binding=7)
-    resources.material_tex.use(location=0)
-    resources.phase_tex.use(location=1)
-    resources.cell_flags_tex.use(location=2)
+    if direct_bridge_outputs:
+        world.bridge.buffers["island_id"].bind_to_storage_buffer(binding=8)
+        world.bridge.buffers["entity_id"].bind_to_storage_buffer(binding=9)
+        world.bridge.buffers["placeholder_displaced_material"].bind_to_storage_buffer(binding=10)
+    resources.cell_state_tex.use(location=0)
     resources.velocity_tex.use(location=3)
     resources.temp_tex.use(location=4)
     resources.timer_tex.use(location=5)
@@ -298,13 +330,14 @@ def _dispatch_apply_falling_island_materialization(
     resources.island_id_tex.use(location=7)
     resources.entity_id_tex.use(location=8)
     resources.displaced_tex.use(location=9)
-    resources.material_out_tex.bind_to_image(0, read=False, write=True)
-    resources.phase_out_tex.bind_to_image(1, read=False, write=True)
-    resources.cell_flags_out_tex.bind_to_image(2, read=False, write=True)
-    resources.velocity_out_tex.bind_to_image(3, read=False, write=True)
-    resources.temp_out_tex.bind_to_image(4, read=False, write=True)
-    resources.timer_out_tex.bind_to_image(5, read=False, write=True)
-    resources.integrity_out_tex.bind_to_image(6, read=False, write=True)
+    if direct_bridge_outputs:
+        world.bridge.textures["material"].bind_to_image(0, read=False, write=True)
+    else:
+        resources.cell_state_out_tex.bind_to_image(0, read=False, write=True)
+        resources.velocity_out_tex.bind_to_image(3, read=False, write=True)
+        resources.temp_out_tex.bind_to_image(4, read=False, write=True)
+        resources.timer_out_tex.bind_to_image(5, read=False, write=True)
+        resources.integrity_out_tex.bind_to_image(6, read=False, write=True)
     with pipeline._profile_pass(world, "island_materialization_main"):
         if formal_frame:
             pipeline._run_active_tile_indirect(
@@ -316,6 +349,21 @@ def _dispatch_apply_falling_island_materialization(
         else:
             program.run(group_x, group_y, 1)
         pipeline._sync_compute_writes(ctx)
+
+    if direct_bridge_outputs:
+        world.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+        )
+        pipeline._refresh_authoritative_active_scheduler_after_apply(
+            world,
+            "active_refresh_after_falling_island_materialization",
+        )
+        pipeline.last_cpu_mirror_downloaded = False
+        return
 
     aux_program = pipeline.programs["apply_falling_island_materialization_aux"]
     aux_program["cell_grid_size"].value = (world.width, world.height)
@@ -334,8 +382,7 @@ def _dispatch_apply_falling_island_materialization(
     resources.island_materialization_index.bind_to_storage_buffer(binding=4)
     materialization_tile_count_buffer.bind_to_storage_buffer(binding=6)
     materialization_tile_list_buffer.bind_to_storage_buffer(binding=7)
-    resources.material_tex.use(location=0)
-    resources.phase_tex.use(location=1)
+    resources.cell_state_tex.use(location=0)
     resources.island_id_tex.use(location=7)
     resources.entity_id_tex.use(location=8)
     resources.displaced_tex.use(location=9)
@@ -404,7 +451,23 @@ def _dispatch_apply_falling_island_reservations(
         resources,
         reservation_count=int(reservation_count),
     )
-    program = pipeline.programs["apply_falling_island_reservations"]
+    direct_bridge_outputs = bool(
+        formal_frame
+        and pipeline._falling_island_apply_bridge_fusion_enabled
+        and pipeline._bridge_context_active(world)
+        and not bool(getattr(world, "phase_c_defer_cell_publish", False))
+    )
+    changed_only = bool(
+        direct_bridge_outputs
+        and pipeline._falling_island_apply_changed_only_enabled
+    )
+    program = pipeline.programs[
+        "apply_falling_island_reservations_bridge_changed_only"
+        if changed_only
+        else "apply_falling_island_reservations_bridge"
+        if direct_bridge_outputs
+        else "apply_falling_island_reservations"
+    ]
     program["cell_grid_size"].value = (world.width, world.height)
     program["gas_grid_size"].value = (world.gas_width, world.gas_height)
     program["tile_grid_size"].value = (world.active.tile_width, world.active.tile_height)
@@ -416,15 +479,19 @@ def _dispatch_apply_falling_island_reservations(
     program["use_reservation_count_buffer"].value = bool(formal_frame)
     program["use_active_tile_dispatch"].value = bool(formal_frame)
     resources.island_reservations.bind_to_storage_buffer(binding=0)
+    if direct_bridge_outputs:
+        world.bridge.buffers["cell_core"].bind_to_storage_buffer(binding=1)
     resources.island_reservation_count.bind_to_storage_buffer(binding=2)
     world.bridge.buffers["active_tile_ttl"].bind_to_storage_buffer(binding=3)
     resources.island_apply_incoming.bind_to_storage_buffer(binding=4)
     resources.island_apply_outgoing.bind_to_storage_buffer(binding=5)
     resources.active_tile_count.bind_to_storage_buffer(binding=6)
     resources.active_tile_list.bind_to_storage_buffer(binding=7)
-    resources.material_tex.use(location=0)
-    resources.phase_tex.use(location=1)
-    resources.cell_flags_tex.use(location=2)
+    if direct_bridge_outputs:
+        world.bridge.buffers["island_id"].bind_to_storage_buffer(binding=8)
+        world.bridge.buffers["entity_id"].bind_to_storage_buffer(binding=9)
+        world.bridge.buffers["placeholder_displaced_material"].bind_to_storage_buffer(binding=10)
+    resources.cell_state_tex.use(location=0)
     resources.velocity_tex.use(location=3)
     resources.temp_tex.use(location=4)
     resources.timer_tex.use(location=5)
@@ -433,19 +500,35 @@ def _dispatch_apply_falling_island_reservations(
     resources.entity_id_tex.use(location=8)
     resources.displaced_tex.use(location=9)
     resources.ambient_tex.use(location=20)
-    resources.material_out_tex.bind_to_image(0, read=False, write=True)
-    resources.phase_out_tex.bind_to_image(1, read=False, write=True)
-    resources.cell_flags_out_tex.bind_to_image(2, read=False, write=True)
-    resources.velocity_out_tex.bind_to_image(3, read=False, write=True)
-    resources.temp_out_tex.bind_to_image(4, read=False, write=True)
-    resources.timer_out_tex.bind_to_image(5, read=False, write=True)
-    resources.integrity_out_tex.bind_to_image(6, read=False, write=True)
+    if direct_bridge_outputs:
+        world.bridge.textures["material"].bind_to_image(0, read=False, write=True)
+    else:
+        resources.cell_state_out_tex.bind_to_image(0, read=False, write=True)
+        resources.velocity_out_tex.bind_to_image(3, read=False, write=True)
+        resources.temp_out_tex.bind_to_image(4, read=False, write=True)
+        resources.timer_out_tex.bind_to_image(5, read=False, write=True)
+        resources.integrity_out_tex.bind_to_image(6, read=False, write=True)
     with pipeline._profile_pass(world, "island_apply_main"):
         if formal_frame:
             pipeline._run_active_tile_indirect(program, resources, "falling island reservation apply")
         else:
             program.run(group_x, group_y, 1)
         pipeline._sync_compute_writes(ctx)
+
+    if direct_bridge_outputs:
+        world.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+        )
+        pipeline._refresh_authoritative_active_scheduler_after_apply(
+            world,
+            "active_refresh_after_falling_island_reservation",
+        )
+        pipeline.last_cpu_mirror_downloaded = False
+        return
 
     aux_program = pipeline.programs["apply_falling_island_reservation_aux"]
     aux_program["cell_grid_size"].value = (world.width, world.height)
@@ -463,8 +546,7 @@ def _dispatch_apply_falling_island_reservations(
     resources.island_apply_outgoing.bind_to_storage_buffer(binding=5)
     resources.active_tile_count.bind_to_storage_buffer(binding=6)
     resources.active_tile_list.bind_to_storage_buffer(binding=7)
-    resources.material_tex.use(location=0)
-    resources.phase_tex.use(location=1)
+    resources.cell_state_tex.use(location=0)
     resources.island_id_tex.use(location=7)
     resources.entity_id_tex.use(location=8)
     resources.displaced_tex.use(location=9)
@@ -521,7 +603,9 @@ def plan_uploaded_falling_island_reservations(
     upload_plan = pipeline._cpu_upload_plan(world)
     pipeline._record_cpu_upload_plan(upload_plan)
     if upload_plan["cell_core"]:
-        resources.material_tex.write(world.material_id.astype("f4").tobytes())
+        resources.cell_state_tex.write(
+            _pack_cell_state_texture(world.material_id, world.phase, world.cell_flags).tobytes()
+        )
     if upload_plan["island_id"]:
         resources.island_id_tex.write(world.island_id.astype("f4").tobytes())
     cell_group_x = (world.width + LOCAL_SIZE - 1) // LOCAL_SIZE
@@ -548,7 +632,7 @@ def plan_uploaded_falling_island_reservations(
     use_bridge_state = pipeline._bridge_authoritative_island_state(world)
     program["use_bridge_authoritative_state"].value = bool(use_bridge_state)
     program["dt"].value = float(dt)
-    resources.material_tex.use(location=0)
+    resources.cell_state_tex.use(location=0)
     resources.island_id_tex.use(location=1)
     resources.island_ids.bind_to_storage_buffer(binding=0)
     resources.island_bboxes.bind_to_storage_buffer(binding=1)
@@ -610,7 +694,9 @@ def plan_uploaded_falling_island_reservations_from_bridge_runtime(
             pipeline._record_cpu_upload_plan(upload_plan)
             use_bridge_state = pipeline._bridge_authoritative_island_state(world)
             if upload_plan["cell_core"]:
-                resources.material_tex.write(world.material_id.astype("f4").tobytes())
+                resources.cell_state_tex.write(
+                    _pack_cell_state_texture(world.material_id, world.phase, world.cell_flags).tobytes()
+                )
             if upload_plan["island_id"]:
                 resources.island_id_tex.write(world.island_id.astype("f4").tobytes())
             if not use_bridge_state:
@@ -623,7 +709,7 @@ def plan_uploaded_falling_island_reservations_from_bridge_runtime(
             program["runtime_capacity"].value = runtime_capacity
             program["use_bridge_authoritative_state"].value = bool(use_bridge_state)
             program["dt"].value = float(dt)
-            resources.material_tex.use(location=0)
+            resources.cell_state_tex.use(location=0)
             resources.island_id_tex.use(location=1)
             bridge.buffers["island_runtime"].bind_to_storage_buffer(binding=0)
             resources.island_reservations.bind_to_storage_buffer(binding=1)
@@ -673,7 +759,9 @@ def plan_uploaded_falling_island_reservations_from_bridge_runtime(
         upload_plan = pipeline._cpu_upload_plan(world)
         pipeline._record_cpu_upload_plan(upload_plan)
         if upload_plan["cell_core"]:
-            resources.material_tex.write(world.material_id.astype("f4").tobytes())
+            resources.cell_state_tex.write(
+                _pack_cell_state_texture(world.material_id, world.phase, world.cell_flags).tobytes()
+            )
         if upload_plan["island_id"]:
             resources.island_id_tex.write(world.island_id.astype("f4").tobytes())
         cell_group_x = (world.width + LOCAL_SIZE - 1) // LOCAL_SIZE
@@ -687,7 +775,7 @@ def plan_uploaded_falling_island_reservations_from_bridge_runtime(
         use_bridge_state = pipeline._bridge_authoritative_island_state(world)
         program["use_bridge_authoritative_state"].value = bool(use_bridge_state)
         program["dt"].value = float(dt)
-        resources.material_tex.use(location=0)
+        resources.cell_state_tex.use(location=0)
         resources.island_id_tex.use(location=1)
         resources.island_ids.bind_to_storage_buffer(binding=0)
         resources.island_bboxes.bind_to_storage_buffer(binding=1)
@@ -819,7 +907,9 @@ def _dispatch_resolve_falling_island_reservations(
     upload_plan = pipeline._cpu_upload_plan(world)
     pipeline._record_cpu_upload_plan(upload_plan)
     if upload_plan["cell_core"]:
-        resources.material_tex.write(world.material_id.astype("f4").tobytes())
+        resources.cell_state_tex.write(
+            _pack_cell_state_texture(world.material_id, world.phase, world.cell_flags).tobytes()
+        )
     if upload_plan["island_id"]:
         resources.island_id_tex.write(world.island_id.astype("f4").tobytes())
     cell_group_x = (world.width + LOCAL_SIZE - 1) // LOCAL_SIZE
@@ -831,13 +921,31 @@ def _dispatch_resolve_falling_island_reservations(
             reservation_count=int(reservation_count),
             operation=2,
         )
-    pipeline._load_authoritative_bridge_inputs(
-        world,
-        resources,
-        cell_group_x,
-        cell_group_y,
-        use_existing_active_tile_dispatch=formal_frame,
+    use_minimal_hydration = bool(
+        formal_frame
+        and pipeline._falling_island_resolve_minimal_hydration_enabled
+        and pipeline._bridge_context_active(world)
+        and pipeline._bridge_authoritative_powder_inputs(world)
+        and pipeline._active_scheduler_gpu_authoritative(world)
     )
+    if use_minimal_hydration:
+        with pipeline._profile_pass(world, "island_reservation_minimal_load"):
+            if not pipeline._load_authoritative_materialization_inputs(
+                world,
+                resources,
+                use_existing_active_tile_dispatch=True,
+            ):
+                raise RuntimeError(
+                    "minimal island reservation hydration requires authoritative bridge inputs"
+                )
+    else:
+        pipeline._load_authoritative_bridge_inputs(
+            world,
+            resources,
+            cell_group_x,
+            cell_group_y,
+            use_existing_active_tile_dispatch=formal_frame,
+        )
     pipeline._dispatch_index_falling_island_reservation_sources(
         world,
         resources,
@@ -852,7 +960,7 @@ def _dispatch_resolve_falling_island_reservations(
         resources.material_contact_params.bind_to_storage_buffer(binding=1)
         resources.island_reservation_count.bind_to_storage_buffer(binding=2)
         resources.island_reservation_source_index.bind_to_storage_buffer(binding=3)
-        resources.material_tex.use(location=0)
+        resources.cell_state_tex.use(location=0)
         resources.island_id_tex.use(location=1)
         if formal_frame:
             pipeline._run_island_reservation_indirect(

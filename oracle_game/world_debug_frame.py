@@ -159,6 +159,8 @@ def _motion_frame(engine: "WorldEngine") -> np.ndarray:
         POWDER_RESOLVE_STALE,
     )
 
+    pipeline = engine.motion_solver.gpu_pipeline
+    pipeline.materialize_compact_powder_reservations(engine, download=True)
     frame = np.clip(_material_frame(engine) * 0.2, 0.0, 1.0).astype(np.float32, copy=False)
     snapshot = engine.motion_solver.runtime_snapshot()
 

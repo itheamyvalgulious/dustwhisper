@@ -1,0 +1,56 @@
+            uniform float dt;
+            uniform float gas_cell_size;
+            uniform int force_count;
+            uniform int species_count;
+            layout(std430, binding=0) buffer ForceSourceBuffer {
+                vec4 force_data[];
+            };
+            layout(std430, binding=1) buffer SpeciesForceParamBuffer {
+                vec4 force_params[{{MAX_SPECIES}}];
+            };
+            layout(std430, binding=5) writeonly buffer DensityValueBuffer {
+                float density_values[];
+            };
+            layout(binding=0) uniform sampler2D velocity_in_tex;
+            layout(binding=1) uniform sampler2D ambient_tex;
+            layout(binding=2) uniform sampler2DArray gas_tex;
+            layout(rg32f, binding=0) writeonly uniform image2D velocity_out_img;
+            layout(r32f, binding=1) writeonly uniform image2D thermo_pressure_img;
+            layout(r32f, binding=2) writeonly uniform image2D density_img;
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                if (gid.x >= grid_size.x || gid.y >= grid_size.y) {
+                    return;
+                }
+
+                vec2 vel = texelFetch(velocity_in_tex, gid, 0).xy;
+                if (solve_active(gid)) {
+                    for (int force_index = 0; force_index < force_count; ++force_index) {
+                        vec4 source = force_data[force_index * 2];
+                        vec4 params = force_data[force_index * 2 + 1];
+                        vec2 grid_pos = source.xy / gas_cell_size;
+                        float radius = max(params.x / gas_cell_size, 1.0);
+                        vec2 delta = vec2(gid) - grid_pos;
+                        float influence = exp(-dot(delta, delta) / (radius * radius));
+                        vel += source.zw * params.y * dt * influence;
+                    }
+                }
+                imageStore(velocity_out_img, gid, vec4(vel, 0.0, 0.0));
+
+                float pressure_coeff = 0.0;
+                float density = 0.0;
+                for (int species = 0; species < species_count; ++species) {
+                    float concentration = texelFetch(gas_tex, ivec3(gid, species), 0).x;
+                    pressure_coeff += concentration * force_params[species].x;
+                    density += concentration * force_params[species].y;
+                }
+                float temperature = max(texelFetch(ambient_tex, gid, 0).x, 0.1);
+                density_values[gid.y * grid_size.x + gid.x] = density;
+                if (!solve_active(gid)) {
+                    imageStore(thermo_pressure_img, gid, vec4(0.0, 0.0, 0.0, 0.0));
+                    imageStore(density_img, gid, vec4(density, 0.0, 0.0, 0.0));
+                    return;
+                }
+                imageStore(thermo_pressure_img, gid, vec4(temperature * pressure_coeff, 0.0, 0.0, 0.0));
+                imageStore(density_img, gid, vec4(density, 0.0, 0.0, 0.0));
+            }

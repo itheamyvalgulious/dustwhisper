@@ -5,14 +5,12 @@
             layout(std430, binding=0) readonly buffer BridgeCellCoreBuffer {
                 uint bridge_cell_core[];
             };
-            layout(r32f, binding=0) writeonly uniform image2D material_ping_img;
-            layout(r32f, binding=1) writeonly uniform image2D material_pong_img;
-            layout(r32f, binding=2) writeonly uniform image2D phase_ping_img;
-            layout(r32f, binding=3) writeonly uniform image2D phase_pong_img;
-            layout(r32f, binding=4) writeonly uniform image2D temp_ping_img;
-            layout(r32f, binding=5) writeonly uniform image2D temp_pong_img;
-            layout(r32f, binding=6) writeonly uniform image2D integrity_ping_img;
-            layout(r32f, binding=7) writeonly uniform image2D integrity_pong_img;
+            layout(r32ui, binding=0) writeonly uniform uimage2D cell_state_ping_img;
+            layout(r32ui, binding=1) writeonly uniform uimage2D cell_state_pong_img;
+            layout(r32f, binding=2) writeonly uniform image2D temp_ping_img;
+            layout(r32f, binding=3) writeonly uniform image2D temp_pong_img;
+            layout(r32f, binding=4) writeonly uniform image2D integrity_ping_img;
+            layout(r32f, binding=5) writeonly uniform image2D integrity_pong_img;
             void main() {
                 ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
                 if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
@@ -21,17 +19,12 @@
                 int cell_index = gid.y * cell_grid_size.x + gid.x;
                 int word_index = cell_index * 5;
                 uint word0 = bridge_cell_core[word_index];
-                float material = float(word0 & 0xFFFFu);
-                float phase = float((word0 >> 16u) & 0xFFu);
                 float temperature = uintBitsToFloat(bridge_cell_core[word_index + 2]);
                 float integrity = float(bridge_cell_core[word_index + 4] & 0xFFFFu);
-                imageStore(material_ping_img, gid, vec4(material, 0.0, 0.0, 0.0));
-                imageStore(phase_ping_img, gid, vec4(phase, 0.0, 0.0, 0.0));
+                imageStore(cell_state_ping_img, gid, uvec4(word0, 0u, 0u, 0u));
                 imageStore(temp_ping_img, gid, vec4(temperature, 0.0, 0.0, 0.0));
                 imageStore(integrity_ping_img, gid, vec4(integrity, 0.0, 0.0, 0.0));
-                imageStore(material_pong_img, gid, vec4(material, 0.0, 0.0, 0.0));
-                imageStore(phase_pong_img, gid, vec4(phase, 0.0, 0.0, 0.0));
+                imageStore(cell_state_pong_img, gid, uvec4(word0, 0u, 0u, 0u));
                 imageStore(temp_pong_img, gid, vec4(temperature, 0.0, 0.0, 0.0));
                 imageStore(integrity_pong_img, gid, vec4(integrity, 0.0, 0.0, 0.0));
             }
-            

@@ -1,14 +1,33 @@
+            #if {{TIMED_SPARSE_INPLACE}}
+            layout(std430, binding=12) readonly buffer TimedSparseCandidateList {
+                uint timed_sparse_candidate_list[];
+            };
+            #endif
 
             void main() {
+                #if {{TIMED_SPARSE_INPLACE}}
+                uint candidate_slot = uint(gl_GlobalInvocationID.y)
+                    * (uint(gl_NumWorkGroups.x) * uint(gl_WorkGroupSize.x))
+                    + uint(gl_GlobalInvocationID.x);
+                if (candidate_slot >= timed_emit_target_count[0]) {
+                    return;
+                }
+                uint candidate_cell = timed_sparse_candidate_list[candidate_slot];
+                ivec2 gid = ivec2(
+                    int(candidate_cell % uint(cell_grid_size.x)),
+                    int(candidate_cell / uint(cell_grid_size.x))
+                );
+                #else
                 ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
                 if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
                     return;
                 }
-                float material_value = texelFetch(material_tex, gid, 0).x;
-                float phase_value = texelFetch(phase_tex, gid, 0).x;
+                #endif
+                float material_value = material_value_at(gid);
+                float phase_value = phase_value_at(gid);
                 float temp_value = texelFetch(temp_tex, gid, 0).x;
                 float integrity_value = texelFetch(integrity_tex, gid, 0).x;
-                vec4 timer_value = texelFetch(timer_tex, gid, 0);
+                vec4 timer_value = unpack_timer(texelFetch(timer_tex, gid, 0).x);
                 vec4 deferred_action_lo = vec4(0.0);
                 vec4 deferred_action_hi = vec4(0.0);
                 vec4 deferred_scale_lo = vec4(0.0);
@@ -82,4 +101,3 @@
                     reaction_latched_value
                 );
             }
-            

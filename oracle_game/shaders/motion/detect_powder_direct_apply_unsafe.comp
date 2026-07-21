@@ -1,0 +1,71 @@
+#version 430
+layout(local_size_x={{POWDER_RESERVATION_LOCAL_SIZE}}, local_size_y=1, local_size_z=1) in;
+
+uniform ivec2 cell_grid_size;
+
+struct PowderReservation {
+    ivec2 source_xy;
+    ivec2 desired_target_xy;
+    ivec2 reserved_target_xy;
+    ivec2 resolved_target_xy;
+    vec2 velocity_xy;
+    int material_id;
+    int resolve_state;
+};
+
+layout(std430, binding=0) readonly buffer PowderReservations {
+    PowderReservation reservations[];
+};
+layout(std430, binding=1) readonly buffer PowderReservationCount {
+    int powder_reservation_count;
+};
+layout(std430, binding=2) readonly buffer PowderApplyIncoming {
+    int apply_incoming[];
+};
+layout(std430, binding=3) readonly buffer PowderApplyOutgoing {
+    int apply_outgoing[];
+};
+layout(std430, binding=4) buffer PowderDirectApplyUnsafe {
+    uint unsafe_flag[];
+};
+
+bool in_bounds(ivec2 cell) {
+    return cell.x >= 0 && cell.y >= 0
+        && cell.x < cell_grid_size.x && cell.y < cell_grid_size.y;
+}
+
+bool same_cell(ivec2 lhs, ivec2 rhs) {
+    return lhs.x == rhs.x && lhs.y == rhs.y;
+}
+
+bool is_moving(PowderReservation reservation) {
+    return (
+        (reservation.resolve_state == {{POWDER_RESOLVE_DDA}}
+            || reservation.resolve_state == {{POWDER_RESOLVE_FALLBACK}})
+        && !same_cell(reservation.source_xy, reservation.resolved_target_xy)
+    );
+}
+
+int cell_index(ivec2 cell) {
+    return cell.y * cell_grid_size.x + cell.x;
+}
+
+void main() {
+    int index = int(gl_GlobalInvocationID.x);
+    int count = clamp(powder_reservation_count, 0, cell_grid_size.x * cell_grid_size.y);
+    if (index >= count) {
+        return;
+    }
+    PowderReservation reservation = reservations[index];
+    if (!is_moving(reservation)
+        || !in_bounds(reservation.source_xy)
+        || !in_bounds(reservation.resolved_target_xy)) {
+        return;
+    }
+
+    // The direct apply shader reads the source payload from bridge_cell_core
+    // while the source invocation clears/rewrites that same cell. This is a
+    // race even for an isolated A->B move; chains add a second B->C hazard.
+    // Without a separate source snapshot, only a no-move frame is safe.
+    atomicOr(unsafe_flag[0], 1u);
+}

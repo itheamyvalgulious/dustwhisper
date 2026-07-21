@@ -20,12 +20,8 @@ def release(pipeline) -> None:
     if pipeline.resources is None:
         return
     for resource in (
-        pipeline.resources.material_tex,
-        pipeline.resources.material_out_tex,
-        pipeline.resources.phase_tex,
-        pipeline.resources.phase_out_tex,
-        pipeline.resources.cell_flags_tex,
-        pipeline.resources.cell_flags_out_tex,
+        pipeline.resources.cell_state_tex,
+        pipeline.resources.cell_state_out_tex,
         pipeline.resources.velocity_tex,
         pipeline.resources.velocity_out_tex,
         pipeline.resources.temp_tex,
@@ -54,8 +50,14 @@ def release(pipeline) -> None:
         pipeline.resources.powder_target_winner,
         pipeline.resources.powder_apply_incoming,
         pipeline.resources.powder_apply_outgoing,
+        pipeline.resources.powder_apply_epoch,
+        pipeline.resources.powder_direct_apply_unsafe,
+        pipeline.resources.powder_source_cell_core_snapshot,
+        pipeline.resources.powder_source_aux_snapshot,
         pipeline.resources.powder_reservations,
+        pipeline.resources.powder_compact_reservations,
         pipeline.resources.powder_reservation_count,
+        pipeline.resources.powder_provisional_moving_count,
         pipeline.resources.powder_reservation_dispatch_args,
         pipeline.resources.island_reservations,
         pipeline.resources.island_reservation_count,
@@ -100,12 +102,8 @@ def _ensure_resources(pipeline, world: "WorldEngine") -> GPUMotionResources:
     if pipeline.resources is not None and pipeline.resources.signature == signature:
         return pipeline.resources
     pipeline.release()
-    material_tex = ctx.texture((world.width, world.height), 1, dtype="f4")
-    material_out_tex = ctx.texture((world.width, world.height), 1, dtype="f4")
-    phase_tex = ctx.texture((world.width, world.height), 1, dtype="f4")
-    phase_out_tex = ctx.texture((world.width, world.height), 1, dtype="f4")
-    cell_flags_tex = ctx.texture((world.width, world.height), 1, dtype="f4")
-    cell_flags_out_tex = ctx.texture((world.width, world.height), 1, dtype="f4")
+    cell_state_tex = ctx.texture((world.width, world.height), 1, dtype="u4")
+    cell_state_out_tex = ctx.texture((world.width, world.height), 1, dtype="u4")
     velocity_tex = ctx.texture((world.width, world.height), 2, dtype="f4")
     velocity_out_tex = ctx.texture((world.width, world.height), 2, dtype="f4")
     temp_tex = ctx.texture((world.width, world.height), 1, dtype="f4")
@@ -136,6 +134,14 @@ def _ensure_resources(pipeline, world: "WorldEngine") -> GPUMotionResources:
     powder_target_winner = ctx.buffer(reserve=max(4, cell_count * 4), dynamic=True)
     powder_apply_incoming = ctx.buffer(reserve=max(4, cell_count * 4), dynamic=True)
     powder_apply_outgoing = ctx.buffer(reserve=max(4, cell_count * 4), dynamic=True)
+    powder_apply_epoch = ctx.buffer(reserve=max(8, cell_count * 2 * 4), dynamic=True)
+    powder_apply_epoch.write(bytes(max(8, cell_count * 2 * 4)))
+    powder_direct_apply_unsafe = ctx.buffer(reserve=4, dynamic=True)
+    powder_source_cell_core_snapshot = ctx.buffer(
+        reserve=max(4, cell_count * 5 * 4),
+        dynamic=True,
+    )
+    powder_source_aux_snapshot = ctx.buffer(reserve=max(4, cell_count * 3 * 4), dynamic=True)
     powder_reservation_dispatch_args = ctx.buffer(reserve=3 * 4, dynamic=True)
     island_runtime_dispatch_args = ctx.buffer(reserve=3 * 4, dynamic=True)
     island_apply_incoming = ctx.buffer(reserve=max(4, cell_count * 4), dynamic=True)
@@ -144,12 +150,8 @@ def _ensure_resources(pipeline, world: "WorldEngine") -> GPUMotionResources:
     component_label_ping = ctx.texture((world.width, world.height), 1, dtype="f4")
     component_label_pong = ctx.texture((world.width, world.height), 1, dtype="f4")
     for texture in (
-        material_tex,
-        material_out_tex,
-        phase_tex,
-        phase_out_tex,
-        cell_flags_tex,
-        cell_flags_out_tex,
+        cell_state_tex,
+        cell_state_out_tex,
         velocity_tex,
         velocity_out_tex,
         temp_tex,
@@ -174,12 +176,8 @@ def _ensure_resources(pipeline, world: "WorldEngine") -> GPUMotionResources:
         texture.filter = (ctx.NEAREST, ctx.NEAREST)
     pipeline.resources = GPUMotionResources(
         signature=signature,
-        material_tex=material_tex,
-        material_out_tex=material_out_tex,
-        phase_tex=phase_tex,
-        phase_out_tex=phase_out_tex,
-        cell_flags_tex=cell_flags_tex,
-        cell_flags_out_tex=cell_flags_out_tex,
+        cell_state_tex=cell_state_tex,
+        cell_state_out_tex=cell_state_out_tex,
         velocity_tex=velocity_tex,
         velocity_out_tex=velocity_out_tex,
         temp_tex=temp_tex,
@@ -208,8 +206,14 @@ def _ensure_resources(pipeline, world: "WorldEngine") -> GPUMotionResources:
         powder_target_winner=powder_target_winner,
         powder_apply_incoming=powder_apply_incoming,
         powder_apply_outgoing=powder_apply_outgoing,
+        powder_apply_epoch=powder_apply_epoch,
+        powder_direct_apply_unsafe=powder_direct_apply_unsafe,
+        powder_source_cell_core_snapshot=powder_source_cell_core_snapshot,
+        powder_source_aux_snapshot=powder_source_aux_snapshot,
         powder_reservations=ctx.buffer(reserve=4, dynamic=True),
+        powder_compact_reservations=ctx.buffer(reserve=4, dynamic=True),
         powder_reservation_count=ctx.buffer(reserve=4, dynamic=True),
+        powder_provisional_moving_count=ctx.buffer(reserve=4, dynamic=True),
         powder_reservation_dispatch_args=powder_reservation_dispatch_args,
         island_reservations=ctx.buffer(reserve=4, dynamic=True),
         island_reservation_count=ctx.buffer(reserve=4, dynamic=True),

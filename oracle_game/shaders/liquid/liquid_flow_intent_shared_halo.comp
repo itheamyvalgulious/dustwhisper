@@ -1,0 +1,675 @@
+#version 430
+#define DIRECT_BRIDGE_CELL_INPUTS {{DIRECT_BRIDGE_CELL_INPUTS}}
+#define LIQUID_PROVENANCE {{LIQUID_PROVENANCE}}
+#define PROVENANCE_TERMINAL {{PROVENANCE_TERMINAL}}
+#define FUSE_CLEANUP {{FUSE_CLEANUP}}
+#define FUSE_ACTIVE_DECAY {{FUSE_ACTIVE_DECAY}}
+#define PROVENANCE_ACTIVE_MASK_CACHE {{PROVENANCE_ACTIVE_MASK_CACHE}}
+#define PROVENANCE_SHARED_META_CACHE {{PROVENANCE_SHARED_META_CACHE}}
+#define PROVENANCE_LAZY_AUX {{PROVENANCE_LAZY_AUX}}
+const bool DIRECT_BRIDGE_AUX_INPUTS = {{DIRECT_BRIDGE_AUX_INPUTS}} != 0;
+layout(local_size_x={{PASS_LOCAL_SIZE}}, local_size_y={{PASS_LOCAL_SIZE}}, local_size_z=1) in;
+uniform ivec2 cell_grid_size;
+uniform ivec2 tile_grid_size;
+uniform int tile_size;
+uniform int phase_liquid;
+uniform int phase_falling_island;
+uniform bool publish_bridge_outputs;
+uniform bool publish_bridge_aux_outputs;
+uniform bool write_cell_core;
+uniform bool resident_hydrate_inputs;
+uniform bool use_split_placeholder_roles;
+uniform bool buoyancy_fused_roles;
+uniform bool provenance_full_grid;
+layout(binding=0) uniform usampler2D cell_state_tex;
+layout(binding=1) uniform usampler2D cell_state_fallback_tex;
+layout(binding=2) uniform sampler2D velocity_tex;
+layout(binding=3) uniform sampler2D active_tile_tex;
+layout(binding=4) uniform sampler2D entity_tex;
+layout(binding=5) uniform sampler2D displaced_tex;
+layout(binding=6) uniform sampler2D displaced_primary_tex;
+layout(binding=7) uniform usampler2D timer_tex;
+layout(binding=8) uniform sampler2D temp_tex;
+layout(binding=9) uniform sampler2D integrity_tex;
+layout(binding=10) uniform sampler2D island_out_tex;
+layout(binding=11) uniform sampler2D entity_out_tex;
+layout(binding=12) uniform sampler2D velocity_fallback_tex;
+layout(binding=13) uniform usampler2D timer_fallback_tex;
+layout(binding=14) uniform sampler2D temp_fallback_tex;
+layout(binding=15) uniform sampler2D integrity_fallback_tex;
+layout(std430, binding=0) buffer MaterialParams {
+    vec4 material_params[{{MAX_MATERIALS}}];
+};
+layout(std430, binding=1) readonly buffer ActiveTileCountBuffer {
+    uint active_tile_count[];
+};
+layout(std430, binding=2) readonly buffer ActiveTileListBuffer {
+    ivec2 active_tile_list[];
+};
+// See liquid_flow_intent.comp: all variants use a readable bridge declaration
+// so NVIDIA does not reject the integer preprocessor gate in this source.
+layout(std430, binding=3) buffer BridgeCellCoreBuffer {
+    uint bridge_cell_core[];
+};
+layout(std430, binding=4) buffer BridgeIslandBuffer {
+    int bridge_island_id[];
+};
+layout(std430, binding=5) buffer BridgeEntityBuffer {
+    int bridge_entity_id[];
+};
+layout(std430, binding=6) buffer BridgeDisplacedBuffer {
+    int bridge_displaced[];
+};
+layout(std430, binding=7) readonly buffer AffectedTileFlagsBuffer {
+    uint affected_tile_flags[];
+};
+#if PROVENANCE_TERMINAL
+layout(std430, binding=8) readonly buffer LiquidProvenancePrimaryBuffer {
+    uint liquid_provenance_primary[];
+};
+layout(std430, binding=9) readonly buffer LiquidProvenanceFallbackBuffer {
+    uint liquid_provenance_fallback[];
+};
+layout(std430, binding=10) writeonly buffer BridgeCellCoreSpareBuffer {
+    uint bridge_cell_core_spare[];
+};
+const uint PROVENANCE_TEXTURE = 0xFFFFFFFEu;
+const uint PROVENANCE_EMPTY = 0xFFFFFFFFu;
+#endif
+#if FUSE_ACTIVE_DECAY
+layout(std430, binding=11) buffer ActiveTileTTLBuffer {
+    int active_tile_ttl[];
+};
+#endif
+layout(rg32f, binding=0) writeonly uniform image2D liquid_flow_intent_img;
+layout(r32f, binding=1) writeonly uniform image2D bridge_material_img;
+layout(r32ui, binding=2) writeonly uniform uimage2D resident_cell_state_img;
+layout(rg32f, binding=3) writeonly uniform image2D resident_velocity_img;
+layout(r32f, binding=4) writeonly uniform image2D resident_entity_img;
+layout(r32f, binding=5) writeonly uniform image2D resident_displaced_img;
+layout(r32f, binding=6) writeonly uniform image2D resident_island_img;
+
+const int SHARED_STRIDE = {{PASS_LOCAL_SIZE}} + 2;
+// Flow probes horizontal and downward neighbors only; no top halo is read.
+const int SHARED_ROWS = {{PASS_LOCAL_SIZE}} + 1;
+const int SHARED_COUNT = SHARED_STRIDE * SHARED_ROWS;
+const int LOCAL_THREAD_COUNT = {{PASS_LOCAL_SIZE}} * {{PASS_LOCAL_SIZE}};
+shared uint shared_cell_state[SHARED_COUNT];
+#if !PROVENANCE_LAZY_AUX
+shared float shared_entity[SHARED_COUNT];
+shared float shared_displaced[SHARED_COUNT];
+#endif
+shared uint shared_valid[SHARED_COUNT];
+#if PROVENANCE_TERMINAL && PROVENANCE_SHARED_META_CACHE
+shared uint shared_terminal_provenance[SHARED_COUNT];
+const uint SHARED_CELL_ACTIVE = 2u;
+const uint SHARED_PRIMARY_ROLE = 4u;
+#endif
+#if PROVENANCE_ACTIVE_MASK_CACHE
+shared uint shared_all_tiles_active;
+#endif
+
+bool in_bounds(ivec2 cell) {
+    return cell.x >= 0 && cell.y >= 0 && cell.x < cell_grid_size.x && cell.y < cell_grid_size.y;
+}
+
+bool tile_active(ivec2 cell) {
+#if PROVENANCE_ACTIVE_MASK_CACHE
+    if (shared_all_tiles_active != 0u) {
+        return true;
+    }
+#endif
+    ivec2 tile = ivec2(
+        min(tile_grid_size.x - 1, max(0, cell.x / tile_size)),
+        min(tile_grid_size.y - 1, max(0, cell.y / tile_size))
+    );
+    return texelFetch(active_tile_tex, tile, 0).x > 0.5;
+}
+
+bool placeholder_role_is_primary(ivec2 cell) {
+    if (!use_split_placeholder_roles) {
+        return true;
+    }
+    ivec2 tile = ivec2(
+        clamp(cell.x / tile_size, 0, tile_grid_size.x - 1),
+        clamp(cell.y / tile_size, 0, tile_grid_size.y - 1)
+    );
+    if (affected_tile_flags[tile.y * tile_grid_size.x + tile.x] != 0u) {
+        return true;
+    }
+    return buoyancy_fused_roles && !tile_active(cell);
+}
+
+#if PROVENANCE_TERMINAL && PROVENANCE_SHARED_META_CACHE
+bool active_placeholder_role_is_primary(ivec2 cell) {
+    if (!use_split_placeholder_roles) {
+        return true;
+    }
+    ivec2 tile = ivec2(
+        clamp(cell.x / tile_size, 0, tile_grid_size.x - 1),
+        clamp(cell.y / tile_size, 0, tile_grid_size.y - 1)
+    );
+    // This helper is only used after the caller established that the cell's
+    // tile is active, so the buoyancy fallback role cannot apply.
+    return affected_tile_flags[tile.y * tile_grid_size.x + tile.x] != 0u;
+}
+#endif
+
+#if PROVENANCE_TERMINAL
+uint provenance_for_role(ivec2 cell, bool primary_role) {
+    int cell_index = cell.y * cell_grid_size.x + cell.x;
+    return primary_role
+        ? liquid_provenance_primary[cell_index]
+        : liquid_provenance_fallback[cell_index];
+}
+
+uint provenance_at(ivec2 cell) {
+    return provenance_for_role(cell, placeholder_role_is_primary(cell));
+}
+
+#if PROVENANCE_SHARED_META_CACHE
+uint terminal_cell_state_at(ivec2 cell, bool tile_is_active, uint provenance, bool primary_role) {
+    if (!tile_is_active) {
+        return bridge_cell_core[(cell.y * cell_grid_size.x + cell.x) * 5];
+    }
+    uint cell_count = uint(cell_grid_size.x * cell_grid_size.y);
+    if (provenance < cell_count) {
+        return bridge_cell_core[int(provenance) * 5];
+    }
+    if (provenance == PROVENANCE_EMPTY) {
+        return 0u;
+    }
+    return primary_role
+        ? texelFetch(cell_state_tex, cell, 0).x
+        : texelFetch(cell_state_fallback_tex, cell, 0).x;
+}
+#endif
+#endif
+
+uint cell_state_at(ivec2 cell) {
+#if PROVENANCE_TERMINAL
+    if (!tile_active(cell)) {
+        return bridge_cell_core[(cell.y * cell_grid_size.x + cell.x) * 5];
+    }
+    uint provenance = provenance_at(cell);
+    uint cell_count = uint(cell_grid_size.x * cell_grid_size.y);
+    if (provenance < cell_count) {
+        return bridge_cell_core[int(provenance) * 5];
+    }
+    if (provenance == PROVENANCE_EMPTY) {
+        return 0u;
+    }
+#endif
+#if DIRECT_BRIDGE_CELL_INPUTS
+    if (tile_active(cell)) {
+        return bridge_cell_core[(cell.y * cell_grid_size.x + cell.x) * 5];
+    }
+#endif
+    return placeholder_role_is_primary(cell)
+        ? texelFetch(cell_state_tex, cell, 0).x
+        : texelFetch(cell_state_fallback_tex, cell, 0).x;
+}
+
+#if FUSE_CLEANUP
+bool cleanup_placeholder_material(uint material) {
+    int material_id = clamp(int(material), 0, {{MAX_MATERIALS_MINUS_1}});
+    return int(material_params[material_id].w + 0.5) == 7;
+}
+
+bool cleanup_state_changed(ivec2 cell, uint final_state) {
+    int word = (cell.y * cell_grid_size.x + cell.x) * 5;
+    uint pre_state = bridge_cell_core[word];
+    return (pre_state & 0xFFFFu) != (final_state & 0xFFFFu)
+        || ((pre_state >> 16u) & 0xFFu) != ((final_state >> 16u) & 0xFFu);
+}
+
+float cleaned_entity_at(ivec2 cell, uint final_state) {
+    int cell_index = cell.y * cell_grid_size.x + cell.x;
+    float value = float(bridge_entity_id[cell_index]);
+    if (value == 0.0) {
+        return value;
+    }
+    uint final_material = final_state & 0xFFFFu;
+    if (cleanup_state_changed(cell, final_state) && !cleanup_placeholder_material(final_material)) {
+        value = 0.0;
+    }
+    return value;
+}
+
+float cleaned_displaced_at(ivec2 cell, uint final_state) {
+    int cell_index = cell.y * cell_grid_size.x + cell.x;
+    float value = placeholder_role_is_primary(cell)
+        ? texelFetch(displaced_primary_tex, cell, 0).x
+        : DIRECT_BRIDGE_AUX_INPUTS
+        ? float(bridge_displaced[cell_index])
+        : texelFetch(displaced_tex, cell, 0).x;
+    if (value == 0.0) {
+        return value;
+    }
+    uint final_material = final_state & 0xFFFFu;
+    if (cleanup_state_changed(cell, final_state) && !cleanup_placeholder_material(final_material)) {
+        value = 0.0;
+    }
+    return value;
+}
+
+int cleaned_island_at(ivec2 cell, uint final_state) {
+    int cell_index = cell.y * cell_grid_size.x + cell.x;
+    int value = bridge_island_id[cell_index];
+    if (value == 0) {
+        return value;
+    }
+    uint final_material = final_state & 0xFFFFu;
+    uint final_phase = (final_state >> 16u) & 0xFFu;
+    if (
+        cleanup_state_changed(cell, final_state)
+        && value > 0
+        && (final_phase != uint(phase_falling_island) || final_material == 0u)
+    ) {
+        value = 0;
+    }
+    return value;
+}
+#endif
+
+vec2 velocity_at(ivec2 cell) {
+#if PROVENANCE_TERMINAL
+    if (!tile_active(cell)) {
+        return unpackHalf2x16(bridge_cell_core[(cell.y * cell_grid_size.x + cell.x) * 5 + 1]);
+    }
+    uint provenance = provenance_at(cell);
+    uint cell_count = uint(cell_grid_size.x * cell_grid_size.y);
+    if (provenance < cell_count) {
+        return unpackHalf2x16(bridge_cell_core[int(provenance) * 5 + 1]);
+    }
+    if (provenance == PROVENANCE_EMPTY) {
+        return vec2(0.0);
+    }
+#endif
+#if DIRECT_BRIDGE_CELL_INPUTS
+    if (tile_active(cell)) {
+        return unpackHalf2x16(bridge_cell_core[(cell.y * cell_grid_size.x + cell.x) * 5 + 1]);
+    }
+#endif
+    return placeholder_role_is_primary(cell)
+        ? texelFetch(velocity_tex, cell, 0).xy
+        : texelFetch(velocity_fallback_tex, cell, 0).xy;
+}
+
+#if PROVENANCE_TERMINAL && PROVENANCE_SHARED_META_CACHE
+vec2 terminal_velocity_at(ivec2 cell, uint provenance, bool primary_role) {
+    uint cell_count = uint(cell_grid_size.x * cell_grid_size.y);
+    if (provenance < cell_count) {
+        return unpackHalf2x16(bridge_cell_core[int(provenance) * 5 + 1]);
+    }
+    if (provenance == PROVENANCE_EMPTY) {
+        return vec2(0.0);
+    }
+    return primary_role
+        ? texelFetch(velocity_tex, cell, 0).xy
+        : texelFetch(velocity_fallback_tex, cell, 0).xy;
+}
+
+#endif
+
+bool active_dispatch_group(out ivec2 group_origin, out ivec2 gid, out ivec2 tile_end) {
+#if PROVENANCE_TERMINAL
+    if (provenance_full_grid) {
+        group_origin = ivec2(gl_WorkGroupID.xy) * {{PASS_LOCAL_SIZE}};
+        gid = group_origin + ivec2(gl_LocalInvocationID.xy);
+        tile_end = cell_grid_size;
+        return group_origin.x < cell_grid_size.x && group_origin.y < cell_grid_size.y;
+    }
+#endif
+    int groups_per_tile_axis = max(1, (tile_size + {{PASS_LOCAL_SIZE_MINUS_1}}) / {{PASS_LOCAL_SIZE}});
+    int workgroups_per_tile = groups_per_tile_axis * groups_per_tile_axis;
+    uint group_index = gl_WorkGroupID.x;
+    uint active_tile_index = group_index / uint(workgroups_per_tile);
+    if (active_tile_index >= active_tile_count[0]) {
+        return false;
+    }
+    int subtile = int(group_index % uint(workgroups_per_tile));
+    ivec2 subtile_xy = ivec2(subtile % groups_per_tile_axis, subtile / groups_per_tile_axis);
+    ivec2 tile = active_tile_list[int(active_tile_index)];
+    if (tile.x < 0 || tile.y < 0 || tile.x >= tile_grid_size.x || tile.y >= tile_grid_size.y) {
+        return false;
+    }
+    ivec2 tile_origin = tile * tile_size;
+    group_origin = tile_origin + subtile_xy * {{PASS_LOCAL_SIZE}};
+    gid = group_origin + ivec2(gl_LocalInvocationID.xy);
+    tile_end = min(tile_origin + ivec2(tile_size), cell_grid_size);
+    return true;
+}
+
+#if PROVENANCE_TERMINAL
+void copy_original_core(ivec2 cell) {
+    int out_word = (cell.y * cell_grid_size.x + cell.x) * 5;
+    bridge_cell_core_spare[out_word] = bridge_cell_core[out_word];
+    bridge_cell_core_spare[out_word + 1] = bridge_cell_core[out_word + 1];
+    bridge_cell_core_spare[out_word + 2] = bridge_cell_core[out_word + 2];
+    bridge_cell_core_spare[out_word + 3] = bridge_cell_core[out_word + 3];
+    bridge_cell_core_spare[out_word + 4] = bridge_cell_core[out_word + 4];
+}
+
+void store_terminal_core_resolved(
+    ivec2 cell,
+    uint cell_state,
+    vec2 velocity,
+    bool primary_role,
+    uint provenance
+) {
+    uint cell_count = uint(cell_grid_size.x * cell_grid_size.y);
+    int out_word = (cell.y * cell_grid_size.x + cell.x) * 5;
+    bridge_cell_core_spare[out_word] = cell_state;
+    if (provenance < cell_count) {
+        int source_word = int(provenance) * 5;
+        bridge_cell_core_spare[out_word + 1] = bridge_cell_core[source_word + 1];
+        bridge_cell_core_spare[out_word + 2] = bridge_cell_core[source_word + 2];
+        bridge_cell_core_spare[out_word + 3] = bridge_cell_core[source_word + 3];
+        bridge_cell_core_spare[out_word + 4] = bridge_cell_core[source_word + 4];
+        return;
+    }
+    if (provenance == PROVENANCE_EMPTY) {
+        bridge_cell_core_spare[out_word + 1] = 0u;
+        bridge_cell_core_spare[out_word + 2] = 0u;
+        bridge_cell_core_spare[out_word + 3] = 0u;
+        bridge_cell_core_spare[out_word + 4] = 0u;
+        return;
+    }
+    float temperature = primary_role
+        ? texelFetch(temp_tex, cell, 0).x
+        : texelFetch(temp_fallback_tex, cell, 0).x;
+    uint timer_word = primary_role
+        ? texelFetch(timer_tex, cell, 0).x
+        : texelFetch(timer_fallback_tex, cell, 0).x;
+    float integrity_value = primary_role
+        ? texelFetch(integrity_tex, cell, 0).x
+        : texelFetch(integrity_fallback_tex, cell, 0).x;
+    bridge_cell_core_spare[out_word + 1] = packHalf2x16(velocity);
+    bridge_cell_core_spare[out_word + 2] = floatBitsToUint(temperature);
+    bridge_cell_core_spare[out_word + 3] = timer_word;
+    bridge_cell_core_spare[out_word + 4] = uint(
+        clamp(round(integrity_value), 0.0, 65535.0)
+    );
+}
+
+void store_terminal_core(ivec2 cell, uint cell_state, vec2 velocity, bool primary_role) {
+    store_terminal_core_resolved(
+        cell,
+        cell_state,
+        velocity,
+        primary_role,
+        provenance_for_role(cell, primary_role)
+    );
+}
+
+#endif
+
+void load_shared_halo(ivec2 group_origin) {
+    int lane = int(gl_LocalInvocationIndex);
+    for (int index = lane; index < SHARED_COUNT; index += LOCAL_THREAD_COUNT) {
+        ivec2 local_cell = ivec2(index % SHARED_STRIDE, index / SHARED_STRIDE);
+        ivec2 cell = group_origin + local_cell - ivec2(1, 0);
+        bool valid = in_bounds(cell);
+        shared_valid[index] = valid ? 1u : 0u;
+        if (valid) {
+#if PROVENANCE_TERMINAL && PROVENANCE_SHARED_META_CACHE
+            bool tile_is_active = tile_active(cell);
+            bool primary_role = tile_is_active && active_placeholder_role_is_primary(cell);
+            uint provenance = tile_is_active
+                ? provenance_for_role(cell, primary_role)
+                : PROVENANCE_EMPTY;
+            shared_valid[index] |= tile_is_active ? SHARED_CELL_ACTIVE : 0u;
+            shared_valid[index] |= primary_role ? SHARED_PRIMARY_ROLE : 0u;
+            shared_terminal_provenance[index] = provenance;
+            shared_cell_state[index] = terminal_cell_state_at(
+                cell,
+                tile_is_active,
+                provenance,
+                primary_role
+            );
+#else
+            shared_cell_state[index] = cell_state_at(cell);
+#endif
+#if !PROVENANCE_LAZY_AUX
+            int cell_index = cell.y * cell_grid_size.x + cell.x;
+#if FUSE_CLEANUP
+            shared_entity[index] = cleaned_entity_at(cell, shared_cell_state[index]);
+            shared_displaced[index] = cleaned_displaced_at(cell, shared_cell_state[index]);
+#else
+            shared_entity[index] = DIRECT_BRIDGE_AUX_INPUTS
+                ? float(bridge_entity_id[cell_index])
+                : texelFetch(entity_tex, cell, 0).x;
+            shared_displaced[index] = DIRECT_BRIDGE_AUX_INPUTS
+                ? float(bridge_displaced[cell_index])
+                : texelFetch(displaced_tex, cell, 0).x;
+#endif
+#endif
+        } else {
+            shared_cell_state[index] = 0u;
+#if !PROVENANCE_LAZY_AUX
+            shared_entity[index] = 0.0;
+            shared_displaced[index] = 0.0;
+#endif
+#if PROVENANCE_TERMINAL && PROVENANCE_SHARED_META_CACHE
+            shared_terminal_provenance[index] = PROVENANCE_EMPTY;
+#endif
+        }
+    }
+}
+
+int shared_index(ivec2 cell, ivec2 group_origin) {
+    ivec2 local_cell = cell - group_origin + ivec2(1, 0);
+    return local_cell.y * SHARED_STRIDE + local_cell.x;
+}
+
+#if FUSE_ACTIVE_DECAY
+void decay_active_tile_once(ivec2 cell, ivec2 group_origin) {
+    if (
+        any(notEqual(cell, group_origin))
+        || group_origin.x % tile_size != 0
+        || group_origin.y % tile_size != 0
+    ) {
+        return;
+    }
+    ivec2 tile = group_origin / tile_size;
+    int tile_index = tile.y * tile_grid_size.x + tile.x;
+    active_tile_ttl[tile_index] = max(0, active_tile_ttl[tile_index] - 1);
+}
+#endif
+
+bool is_placeholder_material(float material) {
+    int material_id = clamp(int(material + 0.5), 0, {{MAX_MATERIALS_MINUS_1}});
+    return int(material_params[material_id].w + 0.5) == 7;
+}
+
+bool reachable_empty(ivec2 cell, ivec2 group_origin) {
+    if (!in_bounds(cell)) {
+        return false;
+    }
+    int index = shared_index(cell, group_origin);
+    if (shared_valid[index] == 0u) {
+        return false;
+    }
+    uint cell_state = shared_cell_state[index];
+    float material = float(cell_state & 0xFFFFu);
+    int phase_id = int((cell_state >> 16u) & 0xFFu);
+    if (
+        material >= 0.5
+        || phase_id == phase_liquid
+        || phase_id == phase_falling_island
+        || is_placeholder_material(material)
+    ) {
+        return false;
+    }
+#if PROVENANCE_LAZY_AUX
+    int cell_index = cell.y * cell_grid_size.x + cell.x;
+    return float(bridge_entity_id[cell_index]) < 0.5
+        && float(bridge_displaced[cell_index]) < 0.5;
+#else
+    return shared_entity[index] < 0.5
+        && shared_displaced[index] < 0.5;
+#endif
+}
+
+int flow_sign(ivec2 cell, vec2 velocity) {
+    if (velocity.x > 0.25) {
+        return 1;
+    }
+    if (velocity.x < -0.25) {
+        return -1;
+    }
+    uint hashv = uint(cell.x) * 73856093u ^ uint(cell.y) * 19349663u;
+    return (hashv & 1u) == 0u ? -1 : 1;
+}
+
+vec2 liquid_intent(ivec2 cell, vec2 velocity, ivec2 group_origin) {
+    int direction = flow_sign(cell, velocity);
+    ivec2 below = cell + ivec2(0, 1);
+    if (reachable_empty(below, group_origin)) {
+        return vec2(float(direction) * 0.35, 2.0);
+    }
+    ivec2 side = cell + ivec2(direction, 0);
+    if (reachable_empty(side, group_origin)) {
+        return vec2(float(direction) * 2.0, 0.0);
+    }
+    ivec2 diag = cell + ivec2(direction, 1);
+    if (reachable_empty(diag, group_origin)) {
+        return vec2(float(direction) * 1.5, 1.0);
+    }
+    ivec2 other_side = cell + ivec2(-direction, 0);
+    if (reachable_empty(other_side, group_origin)) {
+        return vec2(float(-direction) * 2.0, 0.0);
+    }
+    ivec2 other_diag = cell + ivec2(-direction, 1);
+    if (reachable_empty(other_diag, group_origin)) {
+        return vec2(float(-direction) * 1.5, 1.0);
+    }
+    return velocity * 0.35;
+}
+
+void main() {
+    ivec2 group_origin;
+    ivec2 gid;
+    ivec2 tile_end;
+    if (!active_dispatch_group(group_origin, gid, tile_end)) {
+        return;
+    }
+#if PROVENANCE_ACTIVE_MASK_CACHE
+    if (gl_LocalInvocationIndex == 0u) {
+        shared_all_tiles_active = active_tile_count[0] >= uint(tile_grid_size.x * tile_grid_size.y)
+            ? 1u
+            : 0u;
+    }
+    barrier();
+#endif
+    load_shared_halo(group_origin);
+    barrier();
+    if (gid.x >= tile_end.x || gid.y >= tile_end.y) {
+        return;
+    }
+
+#if PROVENANCE_TERMINAL
+    int gid_shared_index = shared_index(gid, group_origin);
+#if PROVENANCE_SHARED_META_CACHE
+    bool terminal_cell_active = (shared_valid[gid_shared_index] & SHARED_CELL_ACTIVE) != 0u;
+#else
+    bool terminal_cell_active = tile_active(gid);
+#endif
+    if (provenance_full_grid && !terminal_cell_active) {
+        if (publish_bridge_outputs && write_cell_core) {
+            copy_original_core(gid);
+        }
+        return;
+    }
+#endif
+
+    uint cell_state = shared_cell_state[shared_index(gid, group_origin)];
+#if PROVENANCE_TERMINAL && PROVENANCE_SHARED_META_CACHE
+    bool primary_role = (shared_valid[gid_shared_index] & SHARED_PRIMARY_ROLE) != 0u;
+    uint terminal_provenance = shared_terminal_provenance[gid_shared_index];
+    vec2 velocity = terminal_velocity_at(gid, terminal_provenance, primary_role);
+#else
+    bool primary_role = placeholder_role_is_primary(gid);
+    vec2 velocity = velocity_at(gid);
+#endif
+    if (resident_hydrate_inputs) {
+        int resident_index = gid.y * cell_grid_size.x + gid.x;
+        imageStore(resident_cell_state_img, gid, uvec4(cell_state, 0u, 0u, 0u));
+        imageStore(resident_velocity_img, gid, vec4(velocity, 0.0, 0.0));
+        imageStore(resident_entity_img, gid, vec4(float(bridge_entity_id[resident_index]), 0.0, 0.0, 0.0));
+        imageStore(resident_displaced_img, gid, vec4(float(bridge_displaced[resident_index]), 0.0, 0.0, 0.0));
+    }
+    uint material = cell_state & 0xFFFFu;
+    int material_id = int(material);
+    int phase_id = int((cell_state >> 16u) & 0xFFu);
+    vec2 intent = vec2(0.0);
+    if (material_id > 0 && phase_id == phase_liquid) {
+        intent = liquid_intent(gid, velocity, group_origin) - velocity;
+    }
+    imageStore(liquid_flow_intent_img, gid, vec4(intent, 0.0, 0.0));
+    if (!publish_bridge_outputs) {
+        return;
+    }
+
+    int cell_index = gid.y * cell_grid_size.x + gid.x;
+#if FUSE_CLEANUP
+    int cleaned_island = cleaned_island_at(gid, cell_state);
+    int cleaned_entity = int(round(shared_entity[shared_index(gid, group_origin)]));
+    int cleaned_displaced = int(round(shared_displaced[shared_index(gid, group_origin)]));
+    if (bridge_island_id[cell_index] != cleaned_island) {
+        bridge_island_id[cell_index] = cleaned_island;
+    }
+    if (bridge_entity_id[cell_index] != cleaned_entity) {
+        bridge_entity_id[cell_index] = cleaned_entity;
+    }
+    if (bridge_displaced[cell_index] != cleaned_displaced) {
+        bridge_displaced[cell_index] = cleaned_displaced;
+    }
+#if !PROVENANCE_TERMINAL
+    imageStore(resident_island_img, gid, vec4(float(cleaned_island), 0.0, 0.0, 0.0));
+    imageStore(resident_entity_img, gid, vec4(float(cleaned_entity), 0.0, 0.0, 0.0));
+#endif
+#endif
+    if (write_cell_core) {
+#if PROVENANCE_TERMINAL
+#if PROVENANCE_SHARED_META_CACHE
+        store_terminal_core_resolved(
+            gid,
+            cell_state,
+            velocity,
+            primary_role,
+            terminal_provenance
+        );
+#else
+        store_terminal_core(gid, cell_state, velocity, primary_role);
+#endif
+#else
+        float temperature = primary_role
+            ? texelFetch(temp_tex, gid, 0).x
+            : texelFetch(temp_fallback_tex, gid, 0).x;
+        uint timer_word = primary_role
+            ? texelFetch(timer_tex, gid, 0).x
+            : texelFetch(timer_fallback_tex, gid, 0).x;
+        float integrity_value = primary_role
+            ? texelFetch(integrity_tex, gid, 0).x
+            : texelFetch(integrity_fallback_tex, gid, 0).x;
+        uint integrity = uint(clamp(round(integrity_value), 0.0, 65535.0));
+        int word_index = cell_index * 5;
+        bridge_cell_core[word_index] = cell_state;
+        bridge_cell_core[word_index + 1] = packHalf2x16(velocity);
+        bridge_cell_core[word_index + 2] = floatBitsToUint(temperature);
+        bridge_cell_core[word_index + 3] = timer_word;
+        bridge_cell_core[word_index + 4] = integrity;
+#endif
+        imageStore(bridge_material_img, gid, vec4(float(material), 0.0, 0.0, 0.0));
+    }
+    if (publish_bridge_aux_outputs) {
+        bridge_island_id[cell_index] = int(round(texelFetch(island_out_tex, gid, 0).x));
+        bridge_entity_id[cell_index] = int(round(texelFetch(entity_out_tex, gid, 0).x));
+        bridge_displaced[cell_index] = int(round(texelFetch(displaced_tex, gid, 0).x));
+    }
+#if FUSE_ACTIVE_DECAY
+    decay_active_tile_once(gid, group_origin);
+#endif
+}

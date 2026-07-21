@@ -1,0 +1,25 @@
+            layout(binding=0) uniform sampler2D velocity_tex;
+            layout(r32f, binding=1) writeonly uniform image2D divergence_img;
+            layout(r32f, binding=2) writeonly uniform image2D pressure_first_img;
+            void main() {
+                ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+                if (gid.x >= grid_size.x || gid.y >= grid_size.y) {
+                    return;
+                }
+                if (!solve_active(gid)) {
+                    imageStore(divergence_img, gid, vec4(0.0, 0.0, 0.0, 0.0));
+                    imageStore(pressure_first_img, gid, vec4(0.0, 0.0, 0.0, 0.0));
+                    return;
+                }
+                ivec2 left = ivec2(max(gid.x - 1, 0), gid.y);
+                ivec2 right = ivec2(min(gid.x + 1, grid_size.x - 1), gid.y);
+                ivec2 down = ivec2(gid.x, max(gid.y - 1, 0));
+                ivec2 up = ivec2(gid.x, min(gid.y + 1, grid_size.y - 1));
+                float div = 0.5 * (
+                    texelFetch(velocity_tex, right, 0).x - texelFetch(velocity_tex, left, 0).x +
+                    texelFetch(velocity_tex, up, 0).y - texelFetch(velocity_tex, down, 0).y
+                );
+                imageStore(divergence_img, gid, vec4(div, 0.0, 0.0, 0.0));
+                float first_pressure = (0.0 + 0.0 + 0.0 + 0.0 - div) * 0.25;
+                imageStore(pressure_first_img, gid, vec4(first_pressure, 0.0, 0.0, 0.0));
+            }

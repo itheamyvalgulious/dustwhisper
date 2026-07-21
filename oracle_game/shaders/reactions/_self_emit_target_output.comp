@@ -1,0 +1,118 @@
+            #define SELF_GAS_CANDIDATE_OUTPUT 1
+            uniform bool collect_self_emit_targets;
+            uniform bool collect_self_gas_candidates;
+            uniform bool write_deferred_hi_outputs;
+            layout(std430, binding=3) buffer PackedMaterialTargetCount {
+                uint packed_material_target_count[];
+            };
+            layout(std430, binding=4) buffer PackedMaterialTargetList {
+                uint packed_material_target_list[];
+            };
+            layout(std430, binding=5) buffer PackedMaterialTargetMarks {
+                uint packed_material_target_marks[];
+            };
+
+            uint self_emit_deterministic_selector(int x, int y, uint count) {
+                if (count == 0u) {
+                    return 0u;
+                }
+                uint mixed = (uint(x) * 73856093u) ^ (uint(y) * 19349663u);
+                return mixed % count;
+            }
+
+            ivec2 self_emit_target_for_direction(ivec2 source, int direction_id) {
+                if (direction_id == {{DIRECTION_DOWN}}) {
+                    return source + ivec2(0, 1);
+                }
+                if (direction_id == {{DIRECTION_UP}}) {
+                    return source + ivec2(0, -1);
+                }
+                if (direction_id == {{DIRECTION_LEFT}}) {
+                    return source + ivec2(-1, 0);
+                }
+                if (direction_id == {{DIRECTION_RIGHT}}) {
+                    return source + ivec2(1, 0);
+                }
+                if (direction_id == {{DIRECTION_RANDOM}}) {
+                    uint selector = self_emit_deterministic_selector(source.x, source.y, 9u);
+                    int dx = int(selector % 3u) - 1;
+                    int dy = int(selector / 3u) - 1;
+                    return source + ivec2(dx, dy);
+                }
+                if (direction_id == {{DIRECTION_SPEED}}) {
+                    vec2 velocity = texelFetch(velocity_tex, source, 0).xy;
+                    return source + ivec2(int(sign(velocity.x)), int(sign(velocity.y)));
+                }
+                return source;
+            }
+
+            void append_self_emit_material_target(ivec2 target) {
+                if (target.x < 0 || target.y < 0 || target.x >= cell_grid_size.x || target.y >= cell_grid_size.y) {
+                    return;
+                }
+                if (material_value_at(target) > 0.5) {
+                    return;
+                }
+                uint target_index = uint(target.y * cell_grid_size.x + target.x);
+                uint generation = packed_material_target_count[1];
+                uint previous = atomicExchange(packed_material_target_marks[target_index], generation);
+                if (previous == generation) {
+                    return;
+                }
+                uint slot = atomicAdd(packed_material_target_count[2], 1u);
+                packed_material_target_list[slot] = target_index;
+            }
+
+            void collect_self_emit_material_target_actions(ivec2 source, vec4 actions) {
+                for (int slot = 0; slot < 4; ++slot) {
+                    int action_index = int(round(actions[slot]));
+                    if (action_index <= 0 || action_index >= {{MAX_ACTIONS}}) {
+                        continue;
+                    }
+                    ivec4 ai = action_i[action_index];
+                    if (ai.x != {{TYPE_EMIT_MATERIAL}} || ai.y <= 0) {
+                        continue;
+                    }
+                    append_self_emit_material_target(self_emit_target_for_direction(source, ai.z));
+                }
+            }
+
+            void collect_self_emit_material_targets(
+                ivec2 gid,
+                vec4 deferred_action_lo,
+                vec4 deferred_action_hi
+            ) {
+                if (!collect_self_emit_targets) {
+                    return;
+                }
+                collect_self_emit_material_target_actions(gid, deferred_action_lo);
+                if (write_deferred_hi_outputs) {
+                    collect_self_emit_material_target_actions(gid, deferred_action_hi);
+                }
+            }
+
+            bool self_action_vector_modifies_gas(vec4 actions) {
+                for (int slot = 0; slot < 4; ++slot) {
+                    int action_index = int(round(actions[slot]));
+                    if (
+                        action_index > 0
+                        && action_index < {{MAX_ACTIONS}}
+                        && action_i[action_index].x == {{TYPE_MODIFY_GAS}}
+                    ) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            void collect_self_gas_candidate(ivec2 cell, vec4 actions_lo, vec4 actions_hi) {
+                if (!collect_self_gas_candidates) {
+                    return;
+                }
+                if (!self_action_vector_modifies_gas(actions_lo) && !self_action_vector_modifies_gas(actions_hi)) {
+                    return;
+                }
+                uint slot = atomicAdd(packed_material_target_count[3], 1u);
+                uint cell_count = uint(cell_grid_size.x * cell_grid_size.y);
+                packed_material_target_list[cell_count + slot] = uint(cell.y * cell_grid_size.x + cell.x);
+            }

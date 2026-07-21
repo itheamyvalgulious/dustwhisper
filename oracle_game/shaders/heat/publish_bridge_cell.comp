@@ -8,10 +8,9 @@
             uniform int phase_falling_island;
             uniform bool mark_structure_dirty;
             uniform bool write_cell_core;
-            layout(binding=0) uniform sampler2D material_tex;
-            layout(binding=1) uniform sampler2D phase_tex;
-            layout(binding=2) uniform sampler2D flags_tex;
-            layout(binding=3) uniform sampler2D timer_tex;
+            uniform bool write_bridge_aux;
+            layout(binding=0) uniform usampler2D cell_state_tex;
+            layout(binding=3) uniform usampler2D timer_tex;
             layout(binding=4) uniform sampler2D temp_tex;
             layout(binding=5) uniform sampler2D integrity_tex;
             layout(binding=6) uniform sampler2D island_tex;
@@ -46,10 +45,6 @@
             layout(std430, binding=8) buffer DirtyTileDispatchArgsBuffer {
                 uint dirty_tile_dispatch_args[];
             };
-            uint pack_timer(vec4 timer) {
-                uvec4 value = uvec4(clamp(round(timer), vec4(0.0), vec4(255.0)));
-                return value.x | (value.y << 8u) | (value.z << 16u) | (value.w << 24u);
-            }
             uint structure_flags(int material_id, int phase_value) {
                 if (material_id <= 0 || material_id >= material_count || phase_value == phase_falling_island) {
                     return 0u;
@@ -103,9 +98,9 @@
                     return;
                 }
                 int cell_index = gid.y * cell_grid_size.x + gid.x;
-                uint material = uint(clamp(round(texelFetch(material_tex, gid, 0).x), 0.0, 65535.0));
-                uint phase = uint(clamp(round(texelFetch(phase_tex, gid, 0).x), 0.0, 255.0));
-                uint flags = uint(clamp(round(texelFetch(flags_tex, gid, 0).x), 0.0, 255.0));
+                uint cell_state = texelFetch(cell_state_tex, gid, 0).x;
+                uint material = cell_state & 0xFFFFu;
+                uint phase = (cell_state >> 16u) & 0xFFu;
                 vec2 velocity = texelFetch(velocity_tex, gid, 0).xy;
                 float temperature = texelFetch(temp_tex, gid, 0).x;
                 uint integrity = uint(clamp(round(texelFetch(integrity_tex, gid, 0).x), 0.0, 65535.0));
@@ -116,15 +111,16 @@
                 uint previous_word = bridge_cell_core[word_index];
                 mark_dirty_if_structure_changed(gid, previous_word, material, phase);
                 if (write_cell_core) {
-                    bridge_cell_core[word_index] = material | (phase << 16u) | (flags << 24u);
+                    bridge_cell_core[word_index] = cell_state;
                     bridge_cell_core[word_index + 1] = packHalf2x16(velocity);
                     bridge_cell_core[word_index + 2] = floatBitsToUint(temperature);
-                    bridge_cell_core[word_index + 3] = pack_timer(texelFetch(timer_tex, gid, 0));
+                    bridge_cell_core[word_index + 3] = texelFetch(timer_tex, gid, 0).x;
                     bridge_cell_core[word_index + 4] = integrity;
                     imageStore(bridge_material_img, gid, vec4(float(material), 0.0, 0.0, 0.0));
                 }
-                bridge_island_id[cell_index] = island;
-                bridge_entity_id[cell_index] = entity;
-                bridge_displaced[cell_index] = displaced;
+                if (write_bridge_aux) {
+                    bridge_island_id[cell_index] = island;
+                    bridge_entity_id[cell_index] = entity;
+                    bridge_displaced[cell_index] = displaced;
+                }
             }
-            

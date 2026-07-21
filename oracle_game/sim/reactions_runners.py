@@ -225,6 +225,53 @@ def _run_material_material(solver, world: "WorldEngine") -> None:
     solver._finalize_stage_runtime(world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state)
 
 
+def _try_run_material_pair_fused(solver, world: "WorldEngine") -> bool:
+    pipeline = solver.gpu_pipeline
+    pipeline.last_material_pair_fused_light = False
+    if not pipeline._material_pair_state_fusion_enabled:
+        return False
+    solver._ensure_runtime_state(world)
+    mm_masks = solver._solve_masks(world, seed_timer_cells=True, stage="material_material")
+    mg_masks = solver._solve_masks(world, seed_timer_cells=True, stage="material_gas")
+    if not solver._all_full_gpu_authoritative_masks(*mm_masks, *mg_masks):
+        return False
+    mm_previous = solver._capture_activity_state(world, mm_masks[1], mm_masks[2])
+    mg_previous = solver._capture_activity_state(world, mg_masks[1], mg_masks[2])
+    ml_masks = None
+    ml_previous = None
+    if (
+        pipeline._material_pair_light_state_fusion_enabled
+        and int(world.bridge.shadow_typed_tables["material_light_rule_table"].shape[0]) > 0
+    ):
+        candidate_ml_masks = solver._solve_masks(world, seed_timer_cells=True, stage="material_light")
+        if solver._all_full_gpu_authoritative_masks(*candidate_ml_masks):
+            ml_masks = candidate_ml_masks
+            ml_previous = solver._capture_activity_state(world, ml_masks[1], ml_masks[2])
+    deferred = pipeline.run_material_pair_fused(
+        world,
+        solve_cell_mask=mm_masks[1],
+        fuse_material_light=ml_masks is not None,
+    )
+    if deferred is None:
+        return False
+
+    solver._record_stage_solve_masks("material_material", *mm_masks)
+    solver._record_stage_solve_masks("material_gas", *mg_masks)
+    solver.last_backend = "gpu"
+    solver._note_runtime_backend("gpu")
+    solver._current_stage = "material_material"
+    solver._apply_deferred_batch(world, deferred)
+    solver._finalize_stage_runtime(world, *mm_masks, mm_previous)
+    solver._current_stage = "material_gas"
+    solver._finalize_stage_runtime(world, *mg_masks, mg_previous)
+    if pipeline.last_material_pair_fused_light:
+        assert ml_masks is not None and ml_previous is not None
+        solver._record_stage_solve_masks("material_light", *ml_masks)
+        solver._current_stage = "material_light"
+        solver._finalize_stage_runtime(world, *ml_masks, ml_previous)
+    return True
+
+
 def _run_material_gas(solver, world: "WorldEngine") -> None:
     solver._ensure_runtime_state(world)
     if int(world.bridge.shadow_typed_tables["material_gas_rule_table"].shape[0]) <= 0:

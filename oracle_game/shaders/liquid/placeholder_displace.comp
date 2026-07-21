@@ -1,4 +1,6 @@
 #version 430
+#define DIRECT_BRIDGE_AUX_INPUTS {{DIRECT_BRIDGE_AUX_INPUTS}}
+#define LIQUID_PROVENANCE {{LIQUID_PROVENANCE}}
 layout(local_size_x={{PASS_LOCAL_SIZE}}, local_size_y={{PASS_LOCAL_SIZE}}, local_size_z=1) in;
 uniform ivec2 cell_grid_size;
 uniform ivec2 tile_grid_size;
@@ -8,10 +10,8 @@ uniform int phase_liquid;
 uniform int phase_falling_island;
 uniform int placeholder_material_id;
 uniform uint placeholder_claim_epoch;
-layout(binding=0) uniform sampler2D material_in_tex;
-layout(binding=1) uniform sampler2D phase_in_tex;
-layout(binding=2) uniform sampler2D flags_in_tex;
-layout(binding=3) uniform sampler2D timer_in_tex;
+layout(binding=0) uniform usampler2D cell_state_in_tex;
+layout(binding=3) uniform usampler2D timer_in_tex;
 layout(binding=4) uniform sampler2D temp_in_tex;
 layout(binding=5) uniform sampler2D integrity_in_tex;
 layout(binding=6) uniform sampler2D velocity_in_tex;
@@ -35,10 +35,26 @@ layout(std430, binding=4) buffer AffectedTileFlagsBuffer {
 layout(std430, binding=5) buffer PlaceholderTargetClaimsBuffer {
     uint placeholder_target_claims[];
 };
-layout(r32f, binding=0) uniform image2D material_out_img;
-layout(r32f, binding=1) uniform image2D phase_out_img;
-layout(r32f, binding=2) uniform image2D flags_out_img;
-layout(rgba32f, binding=3) uniform image2D timer_out_img;
+#if {{DIRECT_BRIDGE_AUX_INPUTS}}
+layout(std430, binding=6) readonly buffer BridgeDisplacedBuffer {
+    int bridge_displaced_material[];
+};
+#endif
+#if LIQUID_PROVENANCE
+layout(std430, binding=8) readonly buffer LiquidProvenanceInBuffer {
+    uint liquid_provenance_in[];
+};
+layout(std430, binding=9) writeonly buffer LiquidProvenanceOutBuffer {
+    uint liquid_provenance_out[];
+};
+layout(std430, binding=10) readonly buffer BridgeCellCoreBuffer {
+    uint bridge_cell_core[];
+};
+const uint PROVENANCE_TEXTURE = 0xFFFFFFFEu;
+const uint PROVENANCE_EMPTY = 0xFFFFFFFFu;
+#endif
+layout(r32ui, binding=0) uniform uimage2D cell_state_out_img;
+layout(r32ui, binding=3) uniform uimage2D timer_out_img;
 layout(r32f, binding=4) uniform image2D temp_out_img;
 layout(r32f, binding=5) uniform image2D integrity_out_img;
 layout(rg32f, binding=6) uniform image2D velocity_out_img;
@@ -53,11 +69,47 @@ bool tile_active(ivec2 cell) {
 }
 
 bool is_placeholder(ivec2 cell) {
-    return int(texelFetch(material_in_tex, cell, 0).x + 0.5) == placeholder_material_id;
+    return int(texelFetch(cell_state_in_tex, cell, 0).x & 0xFFFFu) == placeholder_material_id;
 }
 
 bool in_bounds(ivec2 cell) {
     return cell.x >= 0 && cell.y >= 0 && cell.x < cell_grid_size.x && cell.y < cell_grid_size.y;
+}
+
+float source_temp_at(ivec2 cell) {
+#if LIQUID_PROVENANCE
+    uint provenance = liquid_provenance_in[cell.y * cell_grid_size.x + cell.x];
+    uint cell_count = uint(cell_grid_size.x * cell_grid_size.y);
+    if (provenance < cell_count) {
+        return uintBitsToFloat(bridge_cell_core[int(provenance) * 5 + 2]);
+    }
+    if (provenance == PROVENANCE_EMPTY) {
+        return 0.0;
+    }
+#endif
+    return texelFetch(temp_in_tex, cell, 0).x;
+}
+
+vec2 source_velocity_at(ivec2 cell) {
+#if LIQUID_PROVENANCE
+    uint provenance = liquid_provenance_in[cell.y * cell_grid_size.x + cell.x];
+    uint cell_count = uint(cell_grid_size.x * cell_grid_size.y);
+    if (provenance < cell_count) {
+        return unpackHalf2x16(bridge_cell_core[int(provenance) * 5 + 1]);
+    }
+    if (provenance == PROVENANCE_EMPTY) {
+        return vec2(0.0);
+    }
+#endif
+    return texelFetch(velocity_in_tex, cell, 0).xy;
+}
+
+float displaced_at(ivec2 cell) {
+#if {{DIRECT_BRIDGE_AUX_INPUTS}}
+    return float(bridge_displaced_material[cell.y * cell_grid_size.x + cell.x]);
+#else
+    return texelFetch(displaced_in_tex, cell, 0).x;
+#endif
 }
 
 float base_integrity_for(int material_id) {
@@ -95,7 +147,6 @@ bool active_dispatch_cell(out ivec2 cell) {
     if (tile.x < 0 || tile.y < 0 || tile.x >= tile_grid_size.x || tile.y >= tile_grid_size.y) {
         return false;
     }
-    affected_tile_flags[tile.y * tile_grid_size.x + tile.x] = 0u;
     ivec2 tile_origin = tile * tile_size;
     ivec2 local_cell = subtile_xy * {{PASS_LOCAL_SIZE}} + ivec2(gl_LocalInvocationID.xy);
     cell = tile_origin + local_cell;
@@ -107,14 +158,15 @@ bool target_empty(ivec2 target) {
     if (!in_bounds(target)) {
         return false;
     }
-    if (texelFetch(material_in_tex, target, 0).x > 0.5) {
+    uint target_state = texelFetch(cell_state_in_tex, target, 0).x;
+    if ((target_state & 0xFFFFu) != 0u) {
         return false;
     }
-    int target_phase = int(texelFetch(phase_in_tex, target, 0).x + 0.5);
+    int target_phase = int((target_state >> 16u) & 0xFFu);
     if (target_phase == phase_liquid || target_phase == phase_falling_island) {
         return false;
     }
-    if (texelFetch(displaced_in_tex, target, 0).x > 0.5) {
+    if (displaced_at(target) > 0.5) {
         return false;
     }
     return true;
@@ -228,13 +280,16 @@ bool try_emit(
         return false;
     }
     int liquid_id = int(liquid_material + 0.5);
-    imageStore(material_out_img, target, vec4(liquid_material, 0.0, 0.0, 0.0));
-    imageStore(phase_out_img, target, vec4(float(phase_liquid), 0.0, 0.0, 0.0));
-    imageStore(flags_out_img, target, vec4(0.0, 0.0, 0.0, 0.0));
-    imageStore(timer_out_img, target, vec4(0.0));
+    uint cell_state = uint(clamp(liquid_id, 0, 65535))
+        | (uint(clamp(phase_liquid, 0, 255)) << 16u);
+    imageStore(cell_state_out_img, target, uvec4(cell_state, 0u, 0u, 0u));
+    imageStore(timer_out_img, target, uvec4(0u));
     imageStore(temp_out_img, target, vec4(source_temp, 0.0, 0.0, 0.0));
     imageStore(integrity_out_img, target, vec4(base_integrity_for(liquid_id), 0.0, 0.0, 0.0));
     imageStore(velocity_out_img, target, vec4(source_velocity + push_velocity, 0.0, 0.0));
+#if LIQUID_PROVENANCE
+    liquid_provenance_out[target.y * cell_grid_size.x + target.x] = PROVENANCE_TEXTURE;
+#endif
     refresh_changed_cell(target);
     return true;
 }
@@ -285,7 +340,7 @@ void main() {
     if (!is_placeholder(gid)) {
         return;
     }
-    float liquid_material = texelFetch(displaced_in_tex, gid, 0).x;
+    float liquid_material = displaced_at(gid);
     if (liquid_material < 0.5) {
         return;
     }
@@ -301,7 +356,7 @@ void main() {
     int displaced_count = 0;
     int displaced_rank = 0;
     for (int x = left; x < right; ++x) {
-        if (texelFetch(displaced_in_tex, ivec2(x, gid.y), 0).x > 0.5) {
+        if (displaced_at(ivec2(x, gid.y)) > 0.5) {
             if (x < gid.x) {
                 displaced_rank += 1;
             }
@@ -319,8 +374,8 @@ void main() {
     int side = prefer_left ? -1 : 1;
     int side_rank = prefer_left ? displaced_rank : displaced_count - 1 - displaced_rank;
     side_rank = clamp(side_rank, 0, max(seg_len - 1, 0));
-    float source_temp = texelFetch(temp_in_tex, gid, 0).x;
-    vec2 source_velocity = texelFetch(velocity_in_tex, gid, 0).xy;
+    float source_temp = source_temp_at(gid);
+    vec2 source_velocity = source_velocity_at(gid);
     bool emitted = false;
     emitted = try_emit_side_lane(side, false, side_rank, seg_len, left, right, gid.y, liquid_material, source_temp, source_velocity);
     if (!emitted && top_exposed) {

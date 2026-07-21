@@ -1,0 +1,98 @@
+#version 430
+layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+uniform ivec2 cell_grid_size;
+uniform ivec2 tile_grid_size;
+uniform int tile_size;
+uniform int material_count;
+uniform int phase_falling_island;
+uniform bool mark_structure_dirty;
+uniform bool write_bridge_aux;
+
+layout(binding=0) uniform usampler2D cell_state_tex;
+layout(binding=2) uniform sampler2D island_tex;
+layout(binding=3) uniform sampler2D entity_tex;
+layout(binding=4) uniform sampler2D displaced_tex;
+
+layout(std430, binding=0) readonly buffer BridgeCellCoreBuffer {
+    uint bridge_cell_core[];
+};
+layout(std430, binding=1) writeonly buffer BridgeIslandBuffer {
+    int bridge_island_id[];
+};
+layout(std430, binding=2) writeonly buffer BridgeEntityBuffer {
+    int bridge_entity_id[];
+};
+layout(std430, binding=3) writeonly buffer BridgeDisplacedBuffer {
+    int bridge_displaced[];
+};
+layout(std430, binding=4) readonly buffer MaterialParticipationBuffer {
+    uint material_participates[];
+};
+layout(std430, binding=5) buffer DirtyTileMaskBuffer {
+    uint dirty_tile_mask[];
+};
+layout(std430, binding=6) buffer DirtyTileCountBuffer {
+    uint dirty_tile_count[];
+};
+layout(std430, binding=7) buffer DirtyTileListBuffer {
+    ivec2 dirty_tile_list[];
+};
+layout(std430, binding=8) buffer DirtyTileDispatchArgsBuffer {
+    uint dirty_tile_dispatch_args[];
+};
+
+uint structure_flags(int material_id, int phase_value) {
+    if (material_id <= 0 || material_id >= material_count || phase_value == phase_falling_island) {
+        return 0u;
+    }
+    return material_participates[material_id];
+}
+
+void append_dirty_tile(ivec2 tile) {
+    if (tile.x < 0 || tile.y < 0 || tile.x >= tile_grid_size.x || tile.y >= tile_grid_size.y) {
+        return;
+    }
+    int tile_index = tile.y * tile_grid_size.x + tile.x;
+    uint previous = atomicOr(dirty_tile_mask[tile_index], 1u);
+    if ((previous & 1u) != 0u) {
+        return;
+    }
+    uint slot = atomicAdd(dirty_tile_count[0], 1u);
+    dirty_tile_list[int(slot)] = tile;
+    atomicMax(dirty_tile_dispatch_args[0], slot + 1u);
+}
+
+void mark_dirty_if_structure_changed(ivec2 cell, uint previous_word, uint material, uint phase) {
+    if (!mark_structure_dirty) {
+        return;
+    }
+    int old_material = int(previous_word & 0xFFFFu);
+    int old_phase = int((previous_word >> 16u) & 0xFFu);
+    if (structure_flags(old_material, old_phase) == structure_flags(int(material), int(phase))) {
+        return;
+    }
+    ivec2 tile = cell / tile_size;
+    ivec2 local_cell = cell - tile * tile_size;
+    append_dirty_tile(tile);
+    if (local_cell.x == 0) append_dirty_tile(tile + ivec2(-1, 0));
+    if (local_cell.x + 1 >= tile_size) append_dirty_tile(tile + ivec2(1, 0));
+    if (local_cell.y == 0) append_dirty_tile(tile + ivec2(0, -1));
+    if (local_cell.y + 1 >= tile_size) append_dirty_tile(tile + ivec2(0, 1));
+}
+
+void main() {
+    ivec2 cell = ivec2(gl_GlobalInvocationID.xy);
+    if (cell.x >= cell_grid_size.x || cell.y >= cell_grid_size.y) {
+        return;
+    }
+    int cell_index = cell.y * cell_grid_size.x + cell.x;
+    uint cell_state = texelFetch(cell_state_tex, cell, 0).x;
+    uint material = cell_state & 0xFFFFu;
+    uint phase = (cell_state >> 16u) & 0xFFu;
+    mark_dirty_if_structure_changed(cell, bridge_cell_core[cell_index * 5], material, phase);
+    if (write_bridge_aux) {
+        bridge_island_id[cell_index] = int(round(texelFetch(island_tex, cell, 0).x));
+        bridge_entity_id[cell_index] = int(round(texelFetch(entity_tex, cell, 0).x));
+        bridge_displaced[cell_index] = int(round(texelFetch(displaced_tex, cell, 0).x));
+    }
+}

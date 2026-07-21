@@ -1,12 +1,19 @@
 
-            layout(r32f, binding=0) writeonly uniform image2D material_out_img;
-            layout(r32f, binding=1) writeonly uniform image2D phase_out_img;
+            layout(r32ui, binding=0) writeonly uniform uimage2D cell_state_out_img;
             layout(r32f, binding=2) writeonly uniform image2D temp_out_img;
             layout(r32f, binding=3) writeonly uniform image2D integrity_out_img;
-            layout(rgba32f, binding=4) writeonly uniform image2D timer_out_img;
+            layout(r32ui, binding=4) writeonly uniform uimage2D timer_out_img;
             layout(rgba32f, binding=5) writeonly uniform image2DArray deferred_lo_img;
             layout(rgba32f, binding=6) writeonly uniform image2DArray deferred_hi_img;
             layout(rg32f, binding=7) writeonly uniform image2D cell_meta_out_img;
+            uniform bool write_deferred_outputs;
+            uniform bool write_deferred_hi_outputs;
+            void collect_self_emit_material_targets(
+                ivec2 gid,
+                vec4 deferred_action_lo,
+                vec4 deferred_action_hi
+            ) {
+            }
             void store_cell_outputs(
                 ivec2 gid,
                 float material_value,
@@ -21,15 +28,27 @@
                 float cell_reset_value,
                 float reaction_latched_value
             ) {
-                imageStore(material_out_img, gid, vec4(material_value, 0.0, 0.0, 0.0));
-                imageStore(phase_out_img, gid, vec4(phase_value, 0.0, 0.0, 0.0));
+                uint packed_cell_state = pack_cell_state_at(gid, material_value, phase_value);
+                #if {{PACK_CELL_META_IN_STATE}}
+                if (cell_reset_value > 0.5) {
+                    packed_cell_state &= 0x00FFFFFFu;
+                }
+                if (reaction_latched_value > 0.5) {
+                    packed_cell_state |= uint({{REACTION_LATCHED_FLAG_SHIFTED_24}});
+                }
+                #endif
+                imageStore(cell_state_out_img, gid, uvec4(packed_cell_state, 0u, 0u, 0u));
                 imageStore(temp_out_img, gid, vec4(temp_value, 0.0, 0.0, 0.0));
                 imageStore(integrity_out_img, gid, vec4(integrity_value, 0.0, 0.0, 0.0));
-                imageStore(timer_out_img, gid, timer_value);
-                imageStore(deferred_lo_img, ivec3(gid, 0), deferred_action_lo);
-                imageStore(deferred_lo_img, ivec3(gid, 1), deferred_scale_lo);
-                imageStore(deferred_hi_img, ivec3(gid, 0), deferred_action_hi);
-                imageStore(deferred_hi_img, ivec3(gid, 1), deferred_scale_hi);
+                imageStore(timer_out_img, gid, uvec4(pack_timer(timer_value), 0u, 0u, 0u));
+                if (write_deferred_outputs) {
+                    imageStore(deferred_lo_img, ivec3(gid, 0), deferred_action_lo);
+                    imageStore(deferred_lo_img, ivec3(gid, 1), deferred_scale_lo);
+                    if (write_deferred_hi_outputs) {
+                        imageStore(deferred_hi_img, ivec3(gid, 0), deferred_action_hi);
+                        imageStore(deferred_hi_img, ivec3(gid, 1), deferred_scale_hi);
+                    }
+                }
                 imageStore(cell_meta_out_img, gid, vec4(cell_reset_value, reaction_latched_value, 0.0, 0.0));
             }
             void apply_trigger_vector(
@@ -72,4 +91,3 @@
                     );
                 }
             }
-        

@@ -1,0 +1,754 @@
+#version 430
+{{TERMINAL_NV32_EXTENSIONS}}
+
+layout(local_size_x={{TERMINAL_LOCAL_SIZE_X}}, local_size_y={{TERMINAL_LOCAL_SIZE_Y}}, local_size_z=1) in;
+
+uniform ivec2 cell_grid_size;
+uniform ivec2 gas_grid_size;
+uniform ivec2 tile_grid_size;
+uniform int tile_size;
+uniform float dt;
+uniform int phase_liquid;
+uniform int phase_falling_island;
+uniform int freeze_cold_neighbor_threshold;
+uniform int material_count;
+uniform bool publish_bridge_aux;
+uniform bool fuse_phase_boil;
+uniform bool fuse_dirty_publish;
+uniform bool use_bridge_displaced;
+uniform bool write_private_displaced;
+uniform bool inplace_sparse_write;
+uniform bool reuse_split_target_active_mask;
+uniform bool write_condense_targets;
+
+#if {{TERMINAL_SPARSE_RESIDENT_SPECIALIZED}}
+#define TERMINAL_PUBLISH_BRIDGE_AUX true
+#define TERMINAL_FUSE_PHASE_BOIL false
+#define TERMINAL_FUSE_DIRTY_PUBLISH true
+#define TERMINAL_USE_BRIDGE_DISPLACED true
+#define TERMINAL_WRITE_PRIVATE_DISPLACED false
+#define TERMINAL_INPLACE_SPARSE_WRITE true
+#define TERMINAL_REUSE_SPLIT_TARGET_ACTIVE_MASK true
+#define TERMINAL_WRITE_CONDENSE_TARGETS false
+#else
+#define TERMINAL_PUBLISH_BRIDGE_AUX publish_bridge_aux
+#define TERMINAL_FUSE_PHASE_BOIL fuse_phase_boil
+#define TERMINAL_FUSE_DIRTY_PUBLISH fuse_dirty_publish
+#define TERMINAL_USE_BRIDGE_DISPLACED use_bridge_displaced
+#define TERMINAL_WRITE_PRIVATE_DISPLACED write_private_displaced
+#define TERMINAL_INPLACE_SPARSE_WRITE inplace_sparse_write
+#define TERMINAL_REUSE_SPLIT_TARGET_ACTIVE_MASK reuse_split_target_active_mask
+#define TERMINAL_WRITE_CONDENSE_TARGETS write_condense_targets
+#endif
+
+layout(std430, binding=0) readonly buffer MaterialPhaseBuffer {
+    ivec4 phase_params[{{MAX_MATERIALS}}];
+};
+layout(std430, binding=1) readonly buffer MaterialResponseBuffer {
+    vec4 response_params[{{MAX_MATERIALS}}];
+};
+layout(std430, binding=2) readonly buffer GasCondenseBuffer {
+    vec4 gas_params[{{MAX_GAS_SPECIES}}];
+};
+layout(std430, binding=3) buffer BridgeDisplacedBuffer {
+    int bridge_displaced[];
+};
+layout(std430, binding=4) readonly buffer MaterialParamBuffer {
+    vec4 material_params[{{MAX_MATERIALS}}];
+};
+layout(std430, binding=5) readonly buffer BridgeCellCoreBuffer {
+    uint bridge_cell_core[];
+};
+layout(std430, binding=6) writeonly buffer BridgeIslandBuffer {
+    int bridge_island_id[];
+};
+layout(std430, binding=7) writeonly buffer BridgeEntityBuffer {
+    int bridge_entity_id[];
+};
+layout(std430, binding=8) readonly buffer MaterialParticipationBuffer {
+    uint material_participates[];
+};
+layout(std430, binding=9) buffer DirtyTileMaskBuffer {
+    uint dirty_tile_mask[];
+};
+layout(std430, binding=10) buffer DirtyTileCountBuffer {
+    uint dirty_tile_count[];
+};
+layout(std430, binding=11) buffer DirtyTileListBuffer {
+    ivec2 dirty_tile_list[];
+};
+layout(std430, binding=12) buffer DirtyTileDispatchArgsBuffer {
+   uint dirty_tile_dispatch_args[];
+};
+#if {{HEAT_GAS_BRIDGE_RESIDENT}}
+layout(std430, binding=13) buffer BridgeGasBuffer {
+    float bridge_gas[];
+};
+#endif
+
+layout(binding=1) uniform usampler2D cell_state_tex;
+layout(binding=2) uniform sampler2D active_tile_tex;
+layout(binding=3) uniform sampler2D phase_target_tex;
+layout(binding=4) uniform sampler2DArray gas_tex;
+#if !{{HEAT_PACKED_PHASE_BOIL_TARGETS}}
+layout(binding=5) uniform sampler2D boil_target_tex;
+#endif
+layout(binding=6) uniform usampler2D timer_tex;
+layout(binding=7) uniform sampler2D displaced_tex;
+layout(binding=8) uniform sampler2D velocity_tex;
+layout(binding=9) uniform sampler2D temp_tex;
+layout(binding=10) uniform sampler2D integrity_tex;
+layout(binding=11) uniform sampler2D ambient_tex;
+
+layout(r32ui, binding=0) writeonly uniform uimage2D cell_state_final_img;
+layout(r32ui, binding=1) writeonly uniform uimage2D timer_final_img;
+layout(r32f, binding=2) writeonly uniform image2D temp_final_img;
+layout(r32f, binding=3) writeonly uniform image2D integrity_final_img;
+layout(r32f, binding=4) writeonly uniform image2D displaced_final_img;
+layout(rg32f, binding=5) writeonly uniform image2D velocity_final_img;
+layout(r32f, binding=6) writeonly uniform image2DArray gas_out_img;
+layout(r32f, binding=7) writeonly uniform image2DArray condense_target_img;
+
+#if !{{TERMINAL_NV32_GAS_BALLOT}}
+shared uint after_cell_state[{{TERMINAL_CELL_COUNT}}];
+shared int boil_species_plus_one[{{TERMINAL_CELL_COUNT}}];
+#endif
+shared int condense_rank_material[{{TERMINAL_CONDENSE_RANK_COUNT}}];
+shared uint empty_mask[{{TERMINAL_GAS_COUNT}}];
+shared bool gas_cell_active[{{TERMINAL_GAS_COUNT}}];
+#if {{TERMINAL_HIERARCHICAL_ROW_SUMMARY}}
+shared uint gas_row_empty_nibbles[{{TERMINAL_GAS_COUNT}} * 4];
+shared uint gas_row_boil_counts_packed[{{TERMINAL_GAS_COUNT}} * 4];
+#endif
+#if {{DIRTY_WORKGROUP_AGGREGATE}}
+shared uint workgroup_dirty_tile_bits;
+#endif
+
+bool solve_cell_active(ivec2 cell) {
+    ivec2 tile = ivec2(
+        min(cell.x / tile_size, tile_grid_size.x - 1),
+        min(cell.y / tile_size, tile_grid_size.y - 1)
+    );
+    return texelFetch(active_tile_tex, tile, 0).x > 0.5;
+}
+
+bool solve_gas_cell_active(ivec2 gas_cell) {
+    ivec2 cell_origin = gas_cell * 4;
+    ivec2 cell_end = min(cell_grid_size, cell_origin + ivec2(4));
+    ivec2 tile_origin = max(ivec2(0), cell_origin / tile_size);
+    ivec2 tile_end = min(
+        tile_grid_size,
+        (cell_end + ivec2(tile_size - 1)) / tile_size
+    );
+    for (int tile_y = tile_origin.y; tile_y < tile_end.y; ++tile_y) {
+        for (int tile_x = tile_origin.x; tile_x < tile_end.x; ++tile_x) {
+            if (texelFetch(active_tile_tex, ivec2(tile_x, tile_y), 0).x > 0.5) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool is_placeholder_material(int material_id) {
+    if (material_id <= 0 || material_id >= {{MAX_MATERIALS}}) {
+        return false;
+    }
+    return int(response_params[material_id].w + 0.5) == 7;
+}
+
+float displaced_at(ivec2 cell) {
+    if (TERMINAL_USE_BRIDGE_DISPLACED) {
+        return float(bridge_displaced[cell.y * cell_grid_size.x + cell.x]);
+    }
+    return texelFetch(displaced_tex, cell, 0).x;
+}
+
+void compute_phase_boil_targets(
+    ivec2 cell,
+    bool is_active,
+    uint cell_state,
+    out int phase_target,
+    out int boil_target
+) {
+    phase_target = 0;
+    boil_target = 0;
+    if (!is_active) {
+        return;
+    }
+    int material_id = int(cell_state & 0xFFFFu);
+    if (material_id <= 0) {
+        return;
+    }
+    vec4 material_param = material_params[material_id];
+    ivec4 transition = phase_params[material_id];
+    float temperature = texelFetch(temp_tex, cell, 0).x;
+    float melt_point = material_param.z;
+    if (!isnan(melt_point)) {
+        if (transition.y > 0 && temperature > melt_point) {
+            phase_target = transition.y;
+        } else if (transition.z > 0 && transition.x == phase_liquid && temperature < melt_point) {
+            ivec2 left = ivec2(max(cell.x - 1, 0), cell.y);
+            ivec2 right = ivec2(min(cell.x + 1, cell_grid_size.x - 1), cell.y);
+            ivec2 down = ivec2(cell.x, max(cell.y - 1, 0));
+            ivec2 up = ivec2(cell.x, min(cell.y + 1, cell_grid_size.y - 1));
+            int cold_count = 1;
+            cold_count += texelFetch(temp_tex, left, 0).x < melt_point ? 1 : 0;
+            cold_count += texelFetch(temp_tex, right, 0).x < melt_point ? 1 : 0;
+            cold_count += texelFetch(temp_tex, down, 0).x < melt_point ? 1 : 0;
+            cold_count += texelFetch(temp_tex, up, 0).x < melt_point ? 1 : 0;
+            if (cold_count >= freeze_cold_neighbor_threshold) {
+                phase_target = transition.z;
+            }
+        }
+    }
+    float boil_point = material_param.w;
+    int gas_species_plus_one = transition.w;
+    if (!isnan(boil_point) && gas_species_plus_one > 0 && temperature > boil_point) {
+        boil_target = gas_species_plus_one;
+    }
+}
+
+uint structure_flags(int material_id, int phase_value) {
+    if (material_id <= 0 || material_id >= material_count || phase_value == phase_falling_island) {
+        return 0u;
+    }
+    return material_participates[material_id];
+}
+
+void append_dirty_tile(ivec2 tile) {
+    if (tile.x < 0 || tile.y < 0 || tile.x >= tile_grid_size.x || tile.y >= tile_grid_size.y) {
+        return;
+    }
+    int tile_index = tile.y * tile_grid_size.x + tile.x;
+    uint previous = atomicOr(dirty_tile_mask[tile_index], 1u);
+    if ((previous & 1u) != 0u) {
+        return;
+    }
+    uint slot = atomicAdd(dirty_tile_count[0], 1u);
+    dirty_tile_list[int(slot)] = tile;
+    atomicMax(dirty_tile_dispatch_args[0], slot + 1u);
+}
+
+void mark_dirty_if_structure_changed(ivec2 cell, uint cell_state) {
+    if (!TERMINAL_FUSE_DIRTY_PUBLISH) {
+        return;
+    }
+    int cell_index = cell.y * cell_grid_size.x + cell.x;
+    uint previous_word = bridge_cell_core[cell_index * 5];
+    int old_material = int(previous_word & 0xFFFFu);
+    int old_phase = int((previous_word >> 16u) & 0xFFu);
+    int new_material = int(cell_state & 0xFFFFu);
+    int new_phase = int((cell_state >> 16u) & 0xFFu);
+    if (structure_flags(old_material, old_phase) == structure_flags(new_material, new_phase)) {
+        return;
+    }
+    ivec2 tile = cell / tile_size;
+    ivec2 local_cell = cell - tile * tile_size;
+#if {{DIRTY_WORKGROUP_AGGREGATE}}
+    atomicOr(workgroup_dirty_tile_bits, 1u << 4u);
+    if (local_cell.x == 0) atomicOr(workgroup_dirty_tile_bits, 1u << 3u);
+    if (local_cell.x + 1 >= tile_size) atomicOr(workgroup_dirty_tile_bits, 1u << 5u);
+    if (local_cell.y == 0) atomicOr(workgroup_dirty_tile_bits, 1u << 1u);
+    if (local_cell.y + 1 >= tile_size) atomicOr(workgroup_dirty_tile_bits, 1u << 7u);
+#else
+    append_dirty_tile(tile);
+    if (local_cell.x == 0) append_dirty_tile(tile + ivec2(-1, 0));
+    if (local_cell.x + 1 >= tile_size) append_dirty_tile(tile + ivec2(1, 0));
+    if (local_cell.y == 0) append_dirty_tile(tile + ivec2(0, -1));
+    if (local_cell.y + 1 >= tile_size) append_dirty_tile(tile + ivec2(0, 1));
+#endif
+}
+
+#if {{DIRTY_WORKGROUP_AGGREGATE}}
+void flush_workgroup_dirty_tiles() {
+    ivec2 center_tile = (
+        ivec2(gl_WorkGroupID.xy)
+        * ivec2({{TERMINAL_LOCAL_SIZE_X}}, {{TERMINAL_LOCAL_SIZE_Y}})
+    ) / tile_size;
+    uint bits = workgroup_dirty_tile_bits;
+    for (int bit = 0; bit < 9; ++bit) {
+        if ((bits & (1u << uint(bit))) == 0u) {
+            continue;
+        }
+        append_dirty_tile(center_tile + ivec2(bit % 3 - 1, bit / 3 - 1));
+    }
+}
+#endif
+
+void publish_bridge_aux_changes(
+    ivec2 cell,
+    float displaced_value,
+    bool displaced_changed,
+    bool clear_island,
+    bool clear_entity
+) {
+    if (!TERMINAL_PUBLISH_BRIDGE_AUX) {
+        return;
+    }
+    int cell_index = cell.y * cell_grid_size.x + cell.x;
+    if (displaced_changed) {
+        bridge_displaced[cell_index] = int(round(displaced_value));
+    }
+    if (TERMINAL_FUSE_PHASE_BOIL && clear_island) {
+        bridge_island_id[cell_index] = 0;
+    }
+    if (TERMINAL_FUSE_PHASE_BOIL && clear_entity) {
+        bridge_entity_id[cell_index] = 0;
+    }
+}
+
+void main() {
+    int lane = int(gl_LocalInvocationIndex);
+    ivec2 local_cell = ivec2(gl_LocalInvocationID.xy);
+    ivec2 gas_in_group = local_cell / 4;
+    int gas_lane = gas_in_group.y * {{TERMINAL_GAS_SIZE_X}} + gas_in_group.x;
+    ivec2 gas_cell = ivec2(gl_WorkGroupID.xy)
+        * ivec2({{TERMINAL_GAS_SIZE_X}}, {{TERMINAL_GAS_SIZE_Y}})
+        + gas_in_group;
+    bool gas_valid = all(lessThan(gas_cell, gas_grid_size));
+    ivec2 cell = ivec2(gl_WorkGroupID.xy)
+        * ivec2({{TERMINAL_LOCAL_SIZE_X}}, {{TERMINAL_LOCAL_SIZE_Y}})
+        + local_cell;
+    bool valid = gas_valid && all(lessThan(cell, cell_grid_size));
+#if {{DIRTY_WORKGROUP_AGGREGATE}}
+    if (lane == 0) {
+        workgroup_dirty_tile_bits = 0u;
+    }
+#endif
+
+    uint cell_state_value = 1u;
+    uint timer_value = 0u;
+    float temperature = 0.0;
+    float integrity_value = 0.0;
+    float displaced_value = 0.0;
+    bool displaced_changed = false;
+    bool clear_island = false;
+    bool clear_entity = false;
+    vec2 velocity_value = vec2(0.0);
+    int boil_target = 0;
+    uint original_cell_state = cell_state_value;
+    uint original_timer = timer_value;
+    float original_temperature = temperature;
+    float original_integrity_value = integrity_value;
+    float original_displaced_value = displaced_value;
+    vec2 original_velocity_value = velocity_value;
+#if {{HEAT_LAZY_ACTION_INPUTS}}
+    bool timer_reset = false;
+    bool temperature_loaded = false;
+    bool temperature_changed = false;
+    bool integrity_changed = false;
+    bool velocity_changed = false;
+#endif
+
+    if (valid) {
+        bool is_active = true;
+        cell_state_value = texelFetch(cell_state_tex, cell, 0).x;
+        int previous_material = int(cell_state_value & 0xFFFFu);
+        int previous_phase = int((cell_state_value >> 16u) & 0xFFu);
+        float original_integrity = 0.0;
+#if !{{HEAT_LAZY_ACTION_INPUTS}}
+        timer_value = texelFetch(timer_tex, cell, 0).x;
+        temperature = texelFetch(temp_tex, cell, 0).x;
+        original_integrity = texelFetch(integrity_tex, cell, 0).x;
+        integrity_value = original_integrity;
+#endif
+        // Bridge-resident aux does not need a private displaced snapshot. Read
+        // the SSBO only below when a placeholder-to-placeholder transition
+        // actually preserves the displaced material.
+        if (!TERMINAL_USE_BRIDGE_DISPLACED) {
+            displaced_value = texelFetch(displaced_tex, cell, 0).x;
+        }
+        #if !{{HEAT_LAZY_ACTION_INPUTS}}
+        velocity_value = texelFetch(velocity_tex, cell, 0).xy;
+        #endif
+        original_cell_state = cell_state_value;
+        original_timer = timer_value;
+        original_temperature = temperature;
+        original_integrity_value = integrity_value;
+        original_displaced_value = displaced_value;
+        original_velocity_value = velocity_value;
+        int target_material = 0;
+        int gas_boil_target = 0;
+        if (TERMINAL_FUSE_PHASE_BOIL) {
+            is_active = solve_cell_active(cell);
+            compute_phase_boil_targets(
+                cell,
+                is_active,
+                cell_state_value,
+                target_material,
+                gas_boil_target
+            );
+        } else {
+            // The split target pass writes zero for every inactive cell. The
+            // control path retains the old duplicate active-tile lookup for A/B.
+            if (!TERMINAL_REUSE_SPLIT_TARGET_ACTIVE_MASK) {
+                is_active = solve_cell_active(cell);
+            }
+#if {{HEAT_PACKED_PHASE_BOIL_TARGETS}}
+            int packed_targets = int(texelFetch(phase_target_tex, cell, 0).x + 0.5);
+            target_material = is_active ? (packed_targets & 0xFF) : 0;
+            gas_boil_target = (packed_targets >> 8) & 0xFF;
+#else
+            target_material = is_active
+                ? int(texelFetch(phase_target_tex, cell, 0).x + 0.5)
+                : 0;
+            gas_boil_target = int(texelFetch(boil_target_tex, cell, 0).x + 0.5);
+#endif
+        }
+        if (target_material > 0) {
+            target_material = clamp(target_material, 0, {{MAX_MATERIALS_MINUS_ONE}});
+            int resolved_phase = phase_params[target_material].x;
+            float spawn_temperature = response_params[target_material].z;
+#if {{HEAT_LAZY_ACTION_INPUTS}}
+            temperature = texelFetch(temp_tex, cell, 0).x;
+            original_temperature = temperature;
+            temperature_loaded = true;
+            temperature_changed = true;
+#endif
+            if (!isnan(spawn_temperature)) {
+                temperature = max(temperature, spawn_temperature);
+            }
+            cell_state_value = uint(target_material) | (uint(resolved_phase) << 16u);
+            timer_value = 0u;
+            integrity_value = response_params[target_material].y;
+#if {{HEAT_LAZY_ACTION_INPUTS}}
+            timer_reset = true;
+            integrity_changed = true;
+#endif
+            clear_island = resolved_phase != phase_falling_island;
+            clear_entity = !is_placeholder_material(target_material);
+
+            if (is_placeholder_material(target_material)) {
+                if (is_placeholder_material(previous_material)) {
+                    displaced_value = displaced_at(cell);
+                } else if (previous_material != 0 && previous_phase == phase_liquid) {
+                    displaced_value = float(previous_material);
+                    displaced_changed = true;
+                } else {
+                    displaced_value = 0.0;
+                    displaced_changed = true;
+                }
+            } else {
+                displaced_value = 0.0;
+                displaced_changed = true;
+            }
+        }
+
+#if !{{TERMINAL_NV32_GAS_BALLOT}}
+        boil_species_plus_one[lane] = gas_boil_target;
+#endif
+        boil_target = is_active ? gas_boil_target : 0;
+        if (boil_target > 0) {
+#if {{HEAT_LAZY_ACTION_INPUTS}}
+            original_integrity = texelFetch(integrity_tex, cell, 0).x;
+            if (!integrity_changed) {
+                integrity_value = original_integrity;
+            }
+            integrity_changed = true;
+#endif
+            integrity_value -= 0.5 * dt;
+            if (integrity_value <= 0.0) {
+                cell_state_value = 0u;
+                timer_value = 0u;
+                temperature = texelFetch(ambient_tex, gas_cell, 0).x;
+                integrity_value = 0.0;
+#if {{HEAT_LAZY_ACTION_INPUTS}}
+                timer_reset = true;
+                temperature_loaded = true;
+                temperature_changed = true;
+#endif
+                clear_island = true;
+                clear_entity = true;
+            }
+
+            // The split auxiliary pass tests pre-transition integrity.
+            float auxiliary_integrity = original_integrity - 0.5 * dt;
+            if (auxiliary_integrity <= 0.0) {
+                displaced_value = 0.0;
+                displaced_changed = true;
+                velocity_value = vec2(0.0);
+#if {{HEAT_LAZY_ACTION_INPUTS}}
+                velocity_changed = true;
+#endif
+            }
+        }
+    }
+
+#if {{TERMINAL_NV32_GAS_BALLOT}}
+    // Every invocation executes every ballot after reconverging from the cell
+    // action path. An 8x8 group maps to two 32-lane x-major warps; each warp's
+    // alternating four-lane quads cover one row of two adjacent gas cells.
+    uint gas_empty_ballot = ballotThreadNV(
+        valid && (cell_state_value & 0xFFFFu) == 0u
+    );
+    uint gas_species_1_ballot = ballotThreadNV(valid && boil_target == 1);
+    uint gas_species_2_ballot = ballotThreadNV(valid && boil_target == 2);
+    uint gas_species_3_ballot = ballotThreadNV(valid && boil_target == 3);
+    uint gas_species_4_ballot = ballotThreadNV(valid && boil_target == 4);
+    uint gas_species_5_ballot = ballotThreadNV(valid && boil_target == 5);
+    uint gas_species_6_ballot = ballotThreadNV(valid && boil_target == 6);
+#else
+    after_cell_state[lane] = cell_state_value;
+    if (!valid) {
+        boil_species_plus_one[lane] = 0;
+    }
+    barrier();
+#endif
+
+#if {{TERMINAL_HIERARCHICAL_ROW_SUMMARY}}
+    bool gas_row_leader = (local_cell.x & 3) == 0;
+    if (gas_row_leader) {
+        int row_in_gas = local_cell.y & 3;
+        int row_summary_index = gas_lane * 4 + row_in_gas;
+        uint empty_nibble = 0u;
+        uint boil_counts_packed = 0u;
+        for (int row_x = 0; row_x < 4; ++row_x) {
+            ivec2 gas_local_cell = ivec2(row_x, row_in_gas);
+            ivec2 shared_cell = gas_in_group * 4 + gas_local_cell;
+            int shared_lane = shared_cell.y * {{TERMINAL_LOCAL_SIZE_X}} + shared_cell.x;
+            bool lane_valid = gas_valid
+                && all(lessThan(gas_cell * 4 + gas_local_cell, cell_grid_size));
+            if (!lane_valid) {
+                continue;
+            }
+            if ((after_cell_state[shared_lane] & 0xFFFFu) == 0u) {
+                empty_nibble |= 1u << uint(row_x);
+            }
+            int species_plus_one = boil_species_plus_one[shared_lane];
+            if (species_plus_one >= 1 && species_plus_one <= 6) {
+                // Five bits per species are enough for all 16 cells. Adding
+                // four row summaries cannot carry into an adjacent field.
+                boil_counts_packed += 1u << uint((species_plus_one - 1) * 5);
+            }
+        }
+        gas_row_empty_nibbles[row_summary_index] = empty_nibble;
+        gas_row_boil_counts_packed[row_summary_index] = boil_counts_packed;
+    }
+    barrier();
+#endif
+
+    bool gas_leader = (local_cell.x & 3) == 0 && (local_cell.y & 3) == 0;
+    if (gas_leader) {
+        gas_cell_active[gas_lane] = gas_valid && solve_gas_cell_active(gas_cell);
+        empty_mask[gas_lane] = 0u;
+        int rank_base = gas_lane * 6;
+        for (int rank = 0; rank < 6; ++rank) {
+            condense_rank_material[rank_base + rank] = 0;
+        }
+
+        int boil_counts[6] = int[6](0, 0, 0, 0, 0, 0);
+        int empty_count = 0;
+#if {{TERMINAL_NV32_GAS_BALLOT}}
+        uint gas_warp_mask = gas_in_group.x == 0
+            ? 0x0F0F0F0Fu
+            : 0xF0F0F0F0u;
+        uint gas_quad_shift = uint(gas_in_group.x * 4);
+        uint gas_empty_bits = gas_empty_ballot & gas_warp_mask;
+        empty_mask[gas_lane] =
+            ((gas_empty_bits >> gas_quad_shift) & 0x000Fu)
+            | ((gas_empty_bits >> (gas_quad_shift + 4u)) & 0x00F0u)
+            | ((gas_empty_bits >> (gas_quad_shift + 8u)) & 0x0F00u)
+            | ((gas_empty_bits >> (gas_quad_shift + 12u)) & 0xF000u);
+        empty_count = bitCount(gas_empty_bits);
+        boil_counts[0] = bitCount(gas_species_1_ballot & gas_warp_mask);
+        boil_counts[1] = bitCount(gas_species_2_ballot & gas_warp_mask);
+        boil_counts[2] = bitCount(gas_species_3_ballot & gas_warp_mask);
+        boil_counts[3] = bitCount(gas_species_4_ballot & gas_warp_mask);
+        boil_counts[4] = bitCount(gas_species_5_ballot & gas_warp_mask);
+        boil_counts[5] = bitCount(gas_species_6_ballot & gas_warp_mask);
+#elif {{TERMINAL_HIERARCHICAL_ROW_SUMMARY}}
+        uint boil_counts_packed = 0u;
+        for (int row_in_gas = 0; row_in_gas < 4; ++row_in_gas) {
+            int row_summary_index = gas_lane * 4 + row_in_gas;
+            empty_mask[gas_lane] |=
+                gas_row_empty_nibbles[row_summary_index] << uint(row_in_gas * 4);
+            boil_counts_packed += gas_row_boil_counts_packed[row_summary_index];
+        }
+        empty_count = bitCount(empty_mask[gas_lane]);
+        for (int species = 0; species < 6; ++species) {
+            boil_counts[species] = int(
+                (boil_counts_packed >> uint(species * 5)) & 31u
+            );
+        }
+#else
+        for (int cell_lane = 0; cell_lane < 16; ++cell_lane) {
+            ivec2 gas_local_cell = ivec2(cell_lane & 3, cell_lane >> 2);
+            ivec2 shared_cell = gas_in_group * 4 + gas_local_cell;
+            int shared_lane = shared_cell.y * {{TERMINAL_LOCAL_SIZE_X}} + shared_cell.x;
+            bool lane_valid = gas_valid
+                && all(lessThan(gas_cell * 4 + gas_local_cell, cell_grid_size));
+            if (!lane_valid) {
+                continue;
+            }
+            if ((after_cell_state[shared_lane] & 0xFFFFu) == 0u) {
+                empty_count += 1;
+                empty_mask[gas_lane] |= 1u << uint(cell_lane);
+            }
+            int species_plus_one = boil_species_plus_one[shared_lane];
+            if (species_plus_one >= 1 && species_plus_one <= 6) {
+                boil_counts[species_plus_one - 1] += 1;
+            }
+        }
+#endif
+
+        if (gas_valid) {
+            float ambient = texelFetch(ambient_tex, gas_cell, 0).x;
+            int condense_rank = 0;
+            for (int species = 0; species < 6; ++species) {
+                int gas_index = (species * gas_grid_size.y + gas_cell.y) * gas_grid_size.x + gas_cell.x;
+                float original_value =
+#if {{HEAT_GAS_BRIDGE_RESIDENT}}
+                    max(bridge_gas[gas_index], 0.0);
+#else
+                    texelFetch(gas_tex, ivec3(gas_cell, species), 0).x;
+#endif
+                vec4 species_param = gas_params[species];
+                float condense_point = species_param.x;
+                int target_material = int(species_param.y + 0.5);
+                bool condenses = gas_cell_active[gas_lane]
+                    && !isnan(condense_point)
+                    && target_material > 0
+                    && ambient < condense_point
+                    && original_value > 0.7;
+                if (TERMINAL_WRITE_CONDENSE_TARGETS) {
+                    imageStore(
+                        condense_target_img,
+                        ivec3(gas_cell, species),
+                        vec4(condenses ? 1.0 : 0.0, 0.0, 0.0, 0.0)
+                    );
+                }
+
+                float value = original_value;
+                if (gas_cell_active[gas_lane]) {
+                    value += float(boil_counts[species]) * 0.6 * dt;
+                    if (condenses) {
+                        condense_rank += 1;
+                        condense_rank_material[rank_base + condense_rank - 1] = clamp(
+                            target_material,
+                            0,
+                            {{MAX_MATERIALS_MINUS_ONE}}
+                        );
+                    }
+                    if (condenses && empty_count >= condense_rank) {
+                        value = max(0.0, value - 0.6);
+                    }
+                }
+                if (!TERMINAL_INPLACE_SPARSE_WRITE || floatBitsToUint(value) != floatBitsToUint(original_value)) {
+                    imageStore(gas_out_img, ivec3(gas_cell, species), vec4(value, 0.0, 0.0, 0.0));
+                }
+#if {{HEAT_GAS_BRIDGE_RESIDENT}}
+                bridge_gas[gas_index] = max(value, 0.0);
+#endif
+            }
+        }
+    }
+    barrier();
+
+#if {{DIRTY_WORKGROUP_AGGREGATE}}
+    if (valid) {
+#else
+    if (!valid) {
+        return;
+    }
+#endif
+    if (gas_cell_active[gas_lane] && (cell_state_value & 0xFFFFu) == 0u) {
+        int lane_in_gas = (local_cell.y & 3) * 4 + (local_cell.x & 3);
+        uint lower_lane_mask = (1u << uint(lane_in_gas + 1)) - 1u;
+        int empty_rank = bitCount(empty_mask[gas_lane] & lower_lane_mask);
+        int target_material = empty_rank >= 1 && empty_rank <= 6
+            ? condense_rank_material[gas_lane * 6 + empty_rank - 1]
+            : 0;
+        if (target_material > 0) {
+            int resolved_phase = phase_params[target_material].x;
+            float spawn_temperature = response_params[target_material].z;
+#if {{HEAT_LAZY_ACTION_INPUTS}}
+            if (!temperature_loaded) {
+                temperature = texelFetch(temp_tex, cell, 0).x;
+                original_temperature = temperature;
+                temperature_loaded = true;
+            }
+            temperature_changed = true;
+#endif
+            if (!isnan(spawn_temperature)) {
+                temperature = max(temperature, spawn_temperature);
+            }
+            cell_state_value = uint(target_material) | (uint(resolved_phase) << 16u);
+            timer_value = 0u;
+            integrity_value = response_params[target_material].y;
+#if {{HEAT_LAZY_ACTION_INPUTS}}
+            timer_reset = true;
+            integrity_changed = true;
+#endif
+            displaced_value = 0.0;
+            displaced_changed = true;
+        }
+    }
+
+#if {{HEAT_LAZY_ACTION_INPUTS}}
+    if (cell_state_value != original_cell_state) {
+        imageStore(cell_state_final_img, cell, uvec4(cell_state_value, 0u, 0u, 0u));
+    }
+    if (timer_reset) {
+        imageStore(timer_final_img, cell, uvec4(timer_value, 0u, 0u, 0u));
+    }
+    if (temperature_changed) {
+        imageStore(temp_final_img, cell, vec4(temperature, 0.0, 0.0, 0.0));
+    }
+    if (integrity_changed) {
+        imageStore(integrity_final_img, cell, vec4(integrity_value, 0.0, 0.0, 0.0));
+    }
+#else
+    if (!TERMINAL_INPLACE_SPARSE_WRITE || cell_state_value != original_cell_state) {
+        imageStore(cell_state_final_img, cell, uvec4(cell_state_value, 0u, 0u, 0u));
+    }
+    if (!TERMINAL_INPLACE_SPARSE_WRITE || timer_value != original_timer) {
+        imageStore(timer_final_img, cell, uvec4(timer_value, 0u, 0u, 0u));
+    }
+    if (!TERMINAL_INPLACE_SPARSE_WRITE || floatBitsToUint(temperature) != floatBitsToUint(original_temperature)) {
+        imageStore(temp_final_img, cell, vec4(temperature, 0.0, 0.0, 0.0));
+    }
+    if (!TERMINAL_INPLACE_SPARSE_WRITE || floatBitsToUint(integrity_value) != floatBitsToUint(original_integrity_value)) {
+        imageStore(integrity_final_img, cell, vec4(integrity_value, 0.0, 0.0, 0.0));
+    }
+#endif
+    if (TERMINAL_WRITE_PRIVATE_DISPLACED && (
+        !TERMINAL_INPLACE_SPARSE_WRITE
+        || floatBitsToUint(displaced_value) != floatBitsToUint(original_displaced_value)
+    )) {
+        imageStore(displaced_final_img, cell, vec4(displaced_value, 0.0, 0.0, 0.0));
+    }
+#if {{HEAT_LAZY_ACTION_INPUTS}}
+    if (velocity_changed) {
+        imageStore(velocity_final_img, cell, vec4(velocity_value, 0.0, 0.0));
+    }
+#else
+    if (!TERMINAL_INPLACE_SPARSE_WRITE || any(notEqual(
+        floatBitsToUint(velocity_value),
+        floatBitsToUint(original_velocity_value)
+    ))) {
+        imageStore(velocity_final_img, cell, vec4(velocity_value, 0.0, 0.0));
+    }
+#endif
+    publish_bridge_aux_changes(
+        cell,
+        displaced_value,
+        displaced_changed,
+        clear_island,
+        clear_entity
+    );
+#if {{HEAT_LAZY_ACTION_INPUTS}}
+    if (cell_state_value != original_cell_state) {
+        mark_dirty_if_structure_changed(cell, cell_state_value);
+    }
+#else
+    mark_dirty_if_structure_changed(cell, cell_state_value);
+#endif
+#if {{DIRTY_WORKGROUP_AGGREGATE}}
+    }
+    barrier();
+    if (lane == 0) {
+        flush_workgroup_dirty_tiles();
+    }
+#endif
+}

@@ -1,30 +1,21 @@
 
             uniform float dt;
             uniform int phase_falling_island;
-            uniform int phase_liquid;
             layout(std430, binding=3) buffer MaterialPhaseBuffer {
                 ivec4 phase_params[{{MAX_MATERIALS}}];
             };
             layout(binding=3) uniform sampler2D phase_target_tex;
-            layout(binding=4) uniform sampler2D phase_tex;
-            layout(binding=5) uniform sampler2D cell_flags_tex;
-            layout(binding=6) uniform sampler2D timer_tex;
+            layout(binding=6) uniform usampler2D timer_tex;
             layout(binding=7) uniform sampler2D boil_target_tex;
             layout(binding=8) uniform sampler2D temp_tex;
             layout(binding=9) uniform sampler2D integrity_tex;
-            layout(binding=10) uniform sampler2D island_id_tex;
-            layout(binding=11) uniform sampler2D entity_id_tex;
-            layout(binding=12) uniform sampler2D displaced_tex;
             layout(binding=22) uniform sampler2D ambient_tex;
-            layout(binding=23) uniform sampler2D velocity_tex;
-            layout(r32f, binding=0) writeonly uniform image2D material_out_img;
-            layout(r32f, binding=1) writeonly uniform image2D phase_out_img;
-            layout(r32f, binding=2) writeonly uniform image2D cell_flags_out_img;
-            layout(rgba32f, binding=3) writeonly uniform image2D timer_out_img;
+            layout(r32ui, binding=0) writeonly uniform uimage2D cell_state_out_img;
+            layout(r32ui, binding=3) writeonly uniform uimage2D timer_out_img;
             layout(r32f, binding=4) writeonly uniform image2D temp_out_img;
             layout(r32f, binding=5) writeonly uniform image2D integrity_out_img;
-            layout(r32f, binding=6) writeonly uniform image2D island_id_out_img;
-            layout(r32f, binding=7) writeonly uniform image2D entity_id_out_img;
+            layout(r32f, binding=6) writeonly uniform image2D island_id_img;
+            layout(r32f, binding=7) writeonly uniform image2D entity_id_img;
 
             bool is_placeholder_material(int material_id) {
                 if (material_id <= 0 || material_id >= {{MAX_MATERIALS}}) {
@@ -35,25 +26,15 @@
 
             void store_payload(
                 ivec2 cell,
-                float material_value,
-                float phase_value,
-                float flags_value,
-                vec4 timer_value,
+                uint cell_state_value,
+                uint timer_value,
                 float temp_value,
-                float integrity_value,
-                float island_value,
-                float entity_value,
-                float displaced_value,
-                vec2 velocity_value
+                float integrity_value
             ) {
-                imageStore(material_out_img, cell, vec4(material_value, 0.0, 0.0, 0.0));
-                imageStore(phase_out_img, cell, vec4(phase_value, 0.0, 0.0, 0.0));
-                imageStore(cell_flags_out_img, cell, vec4(flags_value, 0.0, 0.0, 0.0));
-                imageStore(timer_out_img, cell, timer_value);
+                imageStore(cell_state_out_img, cell, uvec4(cell_state_value, 0u, 0u, 0u));
+                imageStore(timer_out_img, cell, uvec4(timer_value, 0u, 0u, 0u));
                 imageStore(temp_out_img, cell, vec4(temp_value, 0.0, 0.0, 0.0));
                 imageStore(integrity_out_img, cell, vec4(integrity_value, 0.0, 0.0, 0.0));
-                imageStore(island_id_out_img, cell, vec4(island_value, 0.0, 0.0, 0.0));
-                imageStore(entity_id_out_img, cell, vec4(entity_value, 0.0, 0.0, 0.0));
             }
 
             void main() {
@@ -62,18 +43,13 @@
                     return;
                 }
                 bool is_active = solve_cell_active(gid);
-                float material_value = texelFetch(material_tex, gid, 0).x;
-                float phase_value = texelFetch(phase_tex, gid, 0).x;
-                int previous_material = int(material_value + 0.5);
-                int previous_phase = int(phase_value + 0.5);
-                float flags_value = texelFetch(cell_flags_tex, gid, 0).x;
-                vec4 timer_value = texelFetch(timer_tex, gid, 0);
+                uint cell_state_value = texelFetch(cell_state_tex, gid, 0).x;
+                int previous_material = int(cell_state_value & 0xFFFFu);
+                uint timer_value = texelFetch(timer_tex, gid, 0).x;
                 float temperature = texelFetch(temp_tex, gid, 0).x;
                 float integrity_value = texelFetch(integrity_tex, gid, 0).x;
-                float island_value = texelFetch(island_id_tex, gid, 0).x;
-                float entity_value = texelFetch(entity_id_tex, gid, 0).x;
-                float displaced_value = texelFetch(displaced_tex, gid, 0).x;
-                vec2 velocity_value = texelFetch(velocity_tex, gid, 0).xy;
+                bool clear_island = false;
+                bool clear_entity = false;
 
                 int target_material = is_active ? int(texelFetch(phase_target_tex, gid, 0).x + 0.5) : 0;
                 if (target_material > 0) {
@@ -83,27 +59,11 @@
                     if (!isnan(spawn_temperature)) {
                         temperature = max(temperature, spawn_temperature);
                     }
-                    if (is_placeholder_material(target_material)) {
-                        if (is_placeholder_material(previous_material)) {
-                            displaced_value = texelFetch(displaced_tex, gid, 0).x;
-                        } else if (previous_material != 0 && previous_phase == phase_liquid) {
-                            displaced_value = float(previous_material);
-                        } else {
-                            displaced_value = 0.0;
-                        }
-                    } else if (previous_material != 0 && previous_phase == phase_liquid) {
-                        entity_value = 0.0;
-                        displaced_value = 0.0;
-                    } else {
-                        entity_value = 0.0;
-                        displaced_value = 0.0;
-                    }
-                    material_value = float(target_material);
-                    phase_value = float(resolved_phase);
-                    flags_value = 0.0;
-                    timer_value = vec4(0.0);
+                    clear_entity = !is_placeholder_material(target_material);
+                    clear_island = resolved_phase != phase_falling_island;
+                    cell_state_value = uint(target_material) | (uint(resolved_phase) << 16u);
+                    timer_value = 0u;
                     integrity_value = response_params[target_material].y;
-                    island_value = resolved_phase == phase_falling_island ? island_value : 0.0;
                 }
 
                 int boil_target = is_active ? int(texelFetch(boil_target_tex, gid, 0).x + 0.5) : 0;
@@ -114,30 +74,25 @@
                             min(gid.x / gas_cell_size, gas_grid_size.x - 1),
                             min(gid.y / gas_cell_size, gas_grid_size.y - 1)
                         );
-                        material_value = 0.0;
-                        phase_value = 0.0;
-                        flags_value = 0.0;
-                        timer_value = vec4(0.0);
+                        cell_state_value = 0u;
+                        timer_value = 0u;
                         temperature = texelFetch(ambient_tex, gas_cell, 0).x;
                         integrity_value = 0.0;
-                        island_value = 0.0;
-                        entity_value = 0.0;
-                        displaced_value = 0.0;
-                        velocity_value = vec2(0.0);
+                        clear_island = true;
+                        clear_entity = true;
                     }
+                }
+                if (clear_island) {
+                    imageStore(island_id_img, gid, vec4(0.0));
+                }
+                if (clear_entity) {
+                    imageStore(entity_id_img, gid, vec4(0.0));
                 }
                 store_payload(
                     gid,
-                    material_value,
-                    phase_value,
-                    flags_value,
+                    cell_state_value,
                     timer_value,
                     temperature,
-                    integrity_value,
-                    island_value,
-                    entity_value,
-                    displaced_value,
-                    velocity_value
+                    integrity_value
                 );
             }
-            

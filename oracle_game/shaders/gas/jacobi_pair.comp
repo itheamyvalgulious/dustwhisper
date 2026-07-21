@@ -1,0 +1,113 @@
+#version 430
+
+layout(
+    local_size_x={{PRESSURE_PAIR_LOCAL_SIZE}},
+    local_size_y={{PRESSURE_PAIR_LOCAL_SIZE}},
+    local_size_z=1
+) in;
+
+uniform ivec2 grid_size;
+layout(binding=0) uniform sampler2D pressure_tex;
+layout(binding=1) uniform sampler2D divergence_tex;
+layout(binding={{ACTIVE_GAS_TEXTURE_UNIT}}) uniform sampler2D active_gas_tex;
+layout(r32f, binding=2) writeonly uniform image2D pressure_first_img;
+layout(r32f, binding=3) writeonly uniform image2D pressure_second_img;
+
+const int LOCAL_SIZE = {{PRESSURE_PAIR_LOCAL_SIZE}};
+const int HALO = {{PRESSURE_PAIR_HALO}};
+const int CORE_SIZE = {{PRESSURE_PAIR_CORE_SIZE}};
+const int TILE_COUNT = LOCAL_SIZE * LOCAL_SIZE;
+
+shared float pressure_zero[TILE_COUNT];
+shared float pressure_one[TILE_COUNT];
+shared float divergence_values[TILE_COUNT];
+shared uint active_values[TILE_COUNT];
+
+int tile_index(ivec2 local_cell) {
+    return local_cell.y * LOCAL_SIZE + local_cell.x;
+}
+
+ivec2 clamp_cell(ivec2 cell) {
+    return clamp(cell, ivec2(0), grid_size - ivec2(1));
+}
+
+ivec2 physical_to_local(ivec2 cell, ivec2 tile_origin) {
+    return clamp_cell(cell) - tile_origin;
+}
+
+float pressure_zero_at(ivec2 cell, ivec2 tile_origin) {
+    return pressure_zero[tile_index(physical_to_local(cell, tile_origin))];
+}
+
+float pressure_one_at(ivec2 cell, ivec2 tile_origin) {
+    return pressure_one[tile_index(physical_to_local(cell, tile_origin))];
+}
+
+void main() {
+    ivec2 local_cell = ivec2(gl_LocalInvocationID.xy);
+    int lane = tile_index(local_cell);
+    ivec2 output_origin = ivec2(gl_WorkGroupID.xy) * CORE_SIZE;
+    ivec2 tile_origin = output_origin - ivec2(HALO);
+    ivec2 physical_cell = clamp_cell(tile_origin + local_cell);
+
+    pressure_zero[lane] = texelFetch(pressure_tex, physical_cell, 0).x;
+    divergence_values[lane] = texelFetch(divergence_tex, physical_cell, 0).x;
+    active_values[lane] = texelFetch(active_gas_tex, physical_cell, 0).x > 0.5 ? 1u : 0u;
+    memoryBarrierShared();
+    barrier();
+
+    if (
+        local_cell.x >= 1 && local_cell.x < LOCAL_SIZE - 1
+        && local_cell.y >= 1 && local_cell.y < LOCAL_SIZE - 1
+    ) {
+        int canonical_index = tile_index(
+            physical_to_local(physical_cell, tile_origin)
+        );
+        float center = pressure_zero[canonical_index];
+        float result = center;
+        if (active_values[canonical_index] != 0u) {
+            ivec2 left = ivec2(max(physical_cell.x - 1, 0), physical_cell.y);
+            ivec2 right = ivec2(min(physical_cell.x + 1, grid_size.x - 1), physical_cell.y);
+            ivec2 down = ivec2(physical_cell.x, max(physical_cell.y - 1, 0));
+            ivec2 up = ivec2(physical_cell.x, min(physical_cell.y + 1, grid_size.y - 1));
+            result = (
+                pressure_zero_at(left, tile_origin)
+                + pressure_zero_at(right, tile_origin)
+                + pressure_zero_at(down, tile_origin)
+                + pressure_zero_at(up, tile_origin)
+                - divergence_values[canonical_index]
+            ) * 0.25;
+        }
+        pressure_one[lane] = result;
+    }
+    memoryBarrierShared();
+    barrier();
+
+    ivec2 gid = output_origin + local_cell - ivec2(HALO);
+    bool core_cell = (
+        local_cell.x >= HALO && local_cell.x < LOCAL_SIZE - HALO
+        && local_cell.y >= HALO && local_cell.y < LOCAL_SIZE - HALO
+    );
+    if (!core_cell || gid.x >= grid_size.x || gid.y >= grid_size.y) {
+        return;
+    }
+
+    int canonical_index = tile_index(physical_to_local(gid, tile_origin));
+    float center = pressure_one[canonical_index];
+    float result = center;
+    if (active_values[canonical_index] != 0u) {
+        ivec2 left = ivec2(max(gid.x - 1, 0), gid.y);
+        ivec2 right = ivec2(min(gid.x + 1, grid_size.x - 1), gid.y);
+        ivec2 down = ivec2(gid.x, max(gid.y - 1, 0));
+        ivec2 up = ivec2(gid.x, min(gid.y + 1, grid_size.y - 1));
+        result = (
+            pressure_one_at(left, tile_origin)
+            + pressure_one_at(right, tile_origin)
+            + pressure_one_at(down, tile_origin)
+            + pressure_one_at(up, tile_origin)
+            - divergence_values[canonical_index]
+        ) * 0.25;
+    }
+    imageStore(pressure_first_img, gid, vec4(center, 0.0, 0.0, 0.0));
+    imageStore(pressure_second_img, gid, vec4(result, 0.0, 0.0, 0.0));
+}

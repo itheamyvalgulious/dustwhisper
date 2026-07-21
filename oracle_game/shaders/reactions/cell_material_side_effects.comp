@@ -3,8 +3,11 @@
             layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
             uniform ivec2 cell_grid_size;
             uniform bool use_local_deferred_outputs;
+            uniform bool use_packed_local_deferred_outputs;
+            uniform bool deferred_hi_valid;
             uniform bool copy_velocity_passthrough;
-            layout(binding=0) uniform sampler2D material_tex;
+            uniform bool velocity_in_place;
+            layout(binding=0) uniform usampler2D cell_state_tex;
             layout(binding=1) uniform sampler2D velocity_tex;
             layout(binding=2) uniform sampler2D action_lo_tex;
             layout(binding=3) uniform sampler2D action_hi_tex;
@@ -13,6 +16,7 @@
             layout(binding=6) uniform sampler2D temp_tex;
             layout(binding=7) uniform sampler2DArray deferred_lo_local_tex;
             layout(binding=8) uniform sampler2DArray deferred_hi_local_tex;
+            layout(binding=9) uniform usampler2D deferred_packed_local_tex;
             layout(std430, binding=0) buffer MaterialParams {
                 vec4 material_params[{{MAX_MATERIALS}}];
             };
@@ -25,13 +29,22 @@
             layout(std430, binding=15) buffer ReactionCounters {
                 uint reaction_counts[16];
             };
-            layout(r32f, binding=0) writeonly uniform image2D material_out_img;
-            layout(r32f, binding=1) writeonly uniform image2D phase_out_img;
+            layout(r32ui, binding=0) writeonly uniform uimage2D cell_state_out_img;
             layout(r32f, binding=2) writeonly uniform image2D temp_out_img;
             layout(r32f, binding=3) writeonly uniform image2D integrity_out_img;
             layout(rg32f, binding=4) writeonly uniform image2D velocity_out_img;
-            layout(rgba32f, binding=5) writeonly uniform image2D timer_out_img;
+            layout(r32ui, binding=5) writeonly uniform uimage2D timer_out_img;
             layout(r32f, binding=6) writeonly uniform image2D emitted_material_mask_img;
+            layout(rg32f, binding=7) coherent uniform image2D velocity_inout_img;
+
+            uint material_id_at(ivec2 cell) {
+                return texelFetch(cell_state_tex, cell, 0).x & 0xFFFFu;
+            }
+
+            uint pack_emitted_cell_state(int material_id, float phase) {
+                uint phase_id = uint(clamp(int(round(phase)), 0, 255));
+                return (uint(material_id) & 0xFFFFu) | (phase_id << 16u);
+            }
 
             uint deterministic_selector(int x, int y, uint count) {
                 if (count == 0u) {
@@ -61,7 +74,9 @@
                     return source + ivec2(dx, dy);
                 }
                 if (direction_id == {{DIRECTION_SPEED}}) {
-                    vec2 velocity = texelFetch(velocity_tex, source, 0).xy;
+                    vec2 velocity = velocity_in_place
+                        ? imageLoad(velocity_inout_img, source).xy
+                        : texelFetch(velocity_tex, source, 0).xy;
                     return source + ivec2(int(sign(velocity.x)), int(sign(velocity.y)));
                 }
                 return source;
@@ -89,7 +104,19 @@
                 return -1;
             }
 
+            vec4 unpack_action_word(uint packed_actions) {
+                return vec4(
+                    float(packed_actions & 0xFFu),
+                    float((packed_actions >> 8u) & 0xFFu),
+                    float((packed_actions >> 16u) & 0xFFu),
+                    float((packed_actions >> 24u) & 0x7Fu)
+                );
+            }
+
             vec4 fetch_action_lo(ivec2 cell) {
+                if (use_packed_local_deferred_outputs) {
+                    return unpack_action_word(texelFetch(deferred_packed_local_tex, cell, 0).x);
+                }
                 if (use_local_deferred_outputs) {
                     return texelFetch(deferred_lo_local_tex, ivec3(cell, 0), 0);
                 }
@@ -97,7 +124,16 @@
             }
 
             vec4 fetch_action_hi(ivec2 cell) {
+                if (use_packed_local_deferred_outputs) {
+                    if (!deferred_hi_valid) {
+                        return vec4(0.0);
+                    }
+                    return unpack_action_word(texelFetch(deferred_packed_local_tex, cell, 0).y);
+                }
                 if (use_local_deferred_outputs) {
+                    if (!deferred_hi_valid) {
+                        return vec4(0.0);
+                    }
                     return texelFetch(deferred_hi_local_tex, ivec3(cell, 0), 0);
                 }
                 return texelFetch(action_hi_tex, cell, 0);
@@ -129,14 +165,18 @@
                 float target_integrity = material_params[material_id].x;
                 float current_temp = texelFetch(temp_tex, target, 0).x;
                 float spawn_temp = material_params[material_id].z;
-                imageStore(material_out_img, target, vec4(float(material_id), 0.0, 0.0, 0.0));
-                imageStore(phase_out_img, target, vec4(target_phase, 0.0, 0.0, 0.0));
+                imageStore(cell_state_out_img, target, uvec4(pack_emitted_cell_state(material_id, target_phase), 0u, 0u, 0u));
                 imageStore(integrity_out_img, target, vec4(target_integrity, 0.0, 0.0, 0.0));
                 if (spawn_temp == spawn_temp) {
                     imageStore(temp_out_img, target, vec4(max(current_temp, spawn_temp), 0.0, 0.0, 0.0));
                 }
-                imageStore(velocity_out_img, target, vec4(emitted_velocity(source, target, ai, af), 0.0, 0.0));
-                imageStore(timer_out_img, target, vec4(0.0));
+                vec4 velocity_value = vec4(emitted_velocity(source, target, ai, af), 0.0, 0.0);
+                if (velocity_in_place) {
+                    imageStore(velocity_inout_img, target, velocity_value);
+                } else {
+                    imageStore(velocity_out_img, target, velocity_value);
+                }
+                imageStore(timer_out_img, target, uvec4(0u));
                 imageStore(emitted_material_mask_img, target, vec4(1.0, 0.0, 0.0, 0.0));
                 atomicAdd(reaction_counts[1], 1u);
                 atomicAdd(reaction_counts[1 + {{TYPE_EMIT_MATERIAL}}], 1u);
@@ -150,7 +190,7 @@
                 if (copy_velocity_passthrough) {
                     imageStore(velocity_out_img, target, texelFetch(velocity_tex, target, 0));
                 }
-                if (texelFetch(material_tex, target, 0).x > 0.5) {
+                if (material_id_at(target) != 0u) {
                     return;
                 }
                 for (int sy = max(0, target.y - 1); sy <= min(cell_grid_size.y - 1, target.y + 1); ++sy) {
@@ -167,4 +207,3 @@
                     }
                 }
             }
-            

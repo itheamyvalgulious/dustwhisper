@@ -1,0 +1,11 @@
+#version 430
+#extension GL_NV_gpu_shader5 : require
+#extension GL_NV_shader_thread_group : require
+layout(local_size_x=1, local_size_y=1, local_size_z=1) in;
+layout(std430, binding=0) writeonly buffer WarpSizeBuffer {
+    uint warp_size[];
+};
+
+void main() {
+    warp_size[0] = uint(gl_WarpSizeNV);
+}

@@ -5,7 +5,7 @@
             uniform ivec2 gas_grid_size;
             uniform int flow_source_layers;
             layout(rgba32f, binding=0) writeonly uniform image2D local_emit_cell_hi_img;
-            layout(rgba32f, binding=1) writeonly uniform image2D local_timer_img;
+            layout(r32ui, binding=1) writeonly uniform uimage2D local_timer_img;
             layout(rg32f, binding=2) writeonly uniform image2D local_cell_meta_img;
             layout(rgba32f, binding=3) writeonly uniform image2DArray flow_source_img;
             layout(std430, binding=0) buffer LightEmitterCount {
@@ -17,7 +17,7 @@
                 if (gid.x < cell_grid_size.x && gid.y < cell_grid_size.y) {
                     vec4 zero4 = vec4(0.0);
                     imageStore(local_emit_cell_hi_img, gid, zero4);
-                    imageStore(local_timer_img, gid, zero4);
+                    imageStore(local_timer_img, gid, uvec4(0u));
                     imageStore(local_cell_meta_img, gid, zero4);
                 }
                 if (gid.x < gas_grid_size.x && gid.y < gas_grid_size.y) {
@@ -30,4 +30,3 @@
                     light_emitter_count[linear] = 0u;
                 }
             }
-            

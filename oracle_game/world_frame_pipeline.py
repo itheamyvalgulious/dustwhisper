@@ -59,7 +59,18 @@ def _step_once(
     engine._world_simulation_frame_active = True
     try:
         return _step_once_impl(engine, dt, frame_input=frame_input, capture_output=capture_output)
+    except BaseException as error:
+        heat_pipeline = getattr(getattr(engine, "heat_solver", None), "gpu_pipeline", None)
+        abort_deferred = getattr(heat_pipeline, "abort_deferred_cell_core", None)
+        if callable(abort_deferred):
+            try:
+                abort_deferred(engine)
+            except Exception as cleanup_error:
+                error.add_note(f"failed to restore deferred heat cell core: {cleanup_error}")
+        raise
     finally:
+        engine.heat_motion_handoff_active = False
+        engine.reaction_motion_handoff_active = False
         engine._world_simulation_frame_active = previous_frame_active
 
 
@@ -73,11 +84,9 @@ def _merge_phase_c(engine: "WorldEngine") -> None:
     lr = engine.liquid_solver.gpu_pipeline.resources
     candidates = MergeCandidates(
         heat={
-            "material": hr.material_tex,
-            "phase": hr.phase_tex,
+            "cell_state": hr.cell_state_tex,
             "temp": hr.temp_ping,
             "integrity": hr.integrity_tex,
-            "flags": hr.cell_flags_tex,
         },
         reactions=rxn_cand,
         motion={
@@ -86,14 +95,25 @@ def _merge_phase_c(engine: "WorldEngine") -> None:
             "velocity": mr.velocity_tex,
         },
         liquid={
-            "material": lr.material_in,
-            "phase": lr.phase_in,
-            "flags": lr.flags_in,
+            "cell_state": lr.cell_state_in,
             "timer": lr.timer_in,
             "velocity": lr.velocity_in,
         },
     )
     engine.merge_pipeline.merge_cell_core(engine, candidates)
+
+
+def _clear_reaction_latches_after_optics(engine: "WorldEngine") -> None:
+    optics_pipeline = engine.optics_solver.gpu_pipeline
+    if optics_pipeline.last_reaction_latch_clear_fused:
+        engine.reaction_solver._note_runtime_backend("gpu")
+        return
+    if engine.reaction_solver.gpu_pipeline.clear_reaction_latches(engine):
+        engine.reaction_solver._note_runtime_backend("gpu")
+        return
+    engine._require_gpu_stage("reaction latch clearing")
+    engine.cell_flags &= np.uint8(~int(CellFlag.REACTION_LATCHED) & 0xFF)
+    engine.reaction_solver._note_runtime_backend("cpu")
 
 
 def _step_once_impl(
@@ -169,7 +189,15 @@ def _step_once_impl(
         engine.collapse_solver.gpu_pipeline.reset_pass_profile()
     collapse_pipeline = engine.collapse_solver.gpu_pipeline
     with engine._profile_pass("collapse"):
-        if engine._should_run_formal_collapse_this_frame():
+        incremental_collapse = bool(
+            engine.simulation_backend == "gpu"
+            and getattr(collapse_pipeline, "_incremental_collapse_pipeline_enabled", False)
+        )
+        if incremental_collapse:
+            with collapse_pipeline._profile_pass(engine, "dirty_tile_drain"):
+                engine._drain_gpu_collapse_structure_dirty_tiles()
+            engine.collapse_solver.advance_formal_gpu_dirty_epoch(engine)
+        elif engine._should_run_formal_collapse_this_frame():
             with collapse_pipeline._profile_pass(engine, "dirty_tile_drain"):
                 engine._drain_gpu_collapse_structure_dirty_tiles()
             engine.collapse_solver.step(engine)
@@ -199,12 +227,20 @@ def _step_once_impl(
         and engine.merge_pipeline.available(engine)
     )
     engine.phase_c_defer_cell_publish = phase_c_active
+    motion_pipeline = engine.motion_solver.gpu_pipeline
+    engine.heat_motion_handoff_active = bool(
+        motion_pipeline.can_consume_deferred_heat_core(engine)
+    )
     with engine._profile_pass("heat"):
         engine.heat_solver.step(engine, dt)
     heat_profile = getattr(getattr(engine.heat_solver, "gpu_pipeline", None), "last_pass_profile", None)
     if engine.profile_passes_enabled and isinstance(heat_profile, dict):
         engine.last_pass_profile["heat"] = heat_profile
     engine.reaction_solver.reset_runtime_state(engine)
+    engine._reaction_motion_terminal_dt = float(dt)
+    engine.reaction_motion_handoff_active = bool(
+        engine.simulation_backend == "gpu" and engine._world_simulation_frame_active
+    )
     if engine.profile_passes_enabled:
         engine.reaction_solver.gpu_pipeline.reset_pass_profile()
     with engine._profile_pass("reactions before motion"):
@@ -214,12 +250,31 @@ def _step_once_impl(
                 engine.reaction_solver._advance_timed_slots(engine)
             with engine._profile_pass("reaction_self"):
                 engine.reaction_solver._run_self_rules(engine)
+            material_pair_fused = False
             with engine._profile_pass("reaction_material_material"):
-                engine.reaction_solver._run_material_material(engine)
+                if engine.reaction_solver.gpu_pipeline._material_pair_state_fusion_enabled:
+                    material_pair_fused = engine.reaction_solver._try_run_material_pair_fused(engine)
+                if not material_pair_fused:
+                    engine.reaction_solver._run_material_material(engine)
             with engine._profile_pass("reaction_material_gas"):
-                engine.reaction_solver._run_material_gas(engine)
+                if not material_pair_fused:
+                    engine.reaction_solver._run_material_gas(engine)
+                else:
+                    with engine.reaction_solver.gpu_pipeline._profile_pass(
+                        engine, "material_gas_fused_marker"
+                    ):
+                        pass
             with engine._profile_pass("reaction_material_light"):
-                engine.reaction_solver._run_material_light(engine)
+                if not (
+                    material_pair_fused
+                    and engine.reaction_solver.gpu_pipeline.last_material_pair_fused_light
+                ):
+                    engine.reaction_solver._run_material_light(engine)
+                else:
+                    with engine.reaction_solver.gpu_pipeline._profile_pass(
+                        engine, "material_light_fused_marker"
+                    ):
+                        pass
             with engine._profile_pass("reaction_gas_gas"):
                 engine.reaction_solver._run_gas_gas(engine)
             with engine._profile_pass("reaction_gas_light"):
@@ -227,8 +282,11 @@ def _step_once_impl(
             engine.reaction_solver.gpu_pipeline.flush_formal_reaction_segment(engine, "before_motion")
         finally:
             engine.reaction_solver.gpu_pipeline.end_formal_reaction_segment(engine, "before_motion")
-    with engine._profile_pass("motion"):
-        engine.motion_solver.step(engine, dt)
+    try:
+        with engine._profile_pass("motion"):
+            engine.motion_solver.step(engine, dt)
+    finally:
+        engine.reaction_motion_handoff_active = False
     motion_profile = getattr(getattr(engine.motion_solver, "gpu_pipeline", None), "last_pass_profile", None)
     if engine.profile_passes_enabled and isinstance(motion_profile, dict):
         engine.last_pass_profile["motion"] = motion_profile
@@ -241,28 +299,31 @@ def _step_once_impl(
         with engine._profile_pass("merge_cell_core"):
             _merge_phase_c(engine)
         engine.phase_c_defer_cell_publish = False
+    optics_pipeline = engine.optics_solver.gpu_pipeline
+    optics_pipeline.last_reaction_latch_clear_fused = False
     with engine._profile_pass("optics"):
         engine.optics_solver.step(engine)
     optics_profile = getattr(engine.optics_solver, "last_pass_profile", None)
     if engine.profile_passes_enabled and isinstance(optics_profile, dict):
         engine.last_pass_profile["optics"] = optics_profile
     with engine._profile_pass("latch_clear"):
-        if engine.reaction_solver.gpu_pipeline.clear_reaction_latches(engine):
-            engine.reaction_solver._note_runtime_backend("gpu")
-        else:
-            engine._require_gpu_stage("reaction latch clearing")
-            engine.cell_flags &= np.uint8(~int(CellFlag.REACTION_LATCHED) & 0xFF)
-            engine.reaction_solver._note_runtime_backend("cpu")
+        _clear_reaction_latches_after_optics(engine)
     reaction_profile = getattr(getattr(engine.reaction_solver, "gpu_pipeline", None), "last_pass_profile", None)
     if engine.profile_passes_enabled and isinstance(reaction_profile, dict):
         engine.last_pass_profile["reactions"] = reaction_profile
     with engine._profile_pass("active_decay"):
+        liquid_pipeline = engine.liquid_solver.gpu_pipeline
+        active_decay_fused = bool(
+            getattr(liquid_pipeline, "last_flow_active_decay_fusion_used", False)
+            and getattr(liquid_pipeline, "_flow_active_decay_fusion_frame_id", None)
+            == int(engine.frame_id)
+        )
         active_scheduler_gpu_authoritative = (
             engine.simulation_backend == "gpu"
             and "active_tile_ttl" in engine.bridge.gpu_authoritative_resources
         )
         if active_scheduler_gpu_authoritative:
-            if not engine.bridge.decay_active_scheduler(engine):
+            if not active_decay_fused and not engine.bridge.decay_active_scheduler(engine):
                 engine._require_gpu_stage("active scheduler decay")
                 raise RuntimeError("GPU active scheduler decay failed; CPU fallback is disabled")
         elif engine.simulation_backend == "gpu":
@@ -476,5 +537,3 @@ def _mark_active_rects_runtime(
         engine.active.mark_rect(int(x0), int(y0), int(x1), int(y1), tile_padding=int(tile_padding))
     if engine.simulation_backend == "gpu":
         engine._invalidate_gpu_authoritative_resources("active_meta", "active_tile_ttl", "active_chunk_mask")
-
-

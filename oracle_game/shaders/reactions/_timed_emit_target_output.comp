@@ -1,0 +1,69 @@
+            layout(std430, binding=3) buffer TimedEmitTargetCount {
+                uint timed_emit_target_count[];
+            };
+            layout(std430, binding=4) buffer TimedEmitTargetList {
+                uint timed_emit_target_list[];
+            };
+            layout(std430, binding=5) buffer TimedEmitTargetMarks {
+                uint timed_emit_target_marks[];
+            };
+
+            uint timed_emit_deterministic_selector(int x, int y, uint count) {
+                if (count == 0u) {
+                    return 0u;
+                }
+                uint mixed = (uint(x) * 73856093u) ^ (uint(y) * 19349663u);
+                return mixed % count;
+            }
+
+            ivec2 timed_emit_target_for_direction(ivec2 source, int direction_id) {
+                if (direction_id == {{DIRECTION_DOWN}}) {
+                    return source + ivec2(0, 1);
+                }
+                if (direction_id == {{DIRECTION_UP}}) {
+                    return source + ivec2(0, -1);
+                }
+                if (direction_id == {{DIRECTION_LEFT}}) {
+                    return source + ivec2(-1, 0);
+                }
+                if (direction_id == {{DIRECTION_RIGHT}}) {
+                    return source + ivec2(1, 0);
+                }
+                if (direction_id == {{DIRECTION_RANDOM}}) {
+                    uint selector = timed_emit_deterministic_selector(source.x, source.y, 9u);
+                    int dx = int(selector % 3u) - 1;
+                    int dy = int(selector / 3u) - 1;
+                    return source + ivec2(dx, dy);
+                }
+                if (direction_id == {{DIRECTION_SPEED}}) {
+                    vec2 velocity = texelFetch(velocity_tex, source, 0).xy;
+                    return source + ivec2(int(sign(velocity.x)), int(sign(velocity.y)));
+                }
+                return source;
+            }
+
+            void collect_timed_emit_material_target(ivec2 source, ivec4 action) {
+                if (action.y <= 0) {
+                    return;
+                }
+                ivec2 target = timed_emit_target_for_direction(source, action.z);
+                if (
+                    target.x < 0
+                    || target.y < 0
+                    || target.x >= cell_grid_size.x
+                    || target.y >= cell_grid_size.y
+                ) {
+                    return;
+                }
+                if (material_value_at(target) > 0.5) {
+                    return;
+                }
+                uint target_index = uint(target.y * cell_grid_size.x + target.x);
+                uint generation = timed_emit_target_count[1];
+                uint previous = atomicExchange(timed_emit_target_marks[target_index], generation);
+                if (previous == generation) {
+                    return;
+                }
+                uint slot = atomicAdd(timed_emit_target_count[2], 1u);
+                timed_emit_target_list[slot] = target_index;
+            }

@@ -466,10 +466,24 @@ def _compact_active_tiles_from_chunks_program(world: "WorldEngine") -> Any:
     )
 
 
-def _dirty_mark_program(world: "WorldEngine") -> Any:
+def _dirty_mark_program(world: "WorldEngine", *, packed_cell_state: bool = False) -> Any:
+    state_declarations = (
+        "layout(binding=0) uniform usampler2D cell_state_tex;"
+        if packed_cell_state
+        else "layout(binding=0) uniform sampler2D material_tex;\n"
+        "layout(binding=1) uniform sampler2D phase_tex;"
+    )
+    state_fetch = (
+        "uint cell_state = texelFetch(cell_state_tex, gid, 0).x;\n"
+        "            int new_material = int(cell_state & 0xFFFFu);\n"
+        "            int new_phase = int((cell_state >> 16u) & 0xFFu);"
+        if packed_cell_state
+        else "int new_material = int(clamp(round(texelFetch(material_tex, gid, 0).x), 0.0, 65535.0));\n"
+        "            int new_phase = int(clamp(round(texelFetch(phase_tex, gid, 0).x), 0.0, 255.0));"
+    )
     return _collapse_dirty_program(
         world,
-        "collapse_structure_dirty_tiles",
+        "collapse_structure_dirty_tiles_packed" if packed_cell_state else "collapse_structure_dirty_tiles",
         f"""
         #version 430
         layout(local_size_x={LOCAL_SIZE}, local_size_y={LOCAL_SIZE}, local_size_z=1) in;
@@ -478,8 +492,7 @@ def _dirty_mark_program(world: "WorldEngine") -> Any:
         uniform int tile_size;
         uniform int material_count;
         uniform int phase_falling_island;
-        layout(binding=0) uniform sampler2D material_tex;
-        layout(binding=1) uniform sampler2D phase_tex;
+        {state_declarations}
         layout(std430, binding=0) readonly buffer BridgeCellCoreBuffer {{
             uint bridge_cell_core[];
         }};
@@ -546,8 +559,7 @@ def _dirty_mark_program(world: "WorldEngine") -> Any:
             uint previous_word = bridge_cell_core[cell_index * 5];
             int old_material = int(previous_word & 0xFFFFu);
             int old_phase = int((previous_word >> 16u) & 0xFFu);
-            int new_material = int(clamp(round(texelFetch(material_tex, gid, 0).x), 0.0, 65535.0));
-            int new_phase = int(clamp(round(texelFetch(phase_tex, gid, 0).x), 0.0, 255.0));
+            {state_fetch}
             uint old_flags = structure_flags(old_material, old_phase);
             uint new_flags = structure_flags(new_material, new_phase);
             if (old_flags == new_flags) {{
@@ -691,6 +703,105 @@ def clear_collapse_structure_dirty_tile_queue_on_gpu(world: "WorldEngine") -> bo
     return True
 
 
+def _mark_dirty_tile_rect_program(world: "WorldEngine") -> Any:
+    return _collapse_dirty_program(
+        world,
+        "collapse_structure_dirty_mark_tile_rect",
+        f"""
+        #version 430
+        layout(local_size_x={LOCAL_SIZE}, local_size_y={LOCAL_SIZE}, local_size_z=1) in;
+        uniform ivec4 tile_rect;
+        uniform ivec2 tile_grid_size;
+        layout(std430, binding=0) buffer DirtyTileMaskBuffer {{
+            uint dirty_tile_mask[];
+        }};
+        layout(std430, binding=1) buffer DirtyTileCountBuffer {{
+            uint dirty_tile_count[];
+        }};
+        layout(std430, binding=2) buffer DirtyTileListBuffer {{
+            ivec2 dirty_tile_list[];
+        }};
+        layout(std430, binding=3) buffer DirtyTileDispatchArgsBuffer {{
+            uint dirty_tile_dispatch_args[];
+        }};
+        void main() {{
+            ivec2 tile = tile_rect.xy + ivec2(gl_GlobalInvocationID.xy);
+            if (tile.x >= tile_rect.z || tile.y >= tile_rect.w) {{
+                return;
+            }}
+            int tile_index = tile.y * tile_grid_size.x + tile.x;
+            uint previous = atomicOr(dirty_tile_mask[tile_index], 1u);
+            if ((previous & 1u) != 0u) {{
+                return;
+            }}
+            uint slot = atomicAdd(dirty_tile_count[0], 1u);
+            dirty_tile_list[int(slot)] = tile;
+            atomicMax(dirty_tile_dispatch_args[0], slot + 1u);
+        }}
+        """,
+    )
+
+
+def mark_collapse_structure_dirty_tile_regions_on_gpu(
+    world: "WorldEngine",
+    regions: list[tuple[int, int, int, int]],
+    *,
+    deferred: bool = False,
+) -> bool:
+    if not _formal_gpu_frame(world) or not regions:
+        return False
+    bridge = world.bridge
+    bridge.ensure_world_resources(world)
+    if not bridge.enabled or bridge.ctx is None:
+        return False
+    dirty_mask = ensure_collapse_structure_dirty_tile_mask(world)
+    dirty_queue = ensure_collapse_structure_dirty_tile_queue(world)
+    if dirty_mask is None or dirty_queue is None:
+        return False
+    dirty_count, dirty_list, dirty_dispatch_args = dirty_queue
+    tile_size = max(1, int(world.active.tile_size))
+    tile_width = max(1, int(world.active.tile_width))
+    tile_height = max(1, int(world.active.tile_height))
+    program = _mark_dirty_tile_rect_program(world)
+    program["tile_grid_size"].value = (tile_width, tile_height)
+    dirty_mask.bind_to_storage_buffer(binding=0)
+    dirty_count.bind_to_storage_buffer(binding=1)
+    dirty_list.bind_to_storage_buffer(binding=2)
+    dirty_dispatch_args.bind_to_storage_buffer(binding=3)
+    marked = False
+    for x0, y0, x1, y1 in regions:
+        tile_x0 = max(0, min(tile_width, int(x0) // tile_size))
+        tile_y0 = max(0, min(tile_height, int(y0) // tile_size))
+        tile_x1 = max(0, min(tile_width, (int(x1) + tile_size - 1) // tile_size))
+        tile_y1 = max(0, min(tile_height, (int(y1) + tile_size - 1) // tile_size))
+        if tile_x0 >= tile_x1 or tile_y0 >= tile_y1:
+            continue
+        program["tile_rect"].value = (tile_x0, tile_y0, tile_x1, tile_y1)
+        program.run(
+            (tile_x1 - tile_x0 + LOCAL_SIZE - 1) // LOCAL_SIZE,
+            (tile_y1 - tile_y0 + LOCAL_SIZE - 1) // LOCAL_SIZE,
+            1,
+        )
+        merge_collapse_structure_dirty_tile_bounds(
+            world,
+            (tile_x0, tile_y0, tile_x1, tile_y1),
+        )
+        marked = True
+    if not marked:
+        return False
+    _shader_storage_barrier(bridge.ctx, command=True)
+    setattr(world, "_gpu_collapse_structure_dirty_tiles_pending", True)
+    if deferred:
+        setattr(world, "_gpu_collapse_structure_dirty_tiles_deferred", True)
+    bridge.mark_gpu_authoritative(
+        COLLAPSE_STRUCTURE_DIRTY_TILE_MASK_BUFFER,
+        COLLAPSE_STRUCTURE_DIRTY_TILE_COUNT_BUFFER,
+        COLLAPSE_STRUCTURE_DIRTY_TILE_LIST_BUFFER,
+        COLLAPSE_STRUCTURE_DIRTY_TILE_DISPATCH_ARGS_BUFFER,
+    )
+    return True
+
+
 def _build_active_tile_dispatch(
     world: "WorldEngine",
     *,
@@ -740,11 +851,12 @@ def _build_active_tile_dispatch(
 
 def mark_collapse_structure_dirty_tiles_from_bridge_cell_core(
     world: "WorldEngine",
-    material_texture: Any,
-    phase_texture: Any,
+    material_texture: Any | None,
+    phase_texture: Any | None,
     *,
     expansion_radius: int = 1,
     dispatch_guard_buffer: Any | None = None,
+    cell_state_texture: Any | None = None,
 ) -> bool:
     if not _formal_gpu_frame(world):
         return False
@@ -775,7 +887,10 @@ def mark_collapse_structure_dirty_tiles_from_bridge_cell_core(
         expansion_radius=expansion_radius,
     )
     material_flags_buffer, material_count = _ensure_material_flags_buffer(world)
-    program = _dirty_mark_program(world)
+    packed_cell_state = cell_state_texture is not None
+    if not packed_cell_state and (material_texture is None or phase_texture is None):
+        raise ValueError("collapse dirty tracking requires split material/phase or packed cell state")
+    program = _dirty_mark_program(world, packed_cell_state=packed_cell_state)
     if not hasattr(program, "run_indirect"):
         raise RuntimeError("GPU collapse dirty tracking requires ComputeShader.run_indirect")
     program["cell_grid_size"].value = (int(world.width), int(world.height))
@@ -783,8 +898,11 @@ def mark_collapse_structure_dirty_tiles_from_bridge_cell_core(
     program["tile_size"].value = int(world.active.tile_size)
     program["material_count"].value = int(material_count)
     program["phase_falling_island"].value = int(Phase.FALLING_ISLAND)
-    material_texture.use(location=0)
-    phase_texture.use(location=1)
+    if packed_cell_state:
+        cell_state_texture.use(location=0)
+    else:
+        material_texture.use(location=0)
+        phase_texture.use(location=1)
     bridge.buffers["cell_core"].bind_to_storage_buffer(binding=0)
     material_flags_buffer.bind_to_storage_buffer(binding=1)
     dirty_buffer.bind_to_storage_buffer(binding=2)

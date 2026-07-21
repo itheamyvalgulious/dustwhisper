@@ -1,0 +1,287 @@
+#version 430
+{{SPARSE_WARP_EXTENSIONS}}
+layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+uniform int build_kind;
+uniform ivec2 cell_grid_size;
+uniform ivec2 gas_grid_size;
+uniform ivec2 cell_sparse_tile_grid_size;
+uniform ivec2 gas_sparse_tile_grid_size;
+uniform int gas_cell_size;
+uniform int dose_channel_count;
+uniform bool expand_gas_visible;
+uniform uint sparse_generation;
+layout(std430, binding=0) readonly buffer CellDoseAccum { uint cell_dose_accum[]; };
+layout(std430, binding=1) readonly buffer GasDoseAccum { uint gas_dose_accum[]; };
+layout(std430, binding=2) readonly buffer IllumAccum { uint illum_accum[]; };
+layout(std430, binding=3) buffer SparseVisibleMarks { uint sparse_visible_marks[]; };
+layout(std430, binding=4) writeonly buffer SparseCellList { uint sparse_cell_list[]; };
+layout(std430, binding=5) writeonly buffer SparseGasList { uint sparse_gas_list[]; };
+layout(std430, binding=6) writeonly buffer SparseVisibleList { uint sparse_visible_list[]; };
+layout(std430, binding=7) buffer SparseRuntime { uint sparse_runtime[]; };
+layout(std430, binding=8) readonly buffer SparseCellTileList { uint sparse_cell_tile_list[]; };
+layout(std430, binding=9) readonly buffer SparseGasTileList { uint sparse_gas_tile_list[]; };
+layout(std430, binding=10) writeonly buffer BridgeCellDose { float bridge_cell_dose[]; };
+layout(std430, binding=11) writeonly buffer BridgeGasDose { float bridge_gas_dose[]; };
+const float CELL_ACCUM_INV_SCALE = {{CELL_ACCUM_INV_SCALE}};
+const float GAS_ACCUM_INV_SCALE = {{GAS_ACCUM_INV_SCALE}};
+
+#if {{SPARSE_TILE_LOCAL_ATOMIC_MAX}}
+shared uint local_cell_dispatch_max;
+shared uint local_gas_dispatch_max;
+shared uint local_visible_dispatch_max;
+#endif
+
+void append_visible(uint index) {
+    if (atomicExchange(sparse_visible_marks[index], sparse_generation) == sparse_generation) {
+        return;
+    }
+    uint slot = atomicAdd(sparse_runtime[2], 1u);
+    sparse_visible_list[slot] = index;
+    #if {{SPARSE_TILE_LOCAL_ATOMIC_MAX}}
+    atomicMax(local_visible_dispatch_max, (slot + {{SPARSE_LOCAL_SIZE}}u) / {{SPARSE_LOCAL_SIZE}}u);
+    #else
+    atomicMax(sparse_runtime[12], (slot + {{SPARSE_LOCAL_SIZE}}u) / {{SPARSE_LOCAL_SIZE}}u);
+    #endif
+}
+
+void append_cell_entry(uint index) {
+    uint slot = atomicAdd(sparse_runtime[0], 1u);
+    sparse_cell_list[slot] = index;
+    #if {{SPARSE_TILE_LOCAL_ATOMIC_MAX}}
+    atomicMax(local_cell_dispatch_max, (slot + {{SPARSE_LOCAL_SIZE}}u) / {{SPARSE_LOCAL_SIZE}}u);
+    #else
+    atomicMax(sparse_runtime[4], (slot + {{SPARSE_LOCAL_SIZE}}u) / {{SPARSE_LOCAL_SIZE}}u);
+    #endif
+}
+
+void append_gas_entry(uint index) {
+    uint slot = atomicAdd(sparse_runtime[1], 1u);
+    sparse_gas_list[slot] = index;
+    #if {{SPARSE_TILE_LOCAL_ATOMIC_MAX}}
+    atomicMax(local_gas_dispatch_max, (slot + {{SPARSE_LOCAL_SIZE}}u) / {{SPARSE_LOCAL_SIZE}}u);
+    #else
+    atomicMax(sparse_runtime[8], (slot + {{SPARSE_LOCAL_SIZE}}u) / {{SPARSE_LOCAL_SIZE}}u);
+    #endif
+}
+
+void expand_gas_cell(ivec2 gas_cell) {
+    ivec2 begin = gas_cell * gas_cell_size;
+    ivec2 end = min(begin + ivec2(gas_cell_size), cell_grid_size);
+    for (int y = begin.y; y < end.y; ++y) {
+        for (int x = begin.x; x < end.x; ++x) {
+            append_visible(uint(y * cell_grid_size.x + x));
+        }
+    }
+}
+
+void build_cell_entries() {
+    uint tile_slot = gl_WorkGroupID.x;
+    if (tile_slot >= sparse_runtime[16]) {
+        return;
+    }
+    uint tile_index = sparse_cell_tile_list[tile_slot];
+    ivec2 tile = ivec2(
+        int(tile_index % uint(cell_sparse_tile_grid_size.x)),
+        int(tile_index / uint(cell_sparse_tile_grid_size.x))
+    );
+    ivec2 cell = tile * {{LOCAL_SIZE}} + ivec2(gl_LocalInvocationID.xy);
+    if (cell.x >= cell_grid_size.x || cell.y >= cell_grid_size.y) {
+        return;
+    }
+    uint cell_count = uint(cell_grid_size.x * cell_grid_size.y);
+    uint spatial_index = uint(cell.y * cell_grid_size.x + cell.x);
+    bool visible = false;
+    for (int channel = 0; channel < dose_channel_count; ++channel) {
+        uint index = uint(channel) * cell_count + spatial_index;
+        uint illumination = illum_accum[index];
+        uint dose = cell_dose_accum[index];
+        if (illumination != 0u || dose != 0u) {
+            append_cell_entry(index);
+            bridge_cell_dose[index] = float(dose) * CELL_ACCUM_INV_SCALE;
+        }
+        visible = visible || illumination != 0u;
+    }
+    if (visible) {
+        append_visible(spatial_index);
+    }
+}
+
+void build_gas_entries() {
+    uint tile_slot = gl_WorkGroupID.x;
+    if (tile_slot >= sparse_runtime[17]) {
+        return;
+    }
+    uint tile_index = sparse_gas_tile_list[tile_slot];
+    ivec2 tile = ivec2(
+        int(tile_index % uint(gas_sparse_tile_grid_size.x)),
+        int(tile_index / uint(gas_sparse_tile_grid_size.x))
+    );
+    ivec2 gas_cell = tile * {{LOCAL_SIZE}} + ivec2(gl_LocalInvocationID.xy);
+    if (gas_cell.x >= gas_grid_size.x || gas_cell.y >= gas_grid_size.y) {
+        return;
+    }
+    uint gas_cell_count = uint(gas_grid_size.x * gas_grid_size.y);
+    uint spatial_index = uint(gas_cell.y * gas_grid_size.x + gas_cell.x);
+    bool has_gas_haze = false;
+    for (int channel = 0; channel < dose_channel_count; ++channel) {
+        uint index = uint(channel) * gas_cell_count + spatial_index;
+        uint dose = gas_dose_accum[index];
+        if (dose != 0u) {
+            append_gas_entry(index);
+            bridge_gas_dose[index] = float(dose) * GAS_ACCUM_INV_SCALE;
+            has_gas_haze = true;
+        }
+    }
+    if (expand_gas_visible && has_gas_haze) {
+        expand_gas_cell(gas_cell);
+    }
+}
+
+#if {{SPARSE_GAS_OWNER_WARP_COMPACTION}}
+uint warp_prefix_sum(uint value, out uint warp_total) {
+    uint inclusive = value;
+    for (uint offset = 1u; offset < 32u; offset <<= 1u) {
+        uint prior = shuffleUpNV(inclusive, offset, 32);
+        if (uint(gl_ThreadInWarpNV) >= offset) {
+            inclusive += prior;
+        }
+    }
+    warp_total = shuffleNV(inclusive, 31u, 32);
+    return inclusive - value;
+}
+
+uint warp_reserve(uint runtime_index, uint count, out uint warp_total) {
+    uint prefix = warp_prefix_sum(count, warp_total);
+    uint base = 0u;
+    if (gl_ThreadInWarpNV == 0 && warp_total != 0u) {
+        base = atomicAdd(sparse_runtime[runtime_index], warp_total);
+    }
+    base = shuffleNV(base, 0u, 32);
+    return base + prefix;
+}
+
+void build_gas_entries_owner_warp() {
+    uint tile_slot = gl_WorkGroupID.x;
+    bool valid_tile = tile_slot < sparse_runtime[17];
+    uint tile_index = valid_tile ? sparse_gas_tile_list[tile_slot] : 0u;
+    ivec2 tile = ivec2(
+        int(tile_index % uint(gas_sparse_tile_grid_size.x)),
+        int(tile_index / uint(gas_sparse_tile_grid_size.x))
+    );
+    ivec2 gas_cell = tile * {{LOCAL_SIZE}} + ivec2(gl_LocalInvocationID.xy);
+    bool valid_gas_cell = valid_tile
+        && gas_cell.x < gas_grid_size.x
+        && gas_cell.y < gas_grid_size.y;
+    uint gas_cell_count = uint(gas_grid_size.x * gas_grid_size.y);
+    uint spatial_index = valid_gas_cell
+        ? uint(gas_cell.y * gas_grid_size.x + gas_cell.x)
+        : 0u;
+    bool has_gas_haze = false;
+
+    for (int channel = 0; channel < dose_channel_count; ++channel) {
+        uint index = uint(channel) * gas_cell_count + spatial_index;
+        uint dose = valid_gas_cell ? gas_dose_accum[index] : 0u;
+        bool has_dose = valid_gas_cell && dose != 0u;
+        uint active_mask = ballotThreadNV(has_dose);
+        uint lane_bit = 1u << uint(gl_ThreadInWarpNV);
+        uint prior_count = uint(bitCount(active_mask & (lane_bit - 1u)));
+        uint active_count = uint(bitCount(active_mask));
+        uint base = 0u;
+        if (gl_ThreadInWarpNV == 0 && active_count != 0u) {
+            base = atomicAdd(sparse_runtime[1], active_count);
+        }
+        base = shuffleNV(base, 0u, 32);
+        if (has_dose) {
+            sparse_gas_list[base + prior_count] = index;
+            bridge_gas_dose[index] = float(dose) * GAS_ACCUM_INV_SCALE;
+        }
+        if (gl_ThreadInWarpNV == 0 && active_count != 0u) {
+            uint end = base + active_count;
+            atomicMax(
+                sparse_runtime[8],
+                (end + {{SPARSE_LOCAL_SIZE}}u - 1u) / {{SPARSE_LOCAL_SIZE}}u
+            );
+        }
+        has_gas_haze = has_gas_haze || has_dose;
+    }
+
+    uint owned_visible_mask = 0u;
+    ivec2 begin = gas_cell * 4;
+    for (int local_y = 0; local_y < 4; ++local_y) {
+        for (int local_x = 0; local_x < 4; ++local_x) {
+            ivec2 cell = begin + ivec2(local_x, local_y);
+            uint bit_index = uint(local_y * 4 + local_x);
+            bool in_bounds = valid_gas_cell
+                && cell.x < cell_grid_size.x
+                && cell.y < cell_grid_size.y;
+            uint cell_index = in_bounds
+                ? uint(cell.y * cell_grid_size.x + cell.x)
+                : 0u;
+            if (
+                expand_gas_visible
+                && has_gas_haze
+                && in_bounds
+                && sparse_visible_marks[cell_index] != sparse_generation
+            ) {
+                owned_visible_mask |= 1u << bit_index;
+            }
+        }
+    }
+
+    uint owned_count = uint(bitCount(owned_visible_mask));
+    uint warp_total = 0u;
+    uint visible_output = warp_reserve(2u, owned_count, warp_total);
+    uint local_output = 0u;
+    for (int local_y = 0; local_y < 4; ++local_y) {
+        for (int local_x = 0; local_x < 4; ++local_x) {
+            uint bit_index = uint(local_y * 4 + local_x);
+            if ((owned_visible_mask & (1u << bit_index)) == 0u) {
+                continue;
+            }
+            ivec2 cell = begin + ivec2(local_x, local_y);
+            uint cell_index = uint(cell.y * cell_grid_size.x + cell.x);
+            sparse_visible_marks[cell_index] = sparse_generation;
+            sparse_visible_list[visible_output + local_output] = cell_index;
+            local_output += 1u;
+        }
+    }
+    if (gl_ThreadInWarpNV == 0 && warp_total != 0u) {
+        uint warp_base = visible_output;
+        uint end = warp_base + warp_total;
+        atomicMax(
+            sparse_runtime[12],
+            (end + {{SPARSE_LOCAL_SIZE}}u - 1u) / {{SPARSE_LOCAL_SIZE}}u
+        );
+    }
+}
+#endif
+
+void main() {
+    #if {{SPARSE_TILE_LOCAL_ATOMIC_MAX}}
+    if (gl_LocalInvocationIndex == 0u) {
+        local_cell_dispatch_max = 0u;
+        local_gas_dispatch_max = 0u;
+        local_visible_dispatch_max = 0u;
+    }
+    barrier();
+    #endif
+
+    if (build_kind == 0) {
+        build_cell_entries();
+    } else {
+#if {{SPARSE_GAS_OWNER_WARP_COMPACTION}}
+        build_gas_entries_owner_warp();
+#else
+        build_gas_entries();
+#endif
+    }
+
+    #if {{SPARSE_TILE_LOCAL_ATOMIC_MAX}}
+    barrier();
+    if (gl_LocalInvocationIndex == 0u) {
+        atomicMax(sparse_runtime[4], local_cell_dispatch_max);
+        atomicMax(sparse_runtime[8], local_gas_dispatch_max);
+        atomicMax(sparse_runtime[12], local_visible_dispatch_max);
+    }
+    #endif
+}

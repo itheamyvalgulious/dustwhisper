@@ -6,12 +6,42 @@
             uniform int gas_cell_size;
             uniform int light_count;
             uniform int dose_channel_count;
+            uniform bool publish_bridge_outputs;
+            uniform bool use_accumulator_inputs;
+            uniform bool clear_reaction_latches;
+            uniform uint reaction_latched_flag_shifted;
             layout(binding=1) uniform sampler2DArray illum_layer_tex;
             layout(binding=2) uniform sampler2DArray gas_dose_tex;
             layout(rgba32f, binding=6) writeonly uniform image2D visible_img;
+            layout(rgba32f, binding=7) writeonly uniform image2D bridge_visible_img;
+            layout(std430, binding=0) readonly buffer IllumAccum {
+                uint illum_accum[];
+            };
+            layout(std430, binding=1) readonly buffer GasDoseAccum {
+                uint gas_dose_accum[];
+            };
             layout(std430, binding=4) buffer LightBuffer {
                 vec4 light_params[{{LIGHT_PARAM_COUNT}}];
             };
+            layout(std430, binding=5) buffer BridgeCellCoreBuffer {
+                uint bridge_cell_core[];
+            };
+            const float GAS_ACCUM_INV_SCALE = 0.0000002384185791015625;
+            const float ILLUM_ACCUM_INV_SCALE = 0.000000476837158203125;
+            float cell_visible_at(ivec2 cell, int dose_channel) {
+                if (use_accumulator_inputs) {
+                    int index = (dose_channel * cell_grid_size.y + cell.y) * cell_grid_size.x + cell.x;
+                    return float(illum_accum[index]) * ILLUM_ACCUM_INV_SCALE;
+                }
+                return texelFetch(illum_layer_tex, ivec3(cell, dose_channel), 0).x;
+            }
+            float gas_haze_at(ivec2 gas_cell, int dose_channel) {
+                if (use_accumulator_inputs) {
+                    int index = (dose_channel * gas_grid_size.y + gas_cell.y) * gas_grid_size.x + gas_cell.x;
+                    return float(gas_dose_accum[index]) * GAS_ACCUM_INV_SCALE;
+                }
+                return texelFetch(gas_dose_tex, ivec3(gas_cell, dose_channel), 0).x;
+            }
             vec3 accent_for_channel(int visual_channel) {
                 int channel = ((visual_channel % 3) + 3) % 3;
                 if (channel == 0) {
@@ -61,7 +91,7 @@
                     if (dose_channel < 0 || dose_channel >= dose_channel_count) {
                         continue;
                     }
-                    float cell_visible = texelFetch(illum_layer_tex, ivec3(cell, dose_channel), 0).x;
+                    float cell_visible = cell_visible_at(cell, dose_channel);
                     float gas_haze = 0.0;
                     if (
                         gas_cell.x >= 0
@@ -69,7 +99,7 @@
                         && gas_cell.x < gas_grid_size.x
                         && gas_cell.y < gas_grid_size.y
                     ) {
-                        gas_haze = texelFetch(gas_dose_tex, ivec3(gas_cell, dose_channel), 0).x;
+                        gas_haze = gas_haze_at(gas_cell, dose_channel);
                     }
                     if (cell_visible <= 0.0 && gas_haze <= 0.0) {
                         continue;
@@ -85,6 +115,15 @@
                         + gas_haze * (tint * scales.z)
                     );
                 }
-                imageStore(visible_img, cell, vec4(frame, 1.0));
+                vec4 visible = vec4(frame, 1.0);
+                if (publish_bridge_outputs) {
+                    imageStore(visible_img, cell, visible);
+                    imageStore(bridge_visible_img, cell, visible);
+                    if (clear_reaction_latches) {
+                        int word_index = (cell.y * cell_grid_size.x + cell.x) * 5;
+                        bridge_cell_core[word_index] &= ~reaction_latched_flag_shifted;
+                    }
+                } else {
+                    imageStore(visible_img, cell, visible);
+                }
             }
-            

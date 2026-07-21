@@ -9,6 +9,10 @@ uniform ivec2 tile_grid_size;
 uniform int tile_size;
 
 layout(binding=0) uniform sampler2D source_tex;
+#if {{SUPPORT_JFA_U8}}
+layout(binding=1) uniform sampler2D support_seed_tex;
+layout(r8ui, binding=0) writeonly uniform uimage2D support_seed_u8_img;
+#endif
 layout(std430, binding=0) readonly buffer ConnectedTileMask {
     int connected_tiles[];
 };
@@ -59,12 +63,14 @@ void main() {
     barrier();
 
     ivec2 cell = tile * tile_size + local_cell;
-    if (
-        local_cell.x >= tile_size ||
-        local_cell.y >= tile_size ||
-        !in_grid(cell) ||
-        texelFetch(source_tex, cell, 0).x <= 0.5
-    ) {
+    if (local_cell.x >= tile_size || local_cell.y >= tile_size || !in_grid(cell)) {
+        return;
+    }
+#if {{SUPPORT_JFA_U8}}
+    bool support_seed = texelFetch(support_seed_tex, cell, 0).x > 0.5;
+    imageStore(support_seed_u8_img, cell, uvec4(support_seed ? 1u : 0u, 0u, 0u, 0u));
+#endif
+    if (texelFetch(source_tex, cell, 0).x <= 0.5) {
         return;
     }
     atomicOr(connected_tile_row_masks[mask_base + local_cell.y], 1u << uint(local_cell.x));

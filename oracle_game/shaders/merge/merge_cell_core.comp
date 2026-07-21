@@ -7,36 +7,27 @@ layout(std430, binding=0) buffer BridgeCellCoreBuffer {
 };
 
 // heat candidate
-layout(binding=0) uniform sampler2D heat_material_tex;
-layout(binding=1) uniform sampler2D heat_phase_tex;
+layout(binding=0) uniform usampler2D heat_cell_state_tex;
 layout(binding=2) uniform sampler2D heat_temp_tex;
 layout(binding=3) uniform sampler2D heat_integrity_tex;
-layout(binding=4) uniform sampler2D heat_flags_tex;
 // reactions candidate
 layout(binding=5) uniform sampler2D rxn_material_tex;
 layout(binding=6) uniform sampler2D rxn_phase_tex;
 layout(binding=7) uniform sampler2D rxn_temp_tex;
 layout(binding=8) uniform sampler2D rxn_integrity_tex;
-layout(binding=9) uniform sampler2D rxn_timer_tex;
-layout(binding=10) uniform sampler2D rxn_latched_tex;
+layout(binding=9) uniform usampler2D rxn_timer_tex;
+layout(binding=10) uniform sampler2D rxn_meta_tex;
 layout(binding=11) uniform sampler2D rxn_velocity_tex;
 // motion candidate
 layout(binding=12) uniform sampler2D motion_material_tex;
 layout(binding=13) uniform sampler2D motion_phase_tex;
 layout(binding=14) uniform sampler2D motion_velocity_tex;
 // liquid candidate
-layout(binding=15) uniform sampler2D liquid_material_tex;
-layout(binding=16) uniform sampler2D liquid_phase_tex;
-layout(binding=17) uniform sampler2D liquid_flags_tex;
-layout(binding=18) uniform sampler2D liquid_timer_tex;
+layout(binding=15) uniform usampler2D liquid_cell_state_tex;
+layout(binding=18) uniform usampler2D liquid_timer_tex;
 layout(binding=19) uniform sampler2D liquid_velocity_tex;
 
 layout(r32f, binding=0) writeonly uniform image2D bridge_material_img;
-
-uint pack_timer(vec4 timer) {
-    uvec4 value = uvec4(clamp(round(timer), vec4(0.0), vec4(255.0)));
-    return value.x | (value.y << 8u) | (value.z << 16u) | (value.w << 24u);
-}
 
 bool changed_f(float a, float b) {
     return a != b;
@@ -62,36 +53,32 @@ void main() {
     float prev_flags = float((w0 >> 24) & 0xFFu);
     vec2 prev_velocity = unpackHalf2x16(w1);
     float prev_temp = uintBitsToFloat(w2);
-    vec4 prev_timer = vec4(
-        float(w3 & 0xFFu),
-        float((w3 >> 8) & 0xFFu),
-        float((w3 >> 16) & 0xFFu),
-        float((w3 >> 24) & 0xFFu)
-    );
     float prev_integrity = float(w4 & 0xFFFFu);
 
-    float heat_material = texelFetch(heat_material_tex, gid, 0).x;
-    float heat_phase = texelFetch(heat_phase_tex, gid, 0).x;
+    uint heat_cell_state = texelFetch(heat_cell_state_tex, gid, 0).x;
+    float heat_material = float(heat_cell_state & 0xFFFFu);
+    float heat_phase = float((heat_cell_state >> 16u) & 0xFFu);
     float heat_temp = texelFetch(heat_temp_tex, gid, 0).x;
     float heat_integrity = texelFetch(heat_integrity_tex, gid, 0).x;
-    float heat_flags = texelFetch(heat_flags_tex, gid, 0).x;
+    float heat_flags = float((heat_cell_state >> 24u) & 0xFFu);
 
     float rxn_material = texelFetch(rxn_material_tex, gid, 0).x;
     float rxn_phase = texelFetch(rxn_phase_tex, gid, 0).x;
     float rxn_temp = texelFetch(rxn_temp_tex, gid, 0).x;
     float rxn_integrity = texelFetch(rxn_integrity_tex, gid, 0).x;
-    vec4 rxn_timer = texelFetch(rxn_timer_tex, gid, 0);
-    float rxn_latched = texelFetch(rxn_latched_tex, gid, 0).x;
+    uint rxn_timer = texelFetch(rxn_timer_tex, gid, 0).x;
+    float rxn_latched = texelFetch(rxn_meta_tex, gid, 0).y;
     vec2 rxn_velocity = texelFetch(rxn_velocity_tex, gid, 0).xy;
 
     float motion_material = texelFetch(motion_material_tex, gid, 0).x;
     float motion_phase = texelFetch(motion_phase_tex, gid, 0).x;
     vec2 motion_velocity = texelFetch(motion_velocity_tex, gid, 0).xy;
 
-    float liquid_material = texelFetch(liquid_material_tex, gid, 0).x;
-    float liquid_phase = texelFetch(liquid_phase_tex, gid, 0).x;
-    float liquid_flags = texelFetch(liquid_flags_tex, gid, 0).x;
-    vec4 liquid_timer = texelFetch(liquid_timer_tex, gid, 0);
+    uint liquid_cell_state = texelFetch(liquid_cell_state_tex, gid, 0).x;
+    float liquid_material = float(liquid_cell_state & 0xFFFFu);
+    float liquid_phase = float((liquid_cell_state >> 16u) & 0xFFu);
+    float liquid_flags = float((liquid_cell_state >> 24u) & 0xFFu);
+    uint liquid_timer = texelFetch(liquid_timer_tex, gid, 0).x;
     vec2 liquid_velocity = texelFetch(liquid_velocity_tex, gid, 0).xy;
 
     // material: reactions > motion > liquid > heat
@@ -117,9 +104,9 @@ void main() {
     else if (changed_f(rxn_integrity, prev_integrity)) integrity = rxn_integrity;
 
     // timer: reactions (falls through to prev when reactions unchanged)
-    vec4 timer = prev_timer;
-    if (rxn_timer != prev_timer) timer = rxn_timer;
-    else if (liquid_timer != prev_timer) timer = liquid_timer;
+    uint timer = w3;
+    if (rxn_timer != w3) timer = rxn_timer;
+    else if (liquid_timer != w3) timer = liquid_timer;
 
     // flags: liquid/heat candidates carry the full flags byte (prev | their
     // changes); reactions only sets the REACTION_LATCHED bit (bit 1 == 2).
@@ -143,7 +130,7 @@ void main() {
     cell_core[idx] = material_id | (phase_id << 16u) | (flags_id << 24u);
     cell_core[idx + 1] = packHalf2x16(velocity);
     cell_core[idx + 2] = floatBitsToUint(temp);
-    cell_core[idx + 3] = pack_timer(timer);
+    cell_core[idx + 3] = timer;
     cell_core[idx + 4] = uint(integrity + 0.5) & 0xFFFFu;
 
     imageStore(bridge_material_img, gid, vec4(material, 0.0, 0.0, 0.0));

@@ -59,6 +59,20 @@ def _solve_masks(
 def _use_full_gpu_authoritative_reaction_solve_masks(solver, world: "WorldEngine", stage: str | None) -> bool:
     if not solver._active_scheduler_gpu_authoritative(world):
         return False
+    if (
+        stage in {"timed", "self"}
+        and getattr(
+            solver.gpu_pipeline,
+            "_timed_self_authoritative_segment_masks_enabled",
+            False,
+        )
+    ):
+        # The formal timed/self upload ignores the materialized solve mask and
+        # builds active_cell_tex from the authoritative TTL buffer.  The CPU
+        # arrays below are runtime telemetry only, so a non-materialized full
+        # descriptor preserves the executed shader coverage while avoiding
+        # two full-grid copies and finalize-time OR reductions per stage.
+        return True
     if stage in {"material_material", "material_gas"}:
         return True
     return stage in {"material_light", "gas_light"} and solver.gpu_pipeline._formal_light_dose_guard_buffer(world) is not None

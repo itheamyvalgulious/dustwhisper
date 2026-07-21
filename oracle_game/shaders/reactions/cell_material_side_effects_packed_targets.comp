@@ -1,0 +1,184 @@
+
+            #version 430
+            layout(local_size_x=64, local_size_y=1, local_size_z=1) in;
+            uniform ivec2 cell_grid_size;
+            uniform bool velocity_in_place;
+            uniform bool deferred_hi_valid;
+            layout(binding=0) uniform usampler2D cell_state_tex;
+            layout(binding=1) uniform sampler2D velocity_tex;
+            layout(binding=2) uniform sampler2D temp_tex;
+            layout(binding=3) uniform usampler2D deferred_packed_local_tex;
+            layout(std430, binding=0) readonly buffer MaterialParams {
+                vec4 material_params[{{MAX_MATERIALS}}];
+            };
+            layout(std430, binding=1) readonly buffer ActionI {
+                ivec4 action_i[{{MAX_ACTIONS}}];
+            };
+            layout(std430, binding=2) readonly buffer ActionF {
+                vec4 action_f[{{MAX_ACTIONS}}];
+            };
+            layout(std430, binding=3) readonly buffer TimedCandidateCount {
+                uint timed_candidate_count[];
+            };
+            layout(std430, binding=4) readonly buffer TimedMaterialTargetList {
+                uint timed_material_target_list[];
+            };
+            layout(std430, binding=15) buffer ReactionCounters {
+                uint reaction_counts[16];
+            };
+            layout(r32ui, binding=0) writeonly uniform uimage2D cell_state_out_img;
+            layout(r32f, binding=2) writeonly uniform image2D temp_out_img;
+            layout(r32f, binding=3) writeonly uniform image2D integrity_out_img;
+            layout(rg32f, binding=4) writeonly uniform image2D velocity_out_img;
+            layout(r32ui, binding=5) writeonly uniform uimage2D timer_out_img;
+            layout(r32f, binding=6) writeonly uniform image2D emitted_material_mask_img;
+            layout(rg32f, binding=7) coherent uniform image2D velocity_inout_img;
+
+            uint material_id_at(ivec2 cell) {
+                return texelFetch(cell_state_tex, cell, 0).x & 0xFFFFu;
+            }
+
+            uint pack_emitted_cell_state(int material_id, float phase) {
+                uint phase_id = uint(clamp(int(round(phase)), 0, 255));
+                return (uint(material_id) & 0xFFFFu) | (phase_id << 16u);
+            }
+
+            uint deterministic_selector(int x, int y, uint count) {
+                if (count == 0u) {
+                    return 0u;
+                }
+                uint mixed = (uint(x) * 73856093u) ^ (uint(y) * 19349663u);
+                return mixed % count;
+            }
+
+            ivec2 target_for_direction(ivec2 source, int direction_id) {
+                if (direction_id == {{DIRECTION_DOWN}}) {
+                    return source + ivec2(0, 1);
+                }
+                if (direction_id == {{DIRECTION_UP}}) {
+                    return source + ivec2(0, -1);
+                }
+                if (direction_id == {{DIRECTION_LEFT}}) {
+                    return source + ivec2(-1, 0);
+                }
+                if (direction_id == {{DIRECTION_RIGHT}}) {
+                    return source + ivec2(1, 0);
+                }
+                if (direction_id == {{DIRECTION_RANDOM}}) {
+                    uint selector = deterministic_selector(source.x, source.y, 9u);
+                    int dx = int(selector % 3u) - 1;
+                    int dy = int(selector / 3u) - 1;
+                    return source + ivec2(dx, dy);
+                }
+                if (direction_id == {{DIRECTION_SPEED}}) {
+                    vec2 velocity = texelFetch(velocity_tex, source, 0).xy;
+                    return source + ivec2(int(sign(velocity.x)), int(sign(velocity.y)));
+                }
+                return source;
+            }
+
+            int first_emitting_action(ivec2 source, ivec2 target) {
+                uvec2 packed_action_words = texelFetch(deferred_packed_local_tex, source, 0).xy;
+                uint packed_actions = packed_action_words.x;
+                for (int slot = 0; slot < 4; ++slot) {
+                    uint action_mask = slot == 3 ? 0x7Fu : 0xFFu;
+                    int action_index = int((packed_actions >> uint(slot * 8)) & action_mask);
+                    if (action_index <= 0 || action_index >= {{MAX_ACTIONS}}) {
+                        continue;
+                    }
+                    ivec4 ai = action_i[action_index];
+                    if (ai.x != {{TYPE_EMIT_MATERIAL}} || ai.y <= 0) {
+                        continue;
+                    }
+                    if (target_for_direction(source, ai.z) == target) {
+                        return action_index;
+                    }
+                }
+                if (!deferred_hi_valid) {
+                    return -1;
+                }
+                packed_actions = packed_action_words.y;
+                for (int slot = 0; slot < 4; ++slot) {
+                    uint action_mask = slot == 3 ? 0x7Fu : 0xFFu;
+                    int action_index = int((packed_actions >> uint(slot * 8)) & action_mask);
+                    if (action_index <= 0 || action_index >= {{MAX_ACTIONS}}) {
+                        continue;
+                    }
+                    ivec4 ai = action_i[action_index];
+                    if (ai.x != {{TYPE_EMIT_MATERIAL}} || ai.y <= 0) {
+                        continue;
+                    }
+                    if (target_for_direction(source, ai.z) == target) {
+                        return action_index;
+                    }
+                }
+                return -1;
+            }
+
+            vec2 emitted_velocity(ivec2 source, ivec2 target, ivec4 ai, vec4 af) {
+                int material_id = clamp(ai.y, 0, {{MAX_MATERIALS_MINUS_1}});
+                int phase_id = int(material_params[material_id].y + 0.5);
+                if (phase_id != {{PHASE_POWDER}}) {
+                    return vec2(0.0);
+                }
+                vec2 explicit_velocity = af.xy;
+                if (length(explicit_velocity) > 1.0e-5) {
+                    return explicit_velocity;
+                }
+                vec2 direction = vec2(target - source);
+                float norm = max(1.0e-5, length(direction));
+                return direction / norm * max(0.0, af.z);
+            }
+
+            void emit_material(ivec2 target, ivec2 source, int action_index) {
+                ivec4 ai = action_i[action_index];
+                vec4 af = action_f[action_index];
+                int material_id = clamp(ai.y, 0, {{MAX_MATERIALS_MINUS_1}});
+                if (material_id <= 0) {
+                    return;
+                }
+                float target_phase = material_params[material_id].y;
+                float target_integrity = material_params[material_id].x;
+                float current_temp = texelFetch(temp_tex, target, 0).x;
+                float spawn_temp = material_params[material_id].z;
+                imageStore(cell_state_out_img, target, uvec4(pack_emitted_cell_state(material_id, target_phase), 0u, 0u, 0u));
+                imageStore(integrity_out_img, target, vec4(target_integrity, 0.0, 0.0, 0.0));
+                if (spawn_temp == spawn_temp) {
+                    imageStore(temp_out_img, target, vec4(max(current_temp, spawn_temp), 0.0, 0.0, 0.0));
+                }
+                vec4 velocity_value = vec4(emitted_velocity(source, target, ai, af), 0.0, 0.0);
+                if (velocity_in_place) {
+                    imageStore(velocity_inout_img, target, velocity_value);
+                } else {
+                    imageStore(velocity_out_img, target, velocity_value);
+                }
+                imageStore(timer_out_img, target, uvec4(0u));
+                imageStore(emitted_material_mask_img, target, vec4(1.0, 0.0, 0.0, 0.0));
+                atomicAdd(reaction_counts[1], 1u);
+                atomicAdd(reaction_counts[1 + {{TYPE_EMIT_MATERIAL}}], 1u);
+            }
+
+            void main() {
+                uint target_slot = gl_GlobalInvocationID.x;
+                if (target_slot >= timed_candidate_count[2]) {
+                    return;
+                }
+                uint target_index = timed_material_target_list[target_slot];
+                ivec2 target = ivec2(
+                    int(target_index % uint(cell_grid_size.x)),
+                    int(target_index / uint(cell_grid_size.x))
+                );
+                if (material_id_at(target) != 0u) {
+                    return;
+                }
+                for (int sy = max(0, target.y - 1); sy <= min(cell_grid_size.y - 1, target.y + 1); ++sy) {
+                    for (int sx = max(0, target.x - 1); sx <= min(cell_grid_size.x - 1, target.x + 1); ++sx) {
+                        ivec2 source = ivec2(sx, sy);
+                        int action_index = first_emitting_action(source, target);
+                        if (action_index >= 0) {
+                            emit_material(target, source, action_index);
+                            return;
+                        }
+                    }
+                }
+            }

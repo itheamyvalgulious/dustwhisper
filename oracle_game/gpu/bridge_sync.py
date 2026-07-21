@@ -191,6 +191,11 @@ def _sync_world_impl(
     upload_island_reservation_from_cpu = (
         upload_solver_runtime_from_cpu and bridge._should_upload_cpu_resource(world, "island_reservation")
     )
+    if upload_powder_reservation_from_cpu:
+        world.motion_solver.gpu_pipeline.materialize_compact_powder_reservations(
+            world,
+            download=True,
+        )
     entity_state_upload = pack_entity_state_upload(world)
     entity_count_upload = np.array([len(entity_state_upload)], dtype=np.int32)
     force_source_upload = pack_force_source_upload(world)
@@ -629,6 +634,10 @@ def _sync_world_impl(
     upload_visible_from_cpu = bridge._should_upload_cpu_resource(world, "visible_illumination")
     if upload_cell_dose_from_cpu or upload_gas_dose_from_cpu or upload_light_from_cpu or upload_visible_from_cpu:
         world._gpu_optics_outputs_clear = False
+        optics_pipeline = getattr(getattr(world, "optics_solver", None), "gpu_pipeline", None)
+        invalidate_sparse = getattr(optics_pipeline, "invalidate_sparse_runtime", None)
+        if callable(invalidate_sparse):
+            invalidate_sparse()
     if bridge._should_upload_cpu_resource(world, "cell_core"):
         packed = pack_cell_core(world)
         bridge.buffers["cell_core"].write(packed.tobytes())
@@ -660,6 +669,12 @@ def _sync_world_impl(
     if upload_powder_reservation_from_cpu:
         bridge._write_dynamic_buffer("powder_reservation", powder_reservation_upload)
         bridge.buffers["powder_reservation_count"].write(powder_reservation_count_upload.tobytes())
+        bridge.clear_gpu_authoritative(
+            "powder_reservation",
+            "powder_reservation_compact",
+            "powder_reservation_standard",
+            "powder_reservation_cpu_mirror",
+        )
     if upload_island_reservation_from_cpu:
         bridge._write_dynamic_buffer("island_reservation", island_reservation_upload)
         bridge.buffers["island_reservation_count"].write(island_reservation_count_upload.tobytes())

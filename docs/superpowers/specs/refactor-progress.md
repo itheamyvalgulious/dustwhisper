@@ -6,12 +6,12 @@ Baseline captured 2026-07-09 on branch `refactor/structure` (off `perf/step2-pha
 
 1. **CPU-path unit tests stay green:** `.venv/bin/python -m pytest tests/ -x -q` → 30 passing.
 2. **Known pre-existing GPU-parity failure stays identical:** `test_patch_material_changes_friction_motion_behavior_in_cpu_and_gpu_paths` fails on `master` too (cpu vy=54.4, gpu vy=0.0). Behavior-preserving refactor ⇒ failure signature must not change.
-3. **GPU behavior snapshot hash unchanged:** `tmp/behavior_snapshot.py`, 480×270, 20 frames, warmup 3 → `ce71a34376c5010d`.
+3. **GPU behavior snapshot hash unchanged:** `scripts/behavior_snapshot.py`, 480×270, 20 frames, warmup 3 → `ce71a34376c5010d`.
 
 Re-run after each phase:
 ```
 .venv/bin/python -m pytest tests/ -q
-.venv/bin/python -c "import sys;sys.path.insert(0,'.');from tmp.behavior_snapshot import snapshot,hash_arrays as h;print(h(snapshot(frames=20,warmup=3,width=480,height=270)))"
+.venv/bin/python scripts/behavior_snapshot.py --width 480 --height 270 --warmup 3 --frames 20 --trials 1
 ```
 
 ## Phases

@@ -1,0 +1,13 @@
+
+            layout(r8ui, binding=1) writeonly uniform uimage2D expanded_active_tile_img;
+            void main() {
+                ivec2 tile = ivec2(gl_GlobalInvocationID.xy);
+                if (tile.x >= tile_grid_size.x || tile.y >= tile_grid_size.y) {
+                    return;
+                }
+                imageStore(
+                    expanded_active_tile_img,
+                    tile,
+                    uvec4(expanded_tile_active(tile) ? 1u : 0u, 0u, 0u, 0u)
+                );
+            }

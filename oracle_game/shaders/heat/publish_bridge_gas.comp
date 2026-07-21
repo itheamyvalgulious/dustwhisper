@@ -22,4 +22,3 @@
                 int gas_index = (species * gas_grid_size.y + gid.y) * gas_grid_size.x + gid.x;
                 bridge_gas[gas_index] = max(texelFetch(gas_tex, ivec3(gid, species), 0).x, 0.0);
             }
-            

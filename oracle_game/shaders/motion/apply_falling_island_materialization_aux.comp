@@ -51,8 +51,7 @@ layout(std430, binding=7) readonly buffer ActiveTileListBuffer {
     ivec2 active_tile_list[];
 };
 
-layout(binding=0) uniform sampler2D material_tex;
-layout(binding=1) uniform sampler2D phase_tex;
+layout(binding=0) uniform usampler2D cell_state_tex;
 layout(binding=7) uniform sampler2D island_id_tex;
 layout(binding=8) uniform sampler2D entity_id_tex;
 layout(binding=9) uniform sampler2D displaced_tex;
@@ -129,8 +128,9 @@ int same_island_neighbor_count(ivec2 cell, int island_id) {
             continue;
         }
         int neighbor_island = int(texelFetch(island_id_tex, neighbor, 0).x + 0.5);
-        int neighbor_phase = int(texelFetch(phase_tex, neighbor, 0).x + 0.5);
-        int neighbor_material = int(texelFetch(material_tex, neighbor, 0).x + 0.5);
+        uint neighbor_state = texelFetch(cell_state_tex, neighbor, 0).x;
+        int neighbor_phase = int((neighbor_state >> 16u) & 0xFFu);
+        int neighbor_material = int(neighbor_state & 0xFFFFu);
         if (neighbor_island == island_id && neighbor_phase == phase_falling_island && neighbor_material > 0) {
             count += 1;
         }
@@ -142,7 +142,7 @@ bool falling_source_matches(ivec2 cell, int island_id, int material_id) {
     if (material_id <= 0 || island_id <= 0) {
         return false;
     }
-    return int(texelFetch(phase_tex, cell, 0).x + 0.5) == phase_falling_island;
+    return int((texelFetch(cell_state_tex, cell, 0).x >> 16u) & 0xFFu) == phase_falling_island;
 }
 
 bool shed_fragment(ivec2 cell, int island_id, int material_id) {
@@ -199,8 +199,9 @@ void store_payload(ivec2 dst, float island_value, float entity_value, float disp
 }
 
 void store_original(ivec2 dst) {
-    int material_id = int(texelFetch(material_tex, dst, 0).x + 0.5);
-    int phase_id = int(texelFetch(phase_tex, dst, 0).x + 0.5);
+    uint cell_state = texelFetch(cell_state_tex, dst, 0).x;
+    int material_id = int(cell_state & 0xFFFFu);
+    int phase_id = int((cell_state >> 16u) & 0xFFu);
     float island_value = texelFetch(island_id_tex, dst, 0).x;
     if (island_value > 0.5 && (material_id <= 0 || phase_id != phase_falling_island)) {
         island_value = 0.0;
@@ -247,7 +248,7 @@ void main() {
         }
     }
     int island_id = int(texelFetch(island_id_tex, gid, 0).x + 0.5);
-    int material_id = int(texelFetch(material_tex, gid, 0).x + 0.5);
+    int material_id = int(texelFetch(cell_state_tex, gid, 0).x & 0xFFFFu);
     if (mode == 0) {
         if (shed_fragment(gid, island_id, material_id)) {
             refresh_changed_cell(gid);

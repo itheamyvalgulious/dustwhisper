@@ -1,0 +1,76 @@
+#version 430
+layout(local_size_x={{SPARSE_LOCAL_SIZE}}, local_size_y=1, local_size_z=1) in;
+uniform uint cell_entry_count;
+uniform uint gas_entry_count;
+uniform uint cell_count;
+uniform uint gas_cell_count;
+uniform ivec2 cell_grid_size;
+uniform ivec2 gas_grid_size;
+uniform int gas_cell_size;
+uniform int dose_channel_count;
+uniform bool expand_gas_visible;
+uniform uint sparse_generation;
+uniform bool clear_reaction_latches;
+uniform uint reaction_latched_flag_shifted;
+layout(std430, binding=0) readonly buffer CellDoseAccum { uint cell_dose_accum[]; };
+layout(std430, binding=1) readonly buffer GasDoseAccum { uint gas_dose_accum[]; };
+layout(std430, binding=2) readonly buffer IllumAccum { uint illum_accum[]; };
+layout(std430, binding=3) buffer SparseVisibleMarks { uint sparse_visible_marks[]; };
+layout(std430, binding=4) writeonly buffer SparseCellList { uint sparse_cell_list[]; };
+layout(std430, binding=5) writeonly buffer SparseGasList { uint sparse_gas_list[]; };
+layout(std430, binding=6) writeonly buffer SparseVisibleList { uint sparse_visible_list[]; };
+layout(std430, binding=7) buffer SparseRuntime { uint sparse_runtime[]; };
+layout(std430, binding=8) buffer BridgeCellCore { uint bridge_cell_core[]; };
+
+void append_visible(uint index) {
+    if (atomicExchange(sparse_visible_marks[index], sparse_generation) == sparse_generation) return;
+    uint slot = atomicAdd(sparse_runtime[2], 1u);
+    sparse_visible_list[slot] = index;
+    atomicMax(sparse_runtime[12], (slot + {{SPARSE_LOCAL_SIZE}}u) / {{SPARSE_LOCAL_SIZE}}u);
+}
+void append_cell_entry(uint index) {
+    uint slot = atomicAdd(sparse_runtime[0], 1u);
+    sparse_cell_list[slot] = index;
+    atomicMax(sparse_runtime[4], (slot + {{SPARSE_LOCAL_SIZE}}u) / {{SPARSE_LOCAL_SIZE}}u);
+}
+void append_gas_entry(uint index) {
+    uint slot = atomicAdd(sparse_runtime[1], 1u);
+    sparse_gas_list[slot] = index;
+    atomicMax(sparse_runtime[8], (slot + {{SPARSE_LOCAL_SIZE}}u) / {{SPARSE_LOCAL_SIZE}}u);
+}
+void expand_gas_cell(uint index) {
+    ivec2 gas_cell = ivec2(int(index) % gas_grid_size.x, int(index) / gas_grid_size.x);
+    ivec2 begin = gas_cell * gas_cell_size;
+    ivec2 end = min(begin + ivec2(gas_cell_size), cell_grid_size);
+    for (int y = begin.y; y < end.y; ++y) {
+        for (int x = begin.x; x < end.x; ++x) {
+            append_visible(uint(y * cell_grid_size.x + x));
+        }
+    }
+}
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index < cell_entry_count) {
+        uint illumination = illum_accum[index];
+        if (illumination != 0u || cell_dose_accum[index] != 0u) {
+            append_cell_entry(index);
+        }
+        if (illumination != 0u) append_visible(index % cell_count);
+        if (clear_reaction_latches && index < cell_count) {
+            bridge_cell_core[index * 5u] &= ~reaction_latched_flag_shifted;
+        }
+    }
+    if (index < gas_entry_count && gas_dose_accum[index] != 0u) {
+        append_gas_entry(index);
+    }
+    if (expand_gas_visible && index < gas_cell_count) {
+        bool has_gas_haze = false;
+        for (int channel = 0; channel < dose_channel_count; ++channel) {
+            uint gas_index = uint(channel) * gas_cell_count + index;
+            has_gas_haze = has_gas_haze || gas_dose_accum[gas_index] != 0u;
+        }
+        if (has_gas_haze) {
+            expand_gas_cell(index);
+        }
+    }
+}

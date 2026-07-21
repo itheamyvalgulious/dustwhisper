@@ -6,7 +6,6 @@
                 ivec4 phase_params[{{MAX_MATERIALS}}];
             };
             layout(binding=3) uniform sampler2D phase_target_tex;
-            layout(binding=4) uniform sampler2D phase_tex;
             layout(binding=5) uniform sampler2D boil_target_tex;
             layout(binding=6) uniform sampler2D integrity_tex;
             layout(binding=7) uniform sampler2D displaced_tex;
@@ -27,8 +26,8 @@
                     return;
                 }
                 bool is_active = solve_cell_active(gid);
-                int previous_material = int(texelFetch(material_tex, gid, 0).x + 0.5);
-                int previous_phase = int(texelFetch(phase_tex, gid, 0).x + 0.5);
+                int previous_material = material_id_at(gid);
+                int previous_phase = phase_id_at(gid);
                 float displaced_value = texelFetch(displaced_tex, gid, 0).x;
                 vec2 velocity_value = texelFetch(velocity_tex, gid, 0).xy;
 
@@ -59,4 +58,3 @@
                 imageStore(displaced_out_img, gid, vec4(displaced_value, 0.0, 0.0, 0.0));
                 imageStore(velocity_out_img, gid, vec4(velocity_value, 0.0, 0.0));
             }
-            

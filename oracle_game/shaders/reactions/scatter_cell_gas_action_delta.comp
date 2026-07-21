@@ -7,7 +7,14 @@
             uniform int gas_count;
             uniform uint modify_gas_layer_mask;
             uniform bool use_local_deferred_outputs;
+            uniform bool use_packed_local_deferred_outputs;
+            uniform bool deferred_hi_valid;
             uniform bool gas_delta_already_applied;
+            uniform bool use_expanded_active_tile_mask;
+            #if {{FLOW_SOURCE_GENERATION_VALIDITY}}
+            uniform bool flow_source_generation_validity_enabled;
+            uniform uint flow_source_generation;
+            #endif
             layout(binding=0) uniform sampler2D action_lo_tex;
             layout(binding=1) uniform sampler2D action_hi_tex;
             layout(binding=2) uniform sampler2D scale_lo_tex;
@@ -15,6 +22,8 @@
             layout(binding=4) uniform sampler2D active_cell_tex;
             layout(binding=5) uniform sampler2DArray deferred_lo_local_tex;
             layout(binding=6) uniform sampler2DArray deferred_hi_local_tex;
+            layout(binding=7) uniform usampler2D deferred_packed_local_tex;
+            layout(binding=8) uniform usampler2D expanded_active_tile_tex;
             layout(std430, binding=0) buffer ActionI {
                 ivec4 action_i[{{MAX_ACTIONS}}];
             };
@@ -28,6 +37,19 @@
                 uint reaction_counts[16];
             };
             layout(rgba32f, binding=0) writeonly uniform image2DArray flow_source_img;
+            #if {{FLOW_SOURCE_GENERATION_VALIDITY}}
+            layout({{FLOW_SOURCE_GENERATION_IMAGE_FORMAT}}, binding={{FLOW_SOURCE_GENERATION_BINDING}}) writeonly uniform uimage2DArray flow_source_generation_img;
+            #endif
+
+
+            void store_flow_source(ivec3 location, vec4 source) {
+                imageStore(flow_source_img, location, source);
+                #if {{FLOW_SOURCE_GENERATION_VALIDITY}}
+                if (flow_source_generation_validity_enabled) {
+                    imageStore(flow_source_generation_img, location, uvec4(flow_source_generation));
+                }
+                #endif
+            }
 
             bool action_layer_enabled(int layer) {
                 if (layer < 0 || layer >= gas_count) {
@@ -54,23 +76,23 @@
                 }
                 int direction_id = ai.z;
                 if (direction_id == {{DIRECTION_RIGHT}}) {
-                    imageStore(flow_source_img, ivec3(gas_cell, layer_base), vec4(1.0, 0.0, radius, strength));
+                    store_flow_source(ivec3(gas_cell, layer_base), vec4(1.0, 0.0, radius, strength));
                 } else if (direction_id == {{DIRECTION_LEFT}}) {
-                    imageStore(flow_source_img, ivec3(gas_cell, layer_base), vec4(-1.0, 0.0, radius, strength));
+                    store_flow_source(ivec3(gas_cell, layer_base), vec4(-1.0, 0.0, radius, strength));
                 } else if (direction_id == {{DIRECTION_UP}}) {
-                    imageStore(flow_source_img, ivec3(gas_cell, layer_base), vec4(0.0, -1.0, radius, strength));
+                    store_flow_source(ivec3(gas_cell, layer_base), vec4(0.0, -1.0, radius, strength));
                 } else if (direction_id == {{DIRECTION_DOWN}}) {
-                    imageStore(flow_source_img, ivec3(gas_cell, layer_base), vec4(0.0, 1.0, radius, strength));
+                    store_flow_source(ivec3(gas_cell, layer_base), vec4(0.0, 1.0, radius, strength));
                 } else if (
                     direction_id == {{DIRECTION_ALL}}
                     && abs(af.w) > 1.0e-5
                     && layer_base + 3 < {{FLOW_SOURCE_LAYERS}}
                 ) {
                     float flow_sign = af.w > 0.0 ? 1.0 : -1.0;
-                    imageStore(flow_source_img, ivec3(gas_cell, layer_base), vec4(-flow_sign, 0.0, radius, strength));
-                    imageStore(flow_source_img, ivec3(gas_cell, layer_base + 1), vec4(flow_sign, 0.0, radius, strength));
-                    imageStore(flow_source_img, ivec3(gas_cell, layer_base + 2), vec4(0.0, -flow_sign, radius, strength));
-                    imageStore(flow_source_img, ivec3(gas_cell, layer_base + 3), vec4(0.0, flow_sign, radius, strength));
+                    store_flow_source(ivec3(gas_cell, layer_base), vec4(-flow_sign, 0.0, radius, strength));
+                    store_flow_source(ivec3(gas_cell, layer_base + 1), vec4(flow_sign, 0.0, radius, strength));
+                    store_flow_source(ivec3(gas_cell, layer_base + 2), vec4(0.0, -flow_sign, radius, strength));
+                    store_flow_source(ivec3(gas_cell, layer_base + 3), vec4(0.0, flow_sign, radius, strength));
                 }
             }
 
@@ -102,7 +124,19 @@
                 }
             }
 
+            vec4 unpack_action_word(uint packed_actions) {
+                return vec4(
+                    float(packed_actions & 0xFFu),
+                    float((packed_actions >> 8u) & 0xFFu),
+                    float((packed_actions >> 16u) & 0xFFu),
+                    float((packed_actions >> 24u) & 0x7Fu)
+                );
+            }
+
             vec4 fetch_action_lo(ivec2 cell) {
+                if (use_packed_local_deferred_outputs) {
+                    return unpack_action_word(texelFetch(deferred_packed_local_tex, cell, 0).x);
+                }
                 if (use_local_deferred_outputs) {
                     return texelFetch(deferred_lo_local_tex, ivec3(cell, 0), 0);
                 }
@@ -110,13 +144,25 @@
             }
 
             vec4 fetch_action_hi(ivec2 cell) {
+                if (use_packed_local_deferred_outputs) {
+                    if (!deferred_hi_valid) {
+                        return vec4(0.0);
+                    }
+                    return unpack_action_word(texelFetch(deferred_packed_local_tex, cell, 0).y);
+                }
                 if (use_local_deferred_outputs) {
+                    if (!deferred_hi_valid) {
+                        return vec4(0.0);
+                    }
                     return texelFetch(deferred_hi_local_tex, ivec3(cell, 0), 0);
                 }
                 return texelFetch(action_hi_tex, cell, 0);
             }
 
             vec4 fetch_scale_lo(ivec2 cell) {
+                if (use_packed_local_deferred_outputs) {
+                    return vec4(1.0);
+                }
                 if (use_local_deferred_outputs) {
                     return texelFetch(deferred_lo_local_tex, ivec3(cell, 1), 0);
                 }
@@ -124,7 +170,13 @@
             }
 
             vec4 fetch_scale_hi(ivec2 cell) {
+                if (use_packed_local_deferred_outputs) {
+                    return vec4(1.0);
+                }
                 if (use_local_deferred_outputs) {
+                    if (!deferred_hi_valid) {
+                        return vec4(0.0);
+                    }
                     return texelFetch(deferred_hi_local_tex, ivec3(cell, 1), 0);
                 }
                 return texelFetch(scale_hi_tex, cell, 0);
@@ -139,7 +191,10 @@
                 if (cell.x >= cell_grid_size.x || cell.y >= cell_grid_size.y) {
                     return;
                 }
-                if (texelFetch(active_cell_tex, cell, 0).x <= 0.5) {
+                bool cell_is_active = use_expanded_active_tile_mask
+                    ? texelFetch(expanded_active_tile_tex, cell >> 5, 0).x != 0u
+                    : texelFetch(active_cell_tex, cell, 0).x > 0.5;
+                if (!cell_is_active) {
                     return;
                 }
                 vec4 action_lo = fetch_action_lo(cell);
@@ -160,4 +215,3 @@
                     scatter_action_vector(gas_cell, action_hi, fetch_scale_hi(cell), 4);
                 }
             }
-            

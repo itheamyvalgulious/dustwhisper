@@ -1,0 +1,441 @@
+#version 430
+{{SUPPORT_JFA_EXTENSIONS}}
+#define SUPPORT_JFA_NV32_ROW_HYDRATE {{SUPPORT_JFA_NV32_ROW_HYDRATE}}
+layout(local_size_x={{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}, local_size_y=1, local_size_z=1) in;
+uniform ivec2 cell_grid_size;
+uniform ivec2 tile_grid_size;
+uniform int tile_size;
+uniform int jump;
+
+#if {{SUPPORT_JFA_U8}}
+layout(binding=1) uniform usampler2D support_in_tex;
+layout(r8ui, binding=2) writeonly uniform uimage2D support_out_img;
+#else
+layout(binding=1) uniform sampler2D support_in_tex;
+layout(r32f, binding=2) writeonly uniform image2D support_out_img;
+#endif
+layout(std430, binding=0) readonly buffer ConnectedTileMask {
+    int connected_tiles[];
+};
+layout(std430, binding=1) readonly buffer ConnectedTileCount {
+    uint connected_tile_count[];
+};
+layout(std430, binding=2) readonly buffer ConnectedTileList {
+    ivec2 connected_tile_list[];
+};
+layout(std430, binding=3) readonly buffer ConnectedTileRowMasks {
+    uint connected_tile_row_masks[];
+};
+layout(std430, binding=4) readonly buffer ConnectedTileColumnMasks {
+    uint connected_tile_column_masks[];
+};
+
+shared uint s_structural_rows[{{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}];
+shared uint s_supported_rows[{{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}];
+shared uint s_next_rows[{{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}];
+shared uint s_step_changed;
+shared uint s_jump_changed;
+
+bool in_grid(ivec2 cell) {
+    return cell.x >= 0 && cell.y >= 0 && cell.x < cell_grid_size.x && cell.y < cell_grid_size.y;
+}
+
+bool tile_in_grid(ivec2 tile) {
+    return tile.x >= 0 && tile.y >= 0 && tile.x < tile_grid_size.x && tile.y < tile_grid_size.y;
+}
+
+bool tile_connected_mask(ivec2 tile) {
+    if (!tile_in_grid(tile)) {
+        return false;
+    }
+    return connected_tiles[tile.y * tile_grid_size.x + tile.x] != 0;
+}
+
+bool cell_connected(ivec2 cell) {
+    return in_grid(cell) && tile_connected_mask(cell / tile_size);
+}
+
+bool structural_connected(ivec2 cell) {
+    if (!cell_connected(cell)) {
+        return false;
+    }
+    ivec2 tile = cell / tile_size;
+    ivec2 local_cell = cell - tile * tile_size;
+    int mask_base = (tile.y * tile_grid_size.x + tile.x) * {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}};
+    uint row_mask = connected_tile_row_masks[mask_base + local_cell.y];
+    return (row_mask & (1u << uint(local_cell.x))) != 0u;
+}
+
+bool support_global(ivec2 cell) {
+#if {{SUPPORT_JFA_U8}}
+#if {{SUPPORT_JFA_PROPAGATED_SOURCE_MASK_ELISION}}
+    // U8 support seeds and every propagated output are structural by
+    // construction. Keep the connected-tile guard to reject stale texels.
+    return cell_connected(cell) && texelFetch(support_in_tex, cell, 0).x != 0u;
+#else
+    return structural_connected(cell) && texelFetch(support_in_tex, cell, 0).x != 0u;
+#endif
+#else
+    return structural_connected(cell) && texelFetch(support_in_tex, cell, 0).x > 0.5;
+#endif
+}
+
+bool support_texel(ivec2 cell) {
+#if {{SUPPORT_JFA_U8}}
+    return texelFetch(support_in_tex, cell, 0).x != 0u;
+#else
+    return texelFetch(support_in_tex, cell, 0).x > 0.5;
+#endif
+}
+
+void store_support(ivec2 cell, bool supported) {
+#if {{SUPPORT_JFA_U8}}
+    imageStore(support_out_img, cell, uvec4(supported ? 1u : 0u, 0u, 0u, 0u));
+#else
+    imageStore(support_out_img, cell, vec4(supported ? 1.0 : 0.0, 0.0, 0.0, 0.0));
+#endif
+}
+
+bool sample_in_current_tile(ivec2 tile, ivec2 sample_cell) {
+    ivec2 sample_local = sample_cell - tile * tile_size;
+    return
+        sample_local.x >= 0 &&
+        sample_local.y >= 0 &&
+        sample_local.x < tile_size &&
+        sample_local.y < tile_size;
+}
+
+int connected_tile_mask_base(ivec2 tile) {
+    return (tile.y * tile_grid_size.x + tile.x) * {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}};
+}
+
+uint bit_range_mask(int local_start, int local_end) {
+    int start_bit = max(0, min(tile_size, local_start));
+    int end_bit = max(0, min(tile_size, local_end));
+    if (end_bit <= start_bit) {
+        return 0u;
+    }
+    uint below_start = start_bit <= 0 ? 0u : ((1u << uint(start_bit)) - 1u);
+    uint below_end = 0xffffffffu;
+    if (end_bit < {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}) {
+        below_end = (1u << uint(end_bit)) - 1u;
+    }
+    return below_end & ~below_start;
+}
+
+bool row_mask_segment_clear(ivec2 segment_tile, int local_y, int local_x0, int local_x1) {
+    if (
+        !tile_connected_mask(segment_tile) ||
+        local_y < 0 ||
+        local_y >= tile_size ||
+        local_y >= {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}
+    ) {
+        return false;
+    }
+    uint required_mask = bit_range_mask(local_x0, local_x1);
+    if (required_mask == 0u) {
+        return true;
+    }
+    uint available_mask = connected_tile_row_masks[connected_tile_mask_base(segment_tile) + local_y];
+    return (available_mask & required_mask) == required_mask;
+}
+
+bool column_mask_segment_clear(ivec2 segment_tile, int local_x, int local_y0, int local_y1) {
+    if (
+        !tile_connected_mask(segment_tile) ||
+        local_x < 0 ||
+        local_x >= tile_size ||
+        local_x >= {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}
+    ) {
+        return false;
+    }
+    uint required_mask = bit_range_mask(local_y0, local_y1);
+    if (required_mask == 0u) {
+        return true;
+    }
+    uint available_mask = connected_tile_column_masks[connected_tile_mask_base(segment_tile) + local_x];
+    return (available_mask & required_mask) == required_mask;
+}
+
+bool row_masks_line_clear(int y, int x0, int x1) {
+    if (y < 0 || y >= cell_grid_size.y || x0 < 0 || x1 > cell_grid_size.x) {
+        return false;
+    }
+    int cursor = x0;
+    while (cursor < x1) {
+        ivec2 segment_tile = ivec2(cursor / tile_size, y / tile_size);
+        int segment_end = min(x1, (segment_tile.x + 1) * tile_size);
+        if (segment_end <= cursor) {
+            return false;
+        }
+        int local_y = y - segment_tile.y * tile_size;
+        int local_x0 = cursor - segment_tile.x * tile_size;
+        int local_x1 = segment_end - segment_tile.x * tile_size;
+        if (!row_mask_segment_clear(segment_tile, local_y, local_x0, local_x1)) {
+            return false;
+        }
+        cursor = segment_end;
+    }
+    return true;
+}
+
+bool column_masks_line_clear(int x, int y0, int y1) {
+    if (x < 0 || x >= cell_grid_size.x || y0 < 0 || y1 > cell_grid_size.y) {
+        return false;
+    }
+    int cursor = y0;
+    while (cursor < y1) {
+        ivec2 segment_tile = ivec2(x / tile_size, cursor / tile_size);
+        int segment_end = min(y1, (segment_tile.y + 1) * tile_size);
+        if (segment_end <= cursor) {
+            return false;
+        }
+        int local_x = x - segment_tile.x * tile_size;
+        int local_y0 = cursor - segment_tile.y * tile_size;
+        int local_y1 = segment_end - segment_tile.y * tile_size;
+        if (!column_mask_segment_clear(segment_tile, local_x, local_y0, local_y1)) {
+            return false;
+        }
+        cursor = segment_end;
+    }
+    return true;
+}
+
+bool line_clear(ivec2 start_cell, ivec2 end_cell) {
+    ivec2 delta = end_cell - start_cell;
+    if (delta.x != 0 && delta.y != 0) {
+        return false;
+    }
+    int steps = max(abs(delta.x), abs(delta.y));
+    if (steps <= 1) {
+        return true;
+    }
+    if (delta.y == 0) {
+        int x0 = min(start_cell.x, end_cell.x) + 1;
+        int x1 = max(start_cell.x, end_cell.x);
+        return row_masks_line_clear(start_cell.y, x0, x1);
+    }
+    int y0 = min(start_cell.y, end_cell.y) + 1;
+    int y1 = max(start_cell.y, end_cell.y);
+    return column_masks_line_clear(start_cell.x, y0, y1);
+}
+
+
+uint close_row(uint supported, uint structural) {
+    supported &= structural;
+    for (int step = 0; step < {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}; ++step) {
+        uint next_value = supported | (((supported << 1u) | (supported >> 1u)) & structural);
+        if (next_value == supported) {
+            break;
+        }
+        supported = next_value;
+    }
+    return supported;
+}
+
+void solve_supported_rows(int local_y, bool row_valid) {
+    int max_steps = max(1, tile_size * tile_size);
+    for (int step = 0; step < max_steps; ++step) {
+        if (gl_LocalInvocationIndex == 0u) {
+            s_step_changed = 0u;
+        }
+        barrier();
+        uint previous_value = row_valid ? s_supported_rows[local_y] : 0u;
+        uint next_value = previous_value;
+        if (row_valid) {
+            uint vertical = 0u;
+            if (local_y > 0) {
+                vertical |= s_supported_rows[local_y - 1];
+            }
+            if (local_y + 1 < tile_size && local_y + 1 < {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}) {
+                vertical |= s_supported_rows[local_y + 1];
+            }
+            next_value = close_row(
+                previous_value | (vertical & s_structural_rows[local_y]),
+                s_structural_rows[local_y]
+            );
+        }
+        if (next_value != previous_value) {
+            atomicOr(s_step_changed, 1u);
+        }
+        s_next_rows[local_y] = next_value;
+        barrier();
+        s_supported_rows[local_y] = s_next_rows[local_y];
+        barrier();
+        if (s_step_changed == 0u) {
+            break;
+        }
+        barrier();
+    }
+}
+
+void main() {
+    uint work_index = gl_WorkGroupID.x;
+    if (work_index >= connected_tile_count[0]) {
+        return;
+    }
+    ivec2 tile = connected_tile_list[int(work_index)];
+    if (!tile_connected_mask(tile)) {
+        return;
+    }
+
+    int local_y = int(gl_LocalInvocationID.x);
+    int world_y = tile.y * tile_size + local_y;
+    bool row_valid = local_y < tile_size && world_y < cell_grid_size.y;
+    uint structural_row = row_valid
+        ? connected_tile_row_masks[connected_tile_mask_base(tile) + local_y]
+        : 0u;
+#if SUPPORT_JFA_NV32_ROW_HYDRATE
+    int local_x = int(gl_ThreadInWarpNV);
+    s_structural_rows[local_y] = structural_row;
+    barrier();
+    for (
+        int input_y = 0;
+        input_y < {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}};
+        ++input_y
+    ) {
+        int input_world_y = tile.y * tile_size + input_y;
+        bool input_row_valid = input_y < tile_size && input_world_y < cell_grid_size.y;
+        uint input_structural_row = s_structural_rows[input_y];
+        uint bit = 1u << uint(local_x);
+        ivec2 cell = tile * tile_size + ivec2(local_x, input_y);
+        bool structural = input_row_valid
+            && local_x < tile_size
+            && in_grid(cell)
+            && (input_structural_row & bit) != 0u;
+        bool supported = false;
+        if (structural) {
+            supported = support_texel(cell);
+            supported = supported ||
+                (local_x == 0 && support_global(cell + ivec2(-1, 0))) ||
+                (local_x + 1 >= tile_size && support_global(cell + ivec2(1, 0))) ||
+                (input_y == 0 && support_global(cell + ivec2(0, -1))) ||
+                (input_y + 1 >= tile_size && support_global(cell + ivec2(0, 1)));
+        }
+        uint supported_mask = ballotThreadNV(supported);
+        if (local_y == input_y) {
+            s_supported_rows[input_y] = close_row(
+                supported_mask,
+                input_structural_row
+            );
+            s_next_rows[input_y] = s_supported_rows[input_y];
+        }
+    }
+#else
+    uint supported_row = 0u;
+    if (row_valid) {
+        for (int local_x = 0; local_x < {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}; ++local_x) {
+            if (local_x >= tile_size) {
+                break;
+            }
+            ivec2 cell = tile * tile_size + ivec2(local_x, local_y);
+            if (!in_grid(cell)) {
+                continue;
+            }
+            uint bit = 1u << uint(local_x);
+            if ((structural_row & bit) == 0u) {
+                continue;
+            }
+            bool supported = support_texel(cell);
+            bool boundary_supported =
+                (local_x == 0 && support_global(cell + ivec2(-1, 0))) ||
+                (local_x + 1 >= tile_size && support_global(cell + ivec2(1, 0))) ||
+                (local_y == 0 && support_global(cell + ivec2(0, -1))) ||
+                (local_y + 1 >= tile_size && support_global(cell + ivec2(0, 1)));
+            if (supported || boundary_supported) {
+                supported_row |= bit;
+            }
+        }
+    }
+    s_structural_rows[local_y] = structural_row;
+    s_supported_rows[local_y] = close_row(supported_row, structural_row);
+    s_next_rows[local_y] = s_supported_rows[local_y];
+#endif
+    barrier();
+
+    solve_supported_rows(local_y, row_valid);
+
+    if (jump > 1) {
+        if (gl_LocalInvocationIndex == 0u) {
+            s_jump_changed = 0u;
+        }
+        barrier();
+        uint previous_row = row_valid ? s_supported_rows[local_y] : 0u;
+        uint jump_row = previous_row;
+        if (row_valid) {
+            for (int local_x = 0; local_x < {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}; ++local_x) {
+                if (local_x >= tile_size) {
+                    break;
+                }
+                uint bit = 1u << uint(local_x);
+                if ((structural_row & bit) == 0u || (jump_row & bit) != 0u) {
+                    continue;
+                }
+                ivec2 cell = tile * tile_size + ivec2(local_x, local_y);
+                for (int axis = 0; axis < 4; ++axis) {
+                    ivec2 offset = axis == 0 ? ivec2(-jump, 0) : axis == 1 ? ivec2(jump, 0) : axis == 2 ? ivec2(0, -jump) : ivec2(0, jump);
+                    ivec2 sample_cell = cell + offset;
+                    if (sample_in_current_tile(tile, sample_cell)) {
+                        continue;
+                    }
+                    if (!support_global(sample_cell)) {
+                        continue;
+                    }
+                    if (line_clear(sample_cell, cell)) {
+                        jump_row |= bit;
+                        break;
+                    }
+                }
+            }
+        }
+        if (jump_row != previous_row) {
+            atomicOr(s_jump_changed, 1u);
+        }
+        s_next_rows[local_y] = jump_row;
+        barrier();
+        s_supported_rows[local_y] = s_next_rows[local_y];
+        barrier();
+        if (s_jump_changed != 0u) {
+            solve_supported_rows(local_y, row_valid);
+        }
+    }
+
+#if {{SUPPORT_JFA_ROW_MAJOR_OUTPUT}}
+    // Every lane owns one output column. Do not gate this on row_valid: on a
+    // partial bottom tile, lanes above the valid row count still own valid x
+    // columns for the rows that remain in bounds.
+    for (
+        int linear = int(gl_LocalInvocationIndex);
+        linear < {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}} * {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}};
+        linear += {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}
+    ) {
+        int local_x = linear % {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}};
+        int output_y = linear / {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}};
+        if (local_x >= tile_size || output_y >= tile_size) {
+            continue;
+        }
+        ivec2 cell = tile * tile_size + ivec2(local_x, output_y);
+        if (!in_grid(cell)) {
+            continue;
+        }
+        uint final_row = s_supported_rows[output_y];
+        bool supported = (final_row & (1u << uint(local_x))) != 0u;
+        store_support(cell, supported);
+    }
+#else
+    if (row_valid) {
+        uint final_row = s_supported_rows[local_y];
+        for (int local_x = 0; local_x < {{FORMAL_CONNECTED_TILE_LOCAL_SIZE}}; ++local_x) {
+            if (local_x >= tile_size) {
+                break;
+            }
+            ivec2 cell = tile * tile_size + ivec2(local_x, local_y);
+            if (!in_grid(cell)) {
+                continue;
+            }
+            bool supported = (final_row & (1u << uint(local_x))) != 0u;
+            store_support(cell, supported);
+        }
+    }
+#endif
+}

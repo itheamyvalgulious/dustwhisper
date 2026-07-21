@@ -426,6 +426,10 @@ def serialize_active_runtime(engine: "WorldEngine") -> dict[str, Any]:
 
 
 def serialize_motion_runtime(engine: "WorldEngine") -> dict[str, Any]:
+    engine.motion_solver.gpu_pipeline.materialize_compact_powder_reservations(
+        engine,
+        download=True,
+    )
     snapshot = engine.motion_solver.runtime_snapshot()
     public_powder_reservations = snapshot.get("public_powder_reservations")
     if isinstance(public_powder_reservations, list) and public_powder_reservations:

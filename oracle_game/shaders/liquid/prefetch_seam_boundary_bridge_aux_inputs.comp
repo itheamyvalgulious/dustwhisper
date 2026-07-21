@@ -4,6 +4,7 @@ uniform ivec2 cell_grid_size;
 uniform ivec2 tile_grid_size;
 uniform int tile_size;
 uniform int seam_axis;
+uniform uint total_tile_count;
 
 layout(std430, binding=0) readonly buffer BridgeEntityBuffer {
     int bridge_entity_id[];
@@ -19,6 +20,9 @@ layout(std430, binding=3) readonly buffer AffectedTileCountBuffer {
 };
 layout(std430, binding=4) readonly buffer AffectedTileListBuffer {
     ivec2 affected_tile_list[];
+};
+layout(std430, binding=5) readonly buffer ActiveTileCountBuffer {
+    uint active_tile_count[];
 };
 
 layout(r32f, binding=0) writeonly uniform image2D entity_img;
@@ -79,6 +83,9 @@ bool tile_is_active(ivec2 cell) {
 }
 
 void main() {
+    if (active_tile_count[0] >= total_tile_count) {
+        return;
+    }
     ivec2 gid;
     if (!boundary_dispatch_cell(gid) || tile_is_active(gid)) {
         return;

@@ -1,0 +1,38 @@
+#version 430
+layout(local_size_x={{SPARSE_LOCAL_SIZE}}, local_size_y=1, local_size_z=1) in;
+uniform int clear_kind;
+layout(std430, binding=0) buffer CellDoseAccum { uint cell_dose_accum[]; };
+layout(std430, binding=1) buffer GasDoseAccum { uint gas_dose_accum[]; };
+layout(std430, binding=2) buffer IllumAccum { uint illum_accum[]; };
+layout(std430, binding=3) buffer BridgeCellDose { float bridge_cell_dose[]; };
+layout(std430, binding=4) buffer BridgeGasDose { float bridge_gas_dose[]; };
+layout(std430, binding=5) readonly buffer SparseCellList { uint sparse_cell_list[]; };
+layout(std430, binding=6) readonly buffer SparseGasList { uint sparse_gas_list[]; };
+layout(std430, binding=7) readonly buffer SparseVisibleList { uint sparse_visible_list[]; };
+layout(std430, binding=8) readonly buffer SparseRuntime { uint sparse_runtime[]; };
+layout(rgba32f, binding=0) writeonly uniform image2D bridge_light_img;
+layout(rgba32f, binding=1) writeonly uniform image2D bridge_visible_img;
+void main() {
+    uint invocation = gl_GlobalInvocationID.x;
+    if (clear_kind == 0) {
+        if (invocation >= sparse_runtime[0]) return;
+        uint index = sparse_cell_list[invocation];
+        cell_dose_accum[index] = 0u;
+        illum_accum[index] = 0u;
+        bridge_cell_dose[index] = 0.0;
+        return;
+    }
+    if (clear_kind == 1) {
+        if (invocation >= sparse_runtime[1]) return;
+        uint index = sparse_gas_list[invocation];
+        gas_dose_accum[index] = 0u;
+        bridge_gas_dose[index] = 0.0;
+        return;
+    }
+    if (invocation >= sparse_runtime[2]) return;
+    uint index = sparse_visible_list[invocation];
+    ivec2 size = imageSize(bridge_visible_img);
+    ivec2 cell = ivec2(int(index) % size.x, int(index) / size.x);
+    imageStore(bridge_light_img, cell, vec4(0.0, 0.0, 0.0, 1.0));
+    imageStore(bridge_visible_img, cell, vec4(0.0, 0.0, 0.0, 1.0));
+}

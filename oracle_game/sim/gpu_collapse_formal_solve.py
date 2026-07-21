@@ -73,30 +73,32 @@ def _solve_formal_connected_dirty_tile_textures(
         )
     with pipeline._profile_pass(world, "classify_filter"):
         pipeline._classify_formal_connected_tile_textures(world, resources, tile_mask_name, x0, y0, width, height)
-        pipeline._publish_bridge_region_mask(
-            world,
-            resources,
-            resources.structural_tex,
-            "collapse_structural_mask",
-            x0,
-            y0,
-            width,
-            height,
-            tile_mask_name=tile_mask_name,
-        )
-        pipeline._publish_bridge_region_mask(
-            world,
-            resources,
-            resources.support_ping,
-            "collapse_support_seed_mask",
-            x0,
-            y0,
-            width,
-            height,
-            tile_mask_name=tile_mask_name,
-        )
+        if not pipeline._classification_mask_publish_fusion_enabled:
+            pipeline._publish_bridge_region_mask(
+                world,
+                resources,
+                resources.structural_tex,
+                "collapse_structural_mask",
+                x0,
+                y0,
+                width,
+                height,
+                tile_mask_name=tile_mask_name,
+            )
+            pipeline._publish_bridge_region_mask(
+                world,
+                resources,
+                resources.support_ping,
+                "collapse_support_seed_mask",
+                x0,
+                y0,
+                width,
+                height,
+                tile_mask_name=tile_mask_name,
+            )
 
     with pipeline._profile_pass(world, "support_jfa"):
+        fuse_support_publish = pipeline._support_outcome_publish_fusion_enabled
         supported_texture = pipeline._solve_formal_connected_tile_support_textures(
             world,
             resources,
@@ -105,6 +107,7 @@ def _solve_formal_connected_dirty_tile_textures(
             width,
             height,
             tile_mask_name,
+            publish_masks=not fuse_support_publish,
         )
     outcome_resources, _, _ = pipeline.resolve_supported_outcome_textures(
         world,
@@ -116,6 +119,7 @@ def _solve_formal_connected_dirty_tile_textures(
         height,
         eligibility_texture=resources.structural_tex,
         tile_mask_name=tile_mask_name,
+        publish_runtime_masks=fuse_support_publish,
     )
     return outcome_resources, x0, y0, width, height
 
@@ -135,30 +139,32 @@ def _solve_formal_connected_tile_textures(
         pipeline._last_formal_connected_tile_mask_name = tile_mask_name
     with pipeline._profile_pass(world, "classify_filter"):
         pipeline._classify_formal_connected_tile_textures(world, resources, tile_mask_name, x0, y0, width, height)
-        pipeline._publish_bridge_region_mask(
-            world,
-            resources,
-            resources.structural_tex,
-            "collapse_structural_mask",
-            x0,
-            y0,
-            width,
-            height,
-            tile_mask_name=tile_mask_name,
-        )
-        pipeline._publish_bridge_region_mask(
-            world,
-            resources,
-            resources.support_ping,
-            "collapse_support_seed_mask",
-            x0,
-            y0,
-            width,
-            height,
-            tile_mask_name=tile_mask_name,
-        )
+        if not pipeline._classification_mask_publish_fusion_enabled:
+            pipeline._publish_bridge_region_mask(
+                world,
+                resources,
+                resources.structural_tex,
+                "collapse_structural_mask",
+                x0,
+                y0,
+                width,
+                height,
+                tile_mask_name=tile_mask_name,
+            )
+            pipeline._publish_bridge_region_mask(
+                world,
+                resources,
+                resources.support_ping,
+                "collapse_support_seed_mask",
+                x0,
+                y0,
+                width,
+                height,
+                tile_mask_name=tile_mask_name,
+            )
 
     with pipeline._profile_pass(world, "support_jfa"):
+        fuse_support_publish = pipeline._support_outcome_publish_fusion_enabled
         supported_texture = pipeline._solve_formal_connected_tile_support_textures(
             world,
             resources,
@@ -167,6 +173,7 @@ def _solve_formal_connected_tile_textures(
             width,
             height,
             tile_mask_name,
+            publish_masks=not fuse_support_publish,
         )
     outcome_resources, _, _ = pipeline.resolve_supported_outcome_textures(
         world,
@@ -178,6 +185,7 @@ def _solve_formal_connected_tile_textures(
         height,
         eligibility_texture=resources.structural_tex,
         tile_mask_name=tile_mask_name,
+        publish_runtime_masks=fuse_support_publish,
     )
     return outcome_resources, x0, y0, width, height
 
@@ -422,6 +430,12 @@ def _classify_formal_connected_tile_textures(
     y0: int,
     width: int,
     height: int,
+    *,
+    publish_runtime_masks: bool | None = None,
+    snapshot_pending: bool = False,
+    packed_incremental_snapshot: bool = False,
+    build_support_axis_masks_u8: bool = False,
+    support_seed_u8_texture: Any | None = None,
 ) -> None:
     ctx = world.bridge.ctx
     if ctx is None:
@@ -433,7 +447,38 @@ def _classify_formal_connected_tile_textures(
     tile_size = max(1, int(getattr(world.active, "tile_size", FORMAL_CONNECTED_TILE_LOCAL_SIZE)))
     if tile_size > FORMAL_CONNECTED_TILE_LOCAL_SIZE:
         raise RuntimeError("formal connected tile classification requires tile_size <= 32")
-    program = pipeline.programs["classify_formal_connected_tiles"]
+    fuse_publish = (
+        pipeline._classification_mask_publish_fusion_enabled
+        if publish_runtime_masks is None
+        else bool(publish_runtime_masks)
+    )
+    direct_bridge_inputs = bool(
+        pipeline._formal_gpu_frame(world)
+        and pipeline._classification_bridge_hydration_fusion_enabled
+        and "cell_core" in bridge.gpu_authoritative_resources
+    )
+    program_suffix = "_bridge" if direct_bridge_inputs else ""
+    if fuse_publish:
+        program_suffix += "_publish"
+    if snapshot_pending:
+        if not direct_bridge_inputs or not fuse_publish:
+            raise RuntimeError("formal connected pending snapshot requires direct bridge classification publish")
+        program_suffix += "_incremental"
+        if packed_incremental_snapshot:
+            program_suffix += "_packed"
+    elif packed_incremental_snapshot:
+        raise ValueError("packed incremental snapshot requires pending snapshot classification")
+    if build_support_axis_masks_u8:
+        if not direct_bridge_inputs or not fuse_publish or not snapshot_pending:
+            raise RuntimeError(
+                "formal connected fused support axis masks require incremental direct bridge classification"
+            )
+        if support_seed_u8_texture is None:
+            raise ValueError("formal connected fused support axis masks require an R8 seed texture")
+        program_suffix += "_axis_u8"
+    program = pipeline.programs[
+        f"classify_formal_connected_tiles{program_suffix}"
+    ]
     if not hasattr(program, "run_indirect"):
         raise RuntimeError("formal connected tile classification requires ComputeShader.run_indirect")
     program["cell_grid_size"].value = (int(width), int(height))
@@ -450,15 +495,52 @@ def _classify_formal_connected_tile_textures(
     resources.phase_tex.use(location=1)
     resources.structural_tex.bind_to_image(2, read=False, write=True)
     resources.support_ping.bind_to_image(3, read=False, write=True)
-    resources.material_out_tex.bind_to_image(4, read=False, write=True)
+    if direct_bridge_inputs:
+        if packed_incremental_snapshot:
+            resources.component_labels.bind_to_storage_buffer(binding=10)
+        else:
+            resources.material_tex.bind_to_image(0, read=False, write=True)
+            resources.phase_tex.bind_to_image(1, read=False, write=True)
+        (resources.pending_tex if snapshot_pending else resources.temp_tex).bind_to_image(
+            4,
+            read=False,
+            write=True,
+        )
+        if not snapshot_pending:
+            resources.cell_flags_tex.bind_to_image(5, read=False, write=True)
+            resources.timer_tex.bind_to_image(6, read=False, write=True)
+            resources.integrity_tex.bind_to_image(7, read=False, write=True)
+    else:
+        resources.material_out_tex.bind_to_image(4, read=False, write=True)
     bridge.buffers[tile_mask_name].bind_to_storage_buffer(binding=3)
     resources.material_structural.bind_to_storage_buffer(binding=0)
     resources.material_support_anchor.bind_to_storage_buffer(binding=1)
     resources.material_collapse_behavior.bind_to_storage_buffer(binding=2)
     bridge.buffers[FORMAL_CONNECTED_TILE_COUNT_BUFFER].bind_to_storage_buffer(binding=4)
     bridge.buffers[FORMAL_CONNECTED_TILE_LIST_BUFFER].bind_to_storage_buffer(binding=5)
+    if fuse_publish:
+        bridge.buffers["collapse_structural_mask"].bind_to_storage_buffer(binding=6)
+        bridge.buffers["collapse_support_seed_mask"].bind_to_storage_buffer(binding=7)
+    if direct_bridge_inputs:
+        bridge.buffers["cell_core"].bind_to_storage_buffer(binding=8)
+    if snapshot_pending:
+        bridge.buffers["collapse_delay_pending"].bind_to_storage_buffer(binding=9)
+    if build_support_axis_masks_u8:
+        pipeline._ensure_formal_connected_axis_mask_buffers(
+            ctx,
+            resources,
+            int(getattr(world.active, "tile_width", 1))
+            * int(getattr(world.active, "tile_height", 1)),
+        )
+        support_seed_u8_texture.bind_to_image(5, read=False, write=True)
+        resources.connected_tile_row_masks.bind_to_storage_buffer(binding=11)
+        resources.connected_tile_column_masks.bind_to_storage_buffer(binding=12)
     program.run_indirect(bridge.buffers[FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER])
-    ctx.memory_barrier(ctx.SHADER_IMAGE_ACCESS_BARRIER_BIT | ctx.TEXTURE_FETCH_BARRIER_BIT)
+    barrier_bits = ctx.SHADER_IMAGE_ACCESS_BARRIER_BIT | ctx.TEXTURE_FETCH_BARRIER_BIT
+    if fuse_publish:
+        barrier_bits |= ctx.SHADER_STORAGE_BARRIER_BIT
+        bridge.mark_gpu_authoritative("collapse_structural_mask", "collapse_support_seed_mask")
+    ctx.memory_barrier(barrier_bits)
 
 
 def _solve_formal_connected_frontier_texture(

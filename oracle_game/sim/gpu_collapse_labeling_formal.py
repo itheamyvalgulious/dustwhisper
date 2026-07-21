@@ -216,71 +216,180 @@ def _label_component_texture_connected_tiles(
     y0: int,
     tile_mask_name: str,
 ) -> tuple[Any, int, int]:
-    seed_frontier = (
-        FORMAL_CONNECTED_CELL_FRONTIER_TILE_FLAGS_BUFFER,
-        FORMAL_CONNECTED_CELL_FRONTIER_TILE_LIST_BUFFER,
-        FORMAL_CONNECTED_CELL_FRONTIER_TILE_COUNT_BUFFER,
-        FORMAL_CONNECTED_CELL_FRONTIER_TILE_DISPATCH_ARGS_BUFFER,
+    current, scratch, schedule = _begin_formal_connected_component_labeling(
+        pipeline,
+        world,
+        resources,
+        component_texture,
+        width,
+        height,
+        tile_mask_name,
     )
-    with pipeline._profile_pass(world, "label_jfa.seed"):
-        pipeline._seed_formal_component_label_frontier(
-            world,
-            resources,
-            component_texture,
-            width,
-            height,
-            tile_mask_name,
-            seed_frontier,
+    current, scratch = _run_formal_connected_component_label_slice(
+        pipeline,
+        world,
+        resources,
+        component_texture,
+        current,
+        scratch,
+        width,
+        height,
+        tile_mask_name,
+        schedule,
+        0,
+        len(schedule),
+    )
+    _publish_formal_connected_component_labels(
+        pipeline,
+        world,
+        resources,
+        current,
+        x0,
+        y0,
+        width,
+        height,
+        tile_mask_name,
+    )
+    return current, width, height
+
+
+def _begin_formal_connected_component_labeling(
+    pipeline,
+    world: "WorldEngine",
+    resources: GPUCollapseResources,
+    component_texture: Any,
+    width: int,
+    height: int,
+    tile_mask_name: str,
+) -> tuple[Any, Any, tuple[int, ...]]:
+    if pipeline._label_seed_materialize_axis_fusion_enabled:
+        with pipeline._profile_pass(world, "label_jfa.seed_materialize_axis"):
+            pipeline._seed_formal_component_labels_and_axis_masks(
+                world,
+                resources,
+                component_texture,
+                resources.support_ping,
+                width,
+                height,
+                tile_mask_name,
+            )
+    else:
+        seed_frontier = (
+            FORMAL_CONNECTED_CELL_FRONTIER_TILE_FLAGS_BUFFER,
+            FORMAL_CONNECTED_CELL_FRONTIER_TILE_LIST_BUFFER,
+            FORMAL_CONNECTED_CELL_FRONTIER_TILE_COUNT_BUFFER,
+            FORMAL_CONNECTED_CELL_FRONTIER_TILE_DISPATCH_ARGS_BUFFER,
         )
-    with pipeline._profile_pass(world, "label_jfa.materialize"):
-        pipeline._copy_formal_component_label_buffer_to_texture(
-            world,
-            resources,
-            component_texture,
-            resources.support_ping,
-            width,
-            height,
-            tile_mask_name,
-        )
+        with pipeline._profile_pass(world, "label_jfa.seed"):
+            pipeline._seed_formal_component_label_frontier(
+                world,
+                resources,
+                component_texture,
+                width,
+                height,
+                tile_mask_name,
+                seed_frontier,
+            )
+        with pipeline._profile_pass(world, "label_jfa.materialize"):
+            pipeline._copy_formal_component_label_buffer_to_texture(
+                world,
+                resources,
+                component_texture,
+                resources.support_ping,
+                width,
+                height,
+                tile_mask_name,
+            )
+        with pipeline._profile_pass(world, "label_jfa.axis_masks"):
+            pipeline._build_formal_connected_axis_masks(
+                world,
+                resources,
+                component_texture,
+                width,
+                height,
+                tile_mask_name,
+            )
     current = resources.support_ping
     scratch = resources.support_pong
-    with pipeline._profile_pass(world, "label_jfa.axis_masks"):
-        pipeline._build_formal_connected_axis_masks(
-            world,
-            resources,
-            component_texture,
-            width,
-            height,
-            tile_mask_name,
-        )
-    jumps = pipeline._formal_jfa_jumps(width, height)
-    with pipeline._profile_pass(world, "label_jfa.jfa"):
-        for band_name, band_jumps in pipeline._formal_jfa_profile_jump_bands(jumps):
-            with pipeline._profile_pass(world, f"label_jfa.jfa.{band_name}"):
-                for jump in band_jumps:
-                    current, scratch = pipeline._run_formal_connected_component_label_pass(
-                        world,
-                        resources,
-                        component_texture,
-                        current,
-                        scratch,
-                        width,
-                        height,
-                        tile_mask_name,
-                        jump,
-                        refine_local_labels=True,
-                    )
-    with pipeline._profile_pass(world, "label_jfa.refine"):
-        current, scratch = pipeline._run_formal_connected_component_label_refine_passes(
-            world,
-            resources,
-            component_texture,
-            current,
-            scratch,
-            width,
-            height,
-            tile_mask_name,
-        )
+    schedule = (
+        *pipeline._formal_jfa_jumps(width, height),
+        *([1] * pipeline._formal_connected_tile_refine_pass_count(world)),
+    )
+    return current, scratch, tuple(int(jump) for jump in schedule)
+
+
+def _run_formal_connected_component_label_slice(
+    pipeline,
+    world: "WorldEngine",
+    resources: GPUCollapseResources,
+    component_texture: Any,
+    current: Any,
+    scratch: Any,
+    width: int,
+    height: int,
+    tile_mask_name: str,
+    schedule: tuple[int, ...],
+    start: int,
+    stop: int,
+) -> tuple[Any, Any]:
+    schedule_length = len(schedule)
+    slice_start = max(0, min(schedule_length, int(start)))
+    slice_stop = max(slice_start, min(schedule_length, int(stop)))
+    refine_pass_count = min(
+        schedule_length,
+        max(0, int(pipeline._formal_connected_tile_refine_pass_count(world))),
+    )
+    jfa_stop = schedule_length - refine_pass_count
+    jfa_slice_start = min(slice_start, jfa_stop)
+    jfa_slice_stop = min(slice_stop, jfa_stop)
+    if jfa_slice_start < jfa_slice_stop:
+        jumps = schedule[jfa_slice_start:jfa_slice_stop]
+        with pipeline._profile_pass(world, "label_jfa.jfa"):
+            for band_name, band_jumps in pipeline._formal_jfa_profile_jump_bands(jumps):
+                with pipeline._profile_pass(world, f"label_jfa.jfa.{band_name}"):
+                    for jump in band_jumps:
+                        current, scratch = pipeline._run_formal_connected_component_label_pass(
+                            world,
+                            resources,
+                            component_texture,
+                            current,
+                            scratch,
+                            width,
+                            height,
+                            tile_mask_name,
+                            jump,
+                            refine_local_labels=True,
+                        )
+    refine_slice_start = max(slice_start, jfa_stop)
+    if refine_slice_start < slice_stop:
+        with pipeline._profile_pass(world, "label_jfa.refine"):
+            for jump in schedule[refine_slice_start:slice_stop]:
+                current, scratch = pipeline._run_formal_connected_component_label_pass(
+                    world,
+                    resources,
+                    component_texture,
+                    current,
+                    scratch,
+                    width,
+                    height,
+                    tile_mask_name,
+                    jump,
+                    refine_local_labels=True,
+                )
+    return current, scratch
+
+
+def _publish_formal_connected_component_labels(
+    pipeline,
+    world: "WorldEngine",
+    resources: GPUCollapseResources,
+    current: Any,
+    x0: int,
+    y0: int,
+    width: int,
+    height: int,
+    tile_mask_name: str,
+) -> None:
     with pipeline._profile_pass(world, "label_jfa.publish"):
         pipeline._publish_bridge_region_labels_connected_tiles(
             world,
@@ -292,7 +401,243 @@ def _label_component_texture_connected_tiles(
             height,
             tile_mask_name,
         )
-    return current, width, height
+
+
+def _ensure_formal_connected_component_label_union_buffers(
+    pipeline,
+    world: "WorldEngine",
+    resources: GPUCollapseResources,
+    width: int,
+    height: int,
+) -> int:
+    from oracle_game.sim.gpu_collapse_frontier import _ensure_support_tile_union_buffers
+
+    ctx = world.bridge.ctx
+    if ctx is None:
+        raise RuntimeError("formal component label tile union requires a valid GL context")
+    pipeline._ensure_programs(ctx)
+    bridge = world.bridge
+    bridge.ensure_world_resources(world)
+    tile_width = max(1, int(world.active.tile_width))
+    tile_height = max(1, int(world.active.tile_height))
+    tile_size = max(1, int(world.active.tile_size))
+    if tile_size > FORMAL_CONNECTED_TILE_LOCAL_SIZE:
+        raise RuntimeError("formal component label tile union requires tile_size <= 32")
+    edge_capacity = max(
+        1,
+        max(0, tile_width - 1) * int(height)
+        + max(0, tile_height - 1) * int(width),
+    )
+    _ensure_support_tile_union_buffers(
+        pipeline,
+        ctx,
+        resources,
+        width,
+        height,
+        edge_capacity,
+    )
+    roots = resources.support_tile_union_roots
+    parents = resources.support_tile_union_parent
+    edges = resources.support_tile_union_edges
+    edge_count = resources.support_tile_union_edge_count
+    if roots is None or parents is None or edges is None or edge_count is None:
+        raise RuntimeError("formal component label tile union buffers were not allocated")
+    return edge_capacity
+
+
+def _begin_formal_connected_component_label_union(
+    pipeline,
+    world: "WorldEngine",
+    resources: GPUCollapseResources,
+    component_texture: Any,
+    width: int,
+    height: int,
+    tile_mask_name: str,
+    *,
+    local_components_ready: bool = False,
+) -> tuple[int, int]:
+    ctx = world.bridge.ctx
+    if ctx is None:
+        raise RuntimeError("formal component label tile union requires a valid GL context")
+    pipeline._ensure_programs(ctx)
+    bridge = world.bridge
+    bridge.ensure_world_resources(world)
+    tile_width = max(1, int(world.active.tile_width))
+    tile_height = max(1, int(world.active.tile_height))
+    tile_size = max(1, int(world.active.tile_size))
+    edge_capacity = pipeline._ensure_formal_connected_component_label_union_buffers(
+        world,
+        resources,
+        width,
+        height,
+    )
+    roots = resources.support_tile_union_roots
+    parents = resources.support_tile_union_parent
+    edges = resources.support_tile_union_edges
+    edge_count = resources.support_tile_union_edge_count
+    if roots is None or parents is None or edges is None or edge_count is None:
+        raise RuntimeError("formal component label tile union buffers were not allocated")
+    edge_count.write(np.zeros(1, dtype=np.uint32).tobytes())
+
+    if not local_components_ready:
+        with pipeline._profile_pass(world, "label_tile_union.local_components"):
+            program = pipeline.programs["label_tile_union_local"]
+            program["cell_grid_size"].value = (int(width), int(height))
+            program["tile_grid_size"].value = (tile_width, tile_height)
+            program["tile_size"].value = tile_size
+            component_texture.use(location=0)
+            bridge.buffers[tile_mask_name].bind_to_storage_buffer(binding=0)
+            bridge.buffers[FORMAL_CONNECTED_TILE_COUNT_BUFFER].bind_to_storage_buffer(binding=1)
+            bridge.buffers[FORMAL_CONNECTED_TILE_LIST_BUFFER].bind_to_storage_buffer(binding=2)
+            roots.bind_to_storage_buffer(binding=3)
+            parents.bind_to_storage_buffer(binding=4)
+            program.run_indirect(bridge.buffers[FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER])
+            pipeline._sync_compute_writes(ctx)
+
+    with pipeline._profile_pass(world, "label_tile_union.boundary_edges"):
+        program = pipeline.programs["support_tile_union_edges"]
+        program["cell_grid_size"].value = (int(width), int(height))
+        program["tile_grid_size"].value = (tile_width, tile_height)
+        program["tile_size"].value = tile_size
+        program["edge_capacity"].value = edge_capacity
+        bridge.buffers[tile_mask_name].bind_to_storage_buffer(binding=0)
+        bridge.buffers[FORMAL_CONNECTED_TILE_COUNT_BUFFER].bind_to_storage_buffer(binding=1)
+        bridge.buffers[FORMAL_CONNECTED_TILE_LIST_BUFFER].bind_to_storage_buffer(binding=2)
+        roots.bind_to_storage_buffer(binding=3)
+        edges.bind_to_storage_buffer(binding=4)
+        edge_count.bind_to_storage_buffer(binding=5)
+        program.run_indirect(bridge.buffers[FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER])
+        pipeline._sync_compute_writes(ctx)
+
+    edge_groups = max(1, (edge_capacity + 63) // 64)
+    resources.change_flag.write(np.zeros(1, dtype=np.uint32).tobytes())
+    resources.component_dispatch_args.write(
+        np.asarray([edge_groups, 1, 1], dtype=np.uint32).tobytes()
+    )
+    # The fixed upper bound is retained for exact worst-case connectivity.
+    # Adaptive dispatch only zeros later rounds after convergence is proven.
+    union_round_count = max(1, (max(1, int(width) * int(height))).bit_length() + 2)
+    return union_round_count, edge_capacity
+
+
+def _run_formal_connected_component_label_union_slice(
+    pipeline,
+    world: "WorldEngine",
+    resources: GPUCollapseResources,
+    edge_capacity: int,
+    start: int,
+    stop: int,
+) -> int:
+    ctx = world.bridge.ctx
+    if ctx is None:
+        raise RuntimeError("formal component label tile union requires a valid GL context")
+    roots = resources.support_tile_union_roots
+    parents = resources.support_tile_union_parent
+    edges = resources.support_tile_union_edges
+    edge_count = resources.support_tile_union_edge_count
+    if roots is None or parents is None or edges is None or edge_count is None:
+        raise RuntimeError("formal component label tile union buffers were not allocated")
+    slice_start = max(0, int(start))
+    slice_stop = max(slice_start, int(stop))
+    edge_groups = max(1, (int(edge_capacity) + 63) // 64)
+    with pipeline._profile_pass(world, "label_tile_union.union"):
+        hook = pipeline.programs["label_tile_union_hook"]
+        hook["edge_capacity"].value = int(edge_capacity)
+        shortcut = pipeline.programs["support_tile_union_shortcut"]
+        shortcut["edge_capacity"].value = int(edge_capacity)
+        build_dispatch = pipeline.programs["label_tile_union_build_dispatch"]
+        build_dispatch["edge_group_count"].value = edge_groups
+        for _ in range(slice_start, slice_stop):
+            edges.bind_to_storage_buffer(binding=0)
+            edge_count.bind_to_storage_buffer(binding=1)
+            parents.bind_to_storage_buffer(binding=2)
+            resources.change_flag.bind_to_storage_buffer(binding=3)
+            hook.run_indirect(resources.component_dispatch_args)
+            pipeline._sync_compute_writes(ctx)
+            edges.bind_to_storage_buffer(binding=0)
+            edge_count.bind_to_storage_buffer(binding=1)
+            parents.bind_to_storage_buffer(binding=2)
+            shortcut.run_indirect(resources.component_dispatch_args)
+            pipeline._sync_compute_writes(ctx)
+            resources.change_flag.bind_to_storage_buffer(binding=0)
+            resources.component_dispatch_args.bind_to_storage_buffer(binding=1)
+            build_dispatch.run(1, 1, 1)
+            pipeline._sync_compute_writes(ctx)
+    return slice_stop
+
+
+def _materialize_formal_connected_component_label_union(
+    pipeline,
+    world: "WorldEngine",
+    resources: GPUCollapseResources,
+    width: int,
+    height: int,
+    tile_mask_name: str,
+) -> tuple[Any, Any]:
+    ctx = world.bridge.ctx
+    if ctx is None:
+        raise RuntimeError("formal component label tile union requires a valid GL context")
+    bridge = world.bridge
+    roots = resources.support_tile_union_roots
+    parents = resources.support_tile_union_parent
+    if roots is None or parents is None:
+        raise RuntimeError("formal component label tile union buffers were not allocated")
+    tile_width = max(1, int(world.active.tile_width))
+    tile_height = max(1, int(world.active.tile_height))
+    tile_size = max(1, int(world.active.tile_size))
+    with pipeline._profile_pass(world, "label_tile_union.materialize"):
+        program = pipeline.programs["label_tile_union_materialize"]
+        program["cell_grid_size"].value = (int(width), int(height))
+        program["tile_grid_size"].value = (tile_width, tile_height)
+        program["tile_size"].value = tile_size
+        resources.support_ping.bind_to_image(0, read=False, write=True)
+        bridge.buffers[tile_mask_name].bind_to_storage_buffer(binding=0)
+        bridge.buffers[FORMAL_CONNECTED_TILE_COUNT_BUFFER].bind_to_storage_buffer(binding=1)
+        bridge.buffers[FORMAL_CONNECTED_TILE_LIST_BUFFER].bind_to_storage_buffer(binding=2)
+        roots.bind_to_storage_buffer(binding=3)
+        parents.bind_to_storage_buffer(binding=4)
+        program.run_indirect(bridge.buffers[FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER])
+        pipeline._sync_compute_writes(ctx)
+    return resources.support_ping, resources.support_pong
+
+
+def _seed_formal_component_labels_and_axis_masks(
+    pipeline,
+    world: "WorldEngine",
+    resources: GPUCollapseResources,
+    component_texture: Any,
+    target_texture: Any,
+    width: int,
+    height: int,
+    tile_mask_name: str,
+) -> None:
+    ctx = world.bridge.ctx
+    if ctx is None:
+        raise RuntimeError("GPU collapse pipeline requires a valid ModernGL context")
+    pipeline._ensure_programs(ctx)
+    bridge = world.bridge
+    bridge.ensure_world_resources(world)
+    tile_size = max(1, int(getattr(world.active, "tile_size", FORMAL_CONNECTED_TILE_LOCAL_SIZE)))
+    if tile_size > FORMAL_CONNECTED_TILE_LOCAL_SIZE:
+        raise RuntimeError("formal connected component labeling requires tile_size <= 32")
+    program = pipeline.programs["seed_formal_component_labels_and_axis_masks"]
+    if not hasattr(program, "run_indirect"):
+        raise RuntimeError("formal connected fused component label seed requires ComputeShader.run_indirect")
+    program["cell_grid_size"].value = (int(width), int(height))
+    program["tile_grid_size"].value = (
+        int(getattr(world.active, "tile_width", 1)),
+        int(getattr(world.active, "tile_height", 1)),
+    )
+    program["tile_size"].value = int(tile_size)
+    component_texture.use(location=0)
+    target_texture.bind_to_image(1, read=False, write=True)
+    bridge.buffers[tile_mask_name].bind_to_storage_buffer(binding=0)
+    bridge.buffers[FORMAL_CONNECTED_TILE_COUNT_BUFFER].bind_to_storage_buffer(binding=1)
+    bridge.buffers[FORMAL_CONNECTED_TILE_LIST_BUFFER].bind_to_storage_buffer(binding=2)
+    resources.connected_tile_row_masks.bind_to_storage_buffer(binding=3)
+    resources.connected_tile_column_masks.bind_to_storage_buffer(binding=4)
+    program.run_indirect(bridge.buffers[FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER])
+    pipeline._sync_compute_writes(ctx)
 
 
 def _seed_formal_component_label_frontier(
@@ -436,7 +781,6 @@ def _run_formal_connected_component_label_pass(
     program["tile_size"].value = int(tile_size)
     program["jump"].value = int(jump)
     program["refine_local_labels"].value = bool(refine_local_labels)
-    component_texture.use(location=0)
     current.use(location=1)
     scratch.bind_to_image(2, read=False, write=True)
     bridge.buffers[tile_mask_name].bind_to_storage_buffer(binding=0)

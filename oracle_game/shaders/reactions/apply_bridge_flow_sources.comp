@@ -8,8 +8,15 @@
             uniform int active_ttl_reset;
             uniform int flow_source_layers;
             uniform float impulse_dt;
+            #if {{FLOW_SOURCE_GENERATION_VALIDITY}}
+            uniform bool flow_source_generation_validity_enabled;
+            uniform uint flow_source_generation;
+            #endif
             layout(binding=0) uniform sampler2D flow_velocity_tex;
             layout(binding=1) uniform sampler2DArray flow_source_tex;
+            #if {{FLOW_SOURCE_GENERATION_VALIDITY}}
+            layout(binding=2) uniform usampler2DArray flow_source_generation_tex;
+            #endif
             layout(rg32f, binding=2) writeonly uniform image2D bridge_flow_velocity_img;
             layout(std430, binding=1) buffer ActiveTileTTLBuffer {
                 int active_tile_ttl[];
@@ -40,6 +47,14 @@
                 vec2 velocity = texelFetch(flow_velocity_tex, gid, 0).xy;
                 int layer_count = min(flow_source_layers, {{FLOW_SOURCE_LAYERS}});
                 for (int layer = 0; layer < layer_count; ++layer) {
+                    #if {{FLOW_SOURCE_GENERATION_VALIDITY}}
+                    if (
+                        flow_source_generation_validity_enabled
+                        && texelFetch(flow_source_generation_tex, ivec3(gid, layer), 0).x != flow_source_generation
+                    ) {
+                        continue;
+                    }
+                    #endif
                     vec4 source = texelFetch(flow_source_tex, ivec3(gid, layer), 0);
                     vec2 direction = source.xy;
                     float radius = source.z;
@@ -52,4 +67,3 @@
                 }
                 imageStore(bridge_flow_velocity_img, gid, vec4(velocity, 0.0, 0.0));
             }
-            

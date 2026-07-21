@@ -9,8 +9,7 @@
             layout(std430, binding=1) readonly buffer TimedCandidateCount {
                 uint timed_candidate_count[];
             };
-            layout(r32f, binding=0) uniform image2D segment_cell_reset_img;
-            layout(r32f, binding=1) uniform image2D segment_reaction_latched_img;
+            layout(rg32f, binding=0) uniform image2D segment_cell_meta_img;
 
             uint linear_thread_index() {
                 return uint(gl_GlobalInvocationID.y) * (uint(gl_NumWorkGroups.x) * uint(gl_WorkGroupSize.x))
@@ -30,13 +29,11 @@
                 vec2 meta = texelFetch(local_cell_meta_tex, gid, 0).xy;
                 float current_reset = meta.x;
                 float current_latched = meta.y;
-                float segment_reset = max(imageLoad(segment_cell_reset_img, gid).x, current_reset);
-                float segment_latched = imageLoad(segment_reaction_latched_img, gid).x;
+                vec2 segment_meta = imageLoad(segment_cell_meta_img, gid).xy;
+                segment_meta.x = max(segment_meta.x, current_reset);
                 if (current_reset > 0.5) {
-                    segment_latched = 0.0;
+                    segment_meta.y = 0.0;
                 }
-                segment_latched = max(segment_latched, current_latched);
-                imageStore(segment_cell_reset_img, gid, vec4(segment_reset, 0.0, 0.0, 0.0));
-                imageStore(segment_reaction_latched_img, gid, vec4(segment_latched, 0.0, 0.0, 0.0));
+                segment_meta.y = max(segment_meta.y, current_latched);
+                imageStore(segment_cell_meta_img, gid, vec4(segment_meta, 0.0, 0.0));
             }
-            

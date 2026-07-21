@@ -1,4 +1,20 @@
 #version 430
+{{TILE_WARP_EXTENSIONS}}
+#define TILE_WARP_FAST_PATH {{TILE_WARP_FAST_PATH}}
+#define TILE_WARP_DIRECT_VERTICAL_MAPPING {{TILE_WARP_DIRECT_VERTICAL_MAPPING}}
+#define TILE_WARP_PROVENANCE_ROW_STREAM {{TILE_WARP_PROVENANCE_ROW_STREAM}}
+#define TILE_WARP_LANE_CHANGE_VOTE {{TILE_WARP_LANE_CHANGE_VOTE}}
+#define LIQUID_PROVENANCE {{LIQUID_PROVENANCE}}
+#define TILE_SHARED_PACKED_STATE 1
+#define TILE_SNAPSHOT_OUTPUT {{TILE_SNAPSHOT_OUTPUT}}
+#define TILE_COMPACT_SNAPSHOT {{TILE_COMPACT_SNAPSHOT}}
+#define TILE_SNAPSHOT_PRE_STATE {{TILE_SNAPSHOT_PRE_STATE}}
+#define TILE_SNAPSHOT_STATE_ELISION {{TILE_SNAPSHOT_STATE_ELISION}}
+#define TILE_PACKED_PRE_STATE_BLOCKER {{TILE_PACKED_PRE_STATE_BLOCKER}}
+#define TILE_LIQUID_KIND_CACHE {{TILE_LIQUID_KIND_CACHE}}
+#define TILE_BLOCKER_MASK_INPUT {{TILE_BLOCKER_MASK_INPUT}}
+const bool DIRECT_BRIDGE_INPUTS = {{DIRECT_BRIDGE_INPUTS}} != 0;
+#define DIRECT_BRIDGE_AUX_INPUTS {{DIRECT_BRIDGE_AUX_INPUTS}}
 layout(local_size_x={{TILE_LOCAL_SIZE}}, local_size_y=1, local_size_z=1) in;
 const int TILE_SIZE = {{TILE_SIZE}};
 uniform ivec2 cell_grid_size;
@@ -6,15 +22,14 @@ uniform ivec2 tile_grid_size;
 uniform int active_ttl_reset;
 uniform int phase_liquid;
 uniform int phase_falling_island;
-layout(binding=0) uniform sampler2D material_in_tex;
-layout(binding=1) uniform sampler2D phase_in_tex;
-layout(binding=2) uniform sampler2D flags_in_tex;
-layout(binding=3) uniform sampler2D timer_in_tex;
+layout(binding=0) uniform usampler2D cell_state_in_tex;
+layout(binding=3) uniform usampler2D timer_in_tex;
 layout(binding=4) uniform sampler2D temp_in_tex;
 layout(binding=5) uniform sampler2D integrity_in_tex;
 layout(binding=6) uniform sampler2D velocity_in_tex;
 layout(binding=8) uniform sampler2D entity_in_tex;
 layout(binding=9) uniform sampler2D displaced_in_tex;
+layout(binding=10) uniform usampler2D blocker_mask_tex;
 layout(std430, binding=0) buffer MaterialParams {
     vec4 material_params[{{MAX_MATERIALS}}];
 };
@@ -27,21 +42,59 @@ layout(std430, binding=2) readonly buffer ActiveTileCountBuffer {
 layout(std430, binding=3) readonly buffer ActiveTileListBuffer {
     ivec2 active_tile_list[];
 };
-layout(r32f, binding=0) writeonly uniform image2D material_out_img;
-layout(r32f, binding=1) writeonly uniform image2D phase_out_img;
-layout(r32f, binding=2) writeonly uniform image2D flags_out_img;
-layout(rgba32f, binding=3) writeonly uniform image2D timer_out_img;
+layout(std430, binding=4) readonly buffer BridgeCellCoreBuffer {
+    uint bridge_cell_core[];
+};
+layout(std430, binding=6) readonly buffer BridgeEntityBuffer {
+    int bridge_entity_id[];
+};
+layout(std430, binding=7) readonly buffer BridgeDisplacedBuffer {
+    int bridge_displaced_material[];
+};
+#if TILE_SNAPSHOT_OUTPUT
+layout(std430, binding=5) writeonly buffer TileSolveSnapshotBuffer {
+    uint tile_solve_snapshot[];
+};
+#endif
+#if TILE_SNAPSHOT_PRE_STATE
+layout(std430, binding=9) readonly buffer TileSnapshotTokenBuffer {
+    uint tile_snapshot_state[];
+};
+layout(std430, binding=10) writeonly buffer TileSnapshotTileTokenBuffer {
+    uvec2 tile_snapshot_tile_tokens[];
+};
+#endif
+#if LIQUID_PROVENANCE
+layout(std430, binding=8) writeonly buffer LiquidProvenanceBuffer {
+    uint liquid_provenance[];
+};
+#endif
+layout(r32ui, binding=0) writeonly uniform uimage2D cell_state_out_img;
+layout(r32ui, binding=3) writeonly uniform uimage2D timer_out_img;
 layout(r32f, binding=4) writeonly uniform image2D temp_out_img;
 layout(r32f, binding=5) writeonly uniform image2D integrity_out_img;
 layout(rg32f, binding=6) writeonly uniform image2D velocity_out_img;
 
+#if TILE_SHARED_PACKED_STATE
+shared uint s_cell_state[TILE_SIZE][TILE_SIZE];
+#if TILE_LIQUID_KIND_CACHE
+shared uint s_liquid_kind[TILE_SIZE][TILE_SIZE];
+#endif
+#else
 shared float s_material[TILE_SIZE][TILE_SIZE];
 shared float s_phase[TILE_SIZE][TILE_SIZE];
 shared float s_flags[TILE_SIZE][TILE_SIZE];
+#endif
+#if TILE_WARP_FAST_PATH && TILE_SNAPSHOT_PRE_STATE && TILE_PACKED_PRE_STATE_BLOCKER
+shared uint s_pre_state_packed[TILE_SIZE][TILE_SIZE / 2];
+shared uint s_blocker_rows[TILE_SIZE];
+#else
 shared int s_blocked[TILE_SIZE][TILE_SIZE];
-shared int s_changed[TILE_SIZE][TILE_SIZE];
+#endif
+#if !(TILE_WARP_FAST_PATH && TILE_WARP_PROVENANCE_ROW_STREAM)
 shared int s_source_x[TILE_SIZE][TILE_SIZE];
 shared int s_source_y[TILE_SIZE][TILE_SIZE];
+#endif
 shared int s_down_target_x[TILE_SIZE];
 shared int s_down_source_x[TILE_SIZE];
 shared int s_down_segment_claimed[TILE_SIZE];
@@ -49,6 +102,7 @@ shared int s_row_liquid_flag[TILE_SIZE];
 shared int s_below_empty_flag[TILE_SIZE];
 shared int s_row_any_liquid;
 shared int s_row_any_below_empty;
+shared int s_tile_changed;
 shared int s_liquid_left_blocker[TILE_SIZE];
 shared int s_liquid_right_blocker[TILE_SIZE];
 shared int s_empty_left_blocker[TILE_SIZE];
@@ -65,14 +119,132 @@ shared int s_liquid_run_first_empty_x[TILE_SIZE];
 shared int s_lateral_target_x[TILE_SIZE];
 shared int s_lateral_source_x[TILE_SIZE];
 
-void clear_cell(int y, int x) {
+uint pack_cell_state(float material, float phase, float flagsv) {
+    uint material_id = uint(clamp(round(material), 0.0, 65535.0));
+    uint phase_id = uint(clamp(round(phase), 0.0, 255.0));
+    uint flags = uint(clamp(round(flagsv), 0.0, 255.0));
+    return material_id | (phase_id << 16u) | (flags << 24u);
+}
+
+#if LIQUID_PROVENANCE
+const uint PROVENANCE_EMPTY = 0xFFFFFFFFu;
+
+void store_provenance(ivec2 cell, bool has_source, ivec2 source_cell) {
+    int cell_index = cell.y * cell_grid_size.x + cell.x;
+    liquid_provenance[cell_index] = has_source
+        ? uint(source_cell.y * cell_grid_size.x + source_cell.x)
+        : PROVENANCE_EMPTY;
+}
+#endif
+
+float shared_material_at(int y, int x) {
+#if TILE_SHARED_PACKED_STATE
+    return float(s_cell_state[y][x] & 0xFFFFu);
+#else
+    return s_material[y][x];
+#endif
+}
+
+float shared_phase_at(int y, int x) {
+#if TILE_SHARED_PACKED_STATE
+    return float((s_cell_state[y][x] >> 16u) & 0xFFu);
+#else
+    return s_phase[y][x];
+#endif
+}
+
+float shared_flags_at(int y, int x) {
+#if TILE_SHARED_PACKED_STATE
+    return float((s_cell_state[y][x] >> 24u) & 0xFFu);
+#else
+    return s_flags[y][x];
+#endif
+}
+
+void mark_tile_changed(inout bool lane_changed) {
+#if TILE_WARP_FAST_PATH && TILE_WARP_LANE_CHANGE_VOTE
+    lane_changed = true;
+#else
+    atomicOr(s_tile_changed, 1);
+#endif
+}
+
+bool shared_cell_blocked(int y, int x) {
+#if TILE_WARP_FAST_PATH && TILE_SNAPSHOT_PRE_STATE && TILE_PACKED_PRE_STATE_BLOCKER
+    return (s_blocker_rows[y] & (1u << uint(x))) != 0u;
+#else
+    return (s_blocked[y][x] & 1) != 0;
+#endif
+}
+
+void clear_shared_cell_blocker(int y, int x) {
+#if TILE_WARP_FAST_PATH && TILE_SNAPSHOT_PRE_STATE && TILE_PACKED_PRE_STATE_BLOCKER
+    atomicAnd(s_blocker_rows[y], ~(1u << uint(x)));
+#else
+#if TILE_SNAPSHOT_PRE_STATE
+    s_blocked[y][x] &= ~1;
+#else
+    s_blocked[y][x] = 0;
+#endif
+#endif
+}
+
+#if TILE_SNAPSHOT_PRE_STATE
+uint shared_pre_state(int y, int x) {
+#if TILE_WARP_FAST_PATH && TILE_PACKED_PRE_STATE_BLOCKER
+    uint packed_pre_state = s_pre_state_packed[y][x >> 1];
+    return (packed_pre_state >> uint((x & 1) * 16)) & 0xFFFFu;
+#else
+    uint pre_state = uint(s_blocked[y][x]) >> 1u;
+    return pre_state;
+#endif
+}
+#endif
+
+int liquid_kind_for(float material);
+
+void write_cell_state(
+    int y,
+    int x,
+    uint cell_state,
+    int source_x,
+    int source_y,
+    inout bool lane_changed
+) {
+#if TILE_SHARED_PACKED_STATE
+    s_cell_state[y][x] = cell_state;
+#if TILE_LIQUID_KIND_CACHE
+    s_liquid_kind[y][x] = uint(liquid_kind_for(float(cell_state & 0xFFFFu)));
+#endif
+#else
+    s_material[y][x] = float(cell_state & 0xFFFFu);
+    s_phase[y][x] = float((cell_state >> 16u) & 0xFFu);
+    s_flags[y][x] = float((cell_state >> 24u) & 0xFFu);
+#endif
+#if !(TILE_WARP_FAST_PATH && TILE_WARP_PROVENANCE_ROW_STREAM)
+    s_source_x[y][x] = source_x;
+    s_source_y[y][x] = source_y;
+#endif
+    mark_tile_changed(lane_changed);
+}
+
+void clear_cell(int y, int x, inout bool lane_changed) {
+#if TILE_SHARED_PACKED_STATE
+    s_cell_state[y][x] = 0u;
+#if TILE_LIQUID_KIND_CACHE
+    s_liquid_kind[y][x] = 0u;
+#endif
+#else
     s_material[y][x] = 0.0;
     s_phase[y][x] = 0.0;
     s_flags[y][x] = 0.0;
-    s_blocked[y][x] = 0;
-    s_changed[y][x] = 1;
+#endif
+    clear_shared_cell_blocker(y, x);
+#if !(TILE_WARP_FAST_PATH && TILE_WARP_PROVENANCE_ROW_STREAM)
     s_source_x[y][x] = -1;
     s_source_y[y][x] = -1;
+#endif
+    mark_tile_changed(lane_changed);
 }
 
 void write_cell(
@@ -82,14 +254,24 @@ void write_cell(
     float phase,
     float flagsv,
     int source_x,
-    int source_y
+    int source_y,
+    inout bool lane_changed
 ) {
+#if TILE_SHARED_PACKED_STATE
+    s_cell_state[y][x] = pack_cell_state(material, phase, flagsv);
+#if TILE_LIQUID_KIND_CACHE
+    s_liquid_kind[y][x] = uint(liquid_kind_for(material));
+#endif
+#else
     s_material[y][x] = material;
     s_phase[y][x] = phase;
     s_flags[y][x] = flagsv;
-    s_changed[y][x] = 1;
+#endif
+#if !(TILE_WARP_FAST_PATH && TILE_WARP_PROVENANCE_ROW_STREAM)
     s_source_x[y][x] = source_x;
     s_source_y[y][x] = source_y;
+#endif
+    mark_tile_changed(lane_changed);
 }
 
 int liquid_kind_for(float material) {
@@ -97,25 +279,35 @@ int liquid_kind_for(float material) {
     return int(material_params[material_id].z + 0.5);
 }
 
+#if TILE_LIQUID_KIND_CACHE
+int shared_liquid_kind_at(int y, int x) {
+    return int(s_liquid_kind[y][x]);
+}
+#else
+int shared_liquid_kind_at(int y, int x) {
+    return liquid_kind_for(shared_material_at(y, x));
+}
+#endif
+
 bool is_placeholder_material(float material) {
     int material_id = clamp(int(material + 0.5), 0, {{MAX_MATERIALS_MINUS_1}});
     return int(material_params[material_id].w + 0.5) == 7;
 }
 
 bool is_reachable_empty(int y, int x) {
-    int phase = int(s_phase[y][x] + 0.5);
-    return s_material[y][x] < 0.5
+    int phase = int(shared_phase_at(y, x) + 0.5);
+    return shared_material_at(y, x) < 0.5
         && phase != phase_liquid
         && phase != phase_falling_island
-        && s_blocked[y][x] == 0;
+        && !shared_cell_blocked(y, x);
 }
 
 bool is_vertical_empty(int y, int x) {
-    int phase = int(s_phase[y][x] + 0.5);
-    return s_material[y][x] < 0.5
+    int phase = int(shared_phase_at(y, x) + 0.5);
+    return shared_material_at(y, x) < 0.5
         && phase != phase_liquid
         && phase != phase_falling_island
-        && s_blocked[y][x] == 0;
+        && !shared_cell_blocked(y, x);
 }
 
 bool local_cell_in_world(ivec2 tile, int y, int x) {
@@ -131,32 +323,97 @@ bool local_cell_in_world(ivec2 tile, int y, int x) {
 }
 
 bool is_liquid_cell(int y, int x) {
-    return s_material[y][x] > 0.5
-        && int(s_phase[y][x] + 0.5) == phase_liquid;
+    return shared_material_at(y, x) > 0.5
+        && int(shared_phase_at(y, x) + 0.5) == phase_liquid;
 }
 
 bool is_columnar_liquid_cell(int y, int x) {
-    return is_liquid_cell(y, x) && liquid_kind_for(s_material[y][x]) == 1;
+    return is_liquid_cell(y, x) && shared_liquid_kind_at(y, x) == 1;
 }
 
-void refresh_changed_cell(ivec2 changed_cell) {
-    if (
-        changed_cell.x < 0
-        || changed_cell.y < 0
-        || changed_cell.x >= cell_grid_size.x
-        || changed_cell.y >= cell_grid_size.y
-    ) {
+uint bridge_core_word(ivec2 cell, int word_offset) {
+    int cell_index = cell.y * cell_grid_size.x + cell.x;
+    return bridge_cell_core[cell_index * 5 + word_offset];
+}
+
+#if TILE_WARP_FAST_PATH && TILE_WARP_PROVENANCE_ROW_STREAM
+void materialize_streamed_cell(ivec2 tile, int y, int x, int source_id) {
+    ivec2 cell = tile * TILE_SIZE + ivec2(x, y);
+    if (cell.x >= cell_grid_size.x || cell.y >= cell_grid_size.y) {
         return;
     }
-    ivec2 changed_tile = ivec2(
-        clamp(changed_cell.x / TILE_SIZE, 0, tile_grid_size.x - 1),
-        clamp(changed_cell.y / TILE_SIZE, 0, tile_grid_size.y - 1)
-    );
-    active_tile_ttl[changed_tile.y * tile_grid_size.x + changed_tile.x] = active_ttl_reset;
+    bool has_source = source_id >= 0;
+    int source_x = has_source ? source_id % TILE_SIZE : 0;
+    int source_y = has_source ? source_id / TILE_SIZE : 0;
+    ivec2 source_cell = tile * TILE_SIZE + ivec2(source_x, source_y);
+#if !LIQUID_PROVENANCE || !TILE_COMPACT_SNAPSHOT
+    uint out_timer = has_source
+        ? (DIRECT_BRIDGE_INPUTS ? bridge_core_word(source_cell, 3) : texelFetch(timer_in_tex, source_cell, 0).x)
+        : 0u;
+    float out_temp = has_source
+        ? (DIRECT_BRIDGE_INPUTS ? uintBitsToFloat(bridge_core_word(source_cell, 2)) : texelFetch(temp_in_tex, source_cell, 0).x)
+        : 0.0;
+    float out_integrity = has_source
+        ? (DIRECT_BRIDGE_INPUTS ? float(bridge_core_word(source_cell, 4) & 0xFFFFu) : texelFetch(integrity_in_tex, source_cell, 0).x)
+        : 0.0;
+    vec2 out_velocity = has_source
+        ? (DIRECT_BRIDGE_INPUTS ? unpackHalf2x16(bridge_core_word(source_cell, 1)) : texelFetch(velocity_in_tex, source_cell, 0).xy)
+        : vec2(0.0);
+#endif
+    uint cell_state = s_cell_state[y][x];
+    imageStore(cell_state_out_img, cell, uvec4(cell_state, 0u, 0u, 0u));
+#if !LIQUID_PROVENANCE
+    imageStore(timer_out_img, cell, uvec4(out_timer, 0u, 0u, 0u));
+    imageStore(temp_out_img, cell, vec4(out_temp, 0.0, 0.0, 0.0));
+    imageStore(integrity_out_img, cell, vec4(out_integrity, 0.0, 0.0, 0.0));
+    imageStore(velocity_out_img, cell, vec4(out_velocity, 0.0, 0.0));
+#endif
+#if LIQUID_PROVENANCE
+    store_provenance(cell, has_source, source_cell);
+#endif
+#if TILE_SNAPSHOT_OUTPUT
+#if TILE_COMPACT_SNAPSHOT
+#if TILE_SNAPSHOT_STATE_ELISION
+    int snapshot_word = cell.y * cell_grid_size.x + cell.x;
+#else
+    int snapshot_word = (cell.y * cell_grid_size.x + cell.x) * 2;
+    tile_solve_snapshot[snapshot_word] = cell_state;
+#endif
+#if TILE_SNAPSHOT_PRE_STATE
+    uint pre_state = shared_pre_state(y, x);
+    uint packed_source = has_source ? uint(source_id) : 0xFFFFu;
+#if TILE_SNAPSHOT_STATE_ELISION
+    tile_solve_snapshot[snapshot_word] = (pre_state << 16u) | packed_source;
+#else
+    tile_solve_snapshot[snapshot_word + 1] = (pre_state << 16u) | packed_source;
+#endif
+#else
+#if TILE_SNAPSHOT_STATE_ELISION
+    tile_solve_snapshot[snapshot_word] = uint(source_id);
+#else
+    tile_solve_snapshot[snapshot_word + 1] = uint(source_id);
+#endif
+#endif
+#else
+    int snapshot_word = (cell.y * cell_grid_size.x + cell.x) * 6;
+    tile_solve_snapshot[snapshot_word] = cell_state;
+    tile_solve_snapshot[snapshot_word + 1] = out_timer;
+    tile_solve_snapshot[snapshot_word + 2] = floatBitsToUint(out_temp);
+    tile_solve_snapshot[snapshot_word + 3] = floatBitsToUint(out_integrity);
+    tile_solve_snapshot[snapshot_word + 4] = floatBitsToUint(out_velocity.x);
+    tile_solve_snapshot[snapshot_word + 5] = floatBitsToUint(out_velocity.y);
+#endif
+#endif
 }
+#endif
 
 void main() {
+#if TILE_WARP_FAST_PATH
+    ivec2 local = ivec2(int(gl_ThreadInWarpNV), 0);
+#else
     ivec2 local = ivec2(gl_LocalInvocationID.x, 0);
+#endif
+    bool lane_changed = false;
     uint active_index = gl_WorkGroupID.x;
     if (active_index >= active_tile_count[0]) {
         return;
@@ -168,32 +425,93 @@ void main() {
     for (int y = 0; y < TILE_SIZE; ++y) {
         ivec2 cell = tile * TILE_SIZE + ivec2(local.x, y);
         bool in_bounds = cell.x < cell_grid_size.x && cell.y < cell_grid_size.y;
-        float material = in_bounds ? texelFetch(material_in_tex, cell, 0).x : 0.0;
-        float phase = in_bounds ? texelFetch(phase_in_tex, cell, 0).x : 0.0;
-        float flagsv = in_bounds ? texelFetch(flags_in_tex, cell, 0).x : 0.0;
-        float entityv = in_bounds ? texelFetch(entity_in_tex, cell, 0).x : 0.0;
-        float displacedv = in_bounds ? texelFetch(displaced_in_tex, cell, 0).x : 0.0;
+        uint cell_state = in_bounds
+            ? (DIRECT_BRIDGE_INPUTS ? bridge_core_word(cell, 0) : texelFetch(cell_state_in_tex, cell, 0).x)
+            : 0u;
+        float material = float(cell_state & 0xFFFFu);
+        float phase = float((cell_state >> 16u) & 0xFFu);
+        float flagsv = float((cell_state >> 24u) & 0xFFu);
+        int cell_index = cell.y * cell_grid_size.x + cell.x;
+#if TILE_BLOCKER_MASK_INPUT
+        bool aux_blocked = in_bounds && texelFetch(blocker_mask_tex, cell, 0).x != 0u;
+#else
+        float entityv = in_bounds
+            ? ((DIRECT_BRIDGE_AUX_INPUTS != 0)
+                ? float(bridge_entity_id[cell_index])
+                : texelFetch(entity_in_tex, cell, 0).x)
+            : 0.0;
+        float displacedv = in_bounds
+            ? ((DIRECT_BRIDGE_AUX_INPUTS != 0)
+                ? float(bridge_displaced_material[cell_index])
+                : texelFetch(displaced_in_tex, cell, 0).x)
+            : 0.0;
+        bool aux_blocked = entityv > 0.5 || displacedv > 0.5;
+#endif
+#if TILE_SHARED_PACKED_STATE
+        s_cell_state[y][local.x] = cell_state;
+#if TILE_LIQUID_KIND_CACHE
+        s_liquid_kind[y][local.x] = uint(liquid_kind_for(material));
+#endif
+#else
         s_material[y][local.x] = material;
         s_phase[y][local.x] = phase;
         s_flags[y][local.x] = flagsv;
-        s_blocked[y][local.x] = (
+#endif
+        int blocker = (
             int(phase + 0.5) == phase_falling_island
-            || entityv > 0.5
-            || displacedv > 0.5
+            || aux_blocked
             || is_placeholder_material(material)
         ) ? 1 : 0;
+#if TILE_SNAPSHOT_PRE_STATE
+        uint pre_material = cell_state & 0xFFu;
+        uint pre_phase = (cell_state >> 16u) & 0xFFu;
+#if TILE_WARP_FAST_PATH && TILE_PACKED_PRE_STATE_BLOCKER
+        uint pre_state = pre_material | (pre_phase << 8u);
+        uint adjacent_pre_state = shuffleDownNV(pre_state, 1u, TILE_SIZE);
+        if ((local.x & 1) == 0) {
+            s_pre_state_packed[y][local.x >> 1] = pre_state | (adjacent_pre_state << 16u);
+        }
+        uint blocker_ballot = ballotThreadNV(blocker != 0);
+        if (local.x == 0) {
+            s_blocker_rows[y] = blocker_ballot;
+        }
+#else
+        s_blocked[y][local.x] = blocker | int((pre_material | (pre_phase << 8u)) << 1u);
+#endif
+#else
+        s_blocked[y][local.x] = blocker;
+#endif
+#if !(TILE_WARP_FAST_PATH && TILE_WARP_PROVENANCE_ROW_STREAM)
         s_source_x[y][local.x] = in_bounds ? local.x : -1;
         s_source_y[y][local.x] = in_bounds ? y : -1;
-        s_changed[y][local.x] = 0;
+#endif
     }
     barrier();
+#if !(TILE_WARP_FAST_PATH && TILE_WARP_LANE_CHANGE_VOTE)
+    if (local.x == 0) {
+        s_tile_changed = 0;
+    }
+    barrier();
+#endif
 
+#if TILE_WARP_FAST_PATH && TILE_WARP_PROVENANCE_ROW_STREAM
+    int below_source_id = local_cell_in_world(tile, TILE_SIZE - 1, local.x)
+        ? (TILE_SIZE - 1) * TILE_SIZE + local.x
+        : -1;
+#endif
     for (int row = TILE_SIZE - 2; row >= 0; --row) {
+#if TILE_WARP_FAST_PATH && TILE_WARP_PROVENANCE_ROW_STREAM
+        int current_source_id = local_cell_in_world(tile, row, local.x)
+            ? row * TILE_SIZE + local.x
+            : -1;
+#endif
+#if !TILE_WARP_FAST_PATH
         if (local.x == 0) {
             s_row_any_liquid = 0;
             s_row_any_below_empty = 0;
         }
         barrier();
+#endif
 
         bool row_liquid = local_cell_in_world(tile, row, local.x)
             && row + 1 < TILE_SIZE
@@ -204,6 +522,12 @@ void main() {
             && is_vertical_empty(row + 1, local.x);
         s_row_liquid_flag[local.x] = row_liquid ? 1 : 0;
         s_below_empty_flag[local.x] = below_empty ? 1 : 0;
+#if TILE_WARP_FAST_PATH
+        uint row_liquid_ballot = ballotThreadNV(row_liquid);
+        uint below_empty_ballot = ballotThreadNV(below_empty);
+        bool row_any_liquid = row_liquid_ballot != 0u;
+        bool row_any_below_empty = below_empty_ballot != 0u;
+#else
         if (row_liquid) {
             atomicOr(s_row_any_liquid, 1);
         }
@@ -212,18 +536,177 @@ void main() {
         }
         memoryBarrierShared();
         barrier();
+        bool row_any_liquid = s_row_any_liquid != 0;
+        bool row_any_below_empty = s_row_any_below_empty != 0;
+#endif
 
-        if (s_row_any_liquid == 0) {
+        if (!row_any_liquid) {
+#if TILE_WARP_FAST_PATH && TILE_WARP_PROVENANCE_ROW_STREAM
+            materialize_streamed_cell(tile, row + 1, local.x, below_source_id);
+            below_source_id = current_source_id;
+#endif
             continue;
         }
 
+#if TILE_WARP_FAST_PATH && TILE_WARP_DIRECT_VERTICAL_MAPPING
+        int direct_down_target_x = -1;
+        int direct_down_segment_claimed = 0;
+        s_down_source_x[local.x] = TILE_SIZE;
+#else
         s_down_target_x[local.x] = -1;
         s_down_source_x[local.x] = TILE_SIZE;
         s_down_segment_claimed[local.x] = 0;
+#endif
         int source_x = -1;
         int target_x = -1;
 
-        if (s_row_any_below_empty != 0) {
+        if (row_any_below_empty) {
+#if TILE_WARP_FAST_PATH && TILE_WARP_DIRECT_VERTICAL_MAPPING
+            barrier();
+
+            if (row_liquid) {
+                int liquid_left = findMSB((~row_liquid_ballot) & gl_ThreadLtMaskNV);
+                int liquid_right = findLSB((~row_liquid_ballot) & gl_ThreadGtMaskNV);
+                liquid_right = liquid_right < 0 ? TILE_SIZE : liquid_right;
+                int liquid_start = liquid_left + 1;
+                int liquid_end = liquid_right;
+                uint liquid_run_lower_mask = 0xFFFFFFFFu << uint(liquid_start);
+                uint liquid_run_upper_mask = liquid_end >= TILE_SIZE
+                    ? 0xFFFFFFFFu
+                    : (1u << uint(liquid_end)) - 1u;
+                uint direct_run_empty_candidates = below_empty_ballot
+                    & liquid_run_lower_mask
+                    & liquid_run_upper_mask;
+                int first_empty_x = findLSB(direct_run_empty_candidates);
+                if (first_empty_x >= 0) {
+                    direct_down_segment_claimed = 1;
+                    uint before_first_empty_mask = first_empty_x <= 0
+                        ? 0u
+                        : (1u << uint(first_empty_x)) - 1u;
+                    uint after_first_empty_mask = first_empty_x + 1 >= TILE_SIZE
+                        ? 0u
+                        : 0xFFFFFFFFu << uint(first_empty_x + 1);
+                    uint below_blocker_ballot = ~below_empty_ballot;
+                    int empty_left = findMSB(below_blocker_ballot & before_first_empty_mask);
+                    int empty_right = findLSB(below_blocker_ballot & after_first_empty_mask);
+                    int empty_start = empty_left + 1;
+                    int empty_end = empty_right < 0 ? TILE_SIZE : empty_right;
+                    int move_count = min(liquid_end - liquid_start, empty_end - empty_start);
+                    int source_offset = local.x - liquid_start;
+                    if (source_offset < move_count) {
+                        int target_base = clamp(liquid_start, empty_start, empty_end - move_count);
+                        direct_down_target_x = target_base + source_offset;
+                        atomicMin(s_down_source_x[direct_down_target_x], local.x);
+                    }
+                }
+            }
+            memoryBarrierShared();
+            barrier();
+
+            source_x = s_down_source_x[local.x];
+            if (source_x == TILE_SIZE) {
+                source_x = -1;
+            }
+#if TILE_WARP_PROVENANCE_ROW_STREAM
+            int vertical_source_id = shuffleNV(
+                current_source_id,
+                uint(max(source_x, 0)),
+                TILE_SIZE
+            );
+#endif
+            if (source_x >= 0) {
+#if TILE_SHARED_PACKED_STATE
+#if TILE_WARP_PROVENANCE_ROW_STREAM
+                write_cell_state(
+                    row + 1,
+                    local.x,
+                    s_cell_state[row][source_x],
+                    0,
+                    0,
+                    lane_changed
+                );
+                below_source_id = vertical_source_id;
+#else
+                write_cell_state(
+                    row + 1,
+                    local.x,
+                    s_cell_state[row][source_x],
+                    s_source_x[row][source_x],
+                    s_source_y[row][source_x],
+                    lane_changed
+                );
+#endif
+#else
+                write_cell(
+                    row + 1,
+                    local.x,
+                    s_material[row][source_x],
+                    s_phase[row][source_x],
+                    s_flags[row][source_x],
+                    s_source_x[row][source_x],
+                    s_source_y[row][source_x],
+                    lane_changed
+                );
+#endif
+            }
+            barrier();
+            target_x = direct_down_target_x;
+            if (target_x >= 0 && s_down_source_x[target_x] == local.x) {
+                clear_cell(row, local.x, lane_changed);
+#if TILE_WARP_PROVENANCE_ROW_STREAM
+                current_source_id = -1;
+#endif
+            }
+            barrier();
+
+            if (
+                direct_down_segment_claimed == 0
+                && local_cell_in_world(tile, row, local.x)
+                && local_cell_in_world(tile, row + 1, local.x)
+                && is_liquid_cell(row, local.x)
+                && is_vertical_empty(row + 1, local.x)
+                && source_x < 0
+            ) {
+#if TILE_SHARED_PACKED_STATE
+#if TILE_WARP_PROVENANCE_ROW_STREAM
+                below_source_id = current_source_id;
+                write_cell_state(
+                    row + 1,
+                    local.x,
+                    s_cell_state[row][local.x],
+                    0,
+                    0,
+                    lane_changed
+                );
+#else
+                write_cell_state(
+                    row + 1,
+                    local.x,
+                    s_cell_state[row][local.x],
+                    s_source_x[row][local.x],
+                    s_source_y[row][local.x],
+                    lane_changed
+                );
+#endif
+#else
+                write_cell(
+                    row + 1,
+                    local.x,
+                    s_material[row][local.x],
+                    s_phase[row][local.x],
+                    s_flags[row][local.x],
+                    s_source_x[row][local.x],
+                    s_source_y[row][local.x],
+                    lane_changed
+                );
+#endif
+                clear_cell(row, local.x, lane_changed);
+#if TILE_WARP_PROVENANCE_ROW_STREAM
+                current_source_id = -1;
+#endif
+            }
+            barrier();
+#else
             s_liquid_left_blocker[local.x] = row_liquid ? -1 : local.x;
             s_liquid_right_blocker[local.x] = row_liquid ? TILE_SIZE : local.x;
             s_empty_left_blocker[local.x] = below_empty ? -1 : local.x;
@@ -235,6 +718,18 @@ void main() {
             s_liquid_run_first_empty_x[local.x] = TILE_SIZE;
             barrier();
 
+#if TILE_WARP_FAST_PATH
+            int liquid_left = findMSB((~row_liquid_ballot) & gl_ThreadLtMaskNV);
+            int liquid_right = findLSB((~row_liquid_ballot) & gl_ThreadGtMaskNV);
+            int empty_left = findMSB((~below_empty_ballot) & gl_ThreadLtMaskNV);
+            int empty_right = findLSB((~below_empty_ballot) & gl_ThreadGtMaskNV);
+            liquid_right = liquid_right < 0 ? TILE_SIZE : liquid_right;
+            empty_right = empty_right < 0 ? TILE_SIZE : empty_right;
+            s_liquid_left_blocker[local.x] = liquid_left;
+            s_liquid_right_blocker[local.x] = liquid_right;
+            s_empty_left_blocker[local.x] = empty_left;
+            s_empty_right_blocker[local.x] = empty_right;
+#else
             for (int stride = 1; stride < TILE_SIZE; stride *= 2) {
                 int liquid_left = s_liquid_left_blocker[local.x];
                 int liquid_right = s_liquid_right_blocker[local.x];
@@ -259,6 +754,7 @@ void main() {
                 s_empty_right_blocker[local.x] = s_empty_right_scan_tmp[local.x];
                 barrier();
             }
+#endif
 
             if (s_row_liquid_flag[local.x] != 0) {
                 int liquid_start = s_liquid_left_blocker[local.x] + 1;
@@ -304,6 +800,16 @@ void main() {
 
             source_x = s_down_source_x[local.x];
             if (source_x >= 0) {
+#if TILE_SHARED_PACKED_STATE
+                write_cell_state(
+                    row + 1,
+                    local.x,
+                    s_cell_state[row][source_x],
+                    s_source_x[row][source_x],
+                    s_source_y[row][source_x],
+                    lane_changed
+                );
+#else
                 write_cell(
                     row + 1,
                     local.x,
@@ -311,17 +817,15 @@ void main() {
                     s_phase[row][source_x],
                     s_flags[row][source_x],
                     s_source_x[row][source_x],
-                    s_source_y[row][source_x]
+                    s_source_y[row][source_x],
+                    lane_changed
                 );
-                refresh_changed_cell(tile * TILE_SIZE + ivec2(source_x, row));
-                refresh_changed_cell(tile * TILE_SIZE + ivec2(local.x, row + 1));
+#endif
             }
             barrier();
             target_x = s_down_target_x[local.x];
             if (target_x >= 0 && s_down_source_x[target_x] == local.x) {
-                clear_cell(row, local.x);
-                refresh_changed_cell(tile * TILE_SIZE + ivec2(local.x, row));
-                refresh_changed_cell(tile * TILE_SIZE + ivec2(target_x, row + 1));
+                clear_cell(row, local.x, lane_changed);
             }
             barrier();
 
@@ -333,6 +837,16 @@ void main() {
                 && is_vertical_empty(row + 1, local.x)
                 && s_down_source_x[local.x] < 0
             ) {
+#if TILE_SHARED_PACKED_STATE
+                write_cell_state(
+                    row + 1,
+                    local.x,
+                    s_cell_state[row][local.x],
+                    s_source_x[row][local.x],
+                    s_source_y[row][local.x],
+                    lane_changed
+                );
+#else
                 write_cell(
                     row + 1,
                     local.x,
@@ -340,16 +854,137 @@ void main() {
                     s_phase[row][local.x],
                     s_flags[row][local.x],
                     s_source_x[row][local.x],
-                    s_source_y[row][local.x]
+                    s_source_y[row][local.x],
+                    lane_changed
                 );
-                clear_cell(row, local.x);
-                refresh_changed_cell(tile * TILE_SIZE + ivec2(local.x, row));
-                refresh_changed_cell(tile * TILE_SIZE + ivec2(local.x, row + 1));
+#endif
+                clear_cell(row, local.x, lane_changed);
             }
             barrier();
+#endif
+        }
+#if TILE_WARP_FAST_PATH
+#if TILE_WARP_PROVENANCE_ROW_STREAM
+        materialize_streamed_cell(tile, row + 1, local.x, below_source_id);
+#endif
+        int lateral_target_x = -1;
+        if (
+#if TILE_WARP_DIRECT_VERTICAL_MAPPING
+            direct_down_segment_claimed == 0
+#else
+            s_down_segment_claimed[local.x] == 0
+#endif
+            && local_cell_in_world(tile, row, local.x)
+            && local_cell_in_world(tile, row + 1, local.x)
+            && is_columnar_liquid_cell(row, local.x)
+        ) {
+            if (
+                local.x > 0
+                && local_cell_in_world(tile, row, local.x - 1)
+                && is_reachable_empty(row, local.x - 1)
+            ) {
+                lateral_target_x = local.x - 1;
+            } else if (
+                local.x + 1 < TILE_SIZE
+                && local_cell_in_world(tile, row, local.x + 1)
+                && is_reachable_empty(row, local.x + 1)
+            ) {
+                lateral_target_x = local.x + 1;
+            }
+        }
+        if (anyThreadNV(lateral_target_x >= 0)) {
+            int left_target_x = shuffleUpNV(lateral_target_x, 1u, TILE_SIZE);
+            int right_target_x = shuffleDownNV(lateral_target_x, 1u, TILE_SIZE);
+            int lateral_owner_x = -1;
+            if (local.x > 0 && left_target_x == local.x) {
+                lateral_owner_x = local.x - 1;
+            } else if (local.x + 1 < TILE_SIZE && right_target_x == local.x) {
+                lateral_owner_x = local.x + 1;
+            }
+
+#if TILE_WARP_PROVENANCE_ROW_STREAM
+            int own_source_id = current_source_id;
+#else
+            int own_source_x = s_source_x[row][local.x];
+            int own_source_y = s_source_y[row][local.x];
+#endif
+#if TILE_SHARED_PACKED_STATE
+            uint own_cell_state = s_cell_state[row][local.x];
+            uint left_cell_state = shuffleUpNV(own_cell_state, 1u, TILE_SIZE);
+            uint right_cell_state = shuffleDownNV(own_cell_state, 1u, TILE_SIZE);
+#else
+            float own_material = s_material[row][local.x];
+            float own_phase = s_phase[row][local.x];
+            float own_flags = s_flags[row][local.x];
+            float left_material = shuffleUpNV(own_material, 1u, TILE_SIZE);
+            float right_material = shuffleDownNV(own_material, 1u, TILE_SIZE);
+            float left_phase = shuffleUpNV(own_phase, 1u, TILE_SIZE);
+            float right_phase = shuffleDownNV(own_phase, 1u, TILE_SIZE);
+            float left_flags = shuffleUpNV(own_flags, 1u, TILE_SIZE);
+            float right_flags = shuffleDownNV(own_flags, 1u, TILE_SIZE);
+#endif
+#if TILE_WARP_PROVENANCE_ROW_STREAM
+            int left_source_id = shuffleUpNV(own_source_id, 1u, TILE_SIZE);
+            int right_source_id = shuffleDownNV(own_source_id, 1u, TILE_SIZE);
+#else
+            int left_source_x = shuffleUpNV(own_source_x, 1u, TILE_SIZE);
+            int right_source_x = shuffleDownNV(own_source_x, 1u, TILE_SIZE);
+            int left_source_y = shuffleUpNV(own_source_y, 1u, TILE_SIZE);
+            int right_source_y = shuffleDownNV(own_source_y, 1u, TILE_SIZE);
+#endif
+            int left_owner_x = shuffleUpNV(lateral_owner_x, 1u, TILE_SIZE);
+            int right_owner_x = shuffleDownNV(lateral_owner_x, 1u, TILE_SIZE);
+
+            if (lateral_owner_x >= 0) {
+                bool owner_is_left = lateral_owner_x < local.x;
+#if TILE_SHARED_PACKED_STATE
+#if TILE_WARP_PROVENANCE_ROW_STREAM
+                write_cell_state(
+                    row,
+                    local.x,
+                    owner_is_left ? left_cell_state : right_cell_state,
+                    0,
+                    0,
+                    lane_changed
+                );
+                current_source_id = owner_is_left ? left_source_id : right_source_id;
+#else
+                write_cell_state(
+                    row,
+                    local.x,
+                    owner_is_left ? left_cell_state : right_cell_state,
+                    owner_is_left ? left_source_x : right_source_x,
+                    owner_is_left ? left_source_y : right_source_y,
+                    lane_changed
+                );
+#endif
+#else
+                write_cell(
+                    row,
+                    local.x,
+                    owner_is_left ? left_material : right_material,
+                    owner_is_left ? left_phase : right_phase,
+                    owner_is_left ? left_flags : right_flags,
+                    owner_is_left ? left_source_x : right_source_x,
+                    owner_is_left ? left_source_y : right_source_y,
+                    lane_changed
+                );
+#endif
+            }
+            int target_owner_x = lateral_target_x < local.x ? left_owner_x : right_owner_x;
+            if (lateral_target_x >= 0 && target_owner_x == local.x) {
+                clear_cell(row, local.x, lane_changed);
+#if TILE_WARP_PROVENANCE_ROW_STREAM
+                current_source_id = -1;
+#endif
+            }
         }
         barrier();
-
+#if TILE_WARP_PROVENANCE_ROW_STREAM
+        below_source_id = current_source_id;
+#endif
+#else
+        barrier();
         s_lateral_target_x[local.x] = -1;
         s_lateral_source_x[local.x] = -1;
         barrier();
@@ -387,6 +1022,16 @@ void main() {
 
         source_x = s_lateral_source_x[local.x];
         if (source_x >= 0) {
+#if TILE_SHARED_PACKED_STATE
+            write_cell_state(
+                row,
+                local.x,
+                s_cell_state[row][source_x],
+                s_source_x[row][source_x],
+                s_source_y[row][source_x],
+                lane_changed
+            );
+#else
             write_cell(
                 row,
                 local.x,
@@ -394,44 +1039,121 @@ void main() {
                 s_phase[row][source_x],
                 s_flags[row][source_x],
                 s_source_x[row][source_x],
-                s_source_y[row][source_x]
+                s_source_y[row][source_x],
+                lane_changed
             );
-            refresh_changed_cell(tile * TILE_SIZE + ivec2(source_x, row));
-            refresh_changed_cell(tile * TILE_SIZE + ivec2(local.x, row));
+#endif
         }
         barrier();
 
         target_x = s_lateral_target_x[local.x];
         if (target_x >= 0 && s_lateral_source_x[target_x] == local.x) {
-            clear_cell(row, local.x);
-            refresh_changed_cell(tile * TILE_SIZE + ivec2(local.x, row));
-            refresh_changed_cell(tile * TILE_SIZE + ivec2(target_x, row));
+            clear_cell(row, local.x, lane_changed);
         }
         barrier();
+#endif
     }
+#if TILE_WARP_FAST_PATH && TILE_WARP_PROVENANCE_ROW_STREAM
+    materialize_streamed_cell(tile, 0, local.x, below_source_id);
+#else
     barrier();
     for (int y = 0; y < TILE_SIZE; ++y) {
         ivec2 cell = tile * TILE_SIZE + ivec2(local.x, y);
         bool in_bounds = cell.x < cell_grid_size.x && cell.y < cell_grid_size.y;
         if (in_bounds) {
-            if (s_changed[y][local.x] == 0) {
-                continue;
-            }
             int source_x = s_source_x[y][local.x];
             int source_y = s_source_y[y][local.x];
             bool has_source = source_x >= 0 && source_y >= 0;
             ivec2 source_cell = tile * TILE_SIZE + ivec2(max(source_x, 0), max(source_y, 0));
-            vec4 out_timer = has_source ? texelFetch(timer_in_tex, source_cell, 0) : vec4(0.0);
-            float out_temp = has_source ? texelFetch(temp_in_tex, source_cell, 0).x : 0.0;
-            float out_integrity = has_source ? texelFetch(integrity_in_tex, source_cell, 0).x : 0.0;
-            vec2 out_velocity = has_source ? texelFetch(velocity_in_tex, source_cell, 0).xy : vec2(0.0);
-            imageStore(material_out_img, cell, vec4(s_material[y][local.x], 0.0, 0.0, 0.0));
-            imageStore(phase_out_img, cell, vec4(s_phase[y][local.x], 0.0, 0.0, 0.0));
-            imageStore(flags_out_img, cell, vec4(s_flags[y][local.x], 0.0, 0.0, 0.0));
-            imageStore(timer_out_img, cell, out_timer);
+#if !LIQUID_PROVENANCE || !TILE_COMPACT_SNAPSHOT
+            uint out_timer = has_source
+                ? (DIRECT_BRIDGE_INPUTS ? bridge_core_word(source_cell, 3) : texelFetch(timer_in_tex, source_cell, 0).x)
+                : 0u;
+            float out_temp = has_source
+                ? (DIRECT_BRIDGE_INPUTS ? uintBitsToFloat(bridge_core_word(source_cell, 2)) : texelFetch(temp_in_tex, source_cell, 0).x)
+                : 0.0;
+            float out_integrity = has_source
+                ? (DIRECT_BRIDGE_INPUTS ? float(bridge_core_word(source_cell, 4) & 0xFFFFu) : texelFetch(integrity_in_tex, source_cell, 0).x)
+                : 0.0;
+            vec2 out_velocity = has_source
+                ? (DIRECT_BRIDGE_INPUTS ? unpackHalf2x16(bridge_core_word(source_cell, 1)) : texelFetch(velocity_in_tex, source_cell, 0).xy)
+                : vec2(0.0);
+#endif
+#if TILE_SHARED_PACKED_STATE
+            uint cell_state = s_cell_state[y][local.x];
+#else
+            uint cell_state = pack_cell_state(
+                s_material[y][local.x],
+                s_phase[y][local.x],
+                s_flags[y][local.x]
+            );
+#endif
+            imageStore(cell_state_out_img, cell, uvec4(cell_state, 0u, 0u, 0u));
+#if !LIQUID_PROVENANCE
+            imageStore(timer_out_img, cell, uvec4(out_timer, 0u, 0u, 0u));
             imageStore(temp_out_img, cell, vec4(out_temp, 0.0, 0.0, 0.0));
             imageStore(integrity_out_img, cell, vec4(out_integrity, 0.0, 0.0, 0.0));
             imageStore(velocity_out_img, cell, vec4(out_velocity, 0.0, 0.0));
+#endif
+#if LIQUID_PROVENANCE
+            store_provenance(cell, has_source, source_cell);
+#endif
+#if TILE_SNAPSHOT_OUTPUT
+#if TILE_COMPACT_SNAPSHOT
+#if TILE_SNAPSHOT_STATE_ELISION
+            int snapshot_word = cell.y * cell_grid_size.x + cell.x;
+#else
+            int snapshot_word = (cell.y * cell_grid_size.x + cell.x) * 2;
+#endif
+            int source_id = has_source ? source_y * TILE_SIZE + source_x : -1;
+#if !TILE_SNAPSHOT_STATE_ELISION
+            tile_solve_snapshot[snapshot_word] = cell_state;
+#endif
+#if TILE_SNAPSHOT_PRE_STATE
+            uint pre_state = shared_pre_state(y, local.x);
+            uint packed_source = has_source ? uint(source_id) : 0xFFFFu;
+#if TILE_SNAPSHOT_STATE_ELISION
+            tile_solve_snapshot[snapshot_word] = (pre_state << 16u) | packed_source;
+#else
+            tile_solve_snapshot[snapshot_word + 1] = (pre_state << 16u) | packed_source;
+#endif
+#else
+#if TILE_SNAPSHOT_STATE_ELISION
+            tile_solve_snapshot[snapshot_word] = uint(source_id);
+#else
+            tile_solve_snapshot[snapshot_word + 1] = uint(source_id);
+#endif
+#endif
+#else
+            int snapshot_word = (cell.y * cell_grid_size.x + cell.x) * 6;
+            tile_solve_snapshot[snapshot_word] = cell_state;
+            tile_solve_snapshot[snapshot_word + 1] = out_timer;
+            tile_solve_snapshot[snapshot_word + 2] = floatBitsToUint(out_temp);
+            tile_solve_snapshot[snapshot_word + 3] = floatBitsToUint(out_integrity);
+            tile_solve_snapshot[snapshot_word + 4] = floatBitsToUint(out_velocity.x);
+            tile_solve_snapshot[snapshot_word + 5] = floatBitsToUint(out_velocity.y);
+#endif
+#endif
         }
+    }
+#endif
+#if TILE_SNAPSHOT_PRE_STATE
+    barrier();
+    if (local.x == 0) {
+        int tile_index = tile.y * tile_grid_size.x + tile.x;
+        tile_snapshot_tile_tokens[tile_index] = uvec2(
+            tile_snapshot_state[0],
+            tile_snapshot_state[1]
+        );
+    }
+#endif
+#if TILE_WARP_FAST_PATH && TILE_WARP_LANE_CHANGE_VOTE
+    bool tile_changed = anyThreadNV(lane_changed);
+    if (local.x == 0 && tile_changed) {
+#else
+    barrier();
+    if (local.x == 0 && s_tile_changed != 0) {
+#endif
+        active_tile_ttl[tile.y * tile_grid_size.x + tile.x] = active_ttl_reset;
     }
 }

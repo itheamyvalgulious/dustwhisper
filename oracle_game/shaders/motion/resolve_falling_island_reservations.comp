@@ -36,7 +36,7 @@ layout(std430, binding=3) readonly buffer IslandReservationSourceIndex {
     int reservation_source_index[];
 };
 
-layout(binding=0) uniform sampler2D material_tex;
+layout(binding=0) uniform usampler2D cell_state_tex;
 layout(binding=1) uniform sampler2D island_id_tex;
 
 int active_reservation_count() {
@@ -89,7 +89,7 @@ bool source_matches(FallingIslandReservation reservation, ivec2 cell) {
         return false;
     }
     int island_id = int(texelFetch(island_id_tex, cell, 0).x + 0.5);
-    int material_id = int(texelFetch(material_tex, cell, 0).x + 0.5);
+    int material_id = int(texelFetch(cell_state_tex, cell, 0).x & 0xFFFFu);
     return island_id == reservation.island_id && material_id > 0;
 }
 
@@ -131,7 +131,7 @@ bool can_shift_delta(FallingIslandReservation reservation, int dx, int dy) {
             if (target.x < 0 || target.y < 0 || target.x >= cell_grid_size.x || target.y >= cell_grid_size.y) {
                 return false;
             }
-            int target_material_id = int(texelFetch(material_tex, target, 0).x + 0.5);
+            int target_material_id = int(texelFetch(cell_state_tex, target, 0).x & 0xFFFFu);
             if (target_material_id == 0) {
                 continue;
             }
@@ -215,7 +215,11 @@ vec2 island_collision_response(FallingIslandReservation reservation, ivec2 actua
             if (!source_matches(reservation, source)) {
                 continue;
             }
-            int material_id = clamp(int(texelFetch(material_tex, source, 0).x + 0.5), 0, {{MAX_MATERIALS_MINUS_1}});
+            int material_id = clamp(
+                int(texelFetch(cell_state_tex, source, 0).x & 0xFFFFu),
+                0,
+                {{MAX_MATERIALS_MINUS_1}}
+            );
             friction_sum += contact_params[material_id].x;
             elasticity_sum += contact_params[material_id].y;
             material_count += 1;

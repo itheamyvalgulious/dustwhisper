@@ -22,8 +22,7 @@ layout(std430, binding=4) readonly buffer ActiveTileCountBuffer {
 layout(std430, binding=5) readonly buffer ActiveTileListBuffer {
     ivec2 active_tile_list[];
 };
-layout(r32f, binding=0) writeonly uniform image2D material_in_img;
-layout(r32f, binding=1) writeonly uniform image2D phase_in_img;
+layout(r32ui, binding=0) writeonly uniform uimage2D cell_state_in_img;
 layout(rg32f, binding=2) writeonly uniform image2D velocity_in_img;
 layout(r32f, binding=3) writeonly uniform image2D entity_in_img;
 layout(r32f, binding=4) writeonly uniform image2D displaced_in_img;
@@ -58,8 +57,7 @@ void main() {
     if (copy_cell_core) {
         int word_index = cell_index * 5;
         uint word0 = bridge_cell_core[word_index];
-        imageStore(material_in_img, gid, vec4(float(word0 & 0xFFFFu), 0.0, 0.0, 0.0));
-        imageStore(phase_in_img, gid, vec4(float((word0 >> 16u) & 0xFFu), 0.0, 0.0, 0.0));
+        imageStore(cell_state_in_img, gid, uvec4(word0, 0u, 0u, 0u));
         imageStore(velocity_in_img, gid, vec4(unpackHalf2x16(bridge_cell_core[word_index + 1]), 0.0, 0.0));
     }
     if (copy_entity_id) {

@@ -4,15 +4,14 @@
             uniform ivec2 cell_grid_size;
             layout(binding=0) uniform sampler2D emit_cell_lo_tex;
             layout(binding=1) uniform sampler2D emit_cell_hi_tex;
-            layout(binding=2) uniform sampler2D emit_timer_tex;
+            layout(binding=2) uniform usampler2D emit_timer_tex;
             layout(binding=3) uniform sampler2D emit_meta_tex;
-            layout(r32f, binding=0) writeonly uniform image2D material_out_img;
-            layout(r32f, binding=1) writeonly uniform image2D phase_out_img;
-            layout(r32f, binding=2) writeonly uniform image2D temp_out_img;
-            layout(r32f, binding=3) writeonly uniform image2D integrity_out_img;
-            layout(rg32f, binding=4) writeonly uniform image2D velocity_out_img;
-            layout(rgba32f, binding=5) writeonly uniform image2D timer_out_img;
-            layout(r32f, binding=6) writeonly uniform image2D emitted_material_mask_img;
+            layout(r32ui, binding=0) writeonly uniform uimage2D cell_state_out_img;
+            layout(r32f, binding=1) writeonly uniform image2D temp_out_img;
+            layout(r32f, binding=2) writeonly uniform image2D integrity_out_img;
+            layout(rg32f, binding=3) writeonly uniform image2D velocity_out_img;
+            layout(r32ui, binding=4) writeonly uniform uimage2D timer_out_img;
+            layout(r32f, binding=5) writeonly uniform image2D emitted_material_mask_img;
             void main() {
                 ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
                 if (gid.x >= cell_grid_size.x || gid.y >= cell_grid_size.y) {
@@ -24,12 +23,12 @@
                 }
                 vec4 lo = texelFetch(emit_cell_lo_tex, gid, 0);
                 vec4 hi = texelFetch(emit_cell_hi_tex, gid, 0);
-                imageStore(material_out_img, gid, vec4(lo.x, 0.0, 0.0, 0.0));
-                imageStore(phase_out_img, gid, vec4(lo.y, 0.0, 0.0, 0.0));
+                uint material = uint(clamp(round(lo.x), 0.0, 65535.0));
+                uint phase = uint(clamp(round(lo.y), 0.0, 255.0));
+                imageStore(cell_state_out_img, gid, uvec4(material | (phase << 16u), 0u, 0u, 0u));
                 imageStore(temp_out_img, gid, vec4(lo.z, 0.0, 0.0, 0.0));
                 imageStore(integrity_out_img, gid, vec4(lo.w, 0.0, 0.0, 0.0));
                 imageStore(velocity_out_img, gid, vec4(hi.xy, 0.0, 0.0));
                 imageStore(timer_out_img, gid, texelFetch(emit_timer_tex, gid, 0));
                 imageStore(emitted_material_mask_img, gid, vec4(meta.x, 0.0, 0.0, 0.0));
             }
-            
