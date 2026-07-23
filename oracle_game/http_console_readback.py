@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from urllib.parse import parse_qs
-
 if TYPE_CHECKING:
     from http.server import BaseHTTPRequestHandler
 
@@ -136,7 +134,9 @@ def route_readback_get(
         offset = int(query.get("offset", ["0"])[0])
         limit = int(query.get("limit", ["64"])[0])
         try:
-            handler._send(engine.serialize_bridge_typed_table_slice(str(name), offset=offset, limit=limit))
+            handler._send(
+                engine.serialize_bridge_typed_table_slice(str(name), offset=offset, limit=limit)
+            )
         except KeyError:
             handler._send({"error": "typed table not found", "name": str(name)}, status=404)
         return True
@@ -158,7 +158,9 @@ def route_readback_get(
         offset = int(query.get("offset", ["0"])[0])
         limit = int(query.get("limit", ["64"])[0])
         try:
-            handler._send(engine.serialize_bridge_shadow_buffer_slice(str(name), offset=offset, limit=limit))
+            handler._send(
+                engine.serialize_bridge_shadow_buffer_slice(str(name), offset=offset, limit=limit)
+            )
         except KeyError:
             handler._send({"error": "shadow buffer not found", "name": str(name)}, status=404)
         return True
@@ -172,7 +174,9 @@ def route_readback_get(
         w = int(query.get("w", ["16"])[0])
         h = int(query.get("h", ["16"])[0])
         try:
-            handler._send(engine.serialize_bridge_shadow_buffer_window(str(name), x=x, y=y, w=w, h=h))
+            handler._send(
+                engine.serialize_bridge_shadow_buffer_window(str(name), x=x, y=y, w=w, h=h)
+            )
         except KeyError:
             handler._send({"error": "shadow buffer not found", "name": str(name)}, status=404)
         except ValueError as exc:
@@ -188,7 +192,9 @@ def route_readback_get(
         w = int(query.get("w", ["16"])[0])
         h = int(query.get("h", ["16"])[0])
         try:
-            handler._send(engine.serialize_bridge_shadow_buffer_world_window(str(name), x=x, y=y, w=w, h=h))
+            handler._send(
+                engine.serialize_bridge_shadow_buffer_world_window(str(name), x=x, y=y, w=w, h=h)
+            )
         except KeyError:
             handler._send({"error": "shadow buffer not found", "name": str(name)}, status=404)
         except ValueError as exc:
@@ -204,7 +210,9 @@ def route_readback_get(
         w = int(query.get("w", ["4"])[0])
         h = int(query.get("h", ["4"])[0])
         try:
-            handler._send(engine.serialize_bridge_shadow_buffer_gas_window(str(name), x=x, y=y, w=w, h=h))
+            handler._send(
+                engine.serialize_bridge_shadow_buffer_gas_window(str(name), x=x, y=y, w=w, h=h)
+            )
         except KeyError:
             handler._send({"error": "shadow buffer not found", "name": str(name)}, status=404)
         except ValueError as exc:
@@ -242,7 +250,9 @@ def route_readback_get(
         return True
     if path == "/api/readback/status":
         request_id = int(query["request_id"][0])
-        handler._send({"request_id": request_id, "status": engine.readback_request_status(request_id)})
+        handler._send(
+            {"request_id": request_id, "status": engine.readback_request_status(request_id)}
+        )
         return True
     if path == "/api/commands/pending":
         handler._send(engine.serialize_pending_commands())
@@ -278,7 +288,9 @@ def route_readback_post(
             request_id=None if payload.get("request_id") is None else int(payload["request_id"]),
             observer_id=None if payload.get("observer_id") is None else int(payload["observer_id"]),
             label=None if payload.get("label") is None else str(payload["label"]),
-            target_query_id=None if payload.get("target_query_id") is None else str(payload["target_query_id"]),
+            target_query_id=None
+            if payload.get("target_query_id") is None
+            else str(payload["target_query_id"]),
             target_dx=int(payload.get("target_dx", 0)),
             target_dy=int(payload.get("target_dy", 0)),
             target_queries=payload.get("target_queries"),
@@ -296,7 +308,9 @@ def route_readback_post(
             request_id=None if payload.get("request_id") is None else int(payload["request_id"]),
             observer_id=None if payload.get("observer_id") is None else int(payload["observer_id"]),
             label=None if payload.get("label") is None else str(payload["label"]),
-            target_query_id=None if payload.get("target_query_id") is None else str(payload["target_query_id"]),
+            target_query_id=None
+            if payload.get("target_query_id") is None
+            else str(payload["target_query_id"]),
             target_dx=int(payload.get("target_dx", 0)),
             target_dy=int(payload.get("target_dy", 0)),
             target_queries=payload.get("target_queries"),
@@ -314,7 +328,9 @@ def route_readback_post(
             request_id=None if payload.get("request_id") is None else int(payload["request_id"]),
             observer_id=None if payload.get("observer_id") is None else int(payload["observer_id"]),
             label=None if payload.get("label") is None else str(payload["label"]),
-            target_query_id=None if payload.get("target_query_id") is None else str(payload["target_query_id"]),
+            target_query_id=None
+            if payload.get("target_query_id") is None
+            else str(payload["target_query_id"]),
             target_dx=int(payload.get("target_dx", 0)),
             target_dy=int(payload.get("target_dy", 0)),
             target_queries=payload.get("target_queries"),
@@ -341,10 +357,14 @@ def route_readback_post(
                 "center_y": None if payload.get("center_y") is None else int(payload["center_y"]),
                 "width": None if payload.get("width") is None else int(payload["width"]),
                 "height": None if payload.get("height") is None else int(payload["height"]),
-                "entity_id": None if payload.get("entity_id") is None else int(payload["entity_id"]),
+                "entity_id": None
+                if payload.get("entity_id") is None
+                else int(payload["entity_id"]),
                 "pad_cells": int(payload.get("pad_cells", 0)),
                 "label": None if payload.get("label") is None else str(payload["label"]),
-                "target_query_id": None if payload.get("target_query_id") is None else str(payload["target_query_id"]),
+                "target_query_id": None
+                if payload.get("target_query_id") is None
+                else str(payload["target_query_id"]),
                 "target_dx": int(payload.get("target_dx", 0)),
                 "target_dy": int(payload.get("target_dy", 0)),
             },
@@ -362,10 +382,14 @@ def route_readback_post(
                 "center_y": None if payload.get("center_y") is None else int(payload["center_y"]),
                 "width": None if payload.get("width") is None else int(payload["width"]),
                 "height": None if payload.get("height") is None else int(payload["height"]),
-                "entity_id": None if payload.get("entity_id") is None else int(payload["entity_id"]),
+                "entity_id": None
+                if payload.get("entity_id") is None
+                else int(payload["entity_id"]),
                 "pad_cells": int(payload.get("pad_cells", 0)),
                 "label": None if payload.get("label") is None else str(payload["label"]),
-                "target_query_id": None if payload.get("target_query_id") is None else str(payload["target_query_id"]),
+                "target_query_id": None
+                if payload.get("target_query_id") is None
+                else str(payload["target_query_id"]),
                 "target_dx": int(payload.get("target_dx", 0)),
                 "target_dy": int(payload.get("target_dy", 0)),
             },
@@ -383,10 +407,14 @@ def route_readback_post(
                 "center_y": None if payload.get("center_y") is None else int(payload["center_y"]),
                 "width": None if payload.get("width") is None else int(payload["width"]),
                 "height": None if payload.get("height") is None else int(payload["height"]),
-                "entity_id": None if payload.get("entity_id") is None else int(payload["entity_id"]),
+                "entity_id": None
+                if payload.get("entity_id") is None
+                else int(payload["entity_id"]),
                 "pad_cells": int(payload.get("pad_cells", 0)),
                 "label": None if payload.get("label") is None else str(payload["label"]),
-                "target_query_id": None if payload.get("target_query_id") is None else str(payload["target_query_id"]),
+                "target_query_id": None
+                if payload.get("target_query_id") is None
+                else str(payload["target_query_id"]),
                 "target_dx": int(payload.get("target_dx", 0)),
                 "target_dy": int(payload.get("target_dy", 0)),
             },

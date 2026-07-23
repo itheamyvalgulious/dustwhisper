@@ -78,7 +78,7 @@
             uint quantize_accum(float value, float scale) {
                 return uint(clamp(value * scale + 0.5, 0.0, UINT_ACCUM_MAX));
             }
-            bool deposit_light(ivec2 cell, int dose_channel, float energy, float absorbed) {
+            bool deposit_light(ivec2 cell, int dose_channel, float energy, float cell_dose) {
                 bool deposited_dose = false;
                 bool deposited_cell_illumination = false;
                 bool deposited_gas_dose = false;
@@ -86,8 +86,11 @@
                     int cell_index = (dose_channel * cell_grid_size.y + cell.y) * cell_grid_size.x + cell.x;
                     atomicAdd(illum_accum[cell_index], quantize_accum(energy, ILLUM_ACCUM_SCALE));
                     deposited_cell_illumination = true;
-                    if (absorbed > 0.0) {
-                        atomicAdd(cell_dose_accum[cell_index], quantize_accum(absorbed, CELL_ACCUM_SCALE));
+                    // Cell dose is the full delivered exposure for empty cells and
+                    // the absorbed fraction for material cells (zero-absorption
+                    // materials deposit nothing).
+                    if (cell_dose > 0.0) {
+                        atomicAdd(cell_dose_accum[cell_index], quantize_accum(cell_dose, CELL_ACCUM_SCALE));
                         deposited_dose = true;
                     }
                 }
@@ -200,7 +203,7 @@
                             opt = optics_at(material_id, light_id);
                             absorbed = energy * opt.x;
                         }
-                        if (deposit_light(cell, dose_channel, energy, absorbed)) {
+                        if (deposit_light(cell, dose_channel, energy, material_id == 0 ? energy : absorbed)) {
                             any_deposit = true;
                         }
                         if (material_id == 0) {

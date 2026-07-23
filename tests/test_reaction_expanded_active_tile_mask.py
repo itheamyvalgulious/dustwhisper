@@ -4,7 +4,7 @@ import inspect
 from types import SimpleNamespace
 
 from oracle_game.sim import gpu_reactions_cell_pass, gpu_reactions_pairings
-from oracle_game.sim.gpu_reactions import GPUReactionPipeline, GPUReactionResources, _SHADER_SUBS
+from oracle_game.sim.gpu_reactions import _SHADER_SUBS, GPUReactionPipeline, GPUReactionResources
 from oracle_game.sim.shader_loader import shader_source
 
 

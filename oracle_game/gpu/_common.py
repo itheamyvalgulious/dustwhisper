@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+if TYPE_CHECKING:
+    from oracle_game.types import MaterialDef
+
 from oracle_game.readback import READBACK_CPU_LATENCY_FRAMES, READBACK_GPU_LATENCY_FRAMES
-
-
 
 CPU_READBACK_LATENCY_FRAMES = READBACK_CPU_LATENCY_FRAMES
 GPU_READBACK_LATENCY_FRAMES = READBACK_GPU_LATENCY_FRAMES

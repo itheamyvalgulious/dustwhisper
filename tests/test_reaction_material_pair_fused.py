@@ -4,13 +4,19 @@ import numpy as np
 import pytest
 
 from oracle_game.sim.gpu_reactions import (
-    GPUReactionPipeline,
     MAX_MATERIALS,
     RULE_CANDIDATE_VECS,
     RULE_CANDIDATE_WORDS,
+    GPUReactionPipeline,
 )
 from oracle_game.sim.gpu_reactions_pairings import _merge_material_pair_candidate_masks
-from oracle_game.types import Direction, PairReactionRule, ReactionAction, ReactionType, SelfReactionRule
+from oracle_game.types import (
+    Direction,
+    PairReactionRule,
+    ReactionAction,
+    ReactionType,
+    SelfReactionRule,
+)
 from oracle_game.world import WorldEngine
 
 
@@ -167,7 +173,9 @@ def _prepare_pair_world(
         )
     rng = np.random.default_rng(9241)
     engine.cell_flags[:] = rng.integers(0, 4, size=engine.cell_flags.shape, dtype=np.uint8)
-    engine.cell_temperature[:] = rng.uniform(-20.0, 140.0, size=engine.cell_temperature.shape).astype(np.float32)
+    engine.cell_temperature[:] = rng.uniform(
+        -20.0, 140.0, size=engine.cell_temperature.shape
+    ).astype(np.float32)
     engine.integrity[:] = np.float32(50.0)
     engine.timer_pack[:] = rng.integers(0, 4, size=engine.timer_pack.shape, dtype=np.uint8)
     engine.timer_pack[..., 0] = 0
@@ -178,7 +186,9 @@ def _prepare_pair_world(
     poison_id = engine.rulebook.gas_id("poison_gas")
     engine.gas_concentration.fill(0.0)
     engine.gas_concentration[poison_id] = np.float32(0.6)
-    engine.flow_velocity[:] = rng.normal(0.0, 0.1, size=engine.flow_velocity.shape).astype(np.float32)
+    engine.flow_velocity[:] = rng.normal(0.0, 0.1, size=engine.flow_velocity.shape).astype(
+        np.float32
+    )
     engine.active.mark_rect(0, 0, engine.width, engine.height)
     if material_light:
         magic_light = engine.rulebook.light_id("magic_light")
@@ -197,11 +207,7 @@ def _prepare_pair_world(
         "active_meta",
         "active_tile_ttl",
         "active_chunk_mask",
-        *(
-            ("cell_optical_dose", "optics_light_dose_guard")
-            if material_light
-            else ()
-        ),
+        *(("cell_optical_dose", "optics_light_dose_guard") if material_light else ()),
     )
     return engine
 
@@ -253,7 +259,9 @@ def _run_pair_frames(
                     light_fusion_used_out.append(light_fused)
                 assert pipeline.resources is not None
                 frame_meta.append(
-                    np.frombuffer(pipeline.resources.segment_cell_meta_tex.read(), dtype=np.float32).copy()
+                    np.frombuffer(
+                        pipeline.resources.segment_cell_meta_tex.read(), dtype=np.float32
+                    ).copy()
                 )
                 pipeline.flush_formal_reaction_segment(engine, "before_motion")
             finally:
@@ -263,7 +271,9 @@ def _run_pair_frames(
         assert pipeline.resources is not None
         state = (
             np.frombuffer(engine.bridge.buffers["cell_core"].read(), dtype=np.uint32).copy(),
-            np.frombuffer(engine.bridge.buffers["gas_concentration"].read(), dtype=np.float32).copy(),
+            np.frombuffer(
+                engine.bridge.buffers["gas_concentration"].read(), dtype=np.float32
+            ).copy(),
             np.frombuffer(engine.bridge.textures["flow_velocity"].read(), dtype=np.float32).copy(),
             np.frombuffer(pipeline.resources.light_emitter_count.read(), dtype=np.uint32).copy(),
             *frame_meta,
@@ -285,7 +295,9 @@ def test_material_pair_state_fusion_matches_two_passes_for_two_frames() -> None:
 
     cell_core = candidate[0].reshape((16, 32, 5))
     iron_id = int(cell_core[0, 2, 0] & np.uint32(0xFFFF))
-    assert np.array_equal(cell_core[0, :3, 0] & np.uint32(0xFFFF), np.full(3, iron_id, dtype=np.uint32))
+    assert np.array_equal(
+        cell_core[0, :3, 0] & np.uint32(0xFFFF), np.full(3, iron_id, dtype=np.uint32)
+    )
     assert np.array_equal(
         cell_core[0, :3, 3] & np.uint32(0xFF),
         np.asarray((4, 3, 3), dtype=np.uint32),
@@ -300,7 +312,9 @@ def test_material_pair_state_fusion_matches_two_passes_for_two_frames() -> None:
 @pytest.mark.parametrize("fallback_kind", ("rhs", "emit_light", "flow"))
 def test_material_pair_state_fusion_falls_back_for_unsafe_rules(fallback_kind: str) -> None:
     control, _ = _run_pair_frames(fused=False, frame_count=1, fallback_kind=fallback_kind)
-    candidate, candidate_used = _run_pair_frames(fused=True, frame_count=1, fallback_kind=fallback_kind)
+    candidate, candidate_used = _run_pair_frames(
+        fused=True, frame_count=1, fallback_kind=fallback_kind
+    )
 
     assert candidate_used == (False,)
     for control_state, candidate_state in zip(control, candidate, strict=True):

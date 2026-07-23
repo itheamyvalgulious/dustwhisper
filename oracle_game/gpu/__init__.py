@@ -2,11 +2,8 @@
 
 Every public name is re-exported here so ``from oracle_game.gpu import X`` keeps working.
 """
+
 from oracle_game.gpu._common import *  # noqa: F401,F403
-from oracle_game.gpu.dtypes import *  # noqa: F401,F403
-from oracle_game.gpu.packers import *  # noqa: F401,F403
-from oracle_game.gpu.readback import *  # noqa: F401,F403
-from oracle_game.gpu.bridge import *  # noqa: F401,F403
 
 # Private helpers the original monolith exposed as module attributes.
 from oracle_game.gpu._common import (  # noqa: F401
@@ -16,6 +13,9 @@ from oracle_game.gpu._common import (  # noqa: F401
     _json_default,
     _render_group_tile,
 )
+from oracle_game.gpu.bridge import *  # noqa: F401,F403
+from oracle_game.gpu.dtypes import *  # noqa: F401,F403
+from oracle_game.gpu.packers import *  # noqa: F401,F403
 from oracle_game.gpu.packers import (  # noqa: F401
     _float_or_nan,
     _gas_ref,
@@ -29,4 +29,4 @@ from oracle_game.gpu.packers import (  # noqa: F401
     _typed_name_id,
     _unpack_half2x16,
 )
-
+from oracle_game.gpu.readback import *  # noqa: F401,F403

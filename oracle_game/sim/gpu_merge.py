@@ -19,12 +19,14 @@ Field rules (plan/step2.md "新数据流" -> "合并规则第一版"):
 island_id / entity_id / placeholder_displaced_material are taken from motion then
 liquid (motion writes island settlements; liquid writes placeholder displacement).
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import numpy as np
+if TYPE_CHECKING:
+    from oracle_game.world import WorldEngine
 
 from oracle_game.sim.gpu_base import GPUPipelineBase
 from oracle_game.sim.shader_loader import build_compute_shader
@@ -51,7 +53,9 @@ class GPUMergePipeline(GPUPipelineBase):
     def _ensure_programs(self, ctx: Any) -> None:
         if "merge_cell_core" in self.programs:
             return
-        self.programs["merge_cell_core"] = build_compute_shader(ctx, "merge/merge_cell_core.comp", {"LOCAL_SIZE": LOCAL_SIZE})
+        self.programs["merge_cell_core"] = build_compute_shader(
+            ctx, "merge/merge_cell_core.comp", {"LOCAL_SIZE": LOCAL_SIZE}
+        )
 
     def merge_cell_core(
         self,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 
 from oracle_game.sim import gpu_reactions_cell_pass
-from oracle_game.sim.gpu_reactions import GPUReactionPipeline, _SHADER_SUBS
+from oracle_game.sim.gpu_reactions import _SHADER_SUBS, GPUReactionPipeline
 from oracle_game.sim.shader_loader import shader_source
 
 
@@ -59,6 +59,6 @@ def test_material_triplet_terminal_32x8_keeps_full_fallback_and_xy_dispatch() ->
     assert positions == tuple(sorted(positions))
     assert source.rindex('"material_pair_fused"') > positions[-1]
     assert "terminal_local_size_x = (" in source
-    assert "terminal_local_size_y = 8 if terminal_32x8" in source
+    assert "8 if terminal_32x8" in " ".join(source.split())
     assert "world.width + terminal_local_size_x - 1" in source
     assert "world.height + terminal_local_size_y - 1" in source

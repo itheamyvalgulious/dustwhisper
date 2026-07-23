@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 from types import SimpleNamespace
 
-from oracle_game.sim.gpu_reactions import GPUReactionPipeline, _SHADER_SUBS
+from oracle_game.sim.gpu_reactions import _SHADER_SUBS, GPUReactionPipeline
 from oracle_game.sim.shader_loader import shader_source
 
 
@@ -76,8 +76,11 @@ def test_terminal_segment_meta_lazy_zero_physically_clears_once_on_legacy_touch(
 
 
 def test_terminal_segment_meta_lazy_zero_hooks_all_legacy_consumers() -> None:
-    from oracle_game.sim import gpu_reactions_cell_pass, gpu_reactions_segments
-    from oracle_game.sim import gpu_reactions_transient
+    from oracle_game.sim import (
+        gpu_reactions_cell_pass,
+        gpu_reactions_segments,
+        gpu_reactions_transient,
+    )
 
     cell_pass = inspect.getsource(gpu_reactions_cell_pass)
     segments = inspect.getsource(gpu_reactions_segments.flush_formal_reaction_segment)

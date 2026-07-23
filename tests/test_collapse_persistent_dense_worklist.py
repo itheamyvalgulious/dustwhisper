@@ -15,7 +15,6 @@ from oracle_game.sim.gpu_collapse import (
 )
 from oracle_game.world import WorldEngine
 
-
 _DENSE_WORKLIST_BUFFERS = (
     FORMAL_CONNECTED_TILE_FRONTIER_BUFFER,
     FORMAL_CONNECTED_TILE_LIST_BUFFER,
@@ -104,10 +103,14 @@ def _run_two_incremental_epochs(
                 "collapse_immune_unsupported_mask",
             )
         }
-        return outputs, (
-            pipeline.persistent_dense_tile_worklist_rebuilds,
-            pipeline.persistent_dense_tile_worklist_hits,
-        ), tuple(support_jumps)
+        return (
+            outputs,
+            (
+                pipeline.persistent_dense_tile_worklist_rebuilds,
+                pipeline.persistent_dense_tile_worklist_hits,
+            ),
+            tuple(support_jumps),
+        )
     finally:
         engine.close()
 
@@ -192,7 +195,9 @@ def _run_incremental_support_publish_case(
             "collapse_collapsed_cell_mask",
             "collapse_component_label",
         ):
-            resource = engine.bridge.textures[name] if name == "material" else engine.bridge.buffers[name]
+            resource = (
+                engine.bridge.textures[name] if name == "material" else engine.bridge.buffers[name]
+            )
             snapshots[f"final.{name}"] = resource.read()
         return snapshots, publish_calls
     finally:
@@ -207,7 +212,9 @@ def test_persistent_dense_tile_worklist_is_default_on() -> None:
 
 def test_persistent_dense_tile_worklist_matches_two_uncached_epochs() -> None:
     control, control_cache_counts, control_jumps = _run_two_incremental_epochs(cache_enabled=False)
-    candidate, candidate_cache_counts, candidate_jumps = _run_two_incremental_epochs(cache_enabled=True)
+    candidate, candidate_cache_counts, candidate_jumps = _run_two_incremental_epochs(
+        cache_enabled=True
+    )
 
     assert candidate == control
     assert control_cache_counts == (0, 0)
@@ -306,7 +313,9 @@ def test_persistent_dense_tile_worklist_rebuilds_after_frontier_pollution_and_re
         assert pipeline._persistent_dense_tile_worklist_signature is None
         pipeline._seed_formal_texture_region_tile_worklist(engine, width, height)
         assert pipeline.persistent_dense_tile_worklist_rebuilds == 3
-        assert {name: engine.bridge.buffers[name].read() for name in _DENSE_WORKLIST_BUFFERS} == expected
+        assert {
+            name: engine.bridge.buffers[name].read() for name in _DENSE_WORKLIST_BUFFERS
+        } == expected
     finally:
         engine.close()
 
@@ -344,9 +353,18 @@ def test_persistent_dense_tile_worklist_signature_covers_context_world_region_an
             active=engine.active,
             bridge=SimpleNamespace(ctx=object(), buffers=engine.bridge.buffers),
         )
-        assert pipeline._persistent_dense_tile_worklist_signature_for(changed_world, 64, 45) != signature
+        assert (
+            pipeline._persistent_dense_tile_worklist_signature_for(changed_world, 64, 45)
+            != signature
+        )
         assert pipeline._persistent_dense_tile_worklist_signature_for(engine, 63, 45) != signature
-        assert pipeline._persistent_dense_tile_worklist_signature_for(changed_tiles, 64, 45) != signature
-        assert pipeline._persistent_dense_tile_worklist_signature_for(changed_context, 64, 45) != signature
+        assert (
+            pipeline._persistent_dense_tile_worklist_signature_for(changed_tiles, 64, 45)
+            != signature
+        )
+        assert (
+            pipeline._persistent_dense_tile_worklist_signature_for(changed_context, 64, 45)
+            != signature
+        )
     finally:
         engine.close()

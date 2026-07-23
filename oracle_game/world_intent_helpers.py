@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -40,7 +40,9 @@ def _patch_entity_states(engine: "WorldEngine", patches: list[EntityStatePatch])
         entity = next_entity_states.get(patch.entity_id)
         if entity is None:
             raise KeyError(patch.entity_id)
-        patch_fields = {name: value for name, value in patch.fields.items() if not name.startswith("_")}
+        patch_fields = {
+            name: value for name, value in patch.fields.items() if not name.startswith("_")
+        }
         world_x = patch.fields.get(
             "_world_x",
             patch_fields.get("x", entity.world_x if entity.world_x is not None else entity.x),
@@ -53,7 +55,9 @@ def _patch_entity_states(engine: "WorldEngine", patches: list[EntityStatePatch])
             replace(entity, **dict(patch_fields), world_x=int(world_x), world_y=int(world_y))
         )
     engine.entity_states = next_entity_states
-    placeholders, _ = engine._frame_entities_to_placeholders_and_observations(list(engine.entity_states.values()))
+    placeholders, _ = engine._frame_entities_to_placeholders_and_observations(
+        list(engine.entity_states.values())
+    )
     engine._sync_entity_placeholders(placeholders)
 
 
@@ -67,11 +71,17 @@ def _preview_can_occupy_placeholder_cell(
 ) -> bool:
     if not engine.in_bounds(x, y):
         return False
-    placeholder_material_id = engine._resolve_sanctioned_placeholder_material_id(str(placeholder.material))
+    placeholder_material_id = engine._resolve_sanctioned_placeholder_material_id(
+        str(placeholder.material)
+    )
     if placeholder_material_id <= 0:
         return False
     material_id, phase = _material_state_for_position(engine, x, y, released_cells=released_cells)
-    if current_cells.get((x, y)) == placeholder.entity_id and material_id > 0 and engine._shadow_material_is_placeholder(material_id):
+    if (
+        current_cells.get((x, y)) == placeholder.entity_id
+        and material_id > 0
+        and engine._shadow_material_is_placeholder(material_id)
+    ):
         return True
     return material_id == 0 or phase == int(Phase.LIQUID)
 
@@ -87,7 +97,12 @@ def _material_state_for_position(
     material_id = int(engine.material_id[y, x])
     phase = int(engine.phase[y, x])
     cell = (x, y)
-    if released_cells is not None and cell in released_cells and material_id > 0 and engine._shadow_material_is_placeholder(material_id):
+    if (
+        released_cells is not None
+        and cell in released_cells
+        and material_id > 0
+        and engine._shadow_material_is_placeholder(material_id)
+    ):
         displaced_material = int(engine.placeholder_displaced_material[y, x])
         if displaced_material > 0:
             return displaced_material, int(Phase.LIQUID)
@@ -102,7 +117,9 @@ def _build_observation_requests(
     targets: list[ObservationTarget],
     resolved_targets: dict[str, ResolvedTarget],
 ) -> list[ReadbackRequest]:
-    return [request for _, request in engine._build_observation_request_pairs(targets, resolved_targets)]
+    return [
+        request for _, request in engine._build_observation_request_pairs(targets, resolved_targets)
+    ]
 
 
 def _resolve_readback_requests(
@@ -128,7 +145,10 @@ def _resolve_change_intents(
     for intent in intents:
         resolved_intent = engine._resolve_change_intent(intent, resolved_targets)
         resolved[intent.intent_id] = resolved_intent
-        commands.extend(WorldCommand(kind=command.kind, payload=deepcopy(command.payload)) for command in resolved_intent.generated_commands)
+        commands.extend(
+            WorldCommand(kind=command.kind, payload=deepcopy(command.payload))
+            for command in resolved_intent.generated_commands
+        )
     return resolved, commands
 
 
@@ -163,7 +183,10 @@ def _resolve_carrier_intents(
     for intent in intents:
         resolved_intent = engine._resolve_carrier_intent(intent, resolved_targets)
         resolved[intent.intent_id] = resolved_intent
-        commands.extend(WorldCommand(kind=command.kind, payload=deepcopy(command.payload)) for command in resolved_intent.generated_commands)
+        commands.extend(
+            WorldCommand(kind=command.kind, payload=deepcopy(command.payload))
+            for command in resolved_intent.generated_commands
+        )
     return resolved, commands
 
 
@@ -179,7 +202,11 @@ def _resolve_intent_world_position(
 ) -> tuple[int, int] | None:
     if target_query_id is not None:
         target = resolved_targets.get(target_query_id)
-        if target is None or target.status not in {"resolved", "drifted"} or target.resolved_world_position is None:
+        if (
+            target is None
+            or target.status not in {"resolved", "drifted"}
+            or target.resolved_world_position is None
+        ):
             return None
         return (
             int(target.resolved_world_position[0]) + int(target_dx),
@@ -217,7 +244,9 @@ def _normalized_world_direction(
     source_world_position: tuple[int, int],
     target_world_position: tuple[int, int],
 ) -> tuple[float, float] | None:
-    delta = np.asarray(target_world_position, dtype=np.float32) - np.asarray(source_world_position, dtype=np.float32)
+    delta = np.asarray(target_world_position, dtype=np.float32) - np.asarray(
+        source_world_position, dtype=np.float32
+    )
     length = float(np.linalg.norm(delta))
     if length <= 1e-6:
         return None
@@ -247,7 +276,9 @@ def _distance_meters_to_cells(distance_meters: float) -> int:
     return cells
 
 
-def _resolve_query_source_position(engine: "WorldEngine", query: TargetQuery) -> tuple[int, int] | None:
+def _resolve_query_source_position(
+    engine: "WorldEngine", query: TargetQuery
+) -> tuple[int, int] | None:
     if query.source_entity_id is not None:
         entity = engine.entity_states.get(int(query.source_entity_id))
         if entity is None:
@@ -263,11 +294,14 @@ def _resolve_query_source_position(engine: "WorldEngine", query: TargetQuery) ->
 def _default_target_source_position(engine: "WorldEngine") -> tuple[int, int]:
     return (
         (int(engine.paging.buffer_origin_x) + int(engine.paging.active_width) // 2) % engine.width,
-        (int(engine.paging.buffer_origin_y) + int(engine.paging.active_height) // 2) % engine.height,
+        (int(engine.paging.buffer_origin_y) + int(engine.paging.active_height) // 2)
+        % engine.height,
     )
 
 
-def _entity_matches_anchor_filters(engine: "WorldEngine", entity: EntityState, filters: tuple[str, ...]) -> bool:
+def _entity_matches_anchor_filters(
+    engine: "WorldEngine", entity: EntityState, filters: tuple[str, ...]
+) -> bool:
     area = max(1, int(entity.width) * int(entity.height))
     entity_tags = set(entity.tags)
     for item in filters:
@@ -288,7 +322,9 @@ def _entity_matches_anchor_filters(engine: "WorldEngine", entity: EntityState, f
     return True
 
 
-def _terrain_tree_cell_matches(engine: "WorldEngine", x: int, y: int, material_id: int, phase: int) -> bool:
+def _terrain_tree_cell_matches(
+    engine: "WorldEngine", x: int, y: int, material_id: int, phase: int
+) -> bool:
     if material_id == 0 or phase in {int(Phase.LIQUID), int(Phase.POWDER)}:
         return False
     if not _world_cell_material_has_tag(engine, x, y, "plant"):
@@ -308,17 +344,25 @@ def _terrain_tree_cell_matches(engine: "WorldEngine", x: int, y: int, material_i
     return plant_neighbors >= 2
 
 
-def _terrain_hill_cell_matches(engine: "WorldEngine", x: int, y: int, material_id: int, phase: int) -> bool:
+def _terrain_hill_cell_matches(
+    engine: "WorldEngine", x: int, y: int, material_id: int, phase: int
+) -> bool:
     if material_id == 0 or phase == int(Phase.LIQUID):
         return False
-    if _world_cell_material_has_tag(engine, x, y, "plant") or _world_cell_material_has_tag(engine, x, y, "placeholder"):
+    if _world_cell_material_has_tag(engine, x, y, "plant") or _world_cell_material_has_tag(
+        engine, x, y, "placeholder"
+    ):
         return False
     if not engine._world_cell_is_empty_local(x, y - 1):
         return False
     if engine._world_cell_is_solid_local(x - 1, y) or engine._world_cell_is_solid_local(x + 1, y):
         return False
-    left_support = engine._world_cell_is_solid_local(x - 1, y + 1) or engine._world_cell_is_solid_local(x - 1, y + 2)
-    right_support = engine._world_cell_is_solid_local(x + 1, y + 1) or engine._world_cell_is_solid_local(x + 1, y + 2)
+    left_support = engine._world_cell_is_solid_local(
+        x - 1, y + 1
+    ) or engine._world_cell_is_solid_local(x - 1, y + 2)
+    right_support = engine._world_cell_is_solid_local(
+        x + 1, y + 1
+    ) or engine._world_cell_is_solid_local(x + 1, y + 2)
     return left_support and right_support
 
 
@@ -335,7 +379,9 @@ def _world_cell_material_has_tag(engine: "WorldEngine", x: int, y: int, tag: str
     return material is not None and tag in material.tags
 
 
-def _source_facing_vector(engine: "WorldEngine", source_entity_id: int | None) -> tuple[float, float]:
+def _source_facing_vector(
+    engine: "WorldEngine", source_entity_id: int | None
+) -> tuple[float, float]:
     if source_entity_id is not None:
         entity = engine.entity_states.get(int(source_entity_id))
         if entity is not None:
@@ -362,7 +408,9 @@ def _entity_center_world_position(engine: "WorldEngine", entity: EntityState) ->
     return engine._buffer_to_world_position(_entity_center_buffer_position(engine, entity))
 
 
-def _normalize_runtime_force_source(engine: "WorldEngine", force_source: ForceSource) -> ForceSource:
+def _normalize_runtime_force_source(
+    engine: "WorldEngine", force_source: ForceSource
+) -> ForceSource:
     world_x, world_y = engine._force_source_world_position(force_source)
     buffer_x, buffer_y = engine._world_to_buffer_float_position((world_x, world_y))
     return replace(
@@ -410,7 +458,9 @@ def _world_distance_sq(left: tuple[int, int], right: tuple[int, int]) -> float:
     return dx * dx + dy * dy
 
 
-def _entity_placeholder_bbox(engine: "WorldEngine", entity_id: int) -> tuple[int, int, int, int] | None:
+def _entity_placeholder_bbox(
+    engine: "WorldEngine", entity_id: int
+) -> tuple[int, int, int, int] | None:
     cells = engine.entity_placeholders.get(entity_id)
     if not cells:
         return None
@@ -419,7 +469,9 @@ def _entity_placeholder_bbox(engine: "WorldEngine", entity_id: int) -> tuple[int
     return (min(xs), min(ys), max(xs) + 1, max(ys) + 1)
 
 
-def _build_entity_feedback_from_world(engine: "WorldEngine", entity: EntityState) -> EntityFeedback | None:
+def _build_entity_feedback_from_world(
+    engine: "WorldEngine", entity: EntityState
+) -> EntityFeedback | None:
     cell_state = {
         "material_id": engine.material_id,
         "phase": engine.phase,
@@ -429,7 +481,9 @@ def _build_entity_feedback_from_world(engine: "WorldEngine", entity: EntityState
         "entity_id": engine.entity_id,
         "placeholder_displaced_material": engine.placeholder_displaced_material,
     }
-    return engine._build_entity_feedback_from_state(entity, cell_state=cell_state, entity_runtime=entity_runtime)
+    return engine._build_entity_feedback_from_state(
+        entity, cell_state=cell_state, entity_runtime=entity_runtime
+    )
 
 
 def _build_entity_feedback_from_current_state(
@@ -440,6 +494,10 @@ def _build_entity_feedback_from_current_state(
 ) -> EntityFeedback | None:
     return engine._build_entity_feedback_from_state(
         entity,
-        cell_state=engine._current_cell_state_snapshot(allow_gpu_sync_readback=allow_gpu_sync_readback),
-        entity_runtime=engine._current_entity_runtime_snapshot(allow_gpu_sync_readback=allow_gpu_sync_readback),
+        cell_state=engine._current_cell_state_snapshot(
+            allow_gpu_sync_readback=allow_gpu_sync_readback
+        ),
+        entity_runtime=engine._current_entity_runtime_snapshot(
+            allow_gpu_sync_readback=allow_gpu_sync_readback
+        ),
     )

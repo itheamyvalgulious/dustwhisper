@@ -11,7 +11,6 @@ from oracle_game.paging import RingPagingWindow
 from oracle_game.types import DebugView, EntityState
 from oracle_game.world import BASE_MATERIAL_RUNTIME_ALIASES, WorldEngine
 
-
 ENGINE_DEMO_TITLE = "Dustwhisper Engine Demo"
 DEMO_CONTROLLER_ENTITY_ID = 2_147_483_000
 DEMO_TARGET_CELL_PIXELS = 1
@@ -40,7 +39,9 @@ def compute_demo_grid_sizing(screen_width: int, screen_height: int) -> dict[str,
     }
 
 
-def demo_view_focus_label(debug_view: DebugView, *, gas_species: str, light_type: str | None) -> str | None:
+def demo_view_focus_label(
+    debug_view: DebugView, *, gas_species: str, light_type: str | None
+) -> str | None:
     if debug_view == DebugView.GAS:
         return f"gas={gas_species}"
     if debug_view in {DebugView.OPTICS, DebugView.LIGHT}:
@@ -111,8 +112,16 @@ def format_demo_focus_probe(
     if callable(world_to_buffer):
         buffer_x, buffer_y = world_to_buffer(int(focus_x), int(focus_y))
     else:
-        buffer_x = int(focus_x) - int(getattr(paging, "origin_x", 0)) + int(getattr(paging, "buffer_origin_x", 0))
-        buffer_y = int(focus_y) - int(getattr(paging, "origin_y", 0)) + int(getattr(paging, "buffer_origin_y", 0))
+        buffer_x = (
+            int(focus_x)
+            - int(getattr(paging, "origin_x", 0))
+            + int(getattr(paging, "buffer_origin_x", 0))
+        )
+        buffer_y = (
+            int(focus_y)
+            - int(getattr(paging, "origin_y", 0))
+            + int(getattr(paging, "buffer_origin_y", 0))
+        )
     if not all(
         hasattr(engine, attr)
         for attr in (
@@ -178,14 +187,26 @@ def format_demo_focus_probe(
         if light_type is not None:
             resolve_light = getattr(engine, "_resolve_sanctioned_light_id", None)
             shadow_dose_channel = getattr(engine, "_shadow_light_dose_channel", None)
-            light_id = int(resolve_light(light_type)) if callable(resolve_light) else engine.rulebook.light_id(light_type)
+            light_id = (
+                int(resolve_light(light_type))
+                if callable(resolve_light)
+                else engine.rulebook.light_id(light_type)
+            )
             dose_channel = shadow_dose_channel(light_id) if callable(shadow_dose_channel) else None
-            if dose_channel is None and not callable(shadow_dose_channel) and 0 <= light_id < engine.light_dose_channel.shape[0]:
+            if (
+                dose_channel is None
+                and not callable(shadow_dose_channel)
+                and 0 <= light_id < engine.light_dose_channel.shape[0]
+            ):
                 dose_channel = int(engine.light_dose_channel[light_id])
             if dose_channel is not None and 0 <= dose_channel < engine.cell_optical_dose.shape[0]:
-                parts.append(f"dose={light_type}:{float(engine.cell_optical_dose[dose_channel, buffer_y, buffer_x]):.2f}")
+                parts.append(
+                    f"dose={light_type}:{float(engine.cell_optical_dose[dose_channel, buffer_y, buffer_x]):.2f}"
+                )
             if dose_channel is not None and 0 <= dose_channel < engine.gas_optical_dose.shape[0]:
-                parts.append(f"gasDose={light_type}:{float(engine.gas_optical_dose[dose_channel, gas_y, gas_x]):.2f}")
+                parts.append(
+                    f"gasDose={light_type}:{float(engine.gas_optical_dose[dose_channel, gas_y, gas_x]):.2f}"
+                )
         else:
             parts.append(_format_demo_probe_rgb("lit", visible_rgb))
     return " ".join(parts)
@@ -227,7 +248,9 @@ def build_demo_controller_entities(
         for entity in existing_entities
         if int(entity.entity_id) != DEMO_CONTROLLER_ENTITY_ID
     }
-    merged[DEMO_CONTROLLER_ENTITY_ID] = build_demo_controller_probe_entity(focus_x=focus_x, focus_y=focus_y)
+    merged[DEMO_CONTROLLER_ENTITY_ID] = build_demo_controller_probe_entity(
+        focus_x=focus_x, focus_y=focus_y
+    )
     return [merged[entity_id] for entity_id in sorted(merged)]
 
 
@@ -242,8 +265,12 @@ def build_demo_controller_entities_for_world_focus(
     return [
         replace(
             entity,
-            world_x=int(focus_x) if int(entity.entity_id) == DEMO_CONTROLLER_ENTITY_ID else entity.world_x,
-            world_y=int(focus_y) if int(entity.entity_id) == DEMO_CONTROLLER_ENTITY_ID else entity.world_y,
+            world_x=int(focus_x)
+            if int(entity.entity_id) == DEMO_CONTROLLER_ENTITY_ID
+            else entity.world_x,
+            world_y=int(focus_y)
+            if int(entity.entity_id) == DEMO_CONTROLLER_ENTITY_ID
+            else entity.world_y,
         )
         for entity in build_demo_controller_entities(
             existing_entities,
@@ -327,14 +354,18 @@ def format_demo_controller_observation_summary(
     velocity_payload = payload.get("velocity")
     if isinstance(velocity_payload, dict) and "values" in velocity_payload:
         values = np.asarray(velocity_payload["values"], dtype=np.float32)
-        parts.append(_format_demo_probe_vector("flowV", values[values.shape[0] // 2, values.shape[1] // 2]))
+        parts.append(
+            _format_demo_probe_vector("flowV", values[values.shape[0] // 2, values.shape[1] // 2])
+        )
 
     gas_payload = payload.get("gas")
     if isinstance(gas_payload, dict):
         species = gas_payload.get("species")
         if isinstance(species, dict) and gas_species in species:
             values = np.asarray(species[gas_species], dtype=np.float32)
-            parts.append(f"gas={gas_species}:{float(values[values.shape[0] // 2, values.shape[1] // 2]):.2f}")
+            parts.append(
+                f"gas={gas_species}:{float(values[values.shape[0] // 2, values.shape[1] // 2]):.2f}"
+            )
 
     optics_payload = payload.get("optics")
     if isinstance(optics_payload, dict):
@@ -342,12 +373,18 @@ def format_demo_controller_observation_summary(
             cell_dose = optics_payload.get("cell_dose")
             if isinstance(cell_dose, dict) and light_type in cell_dose:
                 values = np.asarray(cell_dose[light_type], dtype=np.float32)
-                parts.append(f"dose={light_type}:{float(values[values.shape[0] // 2, values.shape[1] // 2]):.2f}")
+                parts.append(
+                    f"dose={light_type}:{float(values[values.shape[0] // 2, values.shape[1] // 2]):.2f}"
+                )
         else:
             visible = optics_payload.get("visible_illumination")
             if visible is not None:
                 values = np.asarray(visible, dtype=np.float32)
-                parts.append(_format_demo_probe_rgb("lit", values[values.shape[0] // 2, values.shape[1] // 2]))
+                parts.append(
+                    _format_demo_probe_rgb(
+                        "lit", values[values.shape[0] // 2, values.shape[1] // 2]
+                    )
+                )
 
     return " ".join(parts) if len(parts) > 1 else None
 

@@ -46,9 +46,7 @@ def test_powder_compact_shaders_preserve_signed_coordinates_and_public_abi() -> 
 
 def test_powder_compact_lazy_expand_keeps_observable_abi_on_demand() -> None:
     host = inspect.getsource(gpu_motion_powder.resolve_and_apply_powders)
-    materialize = inspect.getsource(
-        gpu_motion_powder.materialize_compact_powder_reservations
-    )
+    materialize = inspect.getsource(gpu_motion_powder.materialize_compact_powder_reservations)
     apply = shader_source("motion/apply_powder_reservations_source_indexed_direct.comp")
     expand = shader_source("motion/expand_compact_powder_reservations.comp")
 

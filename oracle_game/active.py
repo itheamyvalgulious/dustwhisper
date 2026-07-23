@@ -27,7 +27,9 @@ class ActiveRegionTracker:
         self.chunk_width = max(1, (tile_width + self.chunk_tiles - 1) // self.chunk_tiles)
         self.chunk_height = max(1, (tile_height + self.chunk_tiles - 1) // self.chunk_tiles)
         self.active_tile_ttl = [[0 for _ in range(tile_width)] for _ in range(tile_height)]
-        self.active_chunk_mask = [[False for _ in range(self.chunk_width)] for _ in range(self.chunk_height)]
+        self.active_chunk_mask = [
+            [False for _ in range(self.chunk_width)] for _ in range(self.chunk_height)
+        ]
 
     def mark_rect(self, x0: int, y0: int, x1: int, y1: int, *, tile_padding: int = 0) -> None:
         tile_x0, tile_y0, tile_x1, tile_y1 = self._tile_rect_bounds(
@@ -59,8 +61,14 @@ class ActiveRegionTracker:
         for chunk_y in range(self.chunk_height):
             for chunk_x in range(self.chunk_width):
                 active = False
-                for tile_y in range(chunk_y * self.chunk_tiles, min(self.tile_height, (chunk_y + 1) * self.chunk_tiles)):
-                    for tile_x in range(chunk_x * self.chunk_tiles, min(self.tile_width, (chunk_x + 1) * self.chunk_tiles)):
+                for tile_y in range(
+                    chunk_y * self.chunk_tiles,
+                    min(self.tile_height, (chunk_y + 1) * self.chunk_tiles),
+                ):
+                    for tile_x in range(
+                        chunk_x * self.chunk_tiles,
+                        min(self.tile_width, (chunk_x + 1) * self.chunk_tiles),
+                    ):
                         if self.active_tile_ttl[tile_y][tile_x] > 0:
                             active = True
                             break
@@ -100,8 +108,14 @@ class ActiveRegionTracker:
         for chunk_y in range(self.chunk_height):
             for chunk_x in range(self.chunk_width):
                 active = False
-                for tile_y in range(chunk_y * self.chunk_tiles, min(self.tile_height, (chunk_y + 1) * self.chunk_tiles)):
-                    for tile_x in range(chunk_x * self.chunk_tiles, min(self.tile_width, (chunk_x + 1) * self.chunk_tiles)):
+                for tile_y in range(
+                    chunk_y * self.chunk_tiles,
+                    min(self.tile_height, (chunk_y + 1) * self.chunk_tiles),
+                ):
+                    for tile_x in range(
+                        chunk_x * self.chunk_tiles,
+                        min(self.tile_width, (chunk_x + 1) * self.chunk_tiles),
+                    ):
                         if self.active_tile_ttl[tile_y][tile_x] > 0:
                             active = True
                             break

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 
-from oracle_game.sim.gpu_collapse import GPUCollapsePipeline, _SHADER_SUBS
+from oracle_game.sim.gpu_collapse import _SHADER_SUBS, GPUCollapsePipeline
 from oracle_game.sim.shader_loader import shader_source
 
 

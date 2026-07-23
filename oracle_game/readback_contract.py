@@ -10,6 +10,5 @@ READBACK_ALLOWED_CHANNELS: tuple[str, ...] = (
 )
 
 READBACK_CHANNEL_BITS: dict[str, int] = {
-    channel: 1 << index
-    for index, channel in enumerate(READBACK_ALLOWED_CHANNELS)
+    channel: 1 << index for index, channel in enumerate(READBACK_ALLOWED_CHANNELS)
 }

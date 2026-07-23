@@ -6,7 +6,6 @@ from pathlib import Path
 from oracle_game.sim import gpu_collapse_incremental as incremental
 from oracle_game.sim.gpu_collapse import GPUCollapsePipeline
 
-
 ROOT = Path(__file__).parents[1]
 
 

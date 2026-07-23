@@ -1,43 +1,45 @@
+# ruff: noqa: F401
+# Facade module: oracle_game/gpu/__init__.py re-exports this module via
+# `from oracle_game.gpu.packers import *`, so every public import here is part of
+# the oracle_game.gpu namespace.
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from oracle_game.readback_contract import READBACK_CHANNEL_BITS
-from oracle_game.types import COLLAPSE_BEHAVIOR_IDS, PageStripeUpdate
+if TYPE_CHECKING:
+    from oracle_game.world import WorldEngine
 
 from oracle_game.gpu._common import _json_bytes
 from oracle_game.gpu.dtypes import (
-    ENTITY_STATE_DTYPE,
-    FORCE_SOURCE_DTYPE,
-    ISLAND_RUNTIME_DTYPE,
-    FRAME_META_DTYPE,
-    WORLD_COMMAND_DTYPE,
-    READBACK_REQUEST_DTYPE,
-    PLACEHOLDER_DTYPE,
-    PLACEHOLDER_DIRTY_RECT_DTYPE,
     ACTIVE_META_DTYPE,
     ACTIVE_RECT_DTYPE,
+    COLLAPSE_COMPONENT_DTYPE,
+    COLLAPSE_RUNTIME_META_DTYPE,
+    ENTITY_STATE_DTYPE,
     GAS_RUNTIME_META_DTYPE,
     GAS_SPECIES_RUNTIME_DTYPE,
+    GAS_TABLE_DTYPE,
     HEAT_RUNTIME_META_DTYPE,
+    LIGHT_TABLE_DTYPE,
     LIQUID_RUNTIME_META_DTYPE,
-    REACTION_RUNTIME_META_DTYPE,
-    COLLAPSE_RUNTIME_META_DTYPE,
-    COLLAPSE_COMPONENT_DTYPE,
+    MATERIAL_TABLE_DTYPE,
     OPTICS_RUNTIME_META_DTYPE,
+    OPTICS_TABLE_DTYPE,
     PAGE_STRIPE_META_DTYPE,
     PAGE_STRIPE_SECTION_DTYPE,
-    RULE_TABLE_META_DTYPE,
-    MATERIAL_TABLE_DTYPE,
-    GAS_TABLE_DTYPE,
-    LIGHT_TABLE_DTYPE,
-    OPTICS_TABLE_DTYPE,
-    REACTION_ACTION_TABLE_DTYPE,
     PAIR_REACTION_RULE_TABLE_DTYPE,
+    PLACEHOLDER_DIRTY_RECT_DTYPE,
+    PLACEHOLDER_DTYPE,
+    REACTION_ACTION_TABLE_DTYPE,
+    REACTION_RUNTIME_META_DTYPE,
+    RULE_TABLE_META_DTYPE,
     SELF_REACTION_RULE_TABLE_DTYPE,
+    WORLD_COMMAND_DTYPE,
 )
+from oracle_game.readback_contract import READBACK_CHANNEL_BITS
+from oracle_game.types import COLLAPSE_BEHAVIOR_IDS, PageStripeUpdate
 
 
 def _pack_half2x16(velocity: np.ndarray) -> np.ndarray:
@@ -119,7 +121,9 @@ def pack_entity_state_upload(world: "WorldEngine") -> np.ndarray:
         packed[index]["world_y"] = int(world_y)
         packed[index]["width"] = int(entity.width)
         packed[index]["height"] = int(entity.height)
-        packed[index]["placeholder_material_id"] = int(typed_material_id(material_table, entity.placeholder_material))
+        packed[index]["placeholder_material_id"] = int(
+            typed_material_id(material_table, entity.placeholder_material)
+        )
         packed[index]["velocity_xy"] = np.asarray(entity.velocity_xy, dtype=np.float32)
     return packed
 
@@ -174,7 +178,10 @@ def island_runtime_dtype() -> np.dtype:
 
 
 def pack_island_runtime_upload(world: "WorldEngine") -> np.ndarray:
-    island_ids = sorted({int(island_id) for island_id in world.islands} | {int(island_id) for island_id in np.unique(world.island_id) if int(island_id) > 0})
+    island_ids = sorted(
+        {int(island_id) for island_id in world.islands}
+        | {int(island_id) for island_id in np.unique(world.island_id) if int(island_id) > 0}
+    )
     packed = np.zeros((len(island_ids),), dtype=ISLAND_RUNTIME_DTYPE)
     for index, island_id in enumerate(island_ids):
         if island_id <= 0:
@@ -188,7 +195,9 @@ def pack_island_runtime_upload(world: "WorldEngine") -> np.ndarray:
             min_x = int(coords[:, 1].min())
             max_y = int(coords[:, 0].max()) + 1
             max_x = int(coords[:, 1].max()) + 1
-            velocity_xy = np.mean(world.velocity[coords[:, 0], coords[:, 1]], axis=0).astype(np.float32)
+            velocity_xy = np.mean(world.velocity[coords[:, 0], coords[:, 1]], axis=0).astype(
+                np.float32
+            )
             subcell_offset = np.zeros((2,), dtype=np.float32)
         else:
             min_x, min_y, max_x, max_y = (int(value) for value in record.bbox)
@@ -199,7 +208,10 @@ def pack_island_runtime_upload(world: "WorldEngine") -> np.ndarray:
         height = max_y - min_y
         packed[index]["island_id"] = island_id
         packed[index]["buffer_bbox"] = np.asarray((min_x, min_y, max_x, max_y), dtype=np.int32)
-        packed[index]["world_bbox"] = np.asarray((int(world_x0), int(world_y0), int(world_x0) + width, int(world_y0) + height), dtype=np.int32)
+        packed[index]["world_bbox"] = np.asarray(
+            (int(world_x0), int(world_y0), int(world_x0) + width, int(world_y0) + height),
+            dtype=np.int32,
+        )
         packed[index]["velocity_xy"] = velocity_xy
         packed[index]["subcell_offset"] = subcell_offset
     return packed
@@ -319,7 +331,11 @@ def pack_world_command_upload(world: "WorldEngine") -> tuple[np.ndarray, np.ndar
         meta[index]["payload_length"] = len(payload)
         payload_chunks.append(payload)
         payload_offset += len(payload)
-    payload = np.frombuffer(b"".join(payload_chunks), dtype=np.uint8).copy() if payload_chunks else np.zeros((0,), dtype=np.uint8)
+    payload = (
+        np.frombuffer(b"".join(payload_chunks), dtype=np.uint8).copy()
+        if payload_chunks
+        else np.zeros((0,), dtype=np.uint8)
+    )
     return meta, payload
 
 
@@ -352,18 +368,26 @@ def pack_readback_request_upload(world: "WorldEngine") -> tuple[np.ndarray, np.n
         for channel in request.channels:
             channels_mask |= READBACK_CHANNEL_BITS.get(channel, 0)
         label = (request.label or "").encode("utf-8")
-        meta[index]["request_id"] = int(request.request_id) if request.request_id is not None else -1
+        meta[index]["request_id"] = (
+            int(request.request_id) if request.request_id is not None else -1
+        )
         meta[index]["center_x"] = int(request.center_x)
         meta[index]["center_y"] = int(request.center_y)
         meta[index]["width"] = int(request.width)
         meta[index]["height"] = int(request.height)
         meta[index]["channels_mask"] = int(channels_mask)
-        meta[index]["observer_id"] = int(request.observer_id) if request.observer_id is not None else -1
+        meta[index]["observer_id"] = (
+            int(request.observer_id) if request.observer_id is not None else -1
+        )
         meta[index]["label_offset"] = label_offset
         meta[index]["label_length"] = len(label)
         label_chunks.append(label)
         label_offset += len(label)
-    labels = np.frombuffer(b"".join(label_chunks), dtype=np.uint8).copy() if label_chunks else np.zeros((0,), dtype=np.uint8)
+    labels = (
+        np.frombuffer(b"".join(label_chunks), dtype=np.uint8).copy()
+        if label_chunks
+        else np.zeros((0,), dtype=np.uint8)
+    )
     return meta, labels
 
 
@@ -449,7 +473,6 @@ from oracle_game.gpu.packers_extra import (  # noqa: F401
     pack_page_stripe_upload,
     pack_reaction_runtime_upload,
 )
-
 
 RENDER_GROUP_IDS = {
     "powder": 1,
@@ -560,16 +583,26 @@ def pack_material_table(world: "WorldEngine") -> np.ndarray:
         packed[material_id]["friction"] = float(material.friction)
         packed[material_id]["elasticity"] = float(material.elasticity)
         packed[material_id]["max_dda_step"] = int(material.max_dda_step)
-        packed[material_id]["powder_solver_kind_id"] = int(POWDER_SOLVER_KIND_IDS.get(material.powder_solver_kind, 0))
-        packed[material_id]["liquid_solver_kind_id"] = int(LIQUID_SOLVER_KIND_IDS.get(material.liquid_solver_kind, 0))
+        packed[material_id]["powder_solver_kind_id"] = int(
+            POWDER_SOLVER_KIND_IDS.get(material.powder_solver_kind, 0)
+        )
+        packed[material_id]["liquid_solver_kind_id"] = int(
+            LIQUID_SOLVER_KIND_IDS.get(material.liquid_solver_kind, 0)
+        )
         packed[material_id]["falling_island_break_kind_id"] = int(
             FALLING_ISLAND_BREAK_KIND_IDS.get(material.falling_island_break_kind, 0)
         )
         packed[material_id]["is_structural"] = int(bool(material.is_structural))
         packed[material_id]["is_support_anchor"] = int(bool(material.is_support_anchor))
-        packed[material_id]["collapse_behavior_id"] = int(COLLAPSE_BEHAVIOR_IDS.get(material.collapse_behavior, 0))
-        packed[material_id]["collapse_generation_id"] = _material_ref(world, material.collapse_generation)
-        packed[material_id]["powder_generation_id"] = _material_ref(world, material.powder_generation)
+        packed[material_id]["collapse_behavior_id"] = int(
+            COLLAPSE_BEHAVIOR_IDS.get(material.collapse_behavior, 0)
+        )
+        packed[material_id]["collapse_generation_id"] = _material_ref(
+            world, material.collapse_generation
+        )
+        packed[material_id]["powder_generation_id"] = _material_ref(
+            world, material.powder_generation
+        )
         packed[material_id]["base_integrity"] = float(material.base_integrity)
         packed[material_id]["spawn_temperature"] = _float_or_nan(material.spawn_temperature)
         packed[material_id]["heat_capacity"] = float(material.heat_capacity)
@@ -578,8 +611,12 @@ def pack_material_table(world: "WorldEngine") -> np.ndarray:
         packed[material_id]["melt_point"] = _float_or_nan(material.melt_point)
         packed[material_id]["boil_point"] = _float_or_nan(material.boil_point)
         packed[material_id]["melt_to_material_id"] = _material_ref(world, material.melt_to_material)
-        packed[material_id]["freeze_to_material_id"] = _material_ref(world, material.freeze_to_material)
-        packed[material_id]["boil_to_gas_species_id"] = _gas_ref(world, material.boil_to_gas_species)
+        packed[material_id]["freeze_to_material_id"] = _material_ref(
+            world, material.freeze_to_material
+        )
+        packed[material_id]["boil_to_gas_species_id"] = _gas_ref(
+            world, material.boil_to_gas_species
+        )
         packed[material_id]["material_tag_mask"] = np.uint32(material.material_tag_mask)
         packed[material_id]["gas_tag_mask"] = np.uint32(material.gas_tag_mask)
         packed[material_id]["light_tag_mask"] = np.uint32(material.light_tag_mask)
@@ -599,7 +636,9 @@ def pack_gas_table(world: "WorldEngine") -> np.ndarray:
         packed[species_id]["decay_rate"] = float(gas.decay_rate)
         packed[species_id]["temperature_coupling"] = float(gas.temperature_coupling)
         packed[species_id]["condense_point"] = _float_or_nan(gas.condense_point)
-        packed[species_id]["condense_to_material_id"] = _material_ref(world, gas.condense_to_material)
+        packed[species_id]["condense_to_material_id"] = _material_ref(
+            world, gas.condense_to_material
+        )
         packed[species_id]["pressure_factor"] = float(gas.pressure_factor)
         packed[species_id]["density_factor"] = float(gas.density_factor)
         packed[species_id]["material_reaction_tag_mask"] = np.uint32(gas.material_reaction_tag_mask)
@@ -691,7 +730,9 @@ def _pack_pair_reaction_rules(world: "WorldEngine", rules: list[object]) -> np.n
         packed[index]["phase_mask"] = np.uint32(_phase_mask(rule.phases))
         packed[index]["consume_policy_id"] = int(CONSUME_POLICY_IDS.get(rule.consume_policy, -1))
         packed[index]["result_action"] = int(rule.result_action)
-        packed[index]["trigger_slot_index"] = -1 if rule.trigger_slot_index is None else int(rule.trigger_slot_index)
+        packed[index]["trigger_slot_index"] = (
+            -1 if rule.trigger_slot_index is None else int(rule.trigger_slot_index)
+        )
         packed[index]["min_temperature"] = float(rule.min_temperature)
         packed[index]["max_temperature"] = float(rule.max_temperature)
         packed[index]["threshold"] = float(rule.threshold)

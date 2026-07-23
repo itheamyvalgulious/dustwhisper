@@ -10,6 +10,7 @@ Nothing here is mutated at runtime; lookups use ``deepcopy`` or fresh containers
 at the call site (e.g. ``BASE_MATERIAL_RUNTIME_ALIASES`` is deep-copied when the
 capabilities schema is built).
 """
+
 from __future__ import annotations
 
 from oracle_game.readback_contract import READBACK_ALLOWED_CHANNELS

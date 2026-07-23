@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import TYPE_CHECKING
 
-from copy import deepcopy
 from oracle_game.types import DebugView
 
 if TYPE_CHECKING:
@@ -406,7 +406,14 @@ def _build_http_read_endpoints(engine: "WorldEngine", ctx) -> dict:
         "/api/table/reactions": {"method": "GET", "response_type": "reactions_table"},
         "/api/material/write": {
             "method": "POST",
-            "body_fields": ["x", "y", "material", "radius", "immediate", *inline_target_query_optional_fields],
+            "body_fields": [
+                "x",
+                "y",
+                "material",
+                "radius",
+                "immediate",
+                *inline_target_query_optional_fields,
+            ],
             "request_type": "material_injector",
             "response_fields": queued_mutation_result_fields,
             "response_type": "queued_mutation_result",
@@ -417,7 +424,15 @@ def _build_http_read_endpoints(engine: "WorldEngine", ctx) -> dict:
         },
         "/api/material/fill": {
             "method": "POST",
-            "body_fields": ["x", "y", "width", "height", "material", "immediate", *inline_target_query_optional_fields],
+            "body_fields": [
+                "x",
+                "y",
+                "width",
+                "height",
+                "material",
+                "immediate",
+                *inline_target_query_optional_fields,
+            ],
             "request_type": "material_fill_request",
             "response_fields": queued_mutation_result_fields,
             "response_type": "queued_mutation_result",
@@ -428,7 +443,14 @@ def _build_http_read_endpoints(engine: "WorldEngine", ctx) -> dict:
         },
         "/api/inject/temperature": {
             "method": "POST",
-            "body_fields": ["x", "y", "delta", "radius", "immediate", *inline_target_query_optional_fields],
+            "body_fields": [
+                "x",
+                "y",
+                "delta",
+                "radius",
+                "immediate",
+                *inline_target_query_optional_fields,
+            ],
             "request_type": "temperature_injector",
             "response_fields": queued_mutation_result_fields,
             "response_type": "queued_mutation_result",
@@ -439,7 +461,16 @@ def _build_http_read_endpoints(engine: "WorldEngine", ctx) -> dict:
         },
         "/api/inject/velocity": {
             "method": "POST",
-            "body_fields": ["x", "y", "velocity", "radius", "carrier", "mode", "immediate", *inline_target_query_optional_fields],
+            "body_fields": [
+                "x",
+                "y",
+                "velocity",
+                "radius",
+                "carrier",
+                "mode",
+                "immediate",
+                *inline_target_query_optional_fields,
+            ],
             "request_type": "velocity_injector",
             "response_fields": queued_mutation_result_fields,
             "response_type": "queued_mutation_result",
@@ -450,7 +481,15 @@ def _build_http_read_endpoints(engine: "WorldEngine", ctx) -> dict:
         },
         "/api/inject/gas": {
             "method": "POST",
-            "body_fields": ["x", "y", "species", "amount", "radius", "immediate", *inline_target_query_optional_fields],
+            "body_fields": [
+                "x",
+                "y",
+                "species",
+                "amount",
+                "radius",
+                "immediate",
+                *inline_target_query_optional_fields,
+            ],
             "request_type": "gas_injector",
             "response_fields": queued_mutation_result_fields,
             "response_type": "queued_mutation_result",
@@ -461,7 +500,11 @@ def _build_http_read_endpoints(engine: "WorldEngine", ctx) -> dict:
         },
         "/api/inject/force": {
             "method": "POST",
-            "body_fields": [*force_source_fields, "immediate", *inline_target_query_optional_fields],
+            "body_fields": [
+                *force_source_fields,
+                "immediate",
+                *inline_target_query_optional_fields,
+            ],
             "request_type": "force_injector",
             "response_fields": queued_mutation_result_fields,
             "response_type": "queued_mutation_result",

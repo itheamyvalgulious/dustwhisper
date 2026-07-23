@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 
-from oracle_game.types import Phase
+if TYPE_CHECKING:
+    from oracle_game.world import WorldEngine
 
 from oracle_game.sim.liquid import LIQUID_SOLVER_TILE_LEVEL
+from oracle_game.types import Phase
 
 
 def prepare_motion_flow_intent(solver, world: "WorldEngine") -> None:
@@ -22,11 +26,15 @@ def prepare_motion_flow_intent(solver, world: "WorldEngine") -> None:
     solve_tile_mask = np.zeros((world.active.tile_height, world.active.tile_width), dtype=np.bool_)
     solver.gpu_pipeline.prepare_motion_flow_intent(world, solve_tile_mask=solve_tile_mask)
 
-def _build_solve_tile_mask(solver, world: "WorldEngine", active_tiles: list[tuple[int, int]]) -> np.ndarray:
+
+def _build_solve_tile_mask(
+    solver, world: "WorldEngine", active_tiles: list[tuple[int, int]]
+) -> np.ndarray:
     solve_tile_mask = np.zeros((world.active.tile_height, world.active.tile_width), dtype=np.bool_)
     for tile_x, tile_y in active_tiles:
         solve_tile_mask[tile_y, tile_x] = True
     return solve_tile_mask
+
 
 def _world_cell_reachable_empty(solver, world: "WorldEngine", x: int, y: int) -> bool:
     material_id = int(world.material_id[y, x])
@@ -41,6 +49,7 @@ def _world_cell_reachable_empty(solver, world: "WorldEngine", x: int, y: int) ->
         return False
     return True
 
+
 def _world_cell_is_tile_level_liquid(solver, world: "WorldEngine", x: int, y: int) -> bool:
     material_id = int(world.material_id[y, x])
     return (
@@ -48,6 +57,7 @@ def _world_cell_is_tile_level_liquid(solver, world: "WorldEngine", x: int, y: in
         and int(world.phase[y, x]) == int(Phase.LIQUID)
         and solver._material_liquid_solver_kind(world, material_id) == LIQUID_SOLVER_TILE_LEVEL
     )
+
 
 def _solve_tile(solver, world: "WorldEngine", x0: int, y0: int, x1: int, y1: int) -> None:
     local_material = world.material_id[y0:y1, x0:x1].copy()
@@ -76,7 +86,9 @@ def _solve_tile(solver, world: "WorldEngine", x0: int, y0: int, x1: int, y1: int
         return True
 
     def is_liquid(local_y: int, local_x: int) -> bool:
-        return int(local_material[local_y, local_x]) > 0 and int(local_phase[local_y, local_x]) == int(Phase.LIQUID)
+        return int(local_material[local_y, local_x]) > 0 and int(
+            local_phase[local_y, local_x]
+        ) == int(Phase.LIQUID)
 
     def is_tile_level_liquid(local_y: int, local_x: int) -> bool:
         material_id = int(local_material[local_y, local_x])
@@ -86,7 +98,9 @@ def _solve_tile(solver, world: "WorldEngine", x0: int, y0: int, x1: int, y1: int
             and solver._material_liquid_solver_kind(world, material_id) == LIQUID_SOLVER_TILE_LEVEL
         )
 
-    def snapshot_tile_level_liquid(row_material: np.ndarray, row_phase: np.ndarray, local_x: int) -> bool:
+    def snapshot_tile_level_liquid(
+        row_material: np.ndarray, row_phase: np.ndarray, local_x: int
+    ) -> bool:
         material_id = int(row_material[local_x])
         return (
             material_id > 0
@@ -181,7 +195,11 @@ def _solve_tile(solver, world: "WorldEngine", x0: int, y0: int, x1: int, y1: int
                 claimed_lateral_dest[lx - 1] = True
                 planned_lateral_moves.append((ly, lx, ly, lx - 1))
                 continue
-            if lx + 1 < width and reachable_empty(ly, lx + 1) and not bool(claimed_lateral_dest[lx + 1]):
+            if (
+                lx + 1 < width
+                and reachable_empty(ly, lx + 1)
+                and not bool(claimed_lateral_dest[lx + 1])
+            ):
                 claimed_lateral_dest[lx + 1] = True
                 planned_lateral_moves.append((ly, lx, ly, lx + 1))
         for src_y, src_x, dst_y, dst_x in planned_lateral_moves:
@@ -201,6 +219,7 @@ def _solve_tile(solver, world: "WorldEngine", x0: int, y0: int, x1: int, y1: int
         world.placeholder_displaced_material[y0:y1, x0:x1] = local_displaced
         world._mark_active_rect_runtime(x0, y0, x1, y1)
 
+
 def _seam_correction(solver, world: "WorldEngine", solve_tile_mask: np.ndarray) -> None:
     tile_size = world.active.tile_size
     vertical_boundaries: set[tuple[int, int]] = set()
@@ -215,8 +234,6 @@ def _seam_correction(solver, world: "WorldEngine", solve_tile_mask: np.ndarray) 
         if int(tile_y) + 1 < world.active.tile_height:
             horizontal_boundaries.add((int(tile_x), (int(tile_y) + 1) * tile_size))
     for boundary_x, tile_y in sorted(vertical_boundaries):
-        left = boundary_x - 1
-        right = boundary_x
         y0 = tile_y * tile_size
         y1 = min(world.height, y0 + tile_size)
         for y in range(y0, y1):
@@ -229,6 +246,7 @@ def _seam_correction(solver, world: "WorldEngine", solve_tile_mask: np.ndarray) 
         x1 = min(world.width, x0 + tile_size)
         solver._apply_vertical_seam_run(world, top, bottom, x0, x1)
 
+
 def _apply_horizontal_seam_run(
     solver,
     world: "WorldEngine",
@@ -240,14 +258,20 @@ def _apply_horizontal_seam_run(
         return False
     left = boundary_x - 1
     right = boundary_x
-    if solver._world_cell_is_tile_level_liquid(world, left, y) and solver._world_cell_reachable_empty(world, right, y):
+    if solver._world_cell_is_tile_level_liquid(
+        world, left, y
+    ) and solver._world_cell_reachable_empty(world, right, y):
         source_start = left
         source_tile_start = (left // tile_size) * tile_size
-        while source_start > source_tile_start and solver._world_cell_is_tile_level_liquid(world, source_start - 1, y):
+        while source_start > source_tile_start and solver._world_cell_is_tile_level_liquid(
+            world, source_start - 1, y
+        ):
             source_start -= 1
         target_end = right
         target_tile_end = min(world.width, right + tile_size)
-        while target_end < target_tile_end and solver._world_cell_reachable_empty(world, target_end, y):
+        while target_end < target_tile_end and solver._world_cell_reachable_empty(
+            world, target_end, y
+        ):
             target_end += 1
         move_count = min(left - source_start + 1, target_end - right)
         if move_count > 0:
@@ -255,14 +279,20 @@ def _apply_horizontal_seam_run(
             for offset in range(move_count):
                 world.swap_cells(source_base + offset, y, right + offset, y)
             return True
-    if solver._world_cell_is_tile_level_liquid(world, right, y) and solver._world_cell_reachable_empty(world, left, y):
+    if solver._world_cell_is_tile_level_liquid(
+        world, right, y
+    ) and solver._world_cell_reachable_empty(world, left, y):
         source_end = right + 1
         source_tile_end = min(world.width, right + tile_size)
-        while source_end < source_tile_end and solver._world_cell_is_tile_level_liquid(world, source_end, y):
+        while source_end < source_tile_end and solver._world_cell_is_tile_level_liquid(
+            world, source_end, y
+        ):
             source_end += 1
         target_start = left
         target_tile_start = max(0, right - tile_size)
-        while target_start > target_tile_start and solver._world_cell_reachable_empty(world, target_start - 1, y):
+        while target_start > target_tile_start and solver._world_cell_reachable_empty(
+            world, target_start - 1, y
+        ):
             target_start -= 1
         move_count = min(source_end - right, right - target_start)
         if move_count > 0:
@@ -271,6 +301,7 @@ def _apply_horizontal_seam_run(
                 world.swap_cells(right + offset, y, target_base + offset, y)
             return True
     return False
+
 
 def _apply_vertical_seam_run(
     solver,
@@ -294,7 +325,10 @@ def _apply_vertical_seam_run(
         run_end = x
         first_empty_x = -1
         for probe_x in range(run_start, run_end):
-            if solver._world_cell_reachable_empty(world, probe_x, bottom) and probe_x not in claimed_target:
+            if (
+                solver._world_cell_reachable_empty(world, probe_x, bottom)
+                and probe_x not in claimed_target
+            ):
                 first_empty_x = probe_x
                 break
         if first_empty_x < 0:
@@ -324,6 +358,7 @@ def _apply_vertical_seam_run(
     for source_x, target_x in planned_moves:
         world.swap_cells(source_x, top, target_x, bottom)
 
+
 def _apply_buoyancy(solver, world: "WorldEngine", solve_cell_mask: np.ndarray) -> None:
     pair_mask = solve_cell_mask[1:, :] | solve_cell_mask[:-1, :]
     pair_rows, pair_xs = np.nonzero(pair_mask)
@@ -336,7 +371,9 @@ def _apply_buoyancy(solver, world: "WorldEngine", solve_cell_mask: np.ndarray) -
         lower_id = int(material_snapshot[y, x])
         if upper_id == 0 or lower_id == 0:
             continue
-        if int(phase_snapshot[y - 1, x]) != int(Phase.POWDER) or int(phase_snapshot[y, x]) != int(Phase.LIQUID):
+        if int(phase_snapshot[y - 1, x]) != int(Phase.POWDER) or int(phase_snapshot[y, x]) != int(
+            Phase.LIQUID
+        ):
             continue
         powder_density = solver._material_density(world, upper_id)
         liquid_density = solver._material_density(world, lower_id)
@@ -355,7 +392,9 @@ def _apply_buoyancy(solver, world: "WorldEngine", solve_cell_mask: np.ndarray) -
         lower_id = int(material_snapshot[y, x])
         if upper_id == 0 or lower_id == 0:
             continue
-        if int(phase_snapshot[y - 1, x]) != int(Phase.LIQUID) or int(phase_snapshot[y, x]) != int(Phase.POWDER):
+        if int(phase_snapshot[y - 1, x]) != int(Phase.LIQUID) or int(phase_snapshot[y, x]) != int(
+            Phase.POWDER
+        ):
             continue
         liquid_density = solver._material_density(world, upper_id)
         powder_density = solver._material_density(world, lower_id)
@@ -364,7 +403,10 @@ def _apply_buoyancy(solver, world: "WorldEngine", solve_cell_mask: np.ndarray) -
     for x, y in float_swaps:
         world.swap_cells(x, y - 1, x, y)
 
-def _apply_placeholder_displacement(solver, world: "WorldEngine", solve_cell_mask: np.ndarray) -> None:
+
+def _apply_placeholder_displacement(
+    solver, world: "WorldEngine", solve_cell_mask: np.ndarray
+) -> None:
     placeholder_id = solver._placeholder_material_id(world)
     material_in = world.material_id.copy()
     phase_in = world.phase.copy()
@@ -385,11 +427,15 @@ def _apply_placeholder_displacement(solver, world: "WorldEngine", solve_cell_mas
             if not np.any(pending_mask[y, left:right]):
                 continue
             seg_len = right - left
-            pending_sources = [source_x for source_x in range(left, right) if int(pending_in[y, source_x]) > 0]
+            pending_sources = [
+                source_x for source_x in range(left, right) if int(pending_in[y, source_x]) > 0
+            ]
             displaced_count = len(pending_sources)
             if displaced_count <= 0:
                 continue
-            top_exposed = solver._placeholder_segment_top_exposed(material_in, placeholder_id, y, left, right)
+            top_exposed = solver._placeholder_segment_top_exposed(
+                material_in, placeholder_id, y, left, right
+            )
             left_capacity = solver._placeholder_side_capacity(
                 world,
                 material_in,
@@ -414,7 +460,9 @@ def _apply_placeholder_displacement(solver, world: "WorldEngine", solve_cell_mas
                 right,
                 seg_len,
             )
-            left_quota = solver._placeholder_left_quota(displaced_count, left_capacity, right_capacity)
+            left_quota = solver._placeholder_left_quota(
+                displaced_count, left_capacity, right_capacity
+            )
             for displaced_rank, source_x in enumerate(pending_sources):
                 displaced_material = int(pending_in[y, source_x])
                 if displaced_material <= 0:
@@ -439,7 +487,9 @@ def _apply_placeholder_displacement(solver, world: "WorldEngine", solve_cell_mas
                         continue
                     world.material_id[target_y, target_x] = displaced_material
                     world.phase[target_y, target_x] = int(Phase.LIQUID)
-                    world.integrity[target_y, target_x] = solver._material_base_integrity(world, displaced_material)
+                    world.integrity[target_y, target_x] = solver._material_base_integrity(
+                        world, displaced_material
+                    )
                     world.cell_temperature[target_y, target_x] = temp_in[y, source_x]
                     world.velocity[target_y, target_x] = np.array(velocity, dtype=np.float32)
                     world.placeholder_displaced_material[y, source_x] = 0
@@ -451,7 +501,10 @@ def _apply_placeholder_displacement(solver, world: "WorldEngine", solve_cell_mas
                     )
                     break
 
-def _placeholder_left_quota(solver, displaced_count: int, left_capacity: int, right_capacity: int) -> int:
+
+def _placeholder_left_quota(
+    solver, displaced_count: int, left_capacity: int, right_capacity: int
+) -> int:
     total_capacity = left_capacity + right_capacity
     if displaced_count <= 0 or total_capacity <= 0:
         return 0
@@ -460,6 +513,7 @@ def _placeholder_left_quota(solver, displaced_count: int, left_capacity: int, ri
     if remainder * 2 >= total_capacity:
         quota += 1
     return max(0, min(displaced_count, quota))
+
 
 def _placeholder_segment_top_exposed(
     solver,
@@ -472,6 +526,7 @@ def _placeholder_segment_top_exposed(
     if source_y == 0:
         return True
     return any(int(material_in[source_y - 1, x]) != placeholder_id for x in range(left, right))
+
 
 def _placeholder_target_empty(
     solver,
@@ -493,6 +548,7 @@ def _placeholder_target_empty(
         return False
     return True
 
+
 def _placeholder_side_lane_reachable(
     solver,
     world: "WorldEngine",
@@ -509,13 +565,18 @@ def _placeholder_side_lane_reachable(
         return False
     if side < 0:
         for x in range(target_x, left):
-            if not solver._placeholder_target_empty(world, material_in, phase_in, pending_in, x, target_y):
+            if not solver._placeholder_target_empty(
+                world, material_in, phase_in, pending_in, x, target_y
+            ):
                 return False
         return True
     for x in range(right, target_x + 1):
-        if not solver._placeholder_target_empty(world, material_in, phase_in, pending_in, x, target_y):
+        if not solver._placeholder_target_empty(
+            world, material_in, phase_in, pending_in, x, target_y
+        ):
             return False
     return True
+
 
 def _placeholder_side_capacity(
     solver,
@@ -550,6 +611,7 @@ def _placeholder_side_capacity(
             ):
                 capacity += 1
     return capacity
+
 
 def _placeholder_side_candidates(
     solver,
@@ -588,14 +650,20 @@ def _placeholder_side_candidates(
                 candidates.append((target_x, target_y, push))
     return candidates
 
+
 def _mark_pending_placeholder_regions(solver, world: "WorldEngine") -> None:
     ys, xs = np.nonzero(world.placeholder_displaced_material > 0)
     rects: list[tuple[int, int, int, int]] = []
     for y, x in zip(ys.tolist(), xs.tolist()):
-        rects.append((max(0, x - 1), max(0, y - 1), min(world.width, x + 2), min(world.height, y + 2)))
+        rects.append(
+            (max(0, x - 1), max(0, y - 1), min(world.width, x + 2), min(world.height, y + 2))
+        )
     world._mark_active_rects_runtime(rects)
 
-def _refresh_active_tiles(solver, world: "WorldEngine", active_tiles: list[tuple[int, int]]) -> None:
+
+def _refresh_active_tiles(
+    solver, world: "WorldEngine", active_tiles: list[tuple[int, int]]
+) -> None:
     tile_size = world.active.tile_size
     rects: list[tuple[int, int, int, int]] = []
     for tile_x, tile_y in active_tiles:
@@ -605,6 +673,7 @@ def _refresh_active_tiles(solver, world: "WorldEngine", active_tiles: list[tuple
         y1 = min(world.height, (tile_y + 2) * tile_size)
         rects.append((x0, y0, x1, y1))
     world._mark_active_rects_runtime(rects)
+
 
 def _vertical_seam_mask(solver, world: "WorldEngine", solve_tile_mask: np.ndarray) -> np.ndarray:
     mask = np.zeros((world.height, world.width), dtype=np.bool_)
@@ -626,6 +695,7 @@ def _vertical_seam_mask(solver, world: "WorldEngine", solve_tile_mask: np.ndarra
         mask[y0:y1, right] = True
     return mask
 
+
 def _horizontal_seam_mask(solver, world: "WorldEngine", solve_tile_mask: np.ndarray) -> np.ndarray:
     mask = np.zeros((world.height, world.width), dtype=np.bool_)
     tile_size = world.active.tile_size
@@ -645,6 +715,7 @@ def _horizontal_seam_mask(solver, world: "WorldEngine", solve_tile_mask: np.ndar
         mask[top, x0:x1] = True
         mask[bottom, x0:x1] = True
     return mask
+
 
 def _buoyancy_candidate_mask(
     solver,

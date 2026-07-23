@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -28,7 +28,9 @@ if TYPE_CHECKING:
 def step(engine: "WorldEngine", dt: float = 1.0 / 60.0, substeps: int = 1) -> None:
     for _ in range(max(1, substeps)):
         frame_input = engine.pending_frame_inputs.popleft() if engine.pending_frame_inputs else None
-        output = _step_once(engine, dt, frame_input=frame_input, capture_output=frame_input is not None)
+        output = _step_once(
+            engine, dt, frame_input=frame_input, capture_output=frame_input is not None
+        )
         if output is not None:
             engine.completed_frame_outputs.append(output)
 
@@ -124,7 +126,11 @@ def _step_once_impl(
     capture_output: bool,
 ) -> WorldFrameOutput | None:
     engine.last_skipped_gpu_stages = []
-    engine.last_pass_profile = {"passes": [], "summary": {}, "skipped_stages": engine.last_skipped_gpu_stages}
+    engine.last_pass_profile = {
+        "passes": [],
+        "summary": {},
+        "skipped_stages": engine.last_skipped_gpu_stages,
+    }
     if not engine._bridge_inputs_prepared:
         engine._prepare_bridge_frame_inputs()
     consumed_readbacks: list[ReadbackResult] = []
@@ -169,7 +175,8 @@ def _step_once_impl(
 
     engine.frame_id += 1
     if capture_output:
-        _store_entity_observation_consume_snapshot(engine, 
+        _store_entity_observation_consume_snapshot(
+            engine,
             frame_id=engine.frame_id,
             consumed_readbacks=consumed_readbacks,
             observations=observations,
@@ -204,14 +211,18 @@ def _step_once_impl(
         else:
             with collapse_pipeline._profile_pass(engine, "scheduled_defer"):
                 pass
-    collapse_profile = getattr(getattr(engine.collapse_solver, "gpu_pipeline", None), "last_pass_profile", None)
+    collapse_profile = getattr(
+        getattr(engine.collapse_solver, "gpu_pipeline", None), "last_pass_profile", None
+    )
     if engine.profile_passes_enabled and isinstance(collapse_profile, dict):
         engine.last_pass_profile["collapse"] = collapse_profile
     if engine.profile_passes_enabled:
         engine.gas_solver.gpu_pipeline.reset_pass_profile()
     with engine._profile_pass("gas"):
         engine.gas_solver.step(engine, dt)
-    gas_profile = getattr(getattr(engine.gas_solver, "gpu_pipeline", None), "last_pass_profile", None)
+    gas_profile = getattr(
+        getattr(engine.gas_solver, "gpu_pipeline", None), "last_pass_profile", None
+    )
     if engine.profile_passes_enabled and isinstance(gas_profile, dict):
         engine.last_pass_profile["gas"] = gas_profile
     if engine.profile_passes_enabled:
@@ -228,12 +239,12 @@ def _step_once_impl(
     )
     engine.phase_c_defer_cell_publish = phase_c_active
     motion_pipeline = engine.motion_solver.gpu_pipeline
-    engine.heat_motion_handoff_active = bool(
-        motion_pipeline.can_consume_deferred_heat_core(engine)
-    )
+    engine.heat_motion_handoff_active = bool(motion_pipeline.can_consume_deferred_heat_core(engine))
     with engine._profile_pass("heat"):
         engine.heat_solver.step(engine, dt)
-    heat_profile = getattr(getattr(engine.heat_solver, "gpu_pipeline", None), "last_pass_profile", None)
+    heat_profile = getattr(
+        getattr(engine.heat_solver, "gpu_pipeline", None), "last_pass_profile", None
+    )
     if engine.profile_passes_enabled and isinstance(heat_profile, dict):
         engine.last_pass_profile["heat"] = heat_profile
     engine.reaction_solver.reset_runtime_state(engine)
@@ -253,7 +264,9 @@ def _step_once_impl(
             material_pair_fused = False
             with engine._profile_pass("reaction_material_material"):
                 if engine.reaction_solver.gpu_pipeline._material_pair_state_fusion_enabled:
-                    material_pair_fused = engine.reaction_solver._try_run_material_pair_fused(engine)
+                    material_pair_fused = engine.reaction_solver._try_run_material_pair_fused(
+                        engine
+                    )
                 if not material_pair_fused:
                     engine.reaction_solver._run_material_material(engine)
             with engine._profile_pass("reaction_material_gas"):
@@ -279,7 +292,9 @@ def _step_once_impl(
                 engine.reaction_solver._run_gas_gas(engine)
             with engine._profile_pass("reaction_gas_light"):
                 engine.reaction_solver._run_gas_light(engine)
-            engine.reaction_solver.gpu_pipeline.flush_formal_reaction_segment(engine, "before_motion")
+            engine.reaction_solver.gpu_pipeline.flush_formal_reaction_segment(
+                engine, "before_motion"
+            )
         finally:
             engine.reaction_solver.gpu_pipeline.end_formal_reaction_segment(engine, "before_motion")
     try:
@@ -287,12 +302,16 @@ def _step_once_impl(
             engine.motion_solver.step(engine, dt)
     finally:
         engine.reaction_motion_handoff_active = False
-    motion_profile = getattr(getattr(engine.motion_solver, "gpu_pipeline", None), "last_pass_profile", None)
+    motion_profile = getattr(
+        getattr(engine.motion_solver, "gpu_pipeline", None), "last_pass_profile", None
+    )
     if engine.profile_passes_enabled and isinstance(motion_profile, dict):
         engine.last_pass_profile["motion"] = motion_profile
     with engine._profile_pass("liquid"):
         engine.liquid_solver.step(engine)
-    liquid_profile = getattr(getattr(engine.liquid_solver, "gpu_pipeline", None), "last_pass_profile", None)
+    liquid_profile = getattr(
+        getattr(engine.liquid_solver, "gpu_pipeline", None), "last_pass_profile", None
+    )
     if engine.profile_passes_enabled and isinstance(liquid_profile, dict):
         engine.last_pass_profile["liquid"] = liquid_profile
     if phase_c_active:
@@ -308,7 +327,9 @@ def _step_once_impl(
         engine.last_pass_profile["optics"] = optics_profile
     with engine._profile_pass("latch_clear"):
         _clear_reaction_latches_after_optics(engine)
-    reaction_profile = getattr(getattr(engine.reaction_solver, "gpu_pipeline", None), "last_pass_profile", None)
+    reaction_profile = getattr(
+        getattr(engine.reaction_solver, "gpu_pipeline", None), "last_pass_profile", None
+    )
     if engine.profile_passes_enabled and isinstance(reaction_profile, dict):
         engine.last_pass_profile["reactions"] = reaction_profile
     with engine._profile_pass("active_decay"):
@@ -371,7 +392,9 @@ def _step_once_impl(
 def _queue_persistent_entity_observations(engine: "WorldEngine") -> list[dict[str, Any]]:
     if not engine.entity_states:
         return []
-    _, observation_targets = engine._frame_entities_to_placeholders_and_observations(list(engine.entity_states.values()))
+    _, observation_targets = engine._frame_entities_to_placeholders_and_observations(
+        list(engine.entity_states.values())
+    )
     observation_pairs = engine._build_observation_request_pairs(observation_targets, {})
     observation_pairs = [
         (target, engine._assign_readback_request_id(request))
@@ -379,7 +402,9 @@ def _queue_persistent_entity_observations(engine: "WorldEngine") -> list[dict[st
     ]
     observation_requests = [request for _, request in observation_pairs]
     engine.pending_readbacks.extend(observation_requests)
-    engine.bridge_frame_readback_requests.extend(replace(request) for request in observation_requests)
+    engine.bridge_frame_readback_requests.extend(
+        replace(request) for request in observation_requests
+    )
     return [
         engine._serialize_observation_plan_for_target_request(target, request)
         for target, request in observation_pairs
@@ -451,7 +476,9 @@ def _store_entity_observation_consume_snapshot(
     snapshot = {
         "frame_id": int(frame_id),
         "consumed": len(consumed_readbacks),
-        "consumed_readbacks": [engine.serialize_readback_result(result) for result in consumed_readbacks],
+        "consumed_readbacks": [
+            engine.serialize_readback_result(result) for result in consumed_readbacks
+        ],
         "observations": {
             str(observer_id): engine.serialize_observation_result(result)
             for observer_id, result in observations.items()
@@ -466,7 +493,14 @@ def _store_entity_observation_consume_snapshot(
 
 
 def _finish_readbacks(engine: "WorldEngine", *, world_synced: bool = False) -> None:
-    normalized_requests = [engine._assign_readback_request_id(engine._normalize_readback_request(request)) for request in engine.pending_readbacks]
+    # Drain readbacks detached by a GPU context rebuild (console attach or
+    # restore, world resize) before queueing new ones; the ring has been
+    # re-synced by this point in the frame.
+    engine.bridge.requeue_detached_readbacks(engine)
+    normalized_requests = [
+        engine._assign_readback_request_id(engine._normalize_readback_request(request))
+        for request in engine.pending_readbacks
+    ]
     engine.pending_readbacks[:] = normalized_requests
     if engine.pending_readbacks and not world_synced and engine.simulation_backend != "gpu":
         engine.bridge.sync_world(engine)
@@ -485,7 +519,9 @@ def _finish_readbacks(engine: "WorldEngine", *, world_synced: bool = False) -> N
         readback_upload_dirty = True
         if request not in engine.bridge_frame_readback_requests:
             engine.bridge_frame_readback_requests.append(replace(request))
-        if not any(existing.request_id == request.request_id for existing in engine.inflight_readbacks):
+        if not any(
+            existing.request_id == request.request_id for existing in engine.inflight_readbacks
+        ):
             engine.inflight_readbacks.append(replace(request))
     engine.pending_readbacks[:] = remaining_pending
     if readback_upload_dirty:
@@ -499,7 +535,9 @@ def _collect_ready_readbacks(engine: "WorldEngine", current_frame_id: int) -> No
             return
         if result.request.request_id is not None:
             engine.inflight_readbacks = [
-                request for request in engine.inflight_readbacks if request.request_id != result.request.request_id
+                request
+                for request in engine.inflight_readbacks
+                if request.request_id != result.request.request_id
             ]
             if int(result.request.request_id) in engine.canceled_readback_request_ids:
                 continue
@@ -536,4 +574,6 @@ def _mark_active_rects_runtime(
             x0, y0, x1, y1, tile_padding = rect
         engine.active.mark_rect(int(x0), int(y0), int(x1), int(y1), tile_padding=int(tile_padding))
     if engine.simulation_backend == "gpu":
-        engine._invalidate_gpu_authoritative_resources("active_meta", "active_tile_ttl", "active_chunk_mask")
+        engine._invalidate_gpu_authoritative_resources(
+            "active_meta", "active_tile_ttl", "active_chunk_mask"
+        )

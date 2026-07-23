@@ -37,7 +37,9 @@ def _run_timed_self_combined_action_pass(
     pipeline._set_uniform_if_present(program, "rule_count", 0)
     pipeline._set_uniform_if_present(program, "gas_cell_size", int(world.gas_cell_size))
     pipeline._set_uniform_if_present(program, "gas_count", int(world.gas_concentration.shape[0]))
-    pipeline._set_uniform_if_present(program, "random_target_count", int(pipeline.random_target_count))
+    pipeline._set_uniform_if_present(
+        program, "random_target_count", int(pipeline.random_target_count)
+    )
     pipeline._set_uniform_if_present(program, "self_rule_count", int(self_rule_count))
     pipeline._set_uniform_if_present(
         program,
@@ -46,7 +48,9 @@ def _run_timed_self_combined_action_pass(
     )
     pipeline._set_uniform_if_present(program, "gas_grid_size", (world.gas_width, world.gas_height))
     pipeline._set_uniform_if_present(program, "direct_gas_delta_enabled", False)
-    pipeline._set_uniform_if_present(program, "direct_modify_gas_layer_mask", int(modify_gas_layer_mask))
+    pipeline._set_uniform_if_present(
+        program, "direct_modify_gas_layer_mask", int(modify_gas_layer_mask)
+    )
     pipeline._set_uniform_if_present(program, "write_deferred_hi_outputs", True)
     pipeline._set_uniform_if_present(program, "collect_self_emit_targets", False)
     pipeline._set_uniform_if_present(program, "collect_self_gas_candidates", False)

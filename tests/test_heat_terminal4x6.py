@@ -13,7 +13,7 @@ from oracle_game.sim.gpu_collapse_dirty import (
     ensure_collapse_structure_dirty_tile_mask,
     ensure_collapse_structure_dirty_tile_queue,
 )
-from oracle_game.sim.gpu_heat import GPUHeatPipeline, _SHADER_SUBS
+from oracle_game.sim.gpu_heat import _SHADER_SUBS, GPUHeatPipeline
 from oracle_game.sim.shader_loader import shader_source
 from oracle_game.world import WorldEngine
 
@@ -167,7 +167,9 @@ def _seed_terminal4x6_world(engine: WorldEngine) -> None:
     engine.phase[:] = phase_by_material[engine.material_id]
     engine.cell_flags[:] = rng.integers(0, 256, size=engine.cell_flags.shape, dtype=np.uint8)
     engine.timer_pack[:] = rng.integers(0, 256, size=engine.timer_pack.shape, dtype=np.uint8)
-    engine.cell_temperature[:] = rng.uniform(-2000.0, 5000.0, size=engine.cell_temperature.shape).astype("f4")
+    engine.cell_temperature[:] = rng.uniform(
+        -2000.0, 5000.0, size=engine.cell_temperature.shape
+    ).astype("f4")
     engine.integrity[:] = rng.uniform(-0.01, 1.0, size=engine.integrity.shape).astype("f4")
     engine.velocity[:] = rng.normal(0.0, 0.5, size=engine.velocity.shape).astype("f4")
     engine.island_id[:] = rng.integers(0, 200, size=engine.island_id.shape, dtype=np.int32)
@@ -177,8 +179,12 @@ def _seed_terminal4x6_world(engine: WorldEngine) -> None:
         size=engine.placeholder_displaced_material.shape,
         replace=True,
     )
-    engine.ambient_temperature[:] = rng.uniform(-200.0, 200.0, size=engine.ambient_temperature.shape).astype("f4")
-    engine.gas_concentration[:] = rng.uniform(0.65, 0.95, size=engine.gas_concentration.shape).astype("f4")
+    engine.ambient_temperature[:] = rng.uniform(
+        -200.0, 200.0, size=engine.ambient_temperature.shape
+    ).astype("f4")
+    engine.gas_concentration[:] = rng.uniform(
+        0.65, 0.95, size=engine.gas_concentration.shape
+    ).astype("f4")
 
     for tile_y in range(engine.active.tile_height):
         for tile_x in range(engine.active.tile_width):
@@ -194,9 +200,7 @@ def _capture_terminal4x6_state(engine: WorldEngine) -> dict[str, bytes]:
     ctx = engine.bridge.ctx
     assert resources is not None and ctx is not None
     ctx.finish()
-    dirty_count_bytes = engine.bridge.buffers[
-        COLLAPSE_STRUCTURE_DIRTY_TILE_COUNT_BUFFER
-    ].read()
+    dirty_count_bytes = engine.bridge.buffers[COLLAPSE_STRUCTURE_DIRTY_TILE_COUNT_BUFFER].read()
     dirty_count = int(np.frombuffer(dirty_count_bytes, dtype=np.uint32, count=1)[0])
     dirty_list = np.frombuffer(
         engine.bridge.buffers[COLLAPSE_STRUCTURE_DIRTY_TILE_LIST_BUFFER].read(),
@@ -295,14 +299,10 @@ def _run_terminal4x6_sequence(
         pipeline._terminal_bridge_aux_dirty_fusion_enabled = bridge_aux_dirty_fusion
         pipeline._terminal_phase_fusion_enabled = phase_fusion
         pipeline._terminal_dirty_publish_fusion_enabled = dirty_publish_fusion
-        pipeline._terminal_dirty_workgroup_aggregation_enabled = (
-            dirty_workgroup_aggregation
-        )
+        pipeline._terminal_dirty_workgroup_aggregation_enabled = dirty_workgroup_aggregation
         pipeline._terminal4x6_workgroup16x8_enabled = workgroup16x8
         pipeline._terminal_inplace_sparse_write_enabled = inplace_sparse_write
-        pipeline._terminal_sparse_resident_specialization_enabled = (
-            sparse_resident_specialization
-        )
+        pipeline._terminal_sparse_resident_specialization_enabled = sparse_resident_specialization
         # These cases isolate terminal fusion/residency. Packed target ABI has
         # its own full/partial and generation-fallback exact coverage.
         pipeline._packed_phase_boil_targets_enabled = False
@@ -315,8 +315,10 @@ def _run_terminal4x6_sequence(
                 marker = pipeline._terminal_bridge_aux_dirty_frame_id
                 phase_marker = pipeline._terminal_phase_fusion_frame_id
                 dirty_marker = pipeline._terminal_dirty_publish_frame_id
-                if heat_motion_handoff and fused and (
-                    bridge_aux_dirty_fusion or phase_fusion or dirty_publish_fusion
+                if (
+                    heat_motion_handoff
+                    and fused
+                    and (bridge_aux_dirty_fusion or phase_fusion or dirty_publish_fusion)
                 ):
                     assert marker == frame_id
                 else:
@@ -335,9 +337,7 @@ def _run_terminal4x6_sequence(
                     and dirty_publish_fusion
                     and dirty_workgroup_aggregation
                 )
-                assert pipeline.last_terminal4x6_workgroup16x8_used is (
-                    fused and workgroup16x8
-                )
+                assert pipeline.last_terminal4x6_workgroup16x8_used is (fused and workgroup16x8)
                 assert pipeline.last_terminal_sparse_resident_specialization_used is (
                     fused
                     and heat_motion_handoff
@@ -369,7 +369,9 @@ def test_gpu_heat_terminal4x6_matches_fallback_across_edges_frames_and_role_swap
 
     for scenario, snapshots in scenarios.items():
         assert len(snapshots) == len(fallback) == 2
-        for frame_id, (expected, actual) in enumerate(zip(fallback, snapshots, strict=True), start=1):
+        for frame_id, (expected, actual) in enumerate(
+            zip(fallback, snapshots, strict=True), start=1
+        ):
             assert actual.keys() == expected.keys()
             for resource_name in expected:
                 assert actual[resource_name] == expected[resource_name], (
@@ -389,14 +391,11 @@ def test_gpu_heat_terminal4x6_inplace_sparse_write_is_two_frame_raw_byte_exact(
         height=height,
         inplace_sparse_write=True,
     )
-    for frame_id, (expected, actual) in enumerate(
-        zip(control, candidate, strict=True), start=1
-    ):
+    for frame_id, (expected, actual) in enumerate(zip(control, candidate, strict=True), start=1):
         assert actual.keys() == expected.keys()
         for resource_name in expected:
             assert actual[resource_name] == expected[resource_name], (
-                f"terminal in-place sparse write frame {frame_id} differs in "
-                f"{resource_name}"
+                f"terminal in-place sparse write frame {frame_id} differs in {resource_name}"
             )
 
 
@@ -424,9 +423,7 @@ def test_gpu_heat_terminal_sparse_resident_specialization_is_raw_byte_exact(
         sparse_resident_specialization=True,
         **kwargs,
     )
-    for frame_id, (expected, actual) in enumerate(
-        zip(control, candidate, strict=True), start=1
-    ):
+    for frame_id, (expected, actual) in enumerate(zip(control, candidate, strict=True), start=1):
         assert actual.keys() == expected.keys()
         # Sparse bridge residency intentionally leaves these private caches
         # unhydrated; bridge-owned aux below remains byte-exact.
@@ -437,8 +434,7 @@ def test_gpu_heat_terminal_sparse_resident_specialization_is_raw_byte_exact(
         }
         for resource_name in expected.keys() - private_unresident_aux:
             assert actual[resource_name] == expected[resource_name], (
-                f"terminal sparse specialization frame {frame_id} differs in "
-                f"{resource_name}"
+                f"terminal sparse specialization frame {frame_id} differs in {resource_name}"
             )
 
 
@@ -462,9 +458,7 @@ def test_gpu_heat_terminal4x6_workgroup16x8_is_two_frame_raw_byte_exact(
         workgroup16x8=True,
         **kwargs,
     )
-    for frame_id, (expected, actual) in enumerate(
-        zip(control, candidate, strict=True), start=1
-    ):
+    for frame_id, (expected, actual) in enumerate(zip(control, candidate, strict=True), start=1):
         assert actual.keys() == expected.keys()
         for resource_name in expected:
             assert actual[resource_name] == expected[resource_name], (
@@ -504,13 +498,10 @@ def test_gpu_heat_terminal_dirty_workgroup_aggregation_is_two_frame_exact() -> N
         dirty_publish_fusion=True,
         dirty_workgroup_aggregation=True,
     )
-    for frame_id, (expected, actual) in enumerate(
-        zip(control, candidate, strict=True), start=1
-    ):
+    for frame_id, (expected, actual) in enumerate(zip(control, candidate, strict=True), start=1):
         for resource_name in expected:
             assert actual[resource_name] == expected[resource_name], (
-                f"terminal dirty workgroup aggregation frame {frame_id} "
-                f"differs in {resource_name}"
+                f"terminal dirty workgroup aggregation frame {frame_id} differs in {resource_name}"
             )
 
 
@@ -594,12 +585,9 @@ def test_gpu_heat_terminal_split_fusions_are_same_context_dirty_queue_exact() ->
                 engine.heat_solver.step(engine, 1.0 / 60.0)
                 snapshot = _capture_terminal4x6_state(engine)
                 snapshots[mode] = snapshot
-                sparse_aux_residency[mode] = bool(
-                    pipeline.last_heat_sparse_bridge_residency_used
-                )
+                sparse_aux_residency[mode] = bool(pipeline.last_heat_sparse_bridge_residency_used)
                 pass_names[mode] = {
-                    str(entry["name"])
-                    for entry in pipeline.last_pass_profile["passes"]
+                    str(entry["name"]) for entry in pipeline.last_pass_profile["passes"]
                 }
                 assert pipeline.abort_deferred_cell_core(engine)
         finally:

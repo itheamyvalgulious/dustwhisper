@@ -18,6 +18,8 @@ def route_inject_post(
     path = parsed.path  # type: ignore[attr-defined]
     if path == "/api/material/write":
         immediate = handler._payload_immediate(payload)
+        if immediate:
+            console._ensure_gpu_attached()
         engine.inject_material(
             None if payload.get("x") is None else int(payload["x"]),
             None if payload.get("y") is None else int(payload["y"]),
@@ -30,6 +32,8 @@ def route_inject_post(
         return True
     if path == "/api/material/fill":
         immediate = handler._payload_immediate(payload)
+        if immediate:
+            console._ensure_gpu_attached()
         engine.write_material_region(
             None if payload.get("x") is None else int(payload["x"]),
             None if payload.get("y") is None else int(payload["y"]),
@@ -43,6 +47,8 @@ def route_inject_post(
         return True
     if path == "/api/inject/temperature":
         immediate = handler._payload_immediate(payload)
+        if immediate:
+            console._ensure_gpu_attached()
         engine.inject_temperature(
             None if payload.get("x") is None else int(payload["x"]),
             None if payload.get("y") is None else int(payload["y"]),
@@ -55,6 +61,8 @@ def route_inject_post(
         return True
     if path == "/api/inject/velocity":
         immediate = handler._payload_immediate(payload)
+        if immediate:
+            console._ensure_gpu_attached()
         engine.inject_velocity(
             None if payload.get("x") is None else int(payload["x"]),
             None if payload.get("y") is None else int(payload["y"]),
@@ -69,6 +77,8 @@ def route_inject_post(
         return True
     if path == "/api/inject/gas":
         immediate = handler._payload_immediate(payload)
+        if immediate:
+            console._ensure_gpu_attached()
         engine.inject_gas(
             None if payload.get("x") is None else int(payload["x"]),
             None if payload.get("y") is None else int(payload["y"]),
@@ -82,6 +92,8 @@ def route_inject_post(
         return True
     if path == "/api/inject/force":
         immediate = handler._payload_immediate(payload)
+        if immediate:
+            console._ensure_gpu_attached()
         engine.inject_force(
             None if payload.get("x") is None else int(payload["x"]),
             None if payload.get("y") is None else int(payload["y"]),
@@ -129,6 +141,8 @@ def route_inject_post(
         return True
     if path == "/api/inject/light":
         immediate = handler._payload_immediate(payload)
+        if immediate:
+            console._ensure_gpu_attached()
         engine.inject_light(
             None if payload.get("x") is None else int(payload["x"]),
             None if payload.get("y") is None else int(payload["y"]),

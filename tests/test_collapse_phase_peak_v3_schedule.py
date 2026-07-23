@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from oracle_game.sim.gpu_collapse import GPUCollapsePipeline
 from oracle_game.sim import gpu_collapse_incremental as incremental
+from oracle_game.sim.gpu_collapse import GPUCollapsePipeline
 
 
 @contextmanager

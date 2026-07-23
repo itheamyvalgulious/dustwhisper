@@ -38,8 +38,7 @@ def reset_runtime_state(solver, world: "WorldEngine" | None = None) -> None:
     cell_shape = (0, 0) if world is None else (world.height, world.width)
     gas_shape = (0, 0) if world is None else (world.gas_height, world.gas_width)
     solver.last_stage_tile_masks = {
-        stage: np.zeros(tile_shape, dtype=np.bool_)
-        for stage in REACTION_STAGE_NAMES
+        stage: np.zeros(tile_shape, dtype=np.bool_) for stage in REACTION_STAGE_NAMES
     }
     solver.last_solve_cell_mask = np.zeros(cell_shape, dtype=np.bool_)
     solver.last_solve_gas_mask = np.zeros(gas_shape, dtype=np.bool_)
@@ -77,10 +76,16 @@ def reset_runtime_state(solver, world: "WorldEngine" | None = None) -> None:
 def runtime_snapshot(solver) -> dict[str, object]:
     return {
         "backend": solver.last_runtime_backend,
-        "stage_tile_masks": {stage: mask.copy() for stage, mask in solver.last_stage_tile_masks.items()},
+        "stage_tile_masks": {
+            stage: mask.copy() for stage, mask in solver.last_stage_tile_masks.items()
+        },
         "stage_solve_modes": dict(solver.last_stage_solve_modes),
-        "full_gpu_authoritative_solve_stages": sorted(solver.last_full_gpu_authoritative_solve_stages),
-        "full_gpu_authoritative_changed_stages": sorted(solver.last_full_gpu_authoritative_changed_stages),
+        "full_gpu_authoritative_solve_stages": sorted(
+            solver.last_full_gpu_authoritative_solve_stages
+        ),
+        "full_gpu_authoritative_changed_stages": sorted(
+            solver.last_full_gpu_authoritative_changed_stages
+        ),
         "solve_cell_mask": solver.last_solve_cell_mask.copy(),
         "solve_gas_mask": solver.last_solve_gas_mask.copy(),
         "changed_cell_mask": solver.last_changed_cell_mask.copy(),

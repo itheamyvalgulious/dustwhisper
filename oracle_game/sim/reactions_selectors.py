@@ -31,7 +31,9 @@ def _match_material_selector(
         return False
     if required_mask == 0:
         return required_id is not None
-    return solver._mask_matches(solver._material_tag_mask(world, material_id, "material_tag_mask"), required_mask)
+    return solver._mask_matches(
+        solver._material_tag_mask(world, material_id, "material_tag_mask"), required_mask
+    )
 
 
 def _matching_material_neighbor(
@@ -95,7 +97,9 @@ def _matching_material_reaction_gas_species_ids(
     if gas_id is not None:
         if gas_id < 0:
             return []
-        if not solver._mask_matches(solver._gas_tag_mask(world, gas_id, "material_reaction_tag_mask"), required_mask):
+        if not solver._mask_matches(
+            solver._gas_tag_mask(world, gas_id, "material_reaction_tag_mask"), required_mask
+        ):
             return []
         return [int(gas_id)]
     if required_mask == 0:
@@ -108,7 +112,9 @@ def _matching_material_reaction_gas_species_ids(
     return [
         int(species_id)
         for species_id in range(species_limit)
-        if solver._mask_matches(solver._gas_tag_mask(world, species_id, "material_reaction_tag_mask"), required_mask)
+        if solver._mask_matches(
+            solver._gas_tag_mask(world, species_id, "material_reaction_tag_mask"), required_mask
+        )
     ]
 
 
@@ -148,7 +154,9 @@ def _matching_light_gas_species_ids(
     if gas_id is not None:
         if gas_id < 0:
             return []
-        if not solver._mask_matches(solver._gas_tag_mask(world, gas_id, "light_reaction_tag_mask"), required_mask):
+        if not solver._mask_matches(
+            solver._gas_tag_mask(world, gas_id, "light_reaction_tag_mask"), required_mask
+        ):
             return []
         return [int(gas_id)]
     if required_mask == 0:
@@ -161,7 +169,9 @@ def _matching_light_gas_species_ids(
     return [
         int(species_id)
         for species_id in range(species_limit)
-        if solver._mask_matches(solver._gas_tag_mask(world, species_id, "light_reaction_tag_mask"), required_mask)
+        if solver._mask_matches(
+            solver._gas_tag_mask(world, species_id, "light_reaction_tag_mask"), required_mask
+        )
     ]
 
 
@@ -171,7 +181,10 @@ def _light_dose_channel(solver, world: "WorldEngine", light_id: int) -> int | No
         if int(light_table[light_id]["name_hash"]) == 0:
             return None
         dose_channel = int(light_table[light_id]["dose_channel_id"])
-        if 0 <= dose_channel < world.cell_optical_dose.shape[0] and 0 <= dose_channel < world.gas_optical_dose.shape[0]:
+        if (
+            0 <= dose_channel < world.cell_optical_dose.shape[0]
+            and 0 <= dose_channel < world.gas_optical_dose.shape[0]
+        ):
             return dose_channel
         return None
     light_payload = world._shadow_light_type_payload()
@@ -180,13 +193,19 @@ def _light_dose_channel(solver, world: "WorldEngine", light_id: int) -> int | No
             if int(item.get("light_type_id", -1)) != light_id:
                 continue
             dose_channel = int(item.get("dose_channel_id", -1))
-            if 0 <= dose_channel < world.cell_optical_dose.shape[0] and 0 <= dose_channel < world.gas_optical_dose.shape[0]:
+            if (
+                0 <= dose_channel < world.cell_optical_dose.shape[0]
+                and 0 <= dose_channel < world.gas_optical_dose.shape[0]
+            ):
                 return dose_channel
             return None
         return None
     if 0 <= light_id < world.light_dose_channel.shape[0]:
         dose_channel = int(world.light_dose_channel[light_id])
-        if 0 <= dose_channel < world.cell_optical_dose.shape[0] and 0 <= dose_channel < world.gas_optical_dose.shape[0]:
+        if (
+            0 <= dose_channel < world.cell_optical_dose.shape[0]
+            and 0 <= dose_channel < world.gas_optical_dose.shape[0]
+        ):
             return dose_channel
     return None
 
@@ -242,7 +261,11 @@ def _random_convert_candidates(solver, world: "WorldEngine") -> list[int]:
     if material_table is not None:
         return []
     if world.random_convert_material_ids:
-        return [int(material_id) for material_id in world.random_convert_material_ids if int(material_id) > 0]
+        return [
+            int(material_id)
+            for material_id in world.random_convert_material_ids
+            if int(material_id) > 0
+        ]
     return []
 
 
@@ -315,7 +338,9 @@ def _gas_tag_mask(solver, world: "WorldEngine", species_id: int, field: str) -> 
     return 0
 
 
-def _neighbor_for_direction(solver, world: "WorldEngine", direction: Direction, x: int, y: int) -> tuple[int, int]:
+def _neighbor_for_direction(
+    solver, world: "WorldEngine", direction: Direction, x: int, y: int
+) -> tuple[int, int]:
     if direction == Direction.DOWN:
         return x, y + 1
     if direction == Direction.UP:
@@ -332,7 +357,9 @@ def _neighbor_for_direction(solver, world: "WorldEngine", direction: Direction, 
     return x, y
 
 
-def _neighbor_for_direction_id(solver, world: "WorldEngine", direction_id: int, x: int, y: int) -> tuple[int, int]:
+def _neighbor_for_direction_id(
+    solver, world: "WorldEngine", direction_id: int, x: int, y: int
+) -> tuple[int, int]:
     if direction_id == int(DIRECTION_IDS["down"]):
         return x, y + 1
     if direction_id == int(DIRECTION_IDS["up"]):
@@ -388,7 +415,9 @@ def _deterministic_random_neighbor(solver, x: int, y: int) -> tuple[int, int]:
     return x + dx, y + dy
 
 
-def _neighbor_for_gas_direction(solver, world: "WorldEngine", direction: Direction, gx: int, gy: int) -> tuple[int, int]:
+def _neighbor_for_gas_direction(
+    solver, world: "WorldEngine", direction: Direction, gx: int, gy: int
+) -> tuple[int, int]:
     cell_x, cell_y = solver._gas_cell_center(world, gx, gy)
     if direction == Direction.SPEED:
         vx, vy = world.flow_velocity[gy, gx]
@@ -396,7 +425,9 @@ def _neighbor_for_gas_direction(solver, world: "WorldEngine", direction: Directi
     return solver._neighbor_for_direction(world, direction, cell_x, cell_y)
 
 
-def _neighbor_for_gas_direction_id(solver, world: "WorldEngine", direction_id: int, gx: int, gy: int) -> tuple[int, int]:
+def _neighbor_for_gas_direction_id(
+    solver, world: "WorldEngine", direction_id: int, gx: int, gy: int
+) -> tuple[int, int]:
     cell_x, cell_y = solver._gas_cell_center(world, gx, gy)
     if direction_id == int(DIRECTION_IDS["speed"]):
         vx, vy = world.flow_velocity[gy, gx]
@@ -404,7 +435,9 @@ def _neighbor_for_gas_direction_id(solver, world: "WorldEngine", direction_id: i
     return solver._neighbor_for_direction_id(world, direction_id, cell_x, cell_y)
 
 
-def _direction_vector(solver, direction: Direction, x: int, y: int, world: "WorldEngine") -> tuple[float, float]:
+def _direction_vector(
+    solver, direction: Direction, x: int, y: int, world: "WorldEngine"
+) -> tuple[float, float]:
     if direction == Direction.UP:
         return (0.0, -1.0)
     if direction == Direction.DOWN:
@@ -420,7 +453,9 @@ def _direction_vector(solver, direction: Direction, x: int, y: int, world: "Worl
     return (0.0, 0.0)
 
 
-def _direction_vector_id(solver, direction_id: int, x: int, y: int, world: "WorldEngine") -> tuple[float, float]:
+def _direction_vector_id(
+    solver, direction_id: int, x: int, y: int, world: "WorldEngine"
+) -> tuple[float, float]:
     if direction_id == int(DIRECTION_IDS["up"]):
         return (0.0, -1.0)
     if direction_id == int(DIRECTION_IDS["down"]):
@@ -436,7 +471,9 @@ def _direction_vector_id(solver, direction_id: int, x: int, y: int, world: "Worl
     return (0.0, 0.0)
 
 
-def _gas_direction_vector(solver, world: "WorldEngine", direction: Direction, gx: int, gy: int) -> tuple[float, float]:
+def _gas_direction_vector(
+    solver, world: "WorldEngine", direction: Direction, gx: int, gy: int
+) -> tuple[float, float]:
     if direction == Direction.SPEED:
         vx, vy = world.flow_velocity[gy, gx]
         norm = max(1e-5, float(np.hypot(vx, vy)))
@@ -445,7 +482,9 @@ def _gas_direction_vector(solver, world: "WorldEngine", direction: Direction, gx
     return solver._direction_vector(direction, cell_x, cell_y, world)
 
 
-def _gas_direction_vector_id(solver, world: "WorldEngine", direction_id: int, gx: int, gy: int) -> tuple[float, float]:
+def _gas_direction_vector_id(
+    solver, world: "WorldEngine", direction_id: int, gx: int, gy: int
+) -> tuple[float, float]:
     if direction_id == int(DIRECTION_IDS["speed"]):
         vx, vy = world.flow_velocity[gy, gx]
         norm = max(1e-5, float(np.hypot(vx, vy)))

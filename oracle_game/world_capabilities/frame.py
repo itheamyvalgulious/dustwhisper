@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from oracle_game.readback_contract import READBACK_ALLOWED_CHANNELS
 from oracle_game.world_constants import (
@@ -13,7 +13,6 @@ from oracle_game.world_constants import (
     TARGET_QUERY_DISTANCE_HINT_CELLS,
     TERRAIN_ANCHOR_FILTERS,
 )
-
 
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
@@ -27,7 +26,6 @@ def _capabilities_frame_section(engine: "WorldEngine", ctx) -> dict[str, Any]:
     entity_state_fields = ctx.entity_state_fields
     entity_placeholder_fields = ctx.entity_placeholder_fields
     target_query_fields = ctx.target_query_fields
-    target_query_overlay_fields = ctx.target_query_overlay_fields
     readback_request_fields = ctx.readback_request_fields
     observation_target_fields = ctx.observation_target_fields
     change_intent_fields = ctx.change_intent_fields
@@ -48,7 +46,11 @@ def _capabilities_frame_section(engine: "WorldEngine", ctx) -> dict[str, Any]:
                 "focus_center": {"type": "cell_xy", "optional": True},
                 "controller_state": {"type": "json", "optional": True},
                 "controller_state_provided": {"type": "bool", "optional": True},
-                "entities": {"type": "entity_state[]", "optional": True, "replace_semantics": "replace_all"},
+                "entities": {
+                    "type": "entity_state[]",
+                    "optional": True,
+                    "replace_semantics": "replace_all",
+                },
                 "entity_placeholders": {
                     "type": "entity_placeholder[]",
                     "optional": True,
@@ -235,7 +237,10 @@ def _capabilities_frame_section(engine: "WorldEngine", ctx) -> dict[str, Any]:
                 "readback_request": {
                     "fields": readback_request_fields,
                     "allowed_channels": list(READBACK_ALLOWED_CHANNELS),
-                    "max_async_window_size": [int(MAX_ASYNC_READBACK_WIDTH), int(MAX_ASYNC_READBACK_HEIGHT)],
+                    "max_async_window_size": [
+                        int(MAX_ASYNC_READBACK_WIDTH),
+                        int(MAX_ASYNC_READBACK_HEIGHT),
+                    ],
                     "field_types": {
                         "request_id": {"type": "int", "optional": True},
                         "center_x": {"type": "int", "optional": True},
@@ -270,7 +275,11 @@ def _capabilities_frame_section(engine: "WorldEngine", ctx) -> dict[str, Any]:
                 "focus_center": {"type": "cell_xy", "optional": True},
                 "controller_state": {"type": "json", "optional": True},
                 "controller_state_provided": {"type": "bool", "optional": True},
-                "entities": {"type": "entity_state[]", "optional": True, "replace_semantics": "replace_all"},
+                "entities": {
+                    "type": "entity_state[]",
+                    "optional": True,
+                    "replace_semantics": "replace_all",
+                },
                 "entity_placeholders": {
                     "type": "entity_placeholder[]",
                     "optional": True,
@@ -458,7 +467,10 @@ def _capabilities_frame_section(engine: "WorldEngine", ctx) -> dict[str, Any]:
                 "readback_request": {
                     "fields": readback_request_fields,
                     "allowed_channels": list(READBACK_ALLOWED_CHANNELS),
-                    "max_async_window_size": [int(MAX_ASYNC_READBACK_WIDTH), int(MAX_ASYNC_READBACK_HEIGHT)],
+                    "max_async_window_size": [
+                        int(MAX_ASYNC_READBACK_WIDTH),
+                        int(MAX_ASYNC_READBACK_HEIGHT),
+                    ],
                     "field_types": {
                         "request_id": {"type": "int", "optional": True},
                         "center_x": {"type": "int", "optional": True},
@@ -492,7 +504,10 @@ def _capabilities_frame_section(engine: "WorldEngine", ctx) -> dict[str, Any]:
                 "controller_state": {"type": "json"},
                 "resolved_targets": {"type": "resolved_target{}", "key": "query_id"},
                 "resolved_change_intents": {"type": "resolved_change_intent{}", "key": "intent_id"},
-                "resolved_carrier_intents": {"type": "resolved_carrier_intent{}", "key": "intent_id"},
+                "resolved_carrier_intents": {
+                    "type": "resolved_carrier_intent{}",
+                    "key": "intent_id",
+                },
                 "resolved_commands": {"type": "world_command[]"},
                 "observation_requests": {"type": "readback_request[]"},
                 "observation_plans": {"type": "observation_plan[]"},
@@ -512,7 +527,10 @@ def _capabilities_frame_section(engine: "WorldEngine", ctx) -> dict[str, Any]:
                 "consumed_readbacks": {"type": "readback_result[]"},
                 "resolved_targets": {"type": "resolved_target{}", "key": "query_id"},
                 "resolved_change_intents": {"type": "resolved_change_intent{}", "key": "intent_id"},
-                "resolved_carrier_intents": {"type": "resolved_carrier_intent{}", "key": "intent_id"},
+                "resolved_carrier_intents": {
+                    "type": "resolved_carrier_intent{}",
+                    "key": "intent_id",
+                },
                 "observations": {"type": "observation_result{}", "key": "observer_id"},
                 "entity_feedback": {"type": "entity_feedback{}", "key": "entity_id"},
                 "paging_updates": {"type": "page_stripe_update[]"},
@@ -548,7 +566,15 @@ def _capabilities_frame_section(engine: "WorldEngine", ctx) -> dict[str, Any]:
             },
         },
         "frame_cycle_result": {
-            "fields": ["ok", "applied", "queued", "pending_frames", "submission_id", "preview", "result"],
+            "fields": [
+                "ok",
+                "applied",
+                "queued",
+                "pending_frames",
+                "submission_id",
+                "preview",
+                "result",
+            ],
             "preview_type": "frame_preview",
             "result_type": "frame_output",
             "result_optional_when_unapplied": True,

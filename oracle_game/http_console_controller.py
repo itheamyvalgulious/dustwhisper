@@ -60,7 +60,12 @@ def route_controller_post(
             payload["intent"],
             target_queries=payload.get("target_queries"),
         )
-        handler._send({"ok": True, "resolved_intent": engine.serialize_resolved_change_intent(resolved_intent)})
+        handler._send(
+            {
+                "ok": True,
+                "resolved_intent": engine.serialize_resolved_change_intent(resolved_intent),
+            }
+        )
         return True
     if path == "/api/change_intents/request":
         resolved_intent = engine.request_change_intent(
@@ -77,7 +82,12 @@ def route_controller_post(
             payload["intent"],
             target_queries=payload.get("target_queries"),
         )
-        handler._send({"ok": True, "resolved_intent": engine.serialize_resolved_carrier_intent(resolved_intent)})
+        handler._send(
+            {
+                "ok": True,
+                "resolved_intent": engine.serialize_resolved_carrier_intent(resolved_intent),
+            }
+        )
         return True
     if path == "/api/carrier_intents/request":
         resolved_intent = engine.request_carrier_intent(
@@ -106,6 +116,8 @@ def route_controller_post(
         )
         return True
     if path == "/api/entity/controller/preview":
+        if console._frame_focus_advances_paging(payload.get("focus_center")):
+            console._ensure_gpu_attached()
         controller_kwargs = console._controller_turn_kwargs(payload)
         handler._send(
             {
@@ -115,14 +127,20 @@ def route_controller_post(
         )
         return True
     if path == "/api/entity/controller/submit":
+        if console._frame_focus_advances_paging(payload.get("focus_center")):
+            console._ensure_gpu_attached()
         controller_kwargs = console._controller_turn_kwargs(payload)
         handler._send({"ok": True, **engine.request_entity_controller_turn(**controller_kwargs)})
         return True
     if path == "/api/entity/controller/turn":
+        if console._frame_focus_advances_paging(payload.get("focus_center")):
+            console._ensure_gpu_attached()
         controller_kwargs = console._controller_turn_kwargs(payload)
         handler._send({"ok": True, **engine.request_entity_controller_turn(**controller_kwargs)})
         return True
     if path == "/api/entity/controller/cycle":
+        if console._frame_focus_advances_paging(payload.get("focus_center")):
+            console._ensure_gpu_attached()
         controller_kwargs = console._controller_turn_kwargs(payload)
         handler._send(
             {

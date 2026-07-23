@@ -7,12 +7,12 @@ import numpy as np
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
-from oracle_game.sim.reactions import REACTION_ACTIVITY_EPSILON, GPUAuthoritativeFullSolveMask
-from oracle_game.sim.utils import expand_bool_mask
 # tile_mask_to_cell_mask / tile_mask_to_gas_mask are referenced through the
 # facade module (imported below) so tests that monkeypatch
 # oracle_game.sim.reactions.tile_mask_to_*_mask can intercept these calls.
 import oracle_game.sim.reactions as _reactions_facade
+from oracle_game.sim.reactions import REACTION_ACTIVITY_EPSILON, GPUAuthoritativeFullSolveMask
+from oracle_game.sim.utils import expand_bool_mask
 
 
 def _solve_masks(
@@ -37,7 +37,9 @@ def _solve_masks(
             and not bool(getattr(world, "_world_simulation_frame_active", False))
             and not np.any(solve_tile_mask)
         ):
-            solve_tile_mask = np.ones((world.active.tile_height, world.active.tile_width), dtype=np.bool_)
+            solve_tile_mask = np.ones(
+                (world.active.tile_height, world.active.tile_width), dtype=np.bool_
+            )
     solve_cell_mask = _reactions_facade.tile_mask_to_cell_mask(
         solve_tile_mask,
         tile_size=world.active.tile_size,
@@ -56,16 +58,15 @@ def _solve_masks(
     return solve_tile_mask, solve_cell_mask, solve_gas_mask
 
 
-def _use_full_gpu_authoritative_reaction_solve_masks(solver, world: "WorldEngine", stage: str | None) -> bool:
+def _use_full_gpu_authoritative_reaction_solve_masks(
+    solver, world: "WorldEngine", stage: str | None
+) -> bool:
     if not solver._active_scheduler_gpu_authoritative(world):
         return False
-    if (
-        stage in {"timed", "self"}
-        and getattr(
-            solver.gpu_pipeline,
-            "_timed_self_authoritative_segment_masks_enabled",
-            False,
-        )
+    if stage in {"timed", "self"} and getattr(
+        solver.gpu_pipeline,
+        "_timed_self_authoritative_segment_masks_enabled",
+        False,
     ):
         # The formal timed/self upload ignores the materialized solve mask and
         # builds active_cell_tex from the authoritative TTL buffer.  The CPU
@@ -75,13 +76,18 @@ def _use_full_gpu_authoritative_reaction_solve_masks(solver, world: "WorldEngine
         return True
     if stage in {"material_material", "material_gas"}:
         return True
-    return stage in {"material_light", "gas_light"} and solver.gpu_pipeline._formal_light_dose_guard_buffer(world) is not None
+    return (
+        stage in {"material_light", "gas_light"}
+        and solver.gpu_pipeline._formal_light_dose_guard_buffer(world) is not None
+    )
 
 
 def _full_gpu_authoritative_solve_masks(
     solver,
     world: "WorldEngine",
-) -> tuple[GPUAuthoritativeFullSolveMask, GPUAuthoritativeFullSolveMask, GPUAuthoritativeFullSolveMask]:
+) -> tuple[
+    GPUAuthoritativeFullSolveMask, GPUAuthoritativeFullSolveMask, GPUAuthoritativeFullSolveMask
+]:
     tile_shape = (world.active.tile_height, world.active.tile_width)
     cell_shape = (world.height, world.width)
     gas_shape = (world.gas_height, world.gas_width)
@@ -104,7 +110,10 @@ def _full_solve_masks(solver, world: "WorldEngine") -> tuple[np.ndarray, np.ndar
     cell_shape = (world.height, world.width)
     gas_shape = (world.gas_height, world.gas_width)
     signature = (tile_shape, cell_shape, gas_shape)
-    if solver._full_solve_mask_cache_signature != signature or solver._full_solve_mask_cache is None:
+    if (
+        solver._full_solve_mask_cache_signature != signature
+        or solver._full_solve_mask_cache is None
+    ):
         solver._full_solve_mask_cache_signature = signature
         solver._full_solve_mask_cache = (
             np.ones(tile_shape, dtype=np.bool_),
@@ -144,9 +153,8 @@ def _require_materialized_cpu_solve_masks(
 
 
 def _formal_gpu_frame(solver, world: "WorldEngine") -> bool:
-    return (
-        getattr(world, "simulation_backend", "") == "gpu"
-        and bool(getattr(world, "_world_simulation_frame_active", False))
+    return getattr(world, "simulation_backend", "") == "gpu" and bool(
+        getattr(world, "_world_simulation_frame_active", False)
     )
 
 
@@ -180,10 +188,14 @@ def _capture_activity_state(
         if solver._all_full_gpu_authoritative_masks(solve_cell_mask, solve_gas_mask):
             solver._stage_extra_changed_cell_mask = None
         else:
-            solver._stage_extra_changed_cell_mask = np.zeros((world.height, world.width), dtype=np.bool_)
+            solver._stage_extra_changed_cell_mask = np.zeros(
+                (world.height, world.width), dtype=np.bool_
+            )
         return {
             "formal_gpu_frame": True,
-            "full_gpu_authoritative": solver._all_full_gpu_authoritative_masks(solve_cell_mask, solve_gas_mask),
+            "full_gpu_authoritative": solver._all_full_gpu_authoritative_masks(
+                solve_cell_mask, solve_gas_mask
+            ),
             "emitters": len(world.emitters),
         }
     solver._stage_extra_changed_cell_mask = np.zeros((world.height, world.width), dtype=np.bool_)
@@ -226,9 +238,13 @@ def _refresh_active_regions(
     if np.any(solve_tile_mask):
         solver._mark_tiles_from_mask(world, solve_tile_mask)
     if any_cell_changed or any_timer_changed:
-        solver._mark_tiles_from_cell_mask(world, changed_cell_mask | timer_changed_mask, tile_padding=1)
+        solver._mark_tiles_from_cell_mask(
+            world, changed_cell_mask | timer_changed_mask, tile_padding=1
+        )
     if any_gas_changed or any_ambient_changed:
-        solver._mark_tiles_from_gas_mask(world, changed_gas_mask | ambient_changed_mask, tile_padding=1)
+        solver._mark_tiles_from_gas_mask(
+            world, changed_gas_mask | ambient_changed_mask, tile_padding=1
+        )
 
 
 def _ensure_runtime_state(solver, world: "WorldEngine") -> None:
@@ -279,10 +295,14 @@ def _finalize_stage_runtime(
     previous_state: dict[str, object],
 ) -> None:
     if bool(previous_state.get("formal_gpu_frame", False)):
-        if solver._all_full_gpu_authoritative_masks(solve_tile_mask, solve_cell_mask, solve_gas_mask):
+        if solver._all_full_gpu_authoritative_masks(
+            solve_tile_mask, solve_cell_mask, solve_gas_mask
+        ):
             if solver._current_stage is not None:
                 solver.last_full_gpu_authoritative_changed_stages.add(solver._current_stage)
-            if solver._stage_extra_changed_cell_mask is not None and np.any(solver._stage_extra_changed_cell_mask):
+            if solver._stage_extra_changed_cell_mask is not None and np.any(
+                solver._stage_extra_changed_cell_mask
+            ):
                 solver.last_changed_cell_mask |= solver._stage_extra_changed_cell_mask
             solver._current_stage = None
             if not solver._active_scheduler_gpu_authoritative(world):
@@ -305,27 +325,37 @@ def _finalize_stage_runtime(
     cell_temperature_changed_mask = np.zeros((world.height, world.width), dtype=np.bool_)
     integrity_changed_mask = np.zeros((world.height, world.width), dtype=np.bool_)
     if np.any(solve_cell_mask):
-        material_changed_mask[solve_cell_mask] = world.material_id[solve_cell_mask] != previous_state["material_id"]
-        phase_changed_mask[solve_cell_mask] = world.phase[solve_cell_mask] != previous_state["phase"]
+        material_changed_mask[solve_cell_mask] = (
+            world.material_id[solve_cell_mask] != previous_state["material_id"]
+        )
+        phase_changed_mask[solve_cell_mask] = (
+            world.phase[solve_cell_mask] != previous_state["phase"]
+        )
         timer_changed_mask[solve_cell_mask] = np.any(
             world.timer_pack[solve_cell_mask] != previous_state["timer_pack"],
             axis=-1,
         )
         cell_temperature_changed_mask[solve_cell_mask] = (
-            np.abs(world.cell_temperature[solve_cell_mask] - previous_state["cell_temperature"]) > REACTION_ACTIVITY_EPSILON
+            np.abs(world.cell_temperature[solve_cell_mask] - previous_state["cell_temperature"])
+            > REACTION_ACTIVITY_EPSILON
         )
         integrity_changed_mask[solve_cell_mask] = (
-            np.abs(world.integrity[solve_cell_mask] - previous_state["integrity"]) > REACTION_ACTIVITY_EPSILON
+            np.abs(world.integrity[solve_cell_mask] - previous_state["integrity"])
+            > REACTION_ACTIVITY_EPSILON
         )
     gas_changed_mask = np.zeros((world.gas_height, world.gas_width), dtype=np.bool_)
     ambient_changed_mask = np.zeros((world.gas_height, world.gas_width), dtype=np.bool_)
     if np.any(solve_gas_mask):
         gas_changed_mask[solve_gas_mask] = np.any(
-            np.abs(world.gas_concentration[:, solve_gas_mask] - previous_state["gas_concentration"]) > REACTION_ACTIVITY_EPSILON,
+            np.abs(world.gas_concentration[:, solve_gas_mask] - previous_state["gas_concentration"])
+            > REACTION_ACTIVITY_EPSILON,
             axis=0,
         )
         ambient_changed_mask[solve_gas_mask] = (
-            np.abs(world.ambient_temperature[solve_gas_mask] - previous_state["ambient_temperature"]) > REACTION_ACTIVITY_EPSILON
+            np.abs(
+                world.ambient_temperature[solve_gas_mask] - previous_state["ambient_temperature"]
+            )
+            > REACTION_ACTIVITY_EPSILON
         )
     if solver._stage_extra_changed_cell_mask is not None:
         material_changed_mask |= solver._stage_extra_changed_cell_mask
@@ -345,7 +375,10 @@ def _finalize_stage_runtime(
         solver._refresh_active_regions(
             world,
             solve_tile_mask,
-            material_changed_mask | phase_changed_mask | cell_temperature_changed_mask | integrity_changed_mask,
+            material_changed_mask
+            | phase_changed_mask
+            | cell_temperature_changed_mask
+            | integrity_changed_mask,
             gas_changed_mask,
             ambient_changed_mask,
             timer_changed_mask,
@@ -373,12 +406,19 @@ def _mark_tiles_from_cell_mask(
     tile_size = world.active.tile_size
     rects: list[tuple[int, int, int, int, int]] = []
     for tile_y, tile_x in {
-        (int(y) // tile_size, int(x) // tile_size)
-        for y, x in np.argwhere(cell_mask)
+        (int(y) // tile_size, int(x) // tile_size) for y, x in np.argwhere(cell_mask)
     }:
         x0 = tile_x * tile_size
         y0 = tile_y * tile_size
-        rects.append((x0, y0, min(world.width, x0 + tile_size), min(world.height, y0 + tile_size), tile_padding))
+        rects.append(
+            (
+                x0,
+                y0,
+                min(world.width, x0 + tile_size),
+                min(world.height, y0 + tile_size),
+                tile_padding,
+            )
+        )
     world._mark_active_rects_runtime(rects)
 
 
@@ -394,5 +434,13 @@ def _mark_tiles_from_gas_mask(
     for gy, gx in np.argwhere(gas_mask):
         x0 = int(gx) * gas_cell_size
         y0 = int(gy) * gas_cell_size
-        rects.append((x0, y0, min(world.width, x0 + gas_cell_size), min(world.height, y0 + gas_cell_size), tile_padding))
+        rects.append(
+            (
+                x0,
+                y0,
+                min(world.width, x0 + gas_cell_size),
+                min(world.height, y0 + gas_cell_size),
+                tile_padding,
+            )
+        )
     world._mark_active_rects_runtime(rects)

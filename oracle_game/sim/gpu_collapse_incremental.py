@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -131,14 +131,18 @@ def _require_epoch_resources(pipeline, world: WorldEngine, epoch: FormalDirtyCol
 
 def _begin_formal_dirty_epoch(pipeline, world: WorldEngine) -> FormalDirtyCollapseEpoch:
     resource_region = (0, 0, int(world.width), int(world.height))
-    resources, x0, y0, width, height = pipeline._prepare_formal_connected_tile_resources_without_input_upload(
-        world,
-        resource_region,
+    resources, x0, y0, width, height = (
+        pipeline._prepare_formal_connected_tile_resources_without_input_upload(
+            world,
+            resource_region,
+        )
     )
     with pipeline._profile_pass(world, "incremental.phase0.tile_region_worklist"):
         tile_mask_name = pipeline._seed_formal_texture_region_tile_worklist(world, width, height)
         if tile_mask_name is None:
-            raise RuntimeError("formal incremental collapse requires a non-empty connected tile worklist")
+            raise RuntimeError(
+                "formal incremental collapse requires a non-empty connected tile worklist"
+            )
         pipeline._last_formal_connected_tile_mask_name = tile_mask_name
 
     # The connected worklist is epoch-owned. Clear the producer queue now so
@@ -148,7 +152,9 @@ def _begin_formal_dirty_epoch(pipeline, world: WorldEngine) -> FormalDirtyCollap
             raise RuntimeError("formal incremental collapse failed to claim the dirty tile queue")
 
     with pipeline._profile_pass(world, "incremental.phase0.connected_bridge_input_load"):
-        pending_gpu_authoritative = "collapse_delay_pending" in world.bridge.gpu_authoritative_resources
+        pending_gpu_authoritative = (
+            "collapse_delay_pending" in world.bridge.gpu_authoritative_resources
+        )
         if not pending_gpu_authoritative:
             pending = world.collapse_delay_pending[y0 : y0 + height, x0 : x0 + width]
             resources.pending_tex.write(np.asarray(pending, dtype=np.float32).tobytes())
@@ -172,7 +178,9 @@ def _begin_formal_dirty_epoch(pipeline, world: WorldEngine) -> FormalDirtyCollap
     if fuse_classification_support_axis_u8:
         ctx = world.bridge.ctx
         if ctx is None:
-            raise RuntimeError("incremental collapse fused support classification requires a GL context")
+            raise RuntimeError(
+                "incremental collapse fused support classification requires a GL context"
+            )
         support_u8_current, _ = pipeline._ensure_formal_connected_u8_support_textures(
             ctx,
             resources,
@@ -201,14 +209,16 @@ def _begin_formal_dirty_epoch(pipeline, world: WorldEngine) -> FormalDirtyCollap
         support_begin_kwargs: dict[str, bool] = {}
         if fuse_classification_support_axis_u8:
             support_begin_kwargs["axis_masks_prebuilt"] = True
-        support_current, support_scratch, support_schedule = pipeline._begin_formal_connected_tile_support(
-            world,
-            resources,
-            width,
-            height,
-            tile_mask_name,
-            use_u8=bool(pipeline._incremental_support_jfa_u8_enabled),
-            **support_begin_kwargs,
+        support_current, support_scratch, support_schedule = (
+            pipeline._begin_formal_connected_tile_support(
+                world,
+                resources,
+                width,
+                height,
+                tile_mask_name,
+                use_u8=bool(pipeline._incremental_support_jfa_u8_enabled),
+                **support_begin_kwargs,
+            )
         )
 
     pipeline.incremental_collapse_epoch_sequence += 1
@@ -231,27 +241,35 @@ def _begin_formal_dirty_epoch(pipeline, world: WorldEngine) -> FormalDirtyCollap
     )
 
 
-def _run_support_slice(pipeline, world: WorldEngine, epoch: FormalDirtyCollapseEpoch, stop: int) -> None:
+def _run_support_slice(
+    pipeline, world: WorldEngine, epoch: FormalDirtyCollapseEpoch, stop: int
+) -> None:
     start = int(epoch.support_round)
     stop = min(len(epoch.support_schedule), max(start, int(stop)))
-    epoch.support_current, epoch.support_scratch = pipeline._run_formal_connected_tile_support_slice(
-        world,
-        epoch.resources,
-        epoch.support_current,
-        epoch.support_scratch,
-        epoch.width,
-        epoch.height,
-        epoch.tile_mask_name,
-        epoch.support_schedule,
-        start,
-        stop,
+    epoch.support_current, epoch.support_scratch = (
+        pipeline._run_formal_connected_tile_support_slice(
+            world,
+            epoch.resources,
+            epoch.support_current,
+            epoch.support_scratch,
+            epoch.width,
+            epoch.height,
+            epoch.tile_mask_name,
+            epoch.support_schedule,
+            start,
+            stop,
+        )
     )
     epoch.support_round = stop
 
 
-def _run_label_slice(pipeline, world: WorldEngine, epoch: FormalDirtyCollapseEpoch, stop: int) -> None:
+def _run_label_slice(
+    pipeline, world: WorldEngine, epoch: FormalDirtyCollapseEpoch, stop: int
+) -> None:
     if epoch.label_current is None or epoch.label_scratch is None or epoch.outcome_texture is None:
-        raise RuntimeError("formal incremental collapse label slice started before label initialization")
+        raise RuntimeError(
+            "formal incremental collapse label slice started before label initialization"
+        )
     start = int(epoch.label_round)
     stop = min(len(epoch.label_schedule), max(start, int(stop)))
     epoch.label_current, epoch.label_scratch = pipeline._run_formal_connected_component_label_slice(
@@ -299,12 +317,8 @@ def _finish_support_and_resolve_outcome(
 ) -> None:
     with pipeline._profile_pass(world, f"{profile_prefix}.support_slice"):
         _run_support_slice(pipeline, world, epoch, len(epoch.support_schedule))
-    fuse_support_publish = bool(
-        pipeline._incremental_support_outcome_publish_fusion_enabled
-    )
-    publish_immune_direct = bool(
-        pipeline._incremental_direct_immune_publish_enabled
-    )
+    fuse_support_publish = bool(pipeline._incremental_support_outcome_publish_fusion_enabled)
+    publish_immune_direct = bool(pipeline._incremental_direct_immune_publish_enabled)
     publish_delayed_direct = bool(
         pipeline._incremental_direct_delayed_publish_enabled
         and pipeline._incremental_jfa_four_frame_balance_enabled
@@ -397,7 +411,9 @@ def _advance_phase2(pipeline, world: WorldEngine, epoch: FormalDirtyCollapseEpoc
             profile_prefix="incremental.phase2",
         )
     if epoch.outcome_texture is None:
-        raise RuntimeError("formal incremental collapse label initialization requires resolved outcomes")
+        raise RuntimeError(
+            "formal incremental collapse label initialization requires resolved outcomes"
+        )
     if epoch.label_tile_union_enabled:
         with pipeline._profile_pass(world, "incremental.phase2.label_union_begin"):
             epoch.label_union_round_count, epoch.label_union_edge_capacity = (
@@ -421,7 +437,9 @@ def _advance_phase2(pipeline, world: WorldEngine, epoch: FormalDirtyCollapseEpoc
             )
         if pipeline._incremental_phase_peak_v3_balance_enabled:
             if epoch.label_union_round < epoch.label_union_round_count:
-                raise RuntimeError("formal incremental collapse cannot materialize an incomplete label union")
+                raise RuntimeError(
+                    "formal incremental collapse cannot materialize an incomplete label union"
+                )
             if pipeline._incremental_label_union_materialize_validation_fusion_enabled:
                 # The completed union buffers are collapse-private and remain
                 # frozen until phase 3. No phase-2 consumer observes the label
@@ -533,7 +551,9 @@ def _validate_and_collect_formal_dirty_epoch_labels(
     )
 
     if scratch_texture is None:
-        raise RuntimeError("formal incremental collapse validation requires a label scratch texture")
+        raise RuntimeError(
+            "formal incremental collapse validation requires a label scratch texture"
+        )
     if label_texture is None:
         raise RuntimeError("formal incremental collapse validation requires a label texture")
     ctx = world.bridge.ctx
@@ -600,7 +620,9 @@ def _validate_and_collect_formal_dirty_epoch_labels(
         roots = resources.support_tile_union_roots
         parents = resources.support_tile_union_parent
         if roots is None or parents is None:
-            raise RuntimeError("formal incremental collapse fused validation requires label union buffers")
+            raise RuntimeError(
+                "formal incremental collapse fused validation requires label union buffers"
+            )
         label_texture.bind_to_image(0, read=False, write=True)
         roots.bind_to_storage_buffer(binding=6)
         parents.bind_to_storage_buffer(binding=7)
@@ -631,9 +653,7 @@ def _validate_and_collect_formal_dirty_epoch_labels(
         height,
         tile_mask_name=tile_mask_name,
         reject_invalid_components=True,
-        defer_metadata_summary=bool(
-            pipeline._incremental_materialize_metadata_fusion_enabled
-        ),
+        defer_metadata_summary=bool(pipeline._incremental_materialize_metadata_fusion_enabled),
         invalid_generation=invalid_generation,
         component_flag_generation=component_flag_generation,
     )
@@ -674,27 +694,35 @@ def _materialize_formal_dirty_epoch_direct(
     )
 
     if epoch.label_texture is None:
-        raise RuntimeError("formal incremental direct materialization requires a completed label texture")
+        raise RuntimeError(
+            "formal incremental direct materialization requires a completed label texture"
+        )
     ctx = world.bridge.ctx
     if ctx is None:
         raise RuntimeError("formal incremental direct materialization requires a valid GL context")
     bridge = world.bridge
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("formal incremental direct materialization requires bridge GPU resources")
+        raise RuntimeError(
+            "formal incremental direct materialization requires bridge GPU resources"
+        )
     if "cell_core" not in bridge.gpu_authoritative_resources:
-        world._require_gpu_authoritative_resources("incremental collapse materialization", "cell_core")
+        world._require_gpu_authoritative_resources(
+            "incremental collapse materialization", "cell_core"
+        )
         bridge.sync_world(world)
 
     resources = epoch.resources
-    collapse_generation, base_integrity, spawn_temperature = pipeline._materialize_material_params(world)
-    pipeline._write_dynamic_buffer(ctx, resources, "material_collapse_generation", collapse_generation)
+    collapse_generation, base_integrity, spawn_temperature = pipeline._materialize_material_params(
+        world
+    )
+    pipeline._write_dynamic_buffer(
+        ctx, resources, "material_collapse_generation", collapse_generation
+    )
     pipeline._write_dynamic_buffer(ctx, resources, "material_base_integrity", base_integrity)
     pipeline._write_dynamic_buffer(ctx, resources, "material_spawn_temperature", spawn_temperature)
 
-    summarize_metadata = bool(
-        pipeline._incremental_materialize_metadata_fusion_enabled
-    )
+    summarize_metadata = bool(pipeline._incremental_materialize_metadata_fusion_enabled)
     filter_labels = bool(pipeline._incremental_materialize_filter_fusion_enabled)
     if filter_labels and epoch.label_scratch is None:
         raise RuntimeError("formal incremental fused label filtering requires a scratch texture")
@@ -762,7 +790,9 @@ def _materialize_formal_dirty_epoch_direct(
     pipeline.last_cpu_mirror_downloaded = False
 
 
-def _commit_formal_dirty_epoch(pipeline, world: WorldEngine, epoch: FormalDirtyCollapseEpoch) -> int:
+def _commit_formal_dirty_epoch(
+    pipeline, world: WorldEngine, epoch: FormalDirtyCollapseEpoch
+) -> int:
     fuse_label_union_materialize_validation = bool(
         epoch.label_tile_union_enabled
         and not epoch.label_union_materialized
@@ -784,12 +814,16 @@ def _commit_formal_dirty_epoch(pipeline, world: WorldEngine, epoch: FormalDirtyC
             epoch.label_union_materialized = True
         elif fuse_label_union_materialize_validation:
             if epoch.label_union_round < epoch.label_union_round_count:
-                raise RuntimeError("formal incremental collapse cannot validate an incomplete label union")
+                raise RuntimeError(
+                    "formal incremental collapse cannot validate an incomplete label union"
+                )
             epoch.label_texture = epoch.resources.support_ping
             epoch.label_scratch = epoch.resources.support_pong
     else:
         if epoch.label_texture is None:
-            raise RuntimeError("formal incremental collapse commit requires a completed label texture")
+            raise RuntimeError(
+                "formal incremental collapse commit requires a completed label texture"
+            )
         with pipeline._profile_pass(world, "incremental.phase3.label_slice"):
             _run_label_slice(pipeline, world, epoch, len(epoch.label_schedule))
     if epoch.label_texture is None:

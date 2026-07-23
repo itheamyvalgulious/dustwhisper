@@ -74,9 +74,7 @@ def step(
         and pipeline._formal_gpu_frame(world)
         and int(world.gas_cell_size) == 4
         and int(ambient_iterations) == 4
-        and {"cell_core", "ambient_temperature"}.issubset(
-            world.bridge.gpu_authoritative_resources
-        )
+        and {"cell_core", "ambient_temperature"}.issubset(world.bridge.gpu_authoritative_resources)
     )
     heat_gas_bridge_residency = bool(
         (
@@ -108,10 +106,7 @@ def step(
         and pipeline._terminal_inplace_sparse_write_enabled
     )
     bridge_aux_residency = bool(
-        (
-            pipeline._terminal_bridge_aux_residency_enabled
-            or sparse_bridge_aux_residency
-        )
+        (pipeline._terminal_bridge_aux_residency_enabled or sparse_bridge_aux_residency)
         and pipeline._terminal4x6_fusion_enabled
         and pipeline._condense_apply_gas4x6_fusion_enabled
         and pipeline._terminal_bridge_aux_dirty_fusion_enabled
@@ -128,8 +123,7 @@ def step(
         and _active_scheduler_gpu_authoritative(world)
     )
     pipeline.last_heat_sparse_bridge_residency_used = bool(
-        sparse_bridge_aux_residency
-        and bridge_aux_residency
+        sparse_bridge_aux_residency and bridge_aux_residency
     )
     pipeline.last_terminal_bridge_aux_residency_used = bridge_aux_residency
     with pipeline._profile_pass(world, "load_bridge_inputs"):
@@ -155,12 +149,9 @@ def step(
         and pipeline._cell_heat_bridge_exchange_feedback4_fusion_enabled
     )
     fuse_cell_heat_bridge_diffuse4 = bool(
-        cell_heat_bridge_diffuse4_candidate
-        and fuse_cell_heat_exchange_feedback
+        cell_heat_bridge_diffuse4_candidate and fuse_cell_heat_exchange_feedback
     )
-    pipeline.last_cell_heat_bridge_diffuse4_fusion_used = (
-        fuse_cell_heat_bridge_diffuse4
-    )
+    pipeline.last_cell_heat_bridge_diffuse4_fusion_used = fuse_cell_heat_bridge_diffuse4
     if fuse_cell_heat_bridge_diffuse4:
         with pipeline._profile_pass(world, "ambient_diffuse_fused_into_cell_heat"):
             pass
@@ -238,8 +229,7 @@ def step(
                 material_count,
             )
     terminal_phase_fusion = bool(
-        terminal_prepared_dirty_resources is not None
-        and pipeline._terminal_phase_fusion_enabled
+        terminal_prepared_dirty_resources is not None and pipeline._terminal_phase_fusion_enabled
     )
     terminal_dirty_publish_fusion = bool(
         terminal_prepared_dirty_resources is not None
@@ -251,12 +241,8 @@ def step(
         and int(world.active.tile_size) >= 8
         and int(world.active.tile_size) % 8 == 0
     )
-    pipeline.last_terminal_dirty_workgroup_aggregation_used = (
-        terminal_dirty_workgroup_aggregation
-    )
-    terminal_bridge_aux_dirty = bool(
-        terminal_phase_fusion or terminal_dirty_publish_fusion
-    )
+    pipeline.last_terminal_dirty_workgroup_aggregation_used = terminal_dirty_workgroup_aggregation
+    terminal_bridge_aux_dirty = bool(terminal_phase_fusion or terminal_dirty_publish_fusion)
     if (
         not terminal_bridge_aux_dirty
         and fuse_terminal4x6
@@ -313,9 +299,7 @@ def step(
                 group_y,
                 clear_terminal_aux=fuse_terminal4x6,
                 publish_bridge_aux=terminal_bridge_aux_dirty,
-                skip_private_aux_writes=(
-                    bridge_aux_residency and terminal_bridge_aux_dirty
-                ),
+                skip_private_aux_writes=(bridge_aux_residency and terminal_bridge_aux_dirty),
                 lazy_action_inputs=terminal_lazy_action_inputs,
                 packed_phase_boil_targets=packed_phase_boil_targets,
             )
@@ -328,13 +312,9 @@ def step(
                 bridge_aux_dirty=terminal_bridge_aux_dirty,
                 fuse_phase_boil=terminal_phase_fusion,
                 dirty_publish_resources=(
-                    terminal_prepared_dirty_resources
-                    if terminal_dirty_publish_fusion
-                    else None
+                    terminal_prepared_dirty_resources if terminal_dirty_publish_fusion else None
                 ),
-                bridge_aux_resident=(
-                    bridge_aux_residency and terminal_bridge_aux_dirty
-                ),
+                bridge_aux_resident=(bridge_aux_residency and terminal_bridge_aux_dirty),
                 aggregate_dirty_tiles=terminal_dirty_workgroup_aggregation,
                 bridge_gas_resident=heat_gas_bridge_residency,
                 packed_phase_boil_targets=packed_phase_boil_targets,
@@ -373,9 +353,7 @@ def step(
             skip_gas=heat_gas_bridge_residency,
         )
     pipeline._last_formal_output_frame_id = (
-        int(getattr(world, "frame_id", 0))
-        if pipeline._formal_gpu_frame(world)
-        else None
+        int(getattr(world, "frame_id", 0)) if pipeline._formal_gpu_frame(world) else None
     )
     pipeline.last_cpu_mirror_downloaded = not (
         getattr(world, "simulation_backend", "") == "gpu"
@@ -442,11 +420,20 @@ def _load_authoritative_bridge_inputs(
     copy_displaced = "placeholder_displaced_material" in authoritative
     copy_ambient = "ambient_temperature" in authoritative
     copy_gas = "gas_concentration" in authoritative
-    if not (copy_cell_core or copy_island_id or copy_entity_id or copy_displaced or copy_ambient or copy_gas):
+    if not (
+        copy_cell_core
+        or copy_island_id
+        or copy_entity_id
+        or copy_displaced
+        or copy_ambient
+        or copy_gas
+    ):
         return False
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("GPU heat pipeline requires bridge GPU resources for authoritative input state")
+        raise RuntimeError(
+            "GPU heat pipeline requires bridge GPU resources for authoritative input state"
+        )
 
     if (copy_island_id or copy_entity_id or copy_displaced) and not skip_cell_aux_hydration:
         program = pipeline.programs["load_bridge_cell_aux"]
@@ -463,9 +450,7 @@ def _load_authoritative_bridge_inputs(
         program.run(group_x, group_y, 1)
 
     hydrate_ambient = bool(
-        copy_ambient
-        and not skip_ambient_gas_hydration
-        and not skip_ambient_hydration
+        copy_ambient and not skip_ambient_gas_hydration and not skip_ambient_hydration
     )
     hydrate_gas = bool(copy_gas and not skip_ambient_gas_hydration)
     if hydrate_ambient or hydrate_gas:
@@ -512,7 +497,9 @@ def _run_cell_heat(
     assert ctx is not None
     pipeline._set_uniform_if_present(program, "cell_grid_size", (world.width, world.height))
     pipeline._set_uniform_if_present(program, "gas_grid_size", (world.gas_width, world.gas_height))
-    pipeline._set_uniform_if_present(program, "tile_grid_size", (world.active.tile_width, world.active.tile_height))
+    pipeline._set_uniform_if_present(
+        program, "tile_grid_size", (world.active.tile_width, world.active.tile_height)
+    )
     pipeline._set_uniform_if_present(program, "gas_cell_size", world.gas_cell_size)
     pipeline._set_uniform_if_present(program, "tile_size", world.active.tile_size)
     pipeline._set_uniform_if_present(program, "dt", dt)
@@ -557,7 +544,9 @@ def _run_ambient_exchange(
     assert ctx is not None
     pipeline._set_uniform_if_present(program, "cell_grid_size", (world.width, world.height))
     pipeline._set_uniform_if_present(program, "gas_grid_size", (world.gas_width, world.gas_height))
-    pipeline._set_uniform_if_present(program, "tile_grid_size", (world.active.tile_width, world.active.tile_height))
+    pipeline._set_uniform_if_present(
+        program, "tile_grid_size", (world.active.tile_width, world.active.tile_height)
+    )
     pipeline._set_uniform_if_present(program, "gas_cell_size", world.gas_cell_size)
     pipeline._set_uniform_if_present(program, "tile_size", world.active.tile_size)
     pipeline._set_uniform_if_present(program, "dt", dt)
@@ -618,7 +607,9 @@ def _run_ambient_diffuse(
     program = pipeline.programs["ambient_diffuse"]
     pipeline._set_uniform_if_present(program, "cell_grid_size", (world.width, world.height))
     pipeline._set_uniform_if_present(program, "gas_grid_size", (world.gas_width, world.gas_height))
-    pipeline._set_uniform_if_present(program, "tile_grid_size", (world.active.tile_width, world.active.tile_height))
+    pipeline._set_uniform_if_present(
+        program, "tile_grid_size", (world.active.tile_width, world.active.tile_height)
+    )
     pipeline._set_uniform_if_present(program, "gas_cell_size", world.gas_cell_size)
     pipeline._set_uniform_if_present(program, "tile_size", world.active.tile_size)
     resources.material_params.bind_to_storage_buffer(binding=0)
@@ -632,7 +623,10 @@ def _run_ambient_diffuse(
         resources.ambient_pong.bind_to_image(4, read=False, write=True)
         program.run(gas_group_x, gas_group_y, 1)
         pipeline._sync_compute_writes(ctx)
-        resources.ambient_ping, resources.ambient_pong = resources.ambient_pong, resources.ambient_ping
+        resources.ambient_ping, resources.ambient_pong = (
+            resources.ambient_pong,
+            resources.ambient_ping,
+        )
 
 
 def _run_ambient_feedback(
@@ -663,17 +657,23 @@ def _run_ambient_feedback(
     pipeline._sync_compute_writes(ctx)
 
 
-def _run_phase_targets(pipeline, world: "WorldEngine", resources: GPUHeatResources, group_x: int, group_y: int) -> None:
+def _run_phase_targets(
+    pipeline, world: "WorldEngine", resources: GPUHeatResources, group_x: int, group_y: int
+) -> None:
     program = pipeline.programs["phase_targets"]
     ctx = world.bridge.ctx
     assert ctx is not None
     pipeline._set_uniform_if_present(program, "cell_grid_size", (world.width, world.height))
     pipeline._set_uniform_if_present(program, "gas_grid_size", (world.gas_width, world.gas_height))
-    pipeline._set_uniform_if_present(program, "tile_grid_size", (world.active.tile_width, world.active.tile_height))
+    pipeline._set_uniform_if_present(
+        program, "tile_grid_size", (world.active.tile_width, world.active.tile_height)
+    )
     pipeline._set_uniform_if_present(program, "gas_cell_size", world.gas_cell_size)
     pipeline._set_uniform_if_present(program, "tile_size", world.active.tile_size)
     pipeline._set_uniform_if_present(program, "phase_liquid", int(Phase.LIQUID))
-    pipeline._set_uniform_if_present(program, "freeze_cold_neighbor_threshold", FREEZE_COLD_NEIGHBOR_THRESHOLD)
+    pipeline._set_uniform_if_present(
+        program, "freeze_cold_neighbor_threshold", FREEZE_COLD_NEIGHBOR_THRESHOLD
+    )
     resources.material_params.bind_to_storage_buffer(binding=0)
     resources.cell_state_tex.use(location=1)
     resources.active_tile_tex.use(location=2)
@@ -712,12 +712,16 @@ def _run_phase_boil_targets(
     assert ctx is not None
     pipeline._set_uniform_if_present(program, "cell_grid_size", (world.width, world.height))
     pipeline._set_uniform_if_present(program, "gas_grid_size", (world.gas_width, world.gas_height))
-    pipeline._set_uniform_if_present(program, "tile_grid_size", (world.active.tile_width, world.active.tile_height))
+    pipeline._set_uniform_if_present(
+        program, "tile_grid_size", (world.active.tile_width, world.active.tile_height)
+    )
     pipeline._set_uniform_if_present(program, "gas_cell_size", world.gas_cell_size)
     pipeline._set_uniform_if_present(program, "tile_size", world.active.tile_size)
     pipeline._set_uniform_if_present(program, "phase_liquid", int(Phase.LIQUID))
     pipeline._set_uniform_if_present(program, "phase_falling_island", int(Phase.FALLING_ISLAND))
-    pipeline._set_uniform_if_present(program, "freeze_cold_neighbor_threshold", FREEZE_COLD_NEIGHBOR_THRESHOLD)
+    pipeline._set_uniform_if_present(
+        program, "freeze_cold_neighbor_threshold", FREEZE_COLD_NEIGHBOR_THRESHOLD
+    )
     pipeline._set_uniform_if_present(program, "dt", dt)
     pipeline._set_uniform_if_present(program, "clear_terminal_aux", clear_terminal_aux)
     pipeline._set_uniform_if_present(program, "publish_bridge_aux", publish_bridge_aux)
@@ -745,13 +749,17 @@ def _run_phase_boil_targets(
     pipeline._sync_compute_writes(ctx)
 
 
-def _run_boil_targets(pipeline, world: "WorldEngine", resources: GPUHeatResources, group_x: int, group_y: int) -> None:
+def _run_boil_targets(
+    pipeline, world: "WorldEngine", resources: GPUHeatResources, group_x: int, group_y: int
+) -> None:
     program = pipeline.programs["boil_targets"]
     ctx = world.bridge.ctx
     assert ctx is not None
     pipeline._set_uniform_if_present(program, "cell_grid_size", (world.width, world.height))
     pipeline._set_uniform_if_present(program, "gas_grid_size", (world.gas_width, world.gas_height))
-    pipeline._set_uniform_if_present(program, "tile_grid_size", (world.active.tile_width, world.active.tile_height))
+    pipeline._set_uniform_if_present(
+        program, "tile_grid_size", (world.active.tile_width, world.active.tile_height)
+    )
     pipeline._set_uniform_if_present(program, "gas_cell_size", world.gas_cell_size)
     pipeline._set_uniform_if_present(program, "tile_size", world.active.tile_size)
     resources.material_params.bind_to_storage_buffer(binding=0)
@@ -777,10 +785,14 @@ def _run_condense_targets(
     assert ctx is not None
     pipeline._set_uniform_if_present(program, "cell_grid_size", (world.width, world.height))
     pipeline._set_uniform_if_present(program, "gas_grid_size", (world.gas_width, world.gas_height))
-    pipeline._set_uniform_if_present(program, "tile_grid_size", (world.active.tile_width, world.active.tile_height))
+    pipeline._set_uniform_if_present(
+        program, "tile_grid_size", (world.active.tile_width, world.active.tile_height)
+    )
     pipeline._set_uniform_if_present(program, "gas_cell_size", world.gas_cell_size)
     pipeline._set_uniform_if_present(program, "tile_size", world.active.tile_size)
-    pipeline._set_uniform_if_present(program, "gas_species_count", min(world.gas_concentration.shape[0], MAX_GAS_SPECIES))
+    pipeline._set_uniform_if_present(
+        program, "gas_species_count", min(world.gas_concentration.shape[0], MAX_GAS_SPECIES)
+    )
     resources.material_params.bind_to_storage_buffer(binding=0)
     resources.cell_state_tex.use(location=1)
     resources.active_tile_tex.use(location=2)
@@ -806,8 +818,12 @@ def _run_apply_cell_targets(
         ctx = world.bridge.ctx
         assert ctx is not None
         pipeline._set_uniform_if_present(program, "cell_grid_size", (world.width, world.height))
-        pipeline._set_uniform_if_present(program, "gas_grid_size", (world.gas_width, world.gas_height))
-        pipeline._set_uniform_if_present(program, "tile_grid_size", (world.active.tile_width, world.active.tile_height))
+        pipeline._set_uniform_if_present(
+            program, "gas_grid_size", (world.gas_width, world.gas_height)
+        )
+        pipeline._set_uniform_if_present(
+            program, "tile_grid_size", (world.active.tile_width, world.active.tile_height)
+        )
         pipeline._set_uniform_if_present(program, "gas_cell_size", world.gas_cell_size)
         pipeline._set_uniform_if_present(program, "tile_size", world.active.tile_size)
         pipeline._set_uniform_if_present(program, "dt", dt)
@@ -849,7 +865,9 @@ def _run_apply_cell_aux_targets(
     assert ctx is not None
     pipeline._set_uniform_if_present(program, "cell_grid_size", (world.width, world.height))
     pipeline._set_uniform_if_present(program, "gas_grid_size", (world.gas_width, world.gas_height))
-    pipeline._set_uniform_if_present(program, "tile_grid_size", (world.active.tile_width, world.active.tile_height))
+    pipeline._set_uniform_if_present(
+        program, "tile_grid_size", (world.active.tile_width, world.active.tile_height)
+    )
     pipeline._set_uniform_if_present(program, "gas_cell_size", world.gas_cell_size)
     pipeline._set_uniform_if_present(program, "tile_size", world.active.tile_size)
     pipeline._set_uniform_if_present(program, "dt", dt)
@@ -888,10 +906,14 @@ def _run_apply_gas_targets(
     assert ctx is not None
     pipeline._set_uniform_if_present(program, "cell_grid_size", (world.width, world.height))
     pipeline._set_uniform_if_present(program, "gas_grid_size", (world.gas_width, world.gas_height))
-    pipeline._set_uniform_if_present(program, "tile_grid_size", (world.active.tile_width, world.active.tile_height))
+    pipeline._set_uniform_if_present(
+        program, "tile_grid_size", (world.active.tile_width, world.active.tile_height)
+    )
     pipeline._set_uniform_if_present(program, "gas_cell_size", world.gas_cell_size)
     pipeline._set_uniform_if_present(program, "tile_size", world.active.tile_size)
-    pipeline._set_uniform_if_present(program, "gas_species_count", min(world.gas_concentration.shape[0], MAX_GAS_SPECIES))
+    pipeline._set_uniform_if_present(
+        program, "gas_species_count", min(world.gas_concentration.shape[0], MAX_GAS_SPECIES)
+    )
     pipeline._set_uniform_if_present(program, "dt", dt)
     resources.material_params.bind_to_storage_buffer(binding=0)
     resources.cell_state_tex.use(location=1)
@@ -929,11 +951,7 @@ def _run_apply_terminal4x6(
     use_workgroup16x8 = bool(pipeline._terminal4x6_workgroup16x8_enabled)
     if aggregate_dirty_tiles:
         tile_size = int(world.active.tile_size)
-        use_workgroup16x8 = bool(
-            use_workgroup16x8
-            and tile_size >= 16
-            and tile_size % 16 == 0
-        )
+        use_workgroup16x8 = bool(use_workgroup16x8 and tile_size >= 16 and tile_size % 16 == 0)
     pipeline.last_terminal4x6_workgroup16x8_used = use_workgroup16x8
     sparse_resident_specialized = bool(
         pipeline._terminal_sparse_resident_specialization_enabled
@@ -949,12 +967,9 @@ def _run_apply_terminal4x6(
         and pipeline._terminal_split_target_active_reuse_enabled
         and pipeline._terminal_dead_condense_target_store_elision_enabled
     )
-    pipeline.last_terminal_sparse_resident_specialization_used = (
-        sparse_resident_specialized
-    )
+    pipeline.last_terminal_sparse_resident_specialization_used = sparse_resident_specialized
     lazy_action_inputs = bool(
-        sparse_resident_specialized
-        and pipeline._terminal_lazy_action_inputs_enabled
+        sparse_resident_specialized and pipeline._terminal_lazy_action_inputs_enabled
     )
     pipeline.last_terminal_lazy_action_inputs_used = lazy_action_inputs
     if packed_phase_boil_targets and not lazy_action_inputs:
@@ -972,13 +987,9 @@ def _run_apply_terminal4x6(
     pipeline.last_terminal_hierarchical_row_summary_used = bool(
         hierarchical_row_summary and not nv32_ballot_gas_reduction
     )
-    pipeline.last_terminal_nv32_ballot_gas_reduction_used = (
-        nv32_ballot_gas_reduction
-    )
+    pipeline.last_terminal_nv32_ballot_gas_reduction_used = nv32_ballot_gas_reduction
     if nv32_ballot_gas_reduction:
-        program_name = (
-            "apply_terminal4x6_sparse_resident_packed_lazy_nv32_ballot"
-        )
+        program_name = "apply_terminal4x6_sparse_resident_packed_lazy_nv32_ballot"
     elif hierarchical_row_summary:
         program_name = "apply_terminal4x6_sparse_resident_packed_lazy_row_summary"
     elif packed_phase_boil_targets:
@@ -995,9 +1006,7 @@ def _run_apply_terminal4x6(
         )
     else:
         program_name = (
-            "apply_terminal4x6_dirty_workgroup"
-            if aggregate_dirty_tiles
-            else "apply_terminal4x6"
+            "apply_terminal4x6_dirty_workgroup" if aggregate_dirty_tiles else "apply_terminal4x6"
         )
     if use_workgroup16x8:
         program_name += "_workgroup16x8"
@@ -1024,15 +1033,9 @@ def _run_apply_terminal4x6(
     pipeline._set_uniform_if_present(
         program, "fuse_dirty_publish", dirty_publish_resources is not None
     )
-    pipeline._set_uniform_if_present(
-        program, "use_bridge_displaced", bridge_aux_resident
-    )
-    pipeline._set_uniform_if_present(
-        program, "write_private_displaced", not bridge_aux_resident
-    )
-    pipeline._set_uniform_if_present(
-        program, "inplace_sparse_write", inplace_sparse_write
-    )
+    pipeline._set_uniform_if_present(program, "use_bridge_displaced", bridge_aux_resident)
+    pipeline._set_uniform_if_present(program, "write_private_displaced", not bridge_aux_resident)
+    pipeline._set_uniform_if_present(program, "inplace_sparse_write", inplace_sparse_write)
     pipeline._set_uniform_if_present(
         program,
         "reuse_split_target_active_mask",
@@ -1064,21 +1067,21 @@ def _run_apply_terminal4x6(
     resources.temp_ping.use(location=9)
     resources.integrity_tex.use(location=10)
     resources.ambient_pong.use(location=11)
-    (resources.cell_state_tex if inplace_sparse_write else resources.cell_state_out_tex).bind_to_image(
-        0, read=False, write=True
-    )
+    (
+        resources.cell_state_tex if inplace_sparse_write else resources.cell_state_out_tex
+    ).bind_to_image(0, read=False, write=True)
     (resources.timer_tex if inplace_sparse_write else resources.timer_out_tex).bind_to_image(
         1, read=False, write=True
     )
     (resources.temp_ping if inplace_sparse_write else resources.temp_pong).bind_to_image(
         2, read=False, write=True
     )
-    (resources.integrity_tex if inplace_sparse_write else resources.integrity_out_tex).bind_to_image(
-        3, read=False, write=True
-    )
-    (resources.displaced_tex if inplace_sparse_write else resources.displaced_out_tex).bind_to_image(
-        4, read=False, write=True
-    )
+    (
+        resources.integrity_tex if inplace_sparse_write else resources.integrity_out_tex
+    ).bind_to_image(3, read=False, write=True)
+    (
+        resources.displaced_tex if inplace_sparse_write else resources.displaced_out_tex
+    ).bind_to_image(4, read=False, write=True)
     (resources.velocity_tex if inplace_sparse_write else resources.velocity_out_tex).bind_to_image(
         5, read=False, write=True
     )
@@ -1154,9 +1157,7 @@ def _run_apply_terminal4x6(
             COLLAPSE_STRUCTURE_DIRTY_TILE_DISPATCH_ARGS_BUFFER,
         )
     if bridge_gas_resident:
-        pipeline._heat_gas_bridge_residency_frame_id = int(
-            getattr(world, "frame_id", 0)
-        )
+        pipeline._heat_gas_bridge_residency_frame_id = int(getattr(world, "frame_id", 0))
 
 
 def _run_apply_condense_cells(
@@ -1171,8 +1172,12 @@ def _run_apply_condense_cells(
         ctx = world.bridge.ctx
         assert ctx is not None
         pipeline._set_uniform_if_present(program, "cell_grid_size", (world.width, world.height))
-        pipeline._set_uniform_if_present(program, "gas_grid_size", (world.gas_width, world.gas_height))
-        pipeline._set_uniform_if_present(program, "tile_grid_size", (world.active.tile_width, world.active.tile_height))
+        pipeline._set_uniform_if_present(
+            program, "gas_grid_size", (world.gas_width, world.gas_height)
+        )
+        pipeline._set_uniform_if_present(
+            program, "tile_grid_size", (world.active.tile_width, world.active.tile_height)
+        )
         pipeline._set_uniform_if_present(program, "gas_cell_size", world.gas_cell_size)
         pipeline._set_uniform_if_present(program, "tile_size", world.active.tile_size)
         pipeline._set_uniform_if_present(
@@ -1199,7 +1204,10 @@ def _run_apply_condense_cells(
         resources.displaced_tex.bind_to_image(6, read=False, write=True)
         program.run(group_x, group_y, 1)
         pipeline._sync_compute_writes(ctx)
-        resources.velocity_tex, resources.velocity_out_tex = resources.velocity_out_tex, resources.velocity_tex
+        resources.velocity_tex, resources.velocity_out_tex = (
+            resources.velocity_out_tex,
+            resources.velocity_tex,
+        )
 
 
 def _run_apply_condense_cell_aux(
@@ -1214,10 +1222,14 @@ def _run_apply_condense_cell_aux(
     assert ctx is not None
     pipeline._set_uniform_if_present(program, "cell_grid_size", (world.width, world.height))
     pipeline._set_uniform_if_present(program, "gas_grid_size", (world.gas_width, world.gas_height))
-    pipeline._set_uniform_if_present(program, "tile_grid_size", (world.active.tile_width, world.active.tile_height))
+    pipeline._set_uniform_if_present(
+        program, "tile_grid_size", (world.active.tile_width, world.active.tile_height)
+    )
     pipeline._set_uniform_if_present(program, "gas_cell_size", world.gas_cell_size)
     pipeline._set_uniform_if_present(program, "tile_size", world.active.tile_size)
-    pipeline._set_uniform_if_present(program, "gas_species_count", min(world.gas_concentration.shape[0], MAX_GAS_SPECIES))
+    pipeline._set_uniform_if_present(
+        program, "gas_species_count", min(world.gas_concentration.shape[0], MAX_GAS_SPECIES)
+    )
     resources.active_tile_tex.use(location=2)
     resources.gas_params.bind_to_storage_buffer(binding=8)
     resources.cell_state_out_tex.use(location=4)
@@ -1231,7 +1243,9 @@ def _run_apply_condense_cell_aux(
     pipeline._sync_compute_writes(ctx)
 
 
-def _download_outputs(pipeline, world: "WorldEngine", resources: GPUHeatResources) -> GPUHeatStageTargets:
+def _download_outputs(
+    pipeline, world: "WorldEngine", resources: GPUHeatResources
+) -> GPUHeatStageTargets:
     cell_state = np.frombuffer(resources.cell_state_tex.read(), dtype="u4").reshape(
         (world.height, world.width)
     )
@@ -1242,29 +1256,51 @@ def _download_outputs(pipeline, world: "WorldEngine", resources: GPUHeatResource
     world.timer_pack[:] = unpack_u8x4(
         np.frombuffer(resources.timer_tex.read(), dtype="u4").reshape((world.height, world.width))
     )
-    world.cell_temperature[:] = np.frombuffer(resources.temp_ping.read(), dtype="f4").reshape((world.height, world.width))
-    world.integrity[:] = np.frombuffer(resources.integrity_tex.read(), dtype="f4").reshape((world.height, world.width))
+    world.cell_temperature[:] = np.frombuffer(resources.temp_ping.read(), dtype="f4").reshape(
+        (world.height, world.width)
+    )
+    world.integrity[:] = np.frombuffer(resources.integrity_tex.read(), dtype="f4").reshape(
+        (world.height, world.width)
+    )
     world.island_id[:] = np.rint(
-        np.frombuffer(resources.island_id_tex.read(), dtype="f4").reshape((world.height, world.width))
+        np.frombuffer(resources.island_id_tex.read(), dtype="f4").reshape(
+            (world.height, world.width)
+        )
     ).astype(np.int32)
     world.entity_id[:] = np.rint(
-        np.frombuffer(resources.entity_id_tex.read(), dtype="f4").reshape((world.height, world.width))
+        np.frombuffer(resources.entity_id_tex.read(), dtype="f4").reshape(
+            (world.height, world.width)
+        )
     ).astype(np.int32)
     world.placeholder_displaced_material[:] = np.rint(
-        np.frombuffer(resources.displaced_tex.read(), dtype="f4").reshape((world.height, world.width))
+        np.frombuffer(resources.displaced_tex.read(), dtype="f4").reshape(
+            (world.height, world.width)
+        )
     ).astype(np.int32)
-    world.velocity[:] = np.frombuffer(resources.velocity_tex.read(), dtype="f4").reshape((world.height, world.width, 2))
-    world.ambient_temperature[:] = np.frombuffer(resources.ambient_pong.read(), dtype="f4").reshape((world.gas_height, world.gas_width))
-    world.gas_concentration[:] = np.frombuffer(resources.gas_out_tex.read(), dtype="f4").reshape(world.gas_concentration.shape)
+    world.velocity[:] = np.frombuffer(resources.velocity_tex.read(), dtype="f4").reshape(
+        (world.height, world.width, 2)
+    )
+    world.ambient_temperature[:] = np.frombuffer(resources.ambient_pong.read(), dtype="f4").reshape(
+        (world.gas_height, world.gas_width)
+    )
+    world.gas_concentration[:] = np.frombuffer(resources.gas_out_tex.read(), dtype="f4").reshape(
+        world.gas_concentration.shape
+    )
     return GPUHeatStageTargets(
         phase_targets=np.rint(
-            np.frombuffer(resources.phase_target_tex.read(), dtype="f4").reshape((world.height, world.width))
+            np.frombuffer(resources.phase_target_tex.read(), dtype="f4").reshape(
+                (world.height, world.width)
+            )
         ).astype(np.int32),
         boil_targets=np.rint(
-            np.frombuffer(resources.boil_target_tex.read(), dtype="f4").reshape((world.height, world.width))
+            np.frombuffer(resources.boil_target_tex.read(), dtype="f4").reshape(
+                (world.height, world.width)
+            )
         ).astype(np.int32),
         condense_targets=(
-            np.frombuffer(resources.condense_target_tex.read(), dtype="f4").reshape(world.gas_concentration.shape)
+            np.frombuffer(resources.condense_target_tex.read(), dtype="f4").reshape(
+                world.gas_concentration.shape
+            )
             > 0.5
         ),
     )
@@ -1296,7 +1332,9 @@ def _publish_bridge_outputs(
     bridge = world.bridge
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("GPU heat pipeline requires bridge GPU resources for authoritative heat state")
+        raise RuntimeError(
+            "GPU heat pipeline requires bridge GPU resources for authoritative heat state"
+        )
     defer_cell_core = bool(
         pipeline._formal_gpu_frame(world)
         and getattr(world, "heat_motion_handoff_active", False)
@@ -1424,9 +1462,7 @@ def _publish_bridge_outputs(
                 cell_program.run(group_x, group_y, 1)
     elif defer_dirty_publish_to_handoff:
         with pipeline._profile_pass(world, "publish_bridge_outputs.cell_deferred_to_handoff"):
-            pipeline._deferred_dirty_publish_handoff_frame_id = int(
-                getattr(world, "frame_id", 0)
-            )
+            pipeline._deferred_dirty_publish_handoff_frame_id = int(getattr(world, "frame_id", 0))
 
     if not skip_gas:
         with pipeline._profile_pass(world, "publish_bridge_outputs.gas"):
@@ -1445,9 +1481,7 @@ def _publish_bridge_outputs(
             ambient_program = pipeline.programs["publish_bridge_ambient"]
             ambient_program["gas_grid_size"].value = (world.gas_width, world.gas_height)
             resources.ambient_pong.use(location=0)
-            bridge.textures["ambient_temperature"].bind_to_image(
-                1, read=False, write=True
-            )
+            bridge.textures["ambient_temperature"].bind_to_image(1, read=False, write=True)
             ambient_program.run(gas_group_x, gas_group_y, 1)
 
     with pipeline._profile_pass(world, "publish_bridge_outputs.sync"):

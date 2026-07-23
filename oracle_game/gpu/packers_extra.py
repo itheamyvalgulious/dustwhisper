@@ -1,29 +1,36 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from oracle_game.types import PageStripeUpdate
+if TYPE_CHECKING:
+    from oracle_game.world import WorldEngine
+
 from oracle_game.gpu.dtypes import (
+    COLLAPSE_COMPONENT_DTYPE,
+    COLLAPSE_RUNTIME_META_DTYPE,
     GAS_RUNTIME_META_DTYPE,
     GAS_SPECIES_RUNTIME_DTYPE,
     HEAT_RUNTIME_META_DTYPE,
     LIQUID_RUNTIME_META_DTYPE,
-    REACTION_RUNTIME_META_DTYPE,
-    COLLAPSE_RUNTIME_META_DTYPE,
-    COLLAPSE_COMPONENT_DTYPE,
     OPTICS_RUNTIME_META_DTYPE,
     PAGE_STRIPE_META_DTYPE,
     PAGE_STRIPE_SECTION_DTYPE,
+    REACTION_RUNTIME_META_DTYPE,
 )
+from oracle_game.types import PageStripeUpdate
 
 
-def pack_gas_runtime_upload(world: "WorldEngine") -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def pack_gas_runtime_upload(
+    world: "WorldEngine",
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     snapshot = world.gas_solver.runtime_snapshot()
     solve_tile_mask = np.asarray(snapshot["solve_tile_mask"], dtype=np.uint8)
     if solve_tile_mask.shape != (world.active.tile_height, world.active.tile_width):
-        solve_tile_mask = np.zeros((world.active.tile_height, world.active.tile_width), dtype=np.uint8)
+        solve_tile_mask = np.zeros(
+            (world.active.tile_height, world.active.tile_width), dtype=np.uint8
+        )
     solve_gas_mask = np.asarray(snapshot["solve_gas_mask"], dtype=np.uint8)
     if solve_gas_mask.shape != (world.gas_height, world.gas_width):
         solve_gas_mask = np.zeros((world.gas_height, world.gas_width), dtype=np.uint8)
@@ -69,11 +76,15 @@ def pack_gas_runtime_upload(world: "WorldEngine") -> tuple[np.ndarray, np.ndarra
     return meta, solve_tile_mask, solve_gas_mask, species_runtime
 
 
-def pack_heat_runtime_upload(world: "WorldEngine") -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def pack_heat_runtime_upload(
+    world: "WorldEngine",
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     snapshot = world.heat_solver.runtime_snapshot()
     solve_tile_mask = np.asarray(snapshot["solve_tile_mask"], dtype=np.uint8)
     if solve_tile_mask.shape != (world.active.tile_height, world.active.tile_width):
-        solve_tile_mask = np.zeros((world.active.tile_height, world.active.tile_width), dtype=np.uint8)
+        solve_tile_mask = np.zeros(
+            (world.active.tile_height, world.active.tile_width), dtype=np.uint8
+        )
     solve_cell_mask = np.asarray(snapshot["solve_cell_mask"], dtype=np.uint8)
     if solve_cell_mask.shape != (world.height, world.width):
         solve_cell_mask = np.zeros((world.height, world.width), dtype=np.uint8)
@@ -120,19 +131,33 @@ def pack_heat_runtime_upload(world: "WorldEngine") -> tuple[np.ndarray, np.ndarr
     meta[0]["ambient_temperature_max"] = float(ambient_temperature_range[1])
     meta[0]["integrity_min"] = float(integrity_range[0])
     meta[0]["integrity_max"] = float(integrity_range[1])
-    return meta, solve_tile_mask, solve_cell_mask, solve_gas_mask, phase_targets, boil_targets, condense_targets
+    return (
+        meta,
+        solve_tile_mask,
+        solve_cell_mask,
+        solve_gas_mask,
+        phase_targets,
+        boil_targets,
+        condense_targets,
+    )
 
 
 def pack_liquid_runtime_upload(
     world: "WorldEngine",
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray
+]:
     snapshot = world.liquid_solver.runtime_snapshot()
     solve_tile_mask = np.asarray(snapshot["solve_tile_mask"], dtype=np.uint8)
     if solve_tile_mask.shape != (world.active.tile_height, world.active.tile_width):
-        solve_tile_mask = np.zeros((world.active.tile_height, world.active.tile_width), dtype=np.uint8)
+        solve_tile_mask = np.zeros(
+            (world.active.tile_height, world.active.tile_width), dtype=np.uint8
+        )
     post_tile_mask = np.asarray(snapshot["post_tile_mask"], dtype=np.uint8)
     if post_tile_mask.shape != (world.active.tile_height, world.active.tile_width):
-        post_tile_mask = np.zeros((world.active.tile_height, world.active.tile_width), dtype=np.uint8)
+        post_tile_mask = np.zeros(
+            (world.active.tile_height, world.active.tile_width), dtype=np.uint8
+        )
     post_cell_mask = np.asarray(snapshot["post_cell_mask"], dtype=np.uint8)
     if post_cell_mask.shape != (world.height, world.width):
         post_cell_mask = np.zeros((world.height, world.width), dtype=np.uint8)
@@ -215,7 +240,9 @@ def pack_reaction_runtime_upload(
     }
     for stage, mask in stage_tile_masks.items():
         if mask.shape != (world.active.tile_height, world.active.tile_width):
-            stage_tile_masks[stage] = np.zeros((world.active.tile_height, world.active.tile_width), dtype=np.uint8)
+            stage_tile_masks[stage] = np.zeros(
+                (world.active.tile_height, world.active.tile_width), dtype=np.uint8
+            )
     solve_cell_mask = np.asarray(snapshot["solve_cell_mask"], dtype=np.uint8)
     if solve_cell_mask.shape != (world.height, world.width):
         solve_cell_mask = np.zeros((world.height, world.width), dtype=np.uint8)
@@ -293,7 +320,9 @@ def pack_reaction_runtime_upload(
 
 def pack_collapse_runtime_upload(
     world: "WorldEngine",
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray
+]:
     snapshot = world.collapse_solver.runtime_snapshot()
     solve_region_mask = np.asarray(snapshot["solve_region_mask"], dtype=np.int32)
     if solve_region_mask.shape != (world.height, world.width):
@@ -354,11 +383,15 @@ def pack_collapse_runtime_upload(
 
 def pack_optics_runtime_upload(
     world: "WorldEngine",
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray
+]:
     snapshot = world.optics_solver.runtime_snapshot()
     solve_tile_mask = np.asarray(snapshot["solve_tile_mask"], dtype=np.uint8)
     if solve_tile_mask.shape != (world.active.tile_height, world.active.tile_width):
-        solve_tile_mask = np.zeros((world.active.tile_height, world.active.tile_width), dtype=np.uint8)
+        solve_tile_mask = np.zeros(
+            (world.active.tile_height, world.active.tile_width), dtype=np.uint8
+        )
     solve_cell_mask = np.asarray(snapshot["solve_cell_mask"], dtype=np.uint8)
     if solve_cell_mask.shape != (world.height, world.width):
         solve_cell_mask = np.zeros((world.height, world.width), dtype=np.uint8)
@@ -503,6 +536,14 @@ def pack_page_stripe_upload(world: "WorldEngine") -> tuple[np.ndarray, np.ndarra
         meta[stripe_index]["section_offset"] = section_offset
         meta[stripe_index]["section_count"] = len(sections) - section_offset
 
-    section_array = np.array(sections, dtype=PAGE_STRIPE_SECTION_DTYPE) if sections else np.zeros((0,), dtype=PAGE_STRIPE_SECTION_DTYPE)
-    payload_array = np.frombuffer(b"".join(payload_chunks), dtype=np.uint8).copy() if payload_chunks else np.zeros((0,), dtype=np.uint8)
+    section_array = (
+        np.array(sections, dtype=PAGE_STRIPE_SECTION_DTYPE)
+        if sections
+        else np.zeros((0,), dtype=PAGE_STRIPE_SECTION_DTYPE)
+    )
+    payload_array = (
+        np.frombuffer(b"".join(payload_chunks), dtype=np.uint8).copy()
+        if payload_chunks
+        else np.zeros((0,), dtype=np.uint8)
+    )
     return meta, section_array, payload_array

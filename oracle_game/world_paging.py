@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict, replace
-from typing import Any, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Iterable
 
 import numpy as np
 
@@ -11,6 +11,38 @@ from oracle_game.types import PageStripeUpdate, ReadbackResult, TargetQuery
 
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
+
+
+# Schema versions for the persistable page-store wire formats. Bump the matching
+# constant whenever the payload layout changes; readers reject anything else.
+PAGE_STRIPE_SCHEMA_VERSION = 1
+PAGE_STORE_EXPORT_SCHEMA_VERSION = 1
+
+
+def _validate_page_stripe_schema_version(version: Any) -> None:
+    if version is None:
+        raise ValueError(
+            "page stripe payload is missing schema_version; "
+            f"expected schema_version {PAGE_STRIPE_SCHEMA_VERSION}"
+        )
+    if version != PAGE_STRIPE_SCHEMA_VERSION:
+        raise ValueError(
+            f"unsupported page stripe schema_version {version!r}: "
+            f"expected schema_version {PAGE_STRIPE_SCHEMA_VERSION}"
+        )
+
+
+def _validate_page_store_export_schema_version(version: Any) -> None:
+    if version is None:
+        raise ValueError(
+            "page store export document is missing schema_version; "
+            f"expected schema_version {PAGE_STORE_EXPORT_SCHEMA_VERSION}"
+        )
+    if version != PAGE_STORE_EXPORT_SCHEMA_VERSION:
+        raise ValueError(
+            f"unsupported page store export schema_version {version!r}: "
+            f"expected schema_version {PAGE_STORE_EXPORT_SCHEMA_VERSION}"
+        )
 
 
 def focus_paging(engine: "WorldEngine", center_x: int, center_y: int) -> list[PageStripeUpdate]:
@@ -54,11 +86,16 @@ def capture_page_stripe(engine: "WorldEngine", update: PageStripeUpdate) -> dict
         if engine._gpu_cpu_dirty_resources:
             engine.bridge.sync_world(engine)
             engine._gpu_cpu_dirty_resources.clear()
-        return engine.page_stripe_pipeline.capture(engine, update)
-    return _capture_page_stripe_cpu_snapshot(engine, update)
+        payload = engine.page_stripe_pipeline.capture(engine, update)
+    else:
+        payload = _capture_page_stripe_cpu_snapshot(engine, update)
+    payload["schema_version"] = PAGE_STRIPE_SCHEMA_VERSION
+    return payload
 
 
-def _capture_page_stripe_cpu_snapshot(engine: "WorldEngine", update: PageStripeUpdate) -> dict[str, Any]:
+def _capture_page_stripe_cpu_snapshot(
+    engine: "WorldEngine", update: PageStripeUpdate
+) -> dict[str, Any]:
     gas_ranges = _stripe_buffer_ranges(engine, update, gas_grid=True)
     cell_axis = 1 if update.axis == "x" else 0
     cell_dose_axis = 2 if update.axis == "x" else 1
@@ -71,19 +108,21 @@ def _capture_page_stripe_cpu_snapshot(engine: "WorldEngine", update: PageStripeU
         update,
         stripe_axis=cell_axis,
     )
-    phase, island_id, entity_id, placeholder_displaced_material = engine._normalize_cell_runtime_arrays(
-        material_id,
-        phase,
-        island_id,
-        entity_id,
-        placeholder_displaced_material,
+    phase, island_id, entity_id, placeholder_displaced_material = (
+        engine._normalize_cell_runtime_arrays(
+            material_id,
+            phase,
+            island_id,
+            entity_id,
+            placeholder_displaced_material,
+        )
     )
-    runtime_payload = engine._capture_page_stripe_island_runtime(
-        island_id
-    )
-    runtime_payload["entity_placeholder_entity_id"] = engine._capture_page_stripe_entity_placeholder_runtime(
-        update,
-        stripe_axis=cell_axis,
+    runtime_payload = engine._capture_page_stripe_island_runtime(island_id)
+    runtime_payload["entity_placeholder_entity_id"] = (
+        engine._capture_page_stripe_entity_placeholder_runtime(
+            update,
+            stripe_axis=cell_axis,
+        )
     )
     payload = {
         "meta": {
@@ -99,11 +138,21 @@ def _capture_page_stripe_cpu_snapshot(engine: "WorldEngine", update: PageStripeU
         "cell": {
             "material_id": material_id,
             "phase": phase,
-            "cell_flags": engine._capture_stripe_array(engine.cell_flags, update, stripe_axis=cell_axis),
-            "velocity": engine._capture_stripe_array(engine.velocity, update, stripe_axis=cell_axis),
-            "cell_temperature": engine._capture_stripe_array(engine.cell_temperature, update, stripe_axis=cell_axis),
-            "timer_pack": engine._capture_stripe_array(engine.timer_pack, update, stripe_axis=cell_axis),
-            "integrity": engine._capture_stripe_array(engine.integrity, update, stripe_axis=cell_axis),
+            "cell_flags": engine._capture_stripe_array(
+                engine.cell_flags, update, stripe_axis=cell_axis
+            ),
+            "velocity": engine._capture_stripe_array(
+                engine.velocity, update, stripe_axis=cell_axis
+            ),
+            "cell_temperature": engine._capture_stripe_array(
+                engine.cell_temperature, update, stripe_axis=cell_axis
+            ),
+            "timer_pack": engine._capture_stripe_array(
+                engine.timer_pack, update, stripe_axis=cell_axis
+            ),
+            "integrity": engine._capture_stripe_array(
+                engine.integrity, update, stripe_axis=cell_axis
+            ),
             "island_id": island_id,
             "entity_id": entity_id,
             "placeholder_displaced_material": placeholder_displaced_material,
@@ -183,7 +232,9 @@ def apply_page_stripe(
     )
 
 
-def store_page_stripe(engine: "WorldEngine", update: PageStripeUpdate, payload: dict[str, Any]) -> dict[str, Any]:
+def store_page_stripe(
+    engine: "WorldEngine", update: PageStripeUpdate, payload: dict[str, Any]
+) -> dict[str, Any]:
     update = engine._contextualize_page_stripe_update(update)
     normalized_payload = _coerce_page_stripe_payload(engine, payload)
     engine.page_store.save(update, normalized_payload)
@@ -236,17 +287,28 @@ def export_page_store_entries(engine: "WorldEngine") -> dict[str, Any]:
             entries.append(
                 {
                     "key": engine.serialize_page_store_key(key),
-                    "payload": engine.serialize_page_stripe_payload(_coerce_page_stripe_payload(engine, payload)),
+                    "payload": engine.serialize_page_stripe_payload(
+                        _coerce_page_stripe_payload(engine, payload)
+                    ),
                 }
             )
     return {
+        "schema_version": PAGE_STORE_EXPORT_SCHEMA_VERSION,
         "stored_stripes": int(engine.page_store.stored_count()),
         "key_listing_supported": keys is not None,
         "entries": entries,
     }
 
 
-def import_page_store_entries(engine: "WorldEngine", entries: Iterable[dict[str, Any]], *, clear: bool = False) -> dict[str, int]:
+def import_page_store_entries(
+    engine: "WorldEngine",
+    entries: Iterable[dict[str, Any]] | dict[str, Any],
+    *,
+    clear: bool = False,
+) -> dict[str, int]:
+    if isinstance(entries, dict):
+        _validate_page_store_export_schema_version(entries.get("schema_version"))
+        entries = entries.get("entries", [])
     cleared = 0
     if clear:
         cleared = clear_page_store(engine)
@@ -300,6 +362,7 @@ def _coerce_page_store_key(
 
 
 def _coerce_page_stripe_payload(engine: "WorldEngine", payload: dict[str, Any]) -> dict[str, Any]:
+    _validate_page_stripe_schema_version(payload.get("schema_version"))
     cell_payload = dict(payload["cell"])
     gas_payload = dict(payload["gas"])
     runtime_payload = None if payload.get("runtime") is None else dict(payload["runtime"])
@@ -315,22 +378,29 @@ def _coerce_page_stripe_payload(engine: "WorldEngine", payload: dict[str, Any]) 
         )
     if runtime_payload is not None:
         if "island_ids" in runtime_payload:
-            runtime_payload["island_ids"] = np.asarray(runtime_payload["island_ids"], dtype=np.int32)
+            runtime_payload["island_ids"] = np.asarray(
+                runtime_payload["island_ids"], dtype=np.int32
+            )
         if "island_velocity" in runtime_payload:
-            runtime_payload["island_velocity"] = np.asarray(runtime_payload["island_velocity"], dtype=np.float32)
+            runtime_payload["island_velocity"] = np.asarray(
+                runtime_payload["island_velocity"], dtype=np.float32
+            )
         if "island_subcell_offset" in runtime_payload:
             runtime_payload["island_subcell_offset"] = np.asarray(
                 runtime_payload["island_subcell_offset"],
                 dtype=np.float32,
             )
     return {
+        "schema_version": PAGE_STRIPE_SCHEMA_VERSION,
         "meta": dict(payload["meta"]),
         "cell": {
             "material_id": np.asarray(cell_payload["material_id"], dtype=engine.material_id.dtype),
             "phase": np.asarray(cell_payload["phase"], dtype=engine.phase.dtype),
             "cell_flags": np.asarray(cell_payload["cell_flags"], dtype=engine.cell_flags.dtype),
             "velocity": np.asarray(cell_payload["velocity"], dtype=engine.velocity.dtype),
-            "cell_temperature": np.asarray(cell_payload["cell_temperature"], dtype=engine.cell_temperature.dtype),
+            "cell_temperature": np.asarray(
+                cell_payload["cell_temperature"], dtype=engine.cell_temperature.dtype
+            ),
             "timer_pack": np.asarray(cell_payload["timer_pack"], dtype=engine.timer_pack.dtype),
             "integrity": np.asarray(cell_payload["integrity"], dtype=engine.integrity.dtype),
             "island_id": np.asarray(cell_payload["island_id"], dtype=engine.island_id.dtype),
@@ -358,8 +428,12 @@ def _coerce_page_stripe_payload(engine: "WorldEngine", payload: dict[str, Any]) 
                 gas_payload["ambient_temperature"],
                 dtype=engine.ambient_temperature.dtype,
             ),
-            "flow_velocity": np.asarray(gas_payload["flow_velocity"], dtype=engine.flow_velocity.dtype),
-            "pressure_ping": np.asarray(gas_payload["pressure_ping"], dtype=engine.pressure_ping.dtype),
+            "flow_velocity": np.asarray(
+                gas_payload["flow_velocity"], dtype=engine.flow_velocity.dtype
+            ),
+            "pressure_ping": np.asarray(
+                gas_payload["pressure_ping"], dtype=engine.pressure_ping.dtype
+            ),
             "gas_concentration": gas_concentration,
             "gas_optical_dose": np.asarray(
                 gas_payload["gas_optical_dose"],
@@ -369,7 +443,9 @@ def _coerce_page_stripe_payload(engine: "WorldEngine", payload: dict[str, Any]) 
     }
 
 
-def _apply_page_stripe(engine: "WorldEngine", update: PageStripeUpdate, payload: dict[str, Any]) -> None:
+def _apply_page_stripe(
+    engine: "WorldEngine", update: PageStripeUpdate, payload: dict[str, Any]
+) -> None:
     if engine._gpu_pipeline_available(
         engine.page_stripe_pipeline,
         "page stripe",
@@ -395,29 +471,47 @@ def _apply_page_stripe(engine: "WorldEngine", update: PageStripeUpdate, payload:
         engine._rebuild_island_records()
     engine._apply_page_stripe_entity_placeholder_runtime(
         update,
-        None
-        if runtime_payload is None
-        else runtime_payload.get("entity_placeholder_entity_id"),
+        None if runtime_payload is None else runtime_payload.get("entity_placeholder_entity_id"),
     )
-    engine._invalidate_gpu_authoritative_resources("active_meta", "active_tile_ttl", "active_chunk_mask")
+    engine._invalidate_gpu_authoritative_resources(
+        "active_meta", "active_tile_ttl", "active_chunk_mask"
+    )
 
 
-def _apply_page_stripe_dense_cpu(engine: "WorldEngine", update: PageStripeUpdate, payload: dict[str, Any]) -> None:
+def _apply_page_stripe_dense_cpu(
+    engine: "WorldEngine", update: PageStripeUpdate, payload: dict[str, Any]
+) -> None:
     gas_ranges = _stripe_buffer_ranges(engine, update, gas_grid=True)
     cell_payload = payload["cell"]
     gas_payload = payload["gas"]
     cell_axis = 1 if update.axis == "x" else 0
     cell_dose_axis = 2 if update.axis == "x" else 1
 
-    engine._write_stripe_array(engine.material_id, update, cell_payload["material_id"], stripe_axis=cell_axis)
+    engine._write_stripe_array(
+        engine.material_id, update, cell_payload["material_id"], stripe_axis=cell_axis
+    )
     engine._write_stripe_array(engine.phase, update, cell_payload["phase"], stripe_axis=cell_axis)
-    engine._write_stripe_array(engine.cell_flags, update, cell_payload["cell_flags"], stripe_axis=cell_axis)
-    engine._write_stripe_array(engine.velocity, update, cell_payload["velocity"], stripe_axis=cell_axis)
-    engine._write_stripe_array(engine.cell_temperature, update, cell_payload["cell_temperature"], stripe_axis=cell_axis)
-    engine._write_stripe_array(engine.timer_pack, update, cell_payload["timer_pack"], stripe_axis=cell_axis)
-    engine._write_stripe_array(engine.integrity, update, cell_payload["integrity"], stripe_axis=cell_axis)
-    engine._write_stripe_array(engine.island_id, update, cell_payload["island_id"], stripe_axis=cell_axis)
-    engine._write_stripe_array(engine.entity_id, update, cell_payload["entity_id"], stripe_axis=cell_axis)
+    engine._write_stripe_array(
+        engine.cell_flags, update, cell_payload["cell_flags"], stripe_axis=cell_axis
+    )
+    engine._write_stripe_array(
+        engine.velocity, update, cell_payload["velocity"], stripe_axis=cell_axis
+    )
+    engine._write_stripe_array(
+        engine.cell_temperature, update, cell_payload["cell_temperature"], stripe_axis=cell_axis
+    )
+    engine._write_stripe_array(
+        engine.timer_pack, update, cell_payload["timer_pack"], stripe_axis=cell_axis
+    )
+    engine._write_stripe_array(
+        engine.integrity, update, cell_payload["integrity"], stripe_axis=cell_axis
+    )
+    engine._write_stripe_array(
+        engine.island_id, update, cell_payload["island_id"], stripe_axis=cell_axis
+    )
+    engine._write_stripe_array(
+        engine.entity_id, update, cell_payload["entity_id"], stripe_axis=cell_axis
+    )
     engine._write_stripe_array(
         engine.placeholder_displaced_material,
         update,
@@ -480,6 +574,50 @@ def _apply_page_stripe_dense_cpu(engine: "WorldEngine", update: PageStripeUpdate
     )
 
 
+def _sync_loaded_page_stripe_cpu_mirror(
+    engine: "WorldEngine", update: PageStripeUpdate, payload: dict[str, Any]
+) -> None:
+    """Mirror a bridge-GPU page stripe apply back into the CPU world arrays.
+
+    The bridge apply writes only GPU resources and leaves the CPU mirror stale
+    (``last_cpu_mirror_downloaded`` stays False). Paging is event-driven rather
+    than a per-frame path, and CPU-side readers that run right after a paging
+    event — terrain anchor resolution for target queries, observation/readback
+    serialization — scan the CPU arrays, so the freshly loaded stripe must be
+    visible there. This replays the CPU-equivalent stripe write and runtime
+    normalization (no GPU download). It deliberately keeps the bridge's
+    GPU-authoritative marks untouched, so ``_should_upload_cpu_resource`` still
+    skips re-uploading the (partially stale) CPU arrays over the authoritative
+    GPU copies on later frames.
+    """
+    pipeline = engine.page_stripe_pipeline
+    if pipeline.last_backend != "gpu" or pipeline.last_cpu_mirror_downloaded:
+        # CPU-backend and standalone-GPU applies already updated the CPU arrays.
+        return
+    _apply_page_stripe_dense_cpu(engine, update, payload)
+    cell_axis = 1 if update.axis == "x" else 0
+    phase, island_id, entity_id, placeholder_displaced_material = (
+        engine._normalize_cell_runtime_arrays(
+            engine._capture_stripe_array(engine.material_id, update, stripe_axis=cell_axis),
+            engine._capture_stripe_array(engine.phase, update, stripe_axis=cell_axis),
+            engine._capture_stripe_array(engine.island_id, update, stripe_axis=cell_axis),
+            engine._capture_stripe_array(engine.entity_id, update, stripe_axis=cell_axis),
+            engine._capture_stripe_array(
+                engine.placeholder_displaced_material, update, stripe_axis=cell_axis
+            ),
+        )
+    )
+    engine._write_stripe_array(engine.phase, update, phase, stripe_axis=cell_axis)
+    engine._write_stripe_array(engine.island_id, update, island_id, stripe_axis=cell_axis)
+    engine._write_stripe_array(engine.entity_id, update, entity_id, stripe_axis=cell_axis)
+    engine._write_stripe_array(
+        engine.placeholder_displaced_material,
+        update,
+        placeholder_displaced_material,
+        stripe_axis=cell_axis,
+    )
+
+
 def _default_page_stripe_payload(engine: "WorldEngine", update: PageStripeUpdate) -> dict[str, Any]:
     cell_span = engine.paging.stripe_span(update)
     gas_span = cell_span // engine.gas_cell_size
@@ -490,6 +628,7 @@ def _default_page_stripe_payload(engine: "WorldEngine", update: PageStripeUpdate
     light_count = engine.cell_optical_dose.shape[0]
     gas_count = engine.gas_concentration.shape[0]
     payload = {
+        "schema_version": PAGE_STRIPE_SCHEMA_VERSION,
         "meta": {
             "axis": update.axis,
             "world_start": update.world_start,
@@ -532,7 +671,9 @@ def _default_page_stripe_payload(engine: "WorldEngine", update: PageStripeUpdate
     return payload
 
 
-def _stripe_buffer_ranges(engine: "WorldEngine", update: PageStripeUpdate, *, gas_grid: bool) -> list[tuple[int, int]]:
+def _stripe_buffer_ranges(
+    engine: "WorldEngine", update: PageStripeUpdate, *, gas_grid: bool
+) -> list[tuple[int, int]]:
     if not gas_grid:
         return engine.paging.stripe_buffer_ranges(update)
     cell_span = engine.paging.stripe_span(update)
@@ -570,7 +711,9 @@ def poll_readbacks(engine: "WorldEngine", request_id: int | None = None) -> Read
     return None
 
 
-def poll_all_readbacks(engine: "WorldEngine", *, current_frame_id: int | None = None) -> list[ReadbackResult]:
+def poll_all_readbacks(
+    engine: "WorldEngine", *, current_frame_id: int | None = None
+) -> list[ReadbackResult]:
     results: list[ReadbackResult] = []
     if current_frame_id is not None:
         engine._collect_ready_readbacks(current_frame_id)
@@ -579,19 +722,22 @@ def poll_all_readbacks(engine: "WorldEngine", *, current_frame_id: int | None = 
     return results
 
 
-def _contextualize_page_stripe_update(engine: "WorldEngine", update: PageStripeUpdate) -> PageStripeUpdate:
+def _contextualize_page_stripe_update(
+    engine: "WorldEngine", update: PageStripeUpdate
+) -> PageStripeUpdate:
     if update.axis == "x":
         default_cross_start = int(engine.paging.origin_y)
         default_cross_end = int(engine.paging.origin_y + engine.height)
     else:
         default_cross_start = int(engine.paging.origin_x)
         default_cross_end = int(engine.paging.origin_x + engine.width)
-    cross_world_start = default_cross_start if update.cross_world_start is None else int(update.cross_world_start)
-    cross_world_end = default_cross_end if update.cross_world_end is None else int(update.cross_world_end)
-    if (
-        update.cross_world_start == cross_world_start
-        and update.cross_world_end == cross_world_end
-    ):
+    cross_world_start = (
+        default_cross_start if update.cross_world_start is None else int(update.cross_world_start)
+    )
+    cross_world_end = (
+        default_cross_end if update.cross_world_end is None else int(update.cross_world_end)
+    )
+    if update.cross_world_start == cross_world_start and update.cross_world_end == cross_world_end:
         return update
     return replace(
         update,
@@ -630,6 +776,7 @@ def _preview_apply_paging_updates(
         if payload is None:
             payload = _default_page_stripe_payload(engine, update)
         _apply_page_stripe(engine, update, payload)
+        _sync_loaded_page_stripe_cpu_mirror(engine, update, payload)
         preview_page_stripes.append((PageStripeUpdate(**asdict(update)), deepcopy(payload)))
     return preview_page_stripes
 
@@ -642,8 +789,12 @@ def _clear_saved_page_stripe_runtime_state(engine: "WorldEngine", update: PageSt
             engine.active.clear_rect(start, 0, end, engine.height)
         else:
             engine.active.clear_rect(0, start, engine.width, end)
-    engine.collapse_dirty_regions = _prune_page_stripe_regions(engine, engine.collapse_dirty_regions, update)
-    engine.collapse_deferred_regions = _prune_page_stripe_regions(engine, engine.collapse_deferred_regions, update)
+    engine.collapse_dirty_regions = _prune_page_stripe_regions(
+        engine, engine.collapse_dirty_regions, update
+    )
+    engine.collapse_deferred_regions = _prune_page_stripe_regions(
+        engine, engine.collapse_deferred_regions, update
+    )
 
 
 def _prune_page_stripe_regions(
@@ -657,7 +808,11 @@ def _prune_page_stripe_regions(
     for start, end in _stripe_buffer_ranges(engine, update, gas_grid=False):
         pruned: list[tuple[int, int, int, int]] = []
         for region in next_regions:
-            pruned.extend(engine._subtract_page_stripe_range_from_region(region, axis=update.axis, start=start, end=end))
+            pruned.extend(
+                engine._subtract_page_stripe_range_from_region(
+                    region, axis=update.axis, start=start, end=end
+                )
+            )
         next_regions = pruned
     return next_regions
 

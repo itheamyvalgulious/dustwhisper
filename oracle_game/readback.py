@@ -5,7 +5,6 @@ from typing import Any
 
 from oracle_game.types import ReadbackRequest, ReadbackResult
 
-
 READBACK_CPU_LATENCY_FRAMES = 1
 READBACK_GPU_LATENCY_FRAMES = 2
 
@@ -24,7 +23,9 @@ class PBOSlot:
 class PBOReadbackRing:
     """Fixed-capacity delayed readback ring with PBO-style poll semantics."""
 
-    def __init__(self, slots: int = 2, *, latency_frames: int = READBACK_CPU_LATENCY_FRAMES) -> None:
+    def __init__(
+        self, slots: int = 2, *, latency_frames: int = READBACK_CPU_LATENCY_FRAMES
+    ) -> None:
         if slots < 2:
             raise ValueError("readback ring needs at least two slots")
         if latency_frames < 1:

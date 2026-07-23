@@ -1,21 +1,24 @@
 from __future__ import annotations
-from typing import Any, TYPE_CHECKING
+
+from typing import TYPE_CHECKING, Any
+
 import numpy as np
 
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
-from oracle_game.types import Phase
+from oracle_game.sim.gpu_base import release_resource_fields
 from oracle_game.sim.gpu_reactions import (
     FLOW_SOURCE_LAYERS,
-    GPUReactionBridgeInputLoads,
-    GPUReactionResources,
     LOCAL_SIZE,
     MAX_ACTIONS,
     MAX_MATERIALS,
     MAX_SELF_RULES,
+    GPUReactionBridgeInputLoads,
+    GPUReactionResources,
 )
 from oracle_game.sim.gpu_timer_pack import pack_cell_state, pack_u8x4
+from oracle_game.types import Phase
 
 
 def release(pipeline) -> None:
@@ -44,105 +47,7 @@ def release(pipeline) -> None:
     pipeline._clear_formal_external_cell_state()
     if pipeline.resources is None:
         return
-    for resource in (
-        pipeline.resources.cell_state_ping,
-        pipeline.resources.cell_state_pong,
-        pipeline.resources.temp_ping,
-        pipeline.resources.temp_pong,
-        pipeline.resources.integrity_ping,
-        pipeline.resources.integrity_pong,
-        pipeline.resources.velocity_ping,
-        pipeline.resources.velocity_pong,
-        pipeline.resources.timer_ping,
-        pipeline.resources.timer_pong,
-        pipeline.resources.ambient_ping,
-        pipeline.resources.ambient_pong,
-        pipeline.resources.gas_ping,
-        pipeline.resources.gas_pong,
-        pipeline.resources.flow_velocity_tex,
-        pipeline.resources.active_cell_tex,
-        pipeline.resources.expanded_active_tile_tex,
-        pipeline.resources.active_gas_tex,
-        pipeline.resources.cell_dose_tex,
-        pipeline.resources.cell_dose_pong,
-        pipeline.resources.gas_dose_tex,
-        pipeline.resources.gas_dose_pong,
-        pipeline.resources.flow_source_tex,
-        pipeline.resources.flow_source_generation_tex,
-        pipeline.resources.gas_delta_buffer,
-        pipeline.resources.timed_candidate_count,
-        pipeline.resources.timed_candidate_list,
-        pipeline.resources.timed_candidate_dispatch_args,
-        pipeline.resources.light_dose_guarded_dispatch_args,
-        pipeline.resources.timed_candidate_marks,
-        pipeline.resources.timed_material_target_list,
-        pipeline.resources.timed_material_target_dispatch_args,
-        pipeline.resources.timed_material_target_marks,
-        pipeline.resources.trigger_lo_tex,
-        pipeline.resources.trigger_hi_tex,
-        pipeline.resources.deferred_scale_lo_tex,
-        pipeline.resources.deferred_scale_hi_tex,
-        pipeline.resources.cell_reset_tex,
-        pipeline.resources.reaction_latched_tex,
-        pipeline.resources.segment_cell_meta_tex,
-        pipeline.resources.emitted_material_mask_tex,
-        pipeline.resources.local_cell_state_out,
-        pipeline.resources.handoff_material_tex,
-        pipeline.resources.handoff_phase_tex,
-        pipeline.resources.handoff_flags_tex,
-        pipeline.resources.local_temp_out,
-        pipeline.resources.local_integrity_out,
-        pipeline.resources.local_timer_out,
-        pipeline.resources.local_deferred_lo_out,
-        pipeline.resources.local_deferred_hi_out,
-        pipeline.resources.local_deferred_packed_out,
-        pipeline.resources.local_cell_meta_out,
-        pipeline.resources.local_emit_cell_lo_out,
-        pipeline.resources.local_emit_cell_hi_out,
-        pipeline.resources.material_params,
-        pipeline.resources.material_tags,
-        pipeline.resources.gas_tags,
-        pipeline.resources.material_slots_lo,
-        pipeline.resources.material_slots_hi,
-        pipeline.resources.action_meta,
-        pipeline.resources.light_emitter_buffer,
-        pipeline.resources.light_emitter_count,
-        pipeline.resources.random_targets,
-        pipeline.resources.action_i,
-        pipeline.resources.action_f,
-        pipeline.resources.material_pair_action_i,
-        pipeline.resources.material_pair_action_f,
-        pipeline.resources.mm_rule_i,
-        pipeline.resources.mm_rule_f,
-        pipeline.resources.mm_rule_tags,
-        pipeline.resources.mg_rule_i,
-        pipeline.resources.mg_rule_f,
-        pipeline.resources.mg_rule_tags,
-        pipeline.resources.material_pair_rule_i,
-        pipeline.resources.material_pair_rule_f,
-        pipeline.resources.material_pair_rule_tags,
-        pipeline.resources.material_pair_lhs_candidate_masks,
-        pipeline.resources.material_pair_terminal_material_tables,
-        pipeline.resources.material_pair_terminal_action_tables,
-        pipeline.resources.material_pair_terminal_rule_tables,
-        pipeline.resources.rule_lhs_candidate_masks,
-        pipeline.resources.ml_rule_i,
-        pipeline.resources.ml_rule_f,
-        pipeline.resources.ml_rule_tags,
-        pipeline.resources.gg_rule_i,
-        pipeline.resources.gg_rule_f,
-        pipeline.resources.gg_rule_tags,
-        pipeline.resources.gl_rule_i,
-        pipeline.resources.gl_rule_f,
-        pipeline.resources.gl_rule_tags,
-        pipeline.resources.self_rule_i,
-        pipeline.resources.self_rule_f,
-        pipeline.resources.self_rule_span_i,
-    ):
-        try:
-            resource.release()
-        except Exception:
-            pass
+    release_resource_fields(pipeline.resources)
     pipeline.resources = None
 
 
@@ -159,11 +64,17 @@ def _adopt_formal_heat_cell_state(
     heat_resources = getattr(heat_pipeline, "resources", None)
     if heat_resources is None:
         return bridge_loads
-    if getattr(heat_pipeline, "_last_formal_output_frame_id", None) != int(getattr(world, "frame_id", 0)):
+    if getattr(heat_pipeline, "_last_formal_output_frame_id", None) != int(
+        getattr(world, "frame_id", 0)
+    ):
         return bridge_loads
     heat_signature = tuple(getattr(heat_resources, "signature", ()))
     reaction_signature = tuple(cache_key[4]) if isinstance(cache_key[4], tuple) else ()
-    if len(heat_signature) < 5 or len(reaction_signature) < 5 or heat_signature[:5] != reaction_signature[:5]:
+    if (
+        len(heat_signature) < 5
+        or len(reaction_signature) < 5
+        or heat_signature[:5] != reaction_signature[:5]
+    ):
         return bridge_loads
     pipeline._formal_external_cell_state_key = cache_key
     pipeline._formal_external_cell_state_textures = (
@@ -183,7 +94,6 @@ def _adopt_formal_heat_cell_state(
         cell_dose=bridge_loads.cell_dose,
         gas_dose=bridge_loads.gas_dose,
     )
-
 
 
 def _upload_state(
@@ -289,7 +199,9 @@ def _upload_state(
     pipeline.last_cpu_cell_dose_upload_skipped = not upload_cell_dose_from_cpu
     pipeline.last_cpu_gas_dose_upload_skipped = not upload_gas_dose_from_cpu
     if upload_cell_state_from_cpu:
-        packed_cell_state = pack_cell_state(world.material_id, world.phase, world.cell_flags).tobytes()
+        packed_cell_state = pack_cell_state(
+            world.material_id, world.phase, world.cell_flags
+        ).tobytes()
         resources.cell_state_ping.write(packed_cell_state)
         resources.temp_ping.write(world.cell_temperature.astype("f4").tobytes())
         resources.integrity_ping.write(world.integrity.astype("f4").tobytes())
@@ -316,7 +228,9 @@ def _upload_state(
         resources.gas_dose_tex.write(world.gas_optical_dose.astype("f4").tobytes())
         resources.gas_dose_pong.write(world.gas_optical_dose.astype("f4").tobytes())
     if formal_gpu_frame:
-        clear_requirements = pipeline._transient_clear_requirements(reaction_group, compiled_actions)
+        clear_requirements = pipeline._transient_clear_requirements(
+            reaction_group, compiled_actions
+        )
         if flow_source_layers is not None:
             clear_requirements["flow_source_layers"] = max(
                 1,
@@ -377,22 +291,46 @@ def _upload_state(
                 **clear_requirements,
             )
     else:
-        resources.flow_source_tex.write(np.zeros((FLOW_SOURCE_LAYERS, world.gas_height, world.gas_width, 4), dtype="f4").tobytes())
-        resources.trigger_lo_tex.write(np.zeros((world.height, world.width, 4), dtype="f4").tobytes())
-        resources.trigger_hi_tex.write(np.zeros((world.height, world.width, 4), dtype="f4").tobytes())
-        resources.deferred_scale_lo_tex.write(np.zeros((world.height, world.width, 4), dtype="f4").tobytes())
-        resources.deferred_scale_hi_tex.write(np.zeros((world.height, world.width, 4), dtype="f4").tobytes())
+        resources.flow_source_tex.write(
+            np.zeros(
+                (FLOW_SOURCE_LAYERS, world.gas_height, world.gas_width, 4), dtype="f4"
+            ).tobytes()
+        )
+        resources.trigger_lo_tex.write(
+            np.zeros((world.height, world.width, 4), dtype="f4").tobytes()
+        )
+        resources.trigger_hi_tex.write(
+            np.zeros((world.height, world.width, 4), dtype="f4").tobytes()
+        )
+        resources.deferred_scale_lo_tex.write(
+            np.zeros((world.height, world.width, 4), dtype="f4").tobytes()
+        )
+        resources.deferred_scale_hi_tex.write(
+            np.zeros((world.height, world.width, 4), dtype="f4").tobytes()
+        )
         resources.cell_reset_tex.write(np.zeros((world.height, world.width), dtype="f4").tobytes())
-        resources.reaction_latched_tex.write(np.zeros((world.height, world.width), dtype="f4").tobytes())
-        resources.emitted_material_mask_tex.write(np.zeros((world.height, world.width), dtype="f4").tobytes())
-        resources.local_emit_cell_lo_out.write(np.zeros((world.height, world.width, 4), dtype="f4").tobytes())
-        resources.local_emit_cell_hi_out.write(np.zeros((world.height, world.width, 4), dtype="f4").tobytes())
+        resources.reaction_latched_tex.write(
+            np.zeros((world.height, world.width), dtype="f4").tobytes()
+        )
+        resources.emitted_material_mask_tex.write(
+            np.zeros((world.height, world.width), dtype="f4").tobytes()
+        )
+        resources.local_emit_cell_lo_out.write(
+            np.zeros((world.height, world.width, 4), dtype="f4").tobytes()
+        )
+        resources.local_emit_cell_hi_out.write(
+            np.zeros((world.height, world.width, 4), dtype="f4").tobytes()
+        )
         resources.local_timer_out.write(np.zeros((world.height, world.width), dtype="u4").tobytes())
-        resources.local_cell_meta_out.write(np.zeros((world.height, world.width, 2), dtype="f4").tobytes())
+        resources.local_cell_meta_out.write(
+            np.zeros((world.height, world.width, 2), dtype="f4").tobytes()
+        )
         resources.light_emitter_count.write(np.zeros((16,), dtype=np.uint32).tobytes())
     bridge_loads_to_run = bridge_copy_loads
     if formal_gpu_frame and cache_key is not None and reuse_formal_state:
-        bridge_loads_to_run = pipeline._missing_formal_bridge_input_loads(cache_key, bridge_copy_loads)
+        bridge_loads_to_run = pipeline._missing_formal_bridge_input_loads(
+            cache_key, bridge_copy_loads
+        )
     if not reuse_formal_state or bridge_loads_to_run.any():
         with pipeline._profile_scoped_pass(world, profile_scope, "load_bridge_inputs"):
             pipeline._load_authoritative_bridge_inputs(
@@ -412,7 +350,10 @@ def _upload_state(
                 pipeline._set_formal_cell_read_role("ping")
                 pipeline._set_formal_velocity_read_role("ping")
     material_table = world.bridge.shadow_typed_tables["material_table"]
-    table_signature = (world.bridge.table_generations.get("materials", 0), int(material_table.shape[0]))
+    table_signature = (
+        world.bridge.table_generations.get("materials", 0),
+        int(material_table.shape[0]),
+    )
     if resources.material_params_signature != table_signature:
         params = np.zeros((MAX_MATERIALS, 4), dtype="f4")
         count = min(MAX_MATERIALS, int(material_table.shape[0]))
@@ -422,7 +363,6 @@ def _upload_state(
         resources.material_params.write(params.tobytes())
         resources.material_params_signature = table_signature
     pipeline._upload_random_targets(world, resources, material_table)
-
 
 
 def _bridge_input_load_requirements(
@@ -440,7 +380,11 @@ def _bridge_input_load_requirements(
 
     modifies_gas = pipeline._compiled_actions_include_modify_gas(compiled_actions)
     gas_published = modifies_gas if publishes_gas is None else bool(publishes_gas)
-    reads_gas = reaction_group in {"material_gas", "material_pair_fused", "gas_gas", "gas_light"} or modifies_gas or gas_published
+    reads_gas = (
+        reaction_group in {"material_gas", "material_pair_fused", "gas_gas", "gas_light"}
+        or modifies_gas
+        or gas_published
+    )
     reads_ambient = reaction_group in {"gas_gas", "gas_light"} or gas_published
     reads_cell_dose = reaction_group == "material_light"
     reads_gas_dose = reaction_group == "gas_light"
@@ -450,7 +394,8 @@ def _bridge_input_load_requirements(
             cell_core=True,
             gas=reads_gas,
             ambient=reads_ambient,
-            flow_velocity=modifies_gas and pipeline._compiled_actions_include_flow_sources(compiled_actions),
+            flow_velocity=modifies_gas
+            and pipeline._compiled_actions_include_flow_sources(compiled_actions),
             cell_dose=reads_cell_dose,
             gas_dose=reads_gas_dose,
         )
@@ -459,12 +404,12 @@ def _bridge_input_load_requirements(
             cell_core=True,
             gas=reads_gas,
             ambient=reads_ambient,
-            flow_velocity=modifies_gas and pipeline._compiled_actions_include_flow_sources(compiled_actions),
+            flow_velocity=modifies_gas
+            and pipeline._compiled_actions_include_flow_sources(compiled_actions),
             cell_dose=reads_cell_dose,
             gas_dose=reads_gas_dose,
         )
     return GPUReactionBridgeInputLoads()
-
 
 
 def _missing_formal_bridge_input_loads(
@@ -485,7 +430,6 @@ def _missing_formal_bridge_input_loads(
     )
 
 
-
 def _record_formal_bridge_inputs_loaded(
     pipeline,
     cache_key: tuple[object, ...],
@@ -497,26 +441,27 @@ def _record_formal_bridge_inputs_loaded(
     pipeline._formal_loaded_bridge_inputs.update(bridge_loads.resource_names())
 
 
-
 def _transient_clear_requirements(
     pipeline,
     reaction_group: str | None,
     compiled_actions: tuple[np.ndarray, np.ndarray] | None,
 ) -> dict[str, bool]:
     emits_material = bool(
-        compiled_actions is not None and pipeline._compiled_actions_include_emit_material(compiled_actions)
+        compiled_actions is not None
+        and pipeline._compiled_actions_include_emit_material(compiled_actions)
     )
     return {
         "clear_light_counters": True,
         "clear_flow_sources": bool(
-            compiled_actions is not None and pipeline._compiled_actions_include_flow_sources(compiled_actions)
+            compiled_actions is not None
+            and pipeline._compiled_actions_include_flow_sources(compiled_actions)
         ),
         "flow_source_layers": 16 if reaction_group == "timed" else FLOW_SOURCE_LAYERS,
         # Formal action batches never read this debug/download-only mask.
         "clear_emit_material_mask": False,
-        "clear_emit_material_buffers": emits_material and reaction_group in {"gas_gas", "gas_light"},
+        "clear_emit_material_buffers": emits_material
+        and reaction_group in {"gas_gas", "gas_light"},
     }
-
 
 
 def _upload_random_targets(
@@ -549,7 +494,6 @@ def _upload_random_targets(
     resources.random_targets_signature = random_targets_signature
 
 
-
 def _clear_transient_state(
     pipeline,
     world: "WorldEngine",
@@ -567,7 +511,9 @@ def _clear_transient_state(
     if ctx is None:
         return
     ran_clear = False
-    with pipeline._profile_scoped_pass(world, profile_scope, "clear_transient_full_cell_outputs_skipped"):
+    with pipeline._profile_scoped_pass(
+        world, profile_scope, "clear_transient_full_cell_outputs_skipped"
+    ):
         pass
     if clear_light_counters:
         with pipeline._profile_scoped_pass(world, profile_scope, "clear_transient_light_counters"):
@@ -576,11 +522,15 @@ def _clear_transient_state(
             counter_program.run(1, 1, 1)
             ran_clear = True
     else:
-        with pipeline._profile_scoped_pass(world, profile_scope, "clear_transient_light_counters_skipped"):
+        with pipeline._profile_scoped_pass(
+            world, profile_scope, "clear_transient_light_counters_skipped"
+        ):
             pass
 
     if clear_emit_material_buffers:
-        with pipeline._profile_scoped_pass(world, profile_scope, "clear_transient_emit_material_buffers"):
+        with pipeline._profile_scoped_pass(
+            world, profile_scope, "clear_transient_emit_material_buffers"
+        ):
             emit_program = pipeline.programs["clear_transient_emit_material_buffers"]
             emit_program["cell_grid_size"].value = (world.width, world.height)
             resources.local_emit_cell_lo_out.bind_to_image(0, read=False, write=True)
@@ -606,7 +556,9 @@ def _clear_transient_state(
                 emit_program.run(group_x, group_y, 1)
             ran_clear = True
     elif clear_emit_material_mask:
-        with pipeline._profile_scoped_pass(world, profile_scope, "clear_transient_emit_material_mask"):
+        with pipeline._profile_scoped_pass(
+            world, profile_scope, "clear_transient_emit_material_mask"
+        ):
             mask_program = pipeline.programs["clear_transient_emit_material_mask"]
             mask_program["cell_grid_size"].value = (world.width, world.height)
             resources.emitted_material_mask_tex.bind_to_image(0, read=False, write=True)
@@ -626,12 +578,13 @@ def _clear_transient_state(
                 mask_program.run(group_x, group_y, 1)
             ran_clear = True
     else:
-        with pipeline._profile_scoped_pass(world, profile_scope, "clear_transient_emit_material_skipped"):
+        with pipeline._profile_scoped_pass(
+            world, profile_scope, "clear_transient_emit_material_skipped"
+        ):
             pass
 
     generation_validity = bool(
-        clear_flow_sources
-        and pipeline._flow_source_generation_validity_active(world)
+        clear_flow_sources and pipeline._flow_source_generation_validity_active(world)
     )
     if generation_validity:
         with pipeline._profile_scoped_pass(world, profile_scope, "clear_transient_flow_sources"):
@@ -659,7 +612,9 @@ def _clear_transient_state(
                 flow_program.run(group_x, group_y, active_flow_source_layers)
             ran_clear = True
     else:
-        with pipeline._profile_scoped_pass(world, profile_scope, "clear_transient_flow_sources_skipped"):
+        with pipeline._profile_scoped_pass(
+            world, profile_scope, "clear_transient_flow_sources_skipped"
+        ):
             pass
     if ran_clear:
         pipeline._sync_compute_writes(ctx)
@@ -726,7 +681,6 @@ def _bind_flow_source_generation_output(
     )
 
 
-
 def _clear_segment_transient_state(
     pipeline,
     world: "WorldEngine",
@@ -784,8 +738,7 @@ def _record_formal_segment_cell_meta_in_flags(pipeline, carried_in_flags: bool) 
     ):
         return
     pipeline._formal_segment_all_prior_cell_meta_in_flags = bool(
-        pipeline._formal_segment_all_prior_cell_meta_in_flags
-        and carried_in_flags
+        pipeline._formal_segment_all_prior_cell_meta_in_flags and carried_in_flags
     )
 
 
@@ -817,7 +770,6 @@ def _can_use_terminal_segment_meta_zero(pipeline) -> bool:
         and not pipeline._formal_segment_meta_physically_cleared
         and pipeline._formal_segment_all_prior_cell_meta_in_flags
     )
-
 
 
 def _accumulate_segment_cell_transient_state(
@@ -861,7 +813,6 @@ def _accumulate_segment_cell_transient_state(
     pipeline._sync_compute_writes(ctx)
 
 
-
 def _upload_local_metadata(
     pipeline,
     world: "WorldEngine",
@@ -871,7 +822,10 @@ def _upload_local_metadata(
 ) -> None:
     world.bridge.sync_rule_tables(world)
     material_table = world.bridge.shadow_typed_tables["material_table"]
-    material_signature = (world.bridge.table_generations.get("materials", 0), int(material_table.shape[0]))
+    material_signature = (
+        world.bridge.table_generations.get("materials", 0),
+        int(material_table.shape[0]),
+    )
     if resources.material_slots_signature != material_signature:
         slots_lo = np.zeros((MAX_MATERIALS, 4), dtype=np.int32)
         slots_hi = np.zeros((MAX_MATERIALS, 4), dtype=np.int32)
@@ -899,7 +853,10 @@ def _upload_local_metadata(
         resources.gas_tags_signature = gas_signature
 
     action_table = world.bridge.shadow_typed_tables["reaction_action_table"]
-    action_signature = (world.bridge.table_generations.get("reactions", 0), int(action_table.shape[0]))
+    action_signature = (
+        world.bridge.table_generations.get("reactions", 0),
+        int(action_table.shape[0]),
+    )
     if resources.action_meta_signature != action_signature:
         action_meta = np.zeros((MAX_ACTIONS, 4), dtype=np.int32)
         count = min(MAX_ACTIONS, int(action_table.shape[0]))
@@ -988,8 +945,9 @@ def _upload_local_metadata(
     resources.self_rule_signature = self_rule_signature
 
 
-
-def _promote_cell_pong_to_ping(pipeline, world: "WorldEngine", resources: GPUReactionResources) -> None:
+def _promote_cell_pong_to_ping(
+    pipeline, world: "WorldEngine", resources: GPUReactionResources
+) -> None:
     if not pipeline._formal_reaction_state_cache_active():
         return
     program = pipeline.programs["promote_reaction_cell_state"]
@@ -1011,7 +969,6 @@ def _promote_cell_pong_to_ping(pipeline, world: "WorldEngine", resources: GPURea
             1,
         )
         pipeline._sync_compute_writes(world.bridge.ctx)
-
 
 
 def _copy_gas_state(
@@ -1041,29 +998,41 @@ def _copy_gas_state(
     pipeline._sync_compute_writes(world.bridge.ctx)
 
 
-
-def _promote_gas_pong_to_ping(pipeline, world: "WorldEngine", resources: GPUReactionResources) -> None:
+def _promote_gas_pong_to_ping(
+    pipeline, world: "WorldEngine", resources: GPUReactionResources
+) -> None:
     if not pipeline._formal_reaction_state_cache_active():
         return
     with pipeline._profile_pass(world, "promote_gas_pong"):
         resources.gas_ping, resources.gas_pong = resources.gas_pong, resources.gas_ping
 
 
-
-def _promote_gas_result(pipeline, world: "WorldEngine", resources: GPUReactionResources, gas_source: Any, ambient_source: Any) -> None:
+def _promote_gas_result(
+    pipeline,
+    world: "WorldEngine",
+    resources: GPUReactionResources,
+    gas_source: Any,
+    ambient_source: Any,
+) -> None:
     if not pipeline._formal_reaction_state_cache_active():
         return
     with pipeline._profile_pass(world, "promote_gas_pong"):
         if gas_source is resources.gas_ping and ambient_source is resources.ambient_ping:
             return
         if gas_source is not resources.gas_pong or ambient_source is not resources.ambient_pong:
-            raise RuntimeError("formal reaction gas result must use a matching ping/pong texture pair")
+            raise RuntimeError(
+                "formal reaction gas result must use a matching ping/pong texture pair"
+            )
         resources.gas_ping, resources.gas_pong = resources.gas_pong, resources.gas_ping
-        resources.ambient_ping, resources.ambient_pong = resources.ambient_pong, resources.ambient_ping
+        resources.ambient_ping, resources.ambient_pong = (
+            resources.ambient_pong,
+            resources.ambient_ping,
+        )
 
 
-
-def _promote_dose_pong_to_ping(pipeline, world: "WorldEngine", resources: GPUReactionResources) -> None:
+def _promote_dose_pong_to_ping(
+    pipeline, world: "WorldEngine", resources: GPUReactionResources
+) -> None:
     if not pipeline._formal_reaction_state_cache_active():
         return
     program = pipeline.programs["promote_reaction_dose_state"]
@@ -1084,8 +1053,9 @@ def _promote_dose_pong_to_ping(pipeline, world: "WorldEngine", resources: GPURea
         pipeline._sync_compute_writes(world.bridge.ctx)
 
 
-
-def _copy_bridge_flow_velocity_to_reaction(pipeline, world: "WorldEngine", resources: GPUReactionResources) -> None:
+def _copy_bridge_flow_velocity_to_reaction(
+    pipeline, world: "WorldEngine", resources: GPUReactionResources
+) -> None:
     if not pipeline._formal_reaction_state_cache_active():
         return
     program = pipeline.programs["copy_bridge_flow_velocity_to_reaction"]
@@ -1100,7 +1070,6 @@ def _copy_bridge_flow_velocity_to_reaction(pipeline, world: "WorldEngine", resou
     pipeline._sync_compute_writes(world.bridge.ctx)
 
 
-
 def _sync_storage_and_indirect_writes(pipeline, ctx: Any | None) -> None:
     if ctx is None:
         return
@@ -1109,7 +1078,6 @@ def _sync_storage_and_indirect_writes(pipeline, ctx: Any | None) -> None:
         | getattr(ctx, "COMMAND_BARRIER_BIT", 0)
         | ctx.TEXTURE_FETCH_BARRIER_BIT,
     )
-
 
 
 def _sync_compute_writes(pipeline, ctx: Any | None) -> None:

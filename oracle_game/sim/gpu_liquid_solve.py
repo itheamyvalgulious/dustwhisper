@@ -1,19 +1,16 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
-
-import numpy as np
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from oracle_game.world import WorldEngine
     from oracle_game.sim.gpu_liquid import GPULiquidResources
+    from oracle_game.world import WorldEngine
 
 from oracle_game.gpu import typed_material_id
-from oracle_game.types import Phase
-
 from oracle_game.sim.gpu_liquid import (
     PASS_LOCAL_SIZE,
 )
+from oracle_game.types import Phase
 
 
 def _build_seam_boundary_dispatch(
@@ -33,9 +30,13 @@ def _build_seam_boundary_dispatch(
 
     program = pipeline.programs[f"compact_seam_{axis}_boundaries_from_active_tiles"]
     if not hasattr(program, "run_indirect"):
-        raise RuntimeError(f"GPU liquid seam {axis} boundary compaction requires ModernGL ComputeShader.run_indirect")
+        raise RuntimeError(
+            f"GPU liquid seam {axis} boundary compaction requires ModernGL ComputeShader.run_indirect"
+        )
     program["tile_grid_size"].value = (world.active.tile_width, world.active.tile_height)
-    program["source_workgroups_per_tile"].value = int(pipeline._active_tile_workgroups_per_tile(world))
+    program["source_workgroups_per_tile"].value = int(
+        pipeline._active_tile_workgroups_per_tile(world)
+    )
     program["workgroups_per_boundary"].value = int(pipeline._seam_workgroups_per_boundary(axis))
     if axis == "x":
         program["boundary_row_groups"].value = int(
@@ -56,9 +57,7 @@ def _build_seam_boundary_dispatch(
         and pipeline._seam_y_shared_snapshot_enabled
         and pipeline._buoyancy_pass_fusion_enabled
     )
-    multirow_seam_x = bool(
-        axis == "x" and pipeline._seam_x_multirow_frame_rows == 4
-    )
+    multirow_seam_x = bool(axis == "x" and pipeline._seam_x_multirow_frame_rows == 4)
     if pipeline._seam_prefetch_zero_full_active_enabled or multirow_seam_x:
         prefetch_groups = (
             max(
@@ -89,7 +88,6 @@ def _build_seam_boundary_dispatch(
         resources.affected_tile_prefetch_dispatch_args.bind_to_storage_buffer(binding=1)
         retarget_program.run(1, 1, 1)
         pipeline._sync_compute_writes(ctx)
-
 
 
 def _prefetch_seam_boundary_bridge_inputs(
@@ -164,7 +162,9 @@ def _prefetch_seam_boundary_bridge_inputs(
         return
     aux_program = pipeline.programs["prefetch_seam_boundary_bridge_aux_inputs"]
     if not hasattr(aux_program, "run_indirect"):
-        raise RuntimeError("GPU liquid seam aux prefetch requires ModernGL ComputeShader.run_indirect")
+        raise RuntimeError(
+            "GPU liquid seam aux prefetch requires ModernGL ComputeShader.run_indirect"
+        )
     aux_program["cell_grid_size"].value = (world.width, world.height)
     aux_program["tile_grid_size"].value = (world.active.tile_width, world.active.tile_height)
     aux_program["tile_size"].value = int(world.active.tile_size)
@@ -180,7 +180,6 @@ def _prefetch_seam_boundary_bridge_inputs(
     resources.displaced_in.bind_to_image(1, read=False, write=True)
     aux_program.run_indirect(prefetch_dispatch_args)
     pipeline._sync_compute_writes(bridge.ctx)
-
 
 
 def _build_placeholder_dirty_affected_tile_dispatch(
@@ -210,7 +209,9 @@ def _build_placeholder_dirty_affected_tile_dispatch(
     if dirty_rect_count > 0:
         world.bridge.ensure_world_resources(world)
         if "placeholder_dirty_rect" not in world.bridge.buffers:
-            raise RuntimeError("GPU liquid placeholder displacement requires placeholder dirty rect buffer")
+            raise RuntimeError(
+                "GPU liquid placeholder displacement requires placeholder dirty rect buffer"
+            )
         program = pipeline.programs["compact_placeholder_dirty_affected_tiles"]
         program["tile_grid_size"].value = (world.active.tile_width, world.active.tile_height)
         program["tile_size"].value = int(world.active.tile_size)
@@ -237,16 +238,22 @@ def _build_placeholder_dirty_affected_tile_dispatch(
         else "compact_placeholder_active_pending_affected_tiles"
     ]
     if not hasattr(pending_program, "run_indirect"):
-        raise RuntimeError("GPU liquid placeholder pending compaction requires ModernGL ComputeShader.run_indirect")
+        raise RuntimeError(
+            "GPU liquid placeholder pending compaction requires ModernGL ComputeShader.run_indirect"
+        )
     material_table = world.bridge.shadow_typed_tables["material_table"]
     pending_program["cell_grid_size"].value = (world.width, world.height)
     pending_program["tile_grid_size"].value = (world.active.tile_width, world.active.tile_height)
     pending_program["tile_size"].value = int(world.active.tile_size)
-    pending_program["placeholder_material_id"].value = typed_material_id(material_table, "placeholder_solid")
+    pending_program["placeholder_material_id"].value = typed_material_id(
+        material_table, "placeholder_solid"
+    )
     pending_program["source_workgroups_per_tile"].value = int(
         pipeline._active_tile_workgroups_per_tile(world)
     )
-    pending_program["workgroups_per_tile"].value = int(pipeline._active_tile_workgroups_per_tile(world))
+    pending_program["workgroups_per_tile"].value = int(
+        pipeline._active_tile_workgroups_per_tile(world)
+    )
     cell_state_tex.use(location=0)
     displaced_tex.use(location=1)
     resources.active_tile_count.bind_to_storage_buffer(binding=0)
@@ -259,7 +266,6 @@ def _build_placeholder_dirty_affected_tile_dispatch(
         world.bridge.buffers["placeholder_displaced_material"].bind_to_storage_buffer(binding=6)
     pending_program.run_indirect(resources.active_tile_dispatch_args)
     pipeline._sync_compute_writes(ctx)
-
 
 
 def _compact_active_tiles(
@@ -284,8 +290,13 @@ def _compact_active_tiles(
         bridge._refresh_active_chunks_and_meta(world, read_meta=False)
         compact_program = pipeline.programs["compact_active_tiles_from_chunks"]
         if not hasattr(compact_program, "run_indirect"):
-            raise RuntimeError("GPU liquid active chunk compaction requires ModernGL ComputeShader.run_indirect")
-        compact_program["tile_grid_size"].value = (world.active.tile_width, world.active.tile_height)
+            raise RuntimeError(
+                "GPU liquid active chunk compaction requires ModernGL ComputeShader.run_indirect"
+            )
+        compact_program["tile_grid_size"].value = (
+            world.active.tile_width,
+            world.active.tile_height,
+        )
         compact_program["chunk_tiles"].value = int(world.active.chunk_tiles)
         compact_program["workgroups_per_tile"].value = compact_workgroups_per_tile
         resources.active_tile_count.bind_to_storage_buffer(binding=0)
@@ -298,7 +309,10 @@ def _compact_active_tiles(
     else:
         tile_count = int(world.active.tile_width * world.active.tile_height)
         compact_program = pipeline.programs["compact_active_tiles"]
-        compact_program["tile_grid_size"].value = (world.active.tile_width, world.active.tile_height)
+        compact_program["tile_grid_size"].value = (
+            world.active.tile_width,
+            world.active.tile_height,
+        )
         compact_program["workgroups_per_tile"].value = compact_workgroups_per_tile
         resources.active_tile_tex.use(location=0)
         resources.active_tile_count.bind_to_storage_buffer(binding=0)
@@ -306,7 +320,6 @@ def _compact_active_tiles(
         resources.active_tile_dispatch_args.bind_to_storage_buffer(binding=2)
         compact_program.run((tile_count + 255) // 256, 1, 1)
     pipeline._sync_compute_writes(ctx)
-
 
 
 def _run_tile_solve(pipeline, world: "WorldEngine", resources: GPULiquidResources) -> None:
@@ -331,13 +344,9 @@ def _run_tile_solve(pipeline, world: "WorldEngine", resources: GPULiquidResource
             "placeholder_displaced_material",
         }.issubset(world.bridge.gpu_authoritative_resources)
     )
-    provenance_output = bool(
-        snapshot_output
-        and pipeline._provenance_terminal_frame_enabled
-    )
+    provenance_output = bool(snapshot_output and pipeline._provenance_terminal_frame_enabled)
     blocker_mask_input = bool(
-        provenance_output
-        and pipeline._blocker_displaced_hydration_frame_enabled
+        provenance_output and pipeline._blocker_displaced_hydration_frame_enabled
     )
     row_stream = bool(
         snapshot_output
@@ -353,8 +362,7 @@ def _run_tile_solve(pipeline, world: "WorldEngine", resources: GPULiquidResource
             and direct_bridge_aux_inputs
             and pipeline._tile_solve_liquid_kind_cache_enabled
             else "tile_solve_bridge_snapshot_row_stream_provenance_kind_cache"
-            if provenance_output
-            and pipeline._tile_solve_liquid_kind_cache_enabled
+            if provenance_output and pipeline._tile_solve_liquid_kind_cache_enabled
             else "tile_solve_bridge_snapshot_row_stream_provenance_aux"
             if provenance_output and direct_bridge_aux_inputs
             else "tile_solve_bridge_snapshot_row_stream_provenance"
@@ -391,7 +399,9 @@ def _run_tile_solve(pipeline, world: "WorldEngine", resources: GPULiquidResource
             "tile_solve_bridge_snapshot_row_stream_provenance_blocker",
         }
         if program_name not in candidate_names:
-            raise RuntimeError(f"liquid snapshot pre-state unsupported tile program: {program_name}")
+            raise RuntimeError(
+                f"liquid snapshot pre-state unsupported tile program: {program_name}"
+            )
         program_name += "_snapshot_pre"
         if pipeline._tile_snapshot_state_elision_frame_enabled:
             program_name += "_state_elided"
@@ -399,7 +409,9 @@ def _run_tile_solve(pipeline, world: "WorldEngine", resources: GPULiquidResource
     ctx = world.bridge.ctx
     assert ctx is not None
     if not hasattr(program, "run_indirect"):
-        raise RuntimeError("GPU liquid active tile solve requires ModernGL ComputeShader.run_indirect")
+        raise RuntimeError(
+            "GPU liquid active tile solve requires ModernGL ComputeShader.run_indirect"
+        )
     program["cell_grid_size"].value = (world.width, world.height)
     program["tile_grid_size"].value = (world.active.tile_width, world.active.tile_height)
     program["active_ttl_reset"].value = int(world.active.active_ttl_reset)
@@ -465,9 +477,7 @@ def _run_provenance_init(
     if skip_when_all_tiles_active:
         retarget = pipeline.programs["retarget_provenance_init_dispatch"]
         retarget["full_grid_groups"].value = (groups_x, groups_y)
-        retarget["total_tile_count"].value = int(
-            world.active.tile_width * world.active.tile_height
-        )
+        retarget["total_tile_count"].value = int(world.active.tile_width * world.active.tile_height)
         resources.active_tile_count.bind_to_storage_buffer(binding=0)
         resources.affected_tile_prefetch_dispatch_args.bind_to_storage_buffer(binding=1)
         retarget.run(1, 1, 1)
@@ -479,7 +489,6 @@ def _run_provenance_init(
     else:
         program.run(groups_x, groups_y, 1)
     pipeline._sync_compute_writes(ctx)
-
 
 
 def _run_seam_pass(
@@ -539,7 +548,9 @@ def _run_seam_pass(
     write_resources[4].bind_to_image(6, read=False, write=True)
     if boundary_dispatch:
         if not hasattr(program, "run_indirect"):
-            raise RuntimeError(f"GPU liquid {program_name} requires ModernGL ComputeShader.run_indirect")
+            raise RuntimeError(
+                f"GPU liquid {program_name} requires ModernGL ComputeShader.run_indirect"
+            )
         program.run_indirect(resources.affected_tile_dispatch_args)
     else:
         program.run(
@@ -548,7 +559,6 @@ def _run_seam_pass(
             1,
         )
     pipeline._sync_compute_writes(ctx)
-
 
 
 def _run_buoyancy_pass(
@@ -564,9 +574,7 @@ def _run_buoyancy_pass(
     program = pipeline.programs[program_name]
     ctx = world.bridge.ctx
     assert ctx is not None
-    snapshot_pre_state = program_name.startswith(
-        "buoyancy_fused_provenance_cleanup_snapshot_pre"
-    )
+    snapshot_pre_state = program_name.startswith("buoyancy_fused_provenance_cleanup_snapshot_pre")
     if snapshot_pre_state:
         validation_program = pipeline.programs["validate_tile_snapshot_coverage"]
         validation_program["tile_grid_size"].value = (
@@ -596,9 +604,7 @@ def _run_buoyancy_pass(
     resources.active_tile_tex.use(location=7)
     if program_name.startswith("buoyancy_fused"):
         fallback_resources = (
-            write_resources
-            if sink_fallback_resources is None
-            else sink_fallback_resources
+            write_resources if sink_fallback_resources is None else sink_fallback_resources
         )
         # Sink only writes active cells. Float can sample an inactive neighbor,
         # so preserve the old sink destination as the exact fallback value.
@@ -629,7 +635,6 @@ def _run_buoyancy_pass(
     write_resources[4].bind_to_image(6, read=False, write=True)
     pipeline._run_active_tile_indirect(program, resources, program_name)
     pipeline._sync_compute_writes(ctx)
-
 
 
 def _run_copy_core_state(
@@ -670,7 +675,6 @@ def _run_copy_core_state(
     pipeline._sync_compute_writes(ctx)
 
 
-
 def _run_copy_for_placeholder(
     pipeline,
     world: "WorldEngine",
@@ -692,10 +696,7 @@ def _run_copy_for_placeholder(
             world.bridge.gpu_authoritative_resources
         )
     )
-    provenance_output = bool(
-        active_tile_indirect
-        and pipeline._provenance_terminal_frame_enabled
-    )
+    provenance_output = bool(active_tile_indirect and pipeline._provenance_terminal_frame_enabled)
     program = pipeline.programs[
         "copy_with_pending_provenance_bridge_aux"
         if provenance_output and direct_bridge_aux_inputs
@@ -728,8 +729,12 @@ def _run_copy_for_placeholder(
     write_resources[3].bind_to_image(5, read=False, write=True)
     write_resources[4].bind_to_image(6, read=False, write=True)
     displaced_out.bind_to_image(7, read=False, write=True)
-    tile_count_buffer = resources.affected_tile_count if affected_tile_dispatch else resources.active_tile_count
-    tile_list_buffer = resources.affected_tile_list if affected_tile_dispatch else resources.active_tile_list
+    tile_count_buffer = (
+        resources.affected_tile_count if affected_tile_dispatch else resources.active_tile_count
+    )
+    tile_list_buffer = (
+        resources.affected_tile_list if affected_tile_dispatch else resources.active_tile_list
+    )
     dispatch_args = (
         resources.affected_tile_dispatch_args
         if affected_tile_dispatch
@@ -748,7 +753,6 @@ def _run_copy_for_placeholder(
             1,
         )
     pipeline._sync_compute_writes(ctx)
-
 
 
 def _run_placeholder_displacement(
@@ -770,8 +774,7 @@ def _run_placeholder_displacement(
         )
     )
     provenance_output = bool(
-        pipeline._formal_gpu_frame(world)
-        and pipeline._provenance_terminal_frame_enabled
+        pipeline._formal_gpu_frame(world) and pipeline._provenance_terminal_frame_enabled
     )
     program = pipeline.programs[
         "placeholder_displace_provenance_bridge_aux"
@@ -799,8 +802,12 @@ def _run_placeholder_displacement(
     program["active_ttl_reset"].value = int(world.active.active_ttl_reset)
     program["phase_liquid"].value = int(Phase.LIQUID)
     program["phase_falling_island"].value = int(Phase.FALLING_ISLAND)
-    program["placeholder_material_id"].value = typed_material_id(material_table, "placeholder_solid")
-    program["placeholder_claim_epoch"].value = int(pipeline._next_placeholder_claim_epoch(resources, world))
+    program["placeholder_material_id"].value = typed_material_id(
+        material_table, "placeholder_solid"
+    )
+    program["placeholder_claim_epoch"].value = int(
+        pipeline._next_placeholder_claim_epoch(resources, world)
+    )
     read_resources[0].use(location=0)
     read_resources[1].use(location=3)
     read_resources[2].use(location=4)
@@ -832,12 +839,13 @@ def _run_placeholder_displacement(
     displaced_out.bind_to_image(7)
     if dirty_affected_dispatch:
         if not hasattr(program, "run_indirect"):
-            raise RuntimeError("GPU liquid placeholder displacement requires ModernGL ComputeShader.run_indirect")
+            raise RuntimeError(
+                "GPU liquid placeholder displacement requires ModernGL ComputeShader.run_indirect"
+            )
         program.run_indirect(resources.affected_tile_dispatch_args)
     else:
         pipeline._run_active_tile_indirect(program, resources, "placeholder displacement")
     pipeline._sync_compute_writes(ctx)
-
 
 
 def _run_cleanup_runtime(
@@ -877,7 +885,9 @@ def _run_cleanup_runtime(
         if direct_bridge_island_input and direct_bridge_aux_outputs
         else "cleanup_runtime_bridge_aux"
         if direct_bridge_aux_outputs
-        else "cleanup_runtime_bridge" if direct_bridge_inputs else "cleanup_runtime"
+        else "cleanup_runtime_bridge"
+        if direct_bridge_inputs
+        else "cleanup_runtime"
     )
     if restore_bridge_aux_values:
         if not (affected_tile_dispatch and direct_bridge_aux_outputs):
@@ -889,7 +899,8 @@ def _run_cleanup_runtime(
         )
     cleanup_local16 = bool(
         (pipeline._cleanup_local16_enabled or restore_bridge_aux_values)
-        and program_name in {
+        and program_name
+        in {
             "cleanup_runtime_bridge_aux",
             "cleanup_runtime_bridge_aux_island",
             "cleanup_runtime_bridge_aux_restore16",
@@ -926,14 +937,10 @@ def _run_cleanup_runtime(
     resources.active_tile_tex.use(location=7)
     resources.material_params.bind_to_storage_buffer(binding=0)
     tile_count_buffer = (
-        resources.affected_tile_count
-        if affected_tile_dispatch
-        else resources.active_tile_count
+        resources.affected_tile_count if affected_tile_dispatch else resources.active_tile_count
     )
     tile_list_buffer = (
-        resources.affected_tile_list
-        if affected_tile_dispatch
-        else resources.active_tile_list
+        resources.affected_tile_list if affected_tile_dispatch else resources.active_tile_list
     )
     dispatch_args = (
         resources.affected_tile_dispatch_args

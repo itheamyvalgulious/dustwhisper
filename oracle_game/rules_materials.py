@@ -4,7 +4,6 @@ from typing import Callable
 
 from oracle_game.types import Phase
 
-
 # Each sub-builder receives the shared add closure (defined in rules.py's
 # _build_materials) which assigns material_id = len(defs) + 1.  The sub-builders
 # are invoked in the exact order below so material IDs stay identical.
@@ -980,5 +979,3 @@ def _build_special_materials(add: Callable[..., None]) -> None:
         ambient_exchange_rate=0.12,
         tags=("placeholder", "soft"),
     )
-
-

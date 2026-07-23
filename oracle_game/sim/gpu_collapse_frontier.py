@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 if TYPE_CHECKING:
-    from oracle_game.world import WorldEngine
     from oracle_game.sim.gpu_collapse import GPUCollapseResources
-
-from oracle_game.sim.gpu_collapse_dirty import ensure_collapse_structure_dirty_tile_queue
-from oracle_game.types import Phase
+    from oracle_game.world import WorldEngine
 
 from oracle_game.sim.gpu_collapse import (
     FORMAL_CONNECTED_CELL_FRONTIER_TILE_COUNT_BUFFER,
@@ -28,9 +25,10 @@ from oracle_game.sim.gpu_collapse import (
     FORMAL_CONNECTED_TILE_LOCAL_SIZE,
     FORMAL_CONNECTED_TILE_SCRATCH_COUNT_BUFFER,
     FORMAL_CONNECTED_TILE_SCRATCH_DISPATCH_ARGS_BUFFER,
-    FORMAL_CONNECTED_TILE_SCRATCH_LIST_BUFFER
+    FORMAL_CONNECTED_TILE_SCRATCH_LIST_BUFFER,
 )
-
+from oracle_game.sim.gpu_collapse_dirty import ensure_collapse_structure_dirty_tile_queue
+from oracle_game.types import Phase
 
 
 def _solve_formal_connected_tile_frontier(
@@ -43,7 +41,9 @@ def _solve_formal_connected_tile_frontier(
     width: int,
     height: int,
 ) -> str:
-    pipeline._seed_formal_connected_tile_frontier(world, resources, seed_rect, x0, y0, width, height)
+    pipeline._seed_formal_connected_tile_frontier(
+        world, resources, seed_rect, x0, y0, width, height
+    )
     scratch_frontier = (
         FORMAL_CONNECTED_TILE_SCRATCH_LIST_BUFFER,
         FORMAL_CONNECTED_TILE_SCRATCH_COUNT_BUFFER,
@@ -55,7 +55,9 @@ def _solve_formal_connected_tile_frontier(
         FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER,
     )
     for jump in pipeline._formal_connected_tile_jump_schedule(world):
-        pipeline._clear_formal_connected_tile_worklist(world, scratch_frontier[1], scratch_frontier[2])
+        pipeline._clear_formal_connected_tile_worklist(
+            world, scratch_frontier[1], scratch_frontier[2]
+        )
         pipeline._expand_formal_connected_tile_frontier(
             world,
             resources,
@@ -81,7 +83,9 @@ def _solve_formal_connected_dirty_tile_frontier(
     width: int,
     height: int,
 ) -> str:
-    pipeline._seed_formal_connected_tile_frontier_from_dirty_queue(world, resources, x0, y0, width, height)
+    pipeline._seed_formal_connected_tile_frontier_from_dirty_queue(
+        world, resources, x0, y0, width, height
+    )
     scratch_frontier = (
         FORMAL_CONNECTED_TILE_SCRATCH_LIST_BUFFER,
         FORMAL_CONNECTED_TILE_SCRATCH_COUNT_BUFFER,
@@ -93,7 +97,9 @@ def _solve_formal_connected_dirty_tile_frontier(
         FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER,
     )
     for jump in pipeline._formal_connected_dirty_tile_jump_schedule(world):
-        pipeline._clear_formal_connected_tile_worklist(world, scratch_frontier[1], scratch_frontier[2])
+        pipeline._clear_formal_connected_tile_worklist(
+            world, scratch_frontier[1], scratch_frontier[2]
+        )
         pipeline._expand_formal_connected_tile_frontier(
             world,
             resources,
@@ -110,7 +116,9 @@ def _solve_formal_connected_dirty_tile_frontier(
     return FORMAL_CONNECTED_TILE_FRONTIER_BUFFER
 
 
-def _compact_formal_connected_tile_mask(pipeline, world: "WorldEngine", tile_mask_name: str) -> None:
+def _compact_formal_connected_tile_mask(
+    pipeline, world: "WorldEngine", tile_mask_name: str
+) -> None:
     pipeline._invalidate_persistent_dense_tile_worklist()
     ctx = world.bridge.ctx
     if ctx is None:
@@ -194,7 +202,9 @@ def _seed_formal_connected_tile_frontier(
     bridge.buffers[FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER].bind_to_storage_buffer(binding=4)
     bridge.buffers[FORMAL_CONNECTED_TILE_FRONTIER_LIST_BUFFER].bind_to_storage_buffer(binding=5)
     bridge.buffers[FORMAL_CONNECTED_TILE_FRONTIER_COUNT_BUFFER].bind_to_storage_buffer(binding=6)
-    bridge.buffers[FORMAL_CONNECTED_TILE_FRONTIER_DISPATCH_ARGS_BUFFER].bind_to_storage_buffer(binding=7)
+    bridge.buffers[FORMAL_CONNECTED_TILE_FRONTIER_DISPATCH_ARGS_BUFFER].bind_to_storage_buffer(
+        binding=7
+    )
     bridge.buffers["cell_core"].bind_to_storage_buffer(binding=8)
     program.run(tile_x1 - tile_x0, tile_y1 - tile_y0, 1)
     pipeline._sync_compute_writes(ctx)
@@ -254,7 +264,9 @@ def _seed_formal_connected_tile_frontier_from_dirty_queue(
     bridge.buffers[FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER].bind_to_storage_buffer(binding=4)
     bridge.buffers[FORMAL_CONNECTED_TILE_FRONTIER_LIST_BUFFER].bind_to_storage_buffer(binding=5)
     bridge.buffers[FORMAL_CONNECTED_TILE_FRONTIER_COUNT_BUFFER].bind_to_storage_buffer(binding=6)
-    bridge.buffers[FORMAL_CONNECTED_TILE_FRONTIER_DISPATCH_ARGS_BUFFER].bind_to_storage_buffer(binding=7)
+    bridge.buffers[FORMAL_CONNECTED_TILE_FRONTIER_DISPATCH_ARGS_BUFFER].bind_to_storage_buffer(
+        binding=7
+    )
     dirty_count.bind_to_storage_buffer(binding=8)
     dirty_list.bind_to_storage_buffer(binding=9)
     bridge.buffers["cell_core"].bind_to_storage_buffer(binding=10)
@@ -352,7 +364,9 @@ def _clear_formal_connected_cell_frontier_tiles(
     flags_name, list_name, count_name, dispatch_args_name = frontier
     clear_program = pipeline.programs["clear_formal_connected_cell_frontier_tile_flags_by_list"]
     if not hasattr(clear_program, "run_indirect"):
-        raise RuntimeError("formal connected cell frontier flag clear requires ComputeShader.run_indirect")
+        raise RuntimeError(
+            "formal connected cell frontier flag clear requires ComputeShader.run_indirect"
+        )
     clear_program["tile_grid_size"].value = (
         int(getattr(world.active, "tile_width", 1)),
         int(getattr(world.active, "tile_height", 1)),
@@ -386,13 +400,19 @@ def _accumulate_formal_connected_cell_frontier_tiles(
     bridge.ensure_world_resources(world)
     program = pipeline.programs["accumulate_formal_connected_cell_frontier_tiles"]
     if not hasattr(program, "run_indirect"):
-        raise RuntimeError("formal connected cell frontier accumulation requires ComputeShader.run_indirect")
+        raise RuntimeError(
+            "formal connected cell frontier accumulation requires ComputeShader.run_indirect"
+        )
     program["tile_grid_size"].value = (
         int(getattr(world.active, "tile_width", 1)),
         int(getattr(world.active, "tile_height", 1)),
     )
-    target_flags_name, target_list_name, target_count_name, target_dispatch_args_name = target_frontier
-    source_flags_name, source_list_name, source_count_name, source_dispatch_args_name = source_frontier
+    target_flags_name, target_list_name, target_count_name, target_dispatch_args_name = (
+        target_frontier
+    )
+    source_flags_name, source_list_name, source_count_name, source_dispatch_args_name = (
+        source_frontier
+    )
     bridge.buffers[target_flags_name].bind_to_storage_buffer(binding=0)
     bridge.buffers[target_list_name].bind_to_storage_buffer(binding=1)
     bridge.buffers[target_count_name].bind_to_storage_buffer(binding=2)
@@ -440,7 +460,9 @@ def _seed_formal_connected_cell_frontier(
     )
     pipeline._clear_formal_connected_cell_frontier_tiles(world, current_frontier)
     if not hasattr(program, "run_indirect"):
-        raise RuntimeError("formal connected cell frontier seed requires ComputeShader.run_indirect")
+        raise RuntimeError(
+            "formal connected cell frontier seed requires ComputeShader.run_indirect"
+        )
     program["cell_grid_size"].value = (int(width), int(height))
     program["tile_grid_size"].value = (
         int(getattr(world.active, "tile_width", 1)),
@@ -452,10 +474,18 @@ def _seed_formal_connected_cell_frontier(
     bridge.buffers[FORMAL_CONNECTED_FRONTIER_BUFFER].bind_to_storage_buffer(binding=0)
     bridge.buffers[FORMAL_CONNECTED_FRONTIER_SCRATCH_BUFFER].bind_to_storage_buffer(binding=1)
     bridge.buffers[tile_mask_name].bind_to_storage_buffer(binding=2)
-    bridge.buffers[FORMAL_CONNECTED_CELL_FRONTIER_TILE_FLAGS_BUFFER].bind_to_storage_buffer(binding=3)
-    bridge.buffers[FORMAL_CONNECTED_CELL_FRONTIER_TILE_LIST_BUFFER].bind_to_storage_buffer(binding=4)
-    bridge.buffers[FORMAL_CONNECTED_CELL_FRONTIER_TILE_COUNT_BUFFER].bind_to_storage_buffer(binding=5)
-    bridge.buffers[FORMAL_CONNECTED_CELL_FRONTIER_TILE_DISPATCH_ARGS_BUFFER].bind_to_storage_buffer(binding=6)
+    bridge.buffers[FORMAL_CONNECTED_CELL_FRONTIER_TILE_FLAGS_BUFFER].bind_to_storage_buffer(
+        binding=3
+    )
+    bridge.buffers[FORMAL_CONNECTED_CELL_FRONTIER_TILE_LIST_BUFFER].bind_to_storage_buffer(
+        binding=4
+    )
+    bridge.buffers[FORMAL_CONNECTED_CELL_FRONTIER_TILE_COUNT_BUFFER].bind_to_storage_buffer(
+        binding=5
+    )
+    bridge.buffers[FORMAL_CONNECTED_CELL_FRONTIER_TILE_DISPATCH_ARGS_BUFFER].bind_to_storage_buffer(
+        binding=6
+    )
     bridge.buffers[FORMAL_CONNECTED_TILE_COUNT_BUFFER].bind_to_storage_buffer(binding=7)
     bridge.buffers[FORMAL_CONNECTED_TILE_LIST_BUFFER].bind_to_storage_buffer(binding=8)
     program.run_indirect(bridge.buffers[FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER])
@@ -521,10 +551,18 @@ def _seed_formal_connected_cell_frontier_from_dirty_queue(
     bridge.buffers[FORMAL_CONNECTED_FRONTIER_BUFFER].bind_to_storage_buffer(binding=0)
     bridge.buffers[FORMAL_CONNECTED_FRONTIER_SCRATCH_BUFFER].bind_to_storage_buffer(binding=1)
     bridge.buffers[tile_mask_name].bind_to_storage_buffer(binding=2)
-    bridge.buffers[FORMAL_CONNECTED_CELL_FRONTIER_TILE_FLAGS_BUFFER].bind_to_storage_buffer(binding=3)
-    bridge.buffers[FORMAL_CONNECTED_CELL_FRONTIER_TILE_LIST_BUFFER].bind_to_storage_buffer(binding=4)
-    bridge.buffers[FORMAL_CONNECTED_CELL_FRONTIER_TILE_COUNT_BUFFER].bind_to_storage_buffer(binding=5)
-    bridge.buffers[FORMAL_CONNECTED_CELL_FRONTIER_TILE_DISPATCH_ARGS_BUFFER].bind_to_storage_buffer(binding=6)
+    bridge.buffers[FORMAL_CONNECTED_CELL_FRONTIER_TILE_FLAGS_BUFFER].bind_to_storage_buffer(
+        binding=3
+    )
+    bridge.buffers[FORMAL_CONNECTED_CELL_FRONTIER_TILE_LIST_BUFFER].bind_to_storage_buffer(
+        binding=4
+    )
+    bridge.buffers[FORMAL_CONNECTED_CELL_FRONTIER_TILE_COUNT_BUFFER].bind_to_storage_buffer(
+        binding=5
+    )
+    bridge.buffers[FORMAL_CONNECTED_CELL_FRONTIER_TILE_DISPATCH_ARGS_BUFFER].bind_to_storage_buffer(
+        binding=6
+    )
     dirty_count.bind_to_storage_buffer(binding=7)
     dirty_list.bind_to_storage_buffer(binding=8)
     program.run_indirect(dirty_dispatch_args)
@@ -567,7 +605,9 @@ def _expand_formal_connected_cell_frontier(
     bridge.ensure_world_resources(world)
     program = pipeline.programs["expand_formal_connected_cells_by_tile"]
     if not hasattr(program, "run_indirect"):
-        raise RuntimeError("GPU collapse formal connected cell frontier requires ComputeShader.run_indirect")
+        raise RuntimeError(
+            "GPU collapse formal connected cell frontier requires ComputeShader.run_indirect"
+        )
     program["cell_grid_size"].value = (int(width), int(height))
     program["tile_grid_size"].value = (tile_width, tile_height)
     program["tile_size"].value = int(tile_size)
@@ -629,7 +669,9 @@ def _copy_formal_connected_buffer_to_texture(
         int(getattr(world.active, "tile_width", 1)),
         int(getattr(world.active, "tile_height", 1)),
     )
-    program["tile_size"].value = int(max(1, int(getattr(world.active, "tile_size", FORMAL_CONNECTED_TILE_LOCAL_SIZE))))
+    program["tile_size"].value = int(
+        max(1, int(getattr(world.active, "tile_size", FORMAL_CONNECTED_TILE_LOCAL_SIZE)))
+    )
     resources.structural_tex.use(location=0)
     bridge.buffers[connected_buffer_name].bind_to_storage_buffer(binding=0)
     bridge.buffers[tile_mask_name].bind_to_storage_buffer(binding=1)
@@ -778,17 +820,15 @@ def _run_formal_connected_tile_support_slice(
                             world,
                             f"support_jfa.jump_{int(jump)}",
                         ):
-                            current, scratch = (
-                                pipeline._run_formal_connected_tile_support_pass(
-                                    world,
-                                    resources,
-                                    current,
-                                    scratch,
-                                    width,
-                                    height,
-                                    tile_mask_name,
-                                    jump,
-                                )
+                            current, scratch = pipeline._run_formal_connected_tile_support_pass(
+                                world,
+                                resources,
+                                current,
+                                scratch,
+                                width,
+                                height,
+                                tile_mask_name,
+                                jump,
                             )
     refine_slice_start = max(slice_start, jfa_stop)
     if refine_slice_start < slice_stop:
@@ -854,8 +894,7 @@ def _run_formal_connected_tile_support_union(
         raise RuntimeError("formal connected support tile union requires tile_size <= 32")
     edge_capacity = max(
         1,
-        max(0, tile_width - 1) * int(height)
-        + max(0, tile_height - 1) * int(width),
+        max(0, tile_width - 1) * int(height) + max(0, tile_height - 1) * int(width),
     )
     _ensure_support_tile_union_buffers(
         pipeline,
@@ -1046,14 +1085,18 @@ def _expand_formal_connected_tile_support_frontier(
         raise RuntimeError("formal connected support propagation requires tile_size <= 32")
     program = pipeline.programs["expand_formal_connected_tile_support_frontier"]
     if not hasattr(program, "run_indirect"):
-        raise RuntimeError("formal connected support propagation requires ComputeShader.run_indirect")
+        raise RuntimeError(
+            "formal connected support propagation requires ComputeShader.run_indirect"
+        )
     program["cell_grid_size"].value = (int(width), int(height))
     program["tile_grid_size"].value = (
         int(getattr(world.active, "tile_width", 1)),
         int(getattr(world.active, "tile_height", 1)),
     )
     program["tile_size"].value = int(tile_size)
-    current_flags_name, current_list_name, current_count_name, current_dispatch_args_name = current_frontier
+    current_flags_name, current_list_name, current_count_name, current_dispatch_args_name = (
+        current_frontier
+    )
     next_flags_name, next_list_name, next_count_name, next_dispatch_args_name = next_frontier
     resources.structural_tex.use(location=0)
     bridge.buffers[FORMAL_CONNECTED_FRONTIER_BUFFER].bind_to_storage_buffer(binding=0)
@@ -1110,10 +1153,7 @@ def _run_formal_connected_tile_support_pass(
             and pipeline._support_jfa_nv32_row_hydrate_enabled
             and pipeline._support_jfa_nv32_row_hydrate_supported
         ):
-            program_name = (
-                "propagate_formal_connected_tiles_u8_row_major_"
-                "source_mask_elision_nv32"
-            )
+            program_name = "propagate_formal_connected_tiles_u8_row_major_source_mask_elision_nv32"
         elif pipeline._support_jfa_u8_propagated_source_mask_elision_enabled:
             program_name = (
                 "propagate_formal_connected_tiles_u8_row_major_source_mask_elision"
@@ -1134,7 +1174,9 @@ def _run_formal_connected_tile_support_pass(
         )
     program = pipeline.programs[program_name]
     if not hasattr(program, "run_indirect"):
-        raise RuntimeError("formal connected support propagation requires ComputeShader.run_indirect")
+        raise RuntimeError(
+            "formal connected support propagation requires ComputeShader.run_indirect"
+        )
     program["cell_grid_size"].value = (int(width), int(height))
     program["tile_grid_size"].value = (tile_width, tile_height)
     program["tile_size"].value = int(tile_size)
@@ -1152,9 +1194,7 @@ def _run_formal_connected_tile_support_pass(
         # The next JFA pass samples ``current`` as a texture and writes a
         # different ping-pong image.  Image-access ordering is therefore not
         # needed; texture-fetch + storage ordering covers the actual hazards.
-        ctx.memory_barrier(
-            ctx.TEXTURE_FETCH_BARRIER_BIT | ctx.SHADER_STORAGE_BARRIER_BIT
-        )
+        ctx.memory_barrier(ctx.TEXTURE_FETCH_BARRIER_BIT | ctx.SHADER_STORAGE_BARRIER_BIT)
     else:
         pipeline._sync_compute_writes(ctx)
     bridge.mark_gpu_authoritative(

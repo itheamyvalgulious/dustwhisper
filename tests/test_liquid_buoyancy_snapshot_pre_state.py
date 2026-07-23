@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 
-from oracle_game.sim.gpu_liquid import GPULiquidPipeline, _SHADER_SUBS
+from oracle_game.sim.gpu_liquid import _SHADER_SUBS, GPULiquidPipeline
 from oracle_game.sim.shader_loader import shader_source
 
 
@@ -44,10 +44,12 @@ def test_candidate_packs_source_low16_and_destination_pre_state_high16() -> None
 
 
 def test_runtime_blocker_mask_is_initialized_and_only_writes_boolean_values() -> None:
-    resource_source = inspect.getsource(__import__(
-        "oracle_game.sim.gpu_liquid_resources",
-        fromlist=["_ensure_resources"],
-    )._ensure_resources)
+    resource_source = inspect.getsource(
+        __import__(
+            "oracle_game.sim.gpu_liquid_resources",
+            fromlist=["_ensure_resources"],
+        )._ensure_resources
+    )
     blocker_source = shader_source("liquid/load_bridge_blocker_displaced.comp", _SHADER_SUBS)
     assert "blocker_mask.write(np.zeros" in resource_source
     assert "uint blocked = entity > 0 || displaced > 0 ? 1u : 0u" in blocker_source

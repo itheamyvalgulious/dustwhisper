@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 
-from oracle_game.sim.gpu_liquid import GPULiquidPipeline, _SHADER_SUBS
+from oracle_game.sim.gpu_liquid import _SHADER_SUBS, GPULiquidPipeline
 from oracle_game.sim.shader_loader import shader_source
 
 
@@ -31,7 +31,13 @@ def test_flow_terminal_writes_private_five_word_payload() -> None:
     source = shader_source("liquid/liquid_flow_intent_shared_halo.comp", _terminal_subs())
     assert "layout(std430, binding=10) writeonly buffer BridgeCellCoreSpareBuffer" in source
     assert "store_terminal_core(gid, cell_state, velocity, primary_role)" in source
-    for word in ("bridge_cell_core_spare[out_word]", "bridge_cell_core_spare[out_word + 1]", "bridge_cell_core_spare[out_word + 2]", "bridge_cell_core_spare[out_word + 3]", "bridge_cell_core_spare[out_word + 4]"):
+    for word in (
+        "bridge_cell_core_spare[out_word]",
+        "bridge_cell_core_spare[out_word + 1]",
+        "bridge_cell_core_spare[out_word + 2]",
+        "bridge_cell_core_spare[out_word + 3]",
+        "bridge_cell_core_spare[out_word + 4]",
+    ):
         assert word in source
 
 
@@ -44,7 +50,10 @@ def test_provenance_variants_carry_source_and_texture_markers() -> None:
     assert "liquid_provenance_out[]" in buoyancy
     assert "liquid_provenance_out[provenance_index]" in copy
     assert "const uint PROVENANCE_TEXTURE = 0xFFFFFFFEu" in placeholder
-    assert "liquid_provenance_out[target.y * cell_grid_size.x + target.x] = PROVENANCE_TEXTURE" in placeholder
+    assert (
+        "liquid_provenance_out[target.y * cell_grid_size.x + target.x] = PROVENANCE_TEXTURE"
+        in placeholder
+    )
     flow = shader_source("liquid/liquid_flow_intent_shared_halo.comp", substitutions)
     assert "copy_original_core(gid)" in flow
     assert "provenance == PROVENANCE_EMPTY" in flow
@@ -62,7 +71,7 @@ def test_liquid_step_swaps_spare_only_after_terminal_flow() -> None:
     assert "resources.provenance_out.bind_to_storage_buffer(binding=8)" in bridge_source
     assert "resources.provenance_in.bind_to_storage_buffer(binding=9)" in bridge_source
     assert "resources.provenance_in, resources.provenance_out" in source
-    assert "program_name.startswith(\"buoyancy_fused\")" in buoyancy
+    assert 'program_name.startswith("buoyancy_fused")' in buoyancy
     assert "init_liquid_provenance" in inspect.getsource(GPULiquidPipeline._run_provenance_init)
     assert "ensure_cell_core_spare" not in solve
 

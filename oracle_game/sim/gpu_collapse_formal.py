@@ -1,17 +1,12 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 if TYPE_CHECKING:
-    from oracle_game.world import WorldEngine
     from oracle_game.sim.gpu_collapse import GPUCollapseResources
-
-from oracle_game.sim.gpu_collapse_dirty import (
-    clear_collapse_structure_dirty_tile_queue_on_gpu,
-    ensure_collapse_structure_dirty_tile_queue,
-)
+    from oracle_game.world import WorldEngine
 
 from oracle_game.sim.gpu_collapse import (
     FORMAL_CONNECTED_CELL_FRONTIER_TILE_COUNT_BUFFER,
@@ -41,9 +36,12 @@ from oracle_game.sim.gpu_collapse import (
     FORMAL_DEFERRED_REGION_REQUEST_BUFFER,
     FORMAL_DEFERRED_REGION_REQUEST_CAPACITY,
     FORMAL_DEFERRED_REGION_REQUEST_COUNT_BUFFER,
-    LOCAL_SIZE
+    LOCAL_SIZE,
 )
-
+from oracle_game.sim.gpu_collapse_dirty import (
+    clear_collapse_structure_dirty_tile_queue_on_gpu,
+    ensure_collapse_structure_dirty_tile_queue,
+)
 
 
 def prewarm_formal_connected_resources(pipeline, world: "WorldEngine") -> None:
@@ -69,7 +67,9 @@ def _formal_jfa_jumps(width: int, height: int) -> tuple[int, ...]:
     return tuple(jumps)
 
 
-def _formal_jfa_profile_jump_bands(jumps: tuple[int, ...]) -> tuple[tuple[str, tuple[int, ...]], ...]:
+def _formal_jfa_profile_jump_bands(
+    jumps: tuple[int, ...],
+) -> tuple[tuple[str, tuple[int, ...]], ...]:
     small_start = len(jumps)
     for index, jump in enumerate(jumps):
         if jump <= 1:
@@ -204,7 +204,9 @@ def connected_structural_region_texture(
         y0=0,
         publish_masks=False,
     )
-    pipeline.copy_mask_texture(world, resources, connected_texture, resources.cell_flags_out_tex, width, height)
+    pipeline.copy_mask_texture(
+        world, resources, connected_texture, resources.cell_flags_out_tex, width, height
+    )
     return resources.cell_flags_out_tex
 
 
@@ -380,12 +382,18 @@ def detect_connected_internal_boundary_flags(
     return 0
 
 
-def _ensure_formal_deferred_region_request_buffers(pipeline, world: "WorldEngine") -> tuple[Any, Any, int]:
+def _ensure_formal_deferred_region_request_buffers(
+    pipeline, world: "WorldEngine"
+) -> tuple[Any, Any, int]:
     bridge = world.bridge
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("GPU collapse pipeline requires bridge GPU resources for deferred region requests")
-    active_tile_count = int(getattr(world.active, "tile_width", 1)) * int(getattr(world.active, "tile_height", 1))
+        raise RuntimeError(
+            "GPU collapse pipeline requires bridge GPU resources for deferred region requests"
+        )
+    active_tile_count = int(getattr(world.active, "tile_width", 1)) * int(
+        getattr(world.active, "tile_height", 1)
+    )
     capacity = max(4, FORMAL_DEFERRED_REGION_REQUEST_CAPACITY, active_tile_count * 4)
     request_bytes = capacity * 4 * np.dtype(np.int32).itemsize
     count_name = FORMAL_DEFERRED_REGION_REQUEST_COUNT_BUFFER
@@ -447,14 +455,21 @@ def _persistent_dense_tile_worklist_signature(
     )
 
 
-def _ensure_formal_connected_frontier_buffers_impl(pipeline, world: "WorldEngine") -> tuple[str, str]:
+def _ensure_formal_connected_frontier_buffers_impl(
+    pipeline, world: "WorldEngine"
+) -> tuple[str, str]:
     bridge = world.bridge
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("GPU collapse pipeline requires bridge GPU resources for connected frontier expansion")
+        raise RuntimeError(
+            "GPU collapse pipeline requires bridge GPU resources for connected frontier expansion"
+        )
     pipeline._ensure_programs(bridge.ctx)
     cell_count = max(1, int(world.width) * int(world.height))
-    tile_count = max(1, int(getattr(world.active, "tile_width", 1)) * int(getattr(world.active, "tile_height", 1)))
+    tile_count = max(
+        1,
+        int(getattr(world.active, "tile_width", 1)) * int(getattr(world.active, "tile_height", 1)),
+    )
     cell_required_bytes = cell_count * np.dtype(np.int32).itemsize
     tile_required_bytes = tile_count * np.dtype(np.int32).itemsize
     tile_list_bytes = max(8, tile_count * 2 * np.dtype(np.int32).itemsize)
@@ -531,7 +546,9 @@ def _ensure_formal_connected_frontier_buffers_impl(pipeline, world: "WorldEngine
             existing = bridge.buffers.get(name)
             if existing is not None:
                 existing.release()
-            bridge.buffers[name] = bridge.ctx.buffer(reserve=frontier_tile_flags_bytes, dynamic=True)
+            bridge.buffers[name] = bridge.ctx.buffer(
+                reserve=frontier_tile_flags_bytes, dynamic=True
+            )
         bridge.buffers[name].write(np.zeros(tile_count, dtype=np.uint32).tobytes())
     for name in (
         FORMAL_CONNECTED_CELL_FRONTIER_TILE_COUNT_BUFFER,
@@ -589,14 +606,19 @@ def _seed_formal_texture_region_tile_worklist(
 ) -> str | None:
     bridge = world.bridge
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("GPU collapse pipeline requires bridge GPU resources for connected tile worklists")
+        raise RuntimeError(
+            "GPU collapse pipeline requires bridge GPU resources for connected tile worklists"
+        )
     if pipeline._persistent_dense_tile_worklist_enabled:
         signature = pipeline._persistent_dense_tile_worklist_signature_for(
             world,
             width,
             height,
         )
-        if signature is not None and signature == pipeline._persistent_dense_tile_worklist_signature:
+        if (
+            signature is not None
+            and signature == pipeline._persistent_dense_tile_worklist_signature
+        ):
             pipeline.persistent_dense_tile_worklist_hits += 1
             return FORMAL_CONNECTED_TILE_FRONTIER_BUFFER
 
@@ -648,7 +670,9 @@ def _seed_formal_texture_region_tile_worklist(
     return FORMAL_CONNECTED_TILE_FRONTIER_BUFFER
 
 
-def _clear_formal_connected_cell_buffer_names(pipeline, world: "WorldEngine", buffer_names: tuple[str, ...]) -> None:
+def _clear_formal_connected_cell_buffer_names(
+    pipeline, world: "WorldEngine", buffer_names: tuple[str, ...]
+) -> None:
     ctx = world.bridge.ctx
     if ctx is None:
         raise RuntimeError("GPU collapse pipeline requires a valid ModernGL context")
@@ -753,7 +777,9 @@ def _clear_formal_connected_cell_buffer_connected_tiles(
         int(getattr(world.active, "tile_width", 1)),
         int(getattr(world.active, "tile_height", 1)),
     )
-    program["tile_size"].value = int(max(1, int(getattr(world.active, "tile_size", FORMAL_CONNECTED_TILE_LOCAL_SIZE))))
+    program["tile_size"].value = int(
+        max(1, int(getattr(world.active, "tile_size", FORMAL_CONNECTED_TILE_LOCAL_SIZE)))
+    )
     bridge.buffers[buffer_name].bind_to_storage_buffer(binding=0)
     bridge.buffers[tile_mask_name].bind_to_storage_buffer(binding=1)
     bridge.buffers[FORMAL_CONNECTED_TILE_COUNT_BUFFER].bind_to_storage_buffer(binding=2)
@@ -785,11 +811,15 @@ def reset_formal_connected_frontier(
     return current_name, scratch_name
 
 
-def clear_formal_connected_frontier_buffer(pipeline, world: "WorldEngine", buffer_name: str) -> None:
+def clear_formal_connected_frontier_buffer(
+    pipeline, world: "WorldEngine", buffer_name: str
+) -> None:
     bridge = world.bridge
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("GPU collapse pipeline requires bridge GPU resources for connected frontier expansion")
+        raise RuntimeError(
+            "GPU collapse pipeline requires bridge GPU resources for connected frontier expansion"
+        )
     if buffer_name not in bridge.buffers:
         pipeline._ensure_formal_connected_frontier_buffers(world)
     cell_count = max(1, int(world.width) * int(world.height))
@@ -828,10 +858,12 @@ def execute_formal_connected_expansion(
     pipeline._ensure_formal_connected_frontier_buffers(world)
     if resource_region is None:
         resource_region = (0, 0, width, height)
-    outcome_resources, outcome_x0, outcome_y0, outcome_width, outcome_height = pipeline._solve_formal_connected_tile_textures(
-        world,
-        seed_rect,
-        resource_region=resource_region,
+    outcome_resources, outcome_x0, outcome_y0, outcome_width, outcome_height = (
+        pipeline._solve_formal_connected_tile_textures(
+            world,
+            seed_rect,
+            resource_region=resource_region,
+        )
     )
     return pipeline.materialize_component_texture_formal(
         world,

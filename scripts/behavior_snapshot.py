@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-from pathlib import Path
 import sys
 import time
+from pathlib import Path
 
 import numpy as np
 
@@ -14,7 +14,6 @@ if str(ROOT) not in sys.path:
 
 from oracle_game.world import WorldEngine
 from scripts.benchmark_engine import create_context, setup_random_materials
-
 
 SNAPSHOT_FIELDS = (
     "material_id",
@@ -53,8 +52,7 @@ def snapshot(
             ctx.finish()
             engine.poll_all_readbacks()
         return {
-            name: np.ascontiguousarray(getattr(engine, name)).copy()
-            for name in SNAPSHOT_FIELDS
+            name: np.ascontiguousarray(getattr(engine, name)).copy() for name in SNAPSHOT_FIELDS
         }
     finally:
         engine.close()
@@ -91,8 +89,7 @@ def main() -> int:
         }
         elapsed = time.perf_counter() - started
         print(
-            f"trial {trial}: hash={hash_arrays(arrays)} ({elapsed:.1f}s) "
-            f"per-array={field_hashes}"
+            f"trial {trial}: hash={hash_arrays(arrays)} ({elapsed:.1f}s) per-array={field_hashes}"
         )
     return 0
 

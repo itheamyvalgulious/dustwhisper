@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import numpy as np
 
-
-
 ENTITY_STATE_DTYPE = np.dtype(
     [
         ("entity_id", "<i4"),

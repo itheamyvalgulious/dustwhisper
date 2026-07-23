@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -11,7 +11,6 @@ from oracle_game.sim.gpu_collapse import (
     FORMAL_CONNECTED_TILE_LOCAL_SIZE,
     GPUCollapseResources,
 )
-
 
 
 def _ensure_resources(pipeline, ctx: Any, width: int, height: int) -> GPUCollapseResources:
@@ -65,10 +64,14 @@ def _ensure_resources(pipeline, ctx: Any, width: int, height: int) -> GPUCollaps
         displaced_tex,
         displaced_out_tex,
     ):
-            texture.filter = (ctx.NEAREST, ctx.NEAREST)
+        texture.filter = (ctx.NEAREST, ctx.NEAREST)
     cell_count = max(1, width * height)
-    axis_tile_width = max(1, (int(width) + FORMAL_CONNECTED_TILE_LOCAL_SIZE - 1) // FORMAL_CONNECTED_TILE_LOCAL_SIZE)
-    axis_tile_height = max(1, (int(height) + FORMAL_CONNECTED_TILE_LOCAL_SIZE - 1) // FORMAL_CONNECTED_TILE_LOCAL_SIZE)
+    axis_tile_width = max(
+        1, (int(width) + FORMAL_CONNECTED_TILE_LOCAL_SIZE - 1) // FORMAL_CONNECTED_TILE_LOCAL_SIZE
+    )
+    axis_tile_height = max(
+        1, (int(height) + FORMAL_CONNECTED_TILE_LOCAL_SIZE - 1) // FORMAL_CONNECTED_TILE_LOCAL_SIZE
+    )
     axis_mask_bytes = max(
         4,
         axis_tile_width
@@ -142,7 +145,9 @@ def _ensure_formal_connected_u8_support_textures(
     return resources.support_u8_ping, resources.support_u8_pong
 
 
-def _write_dynamic_buffer(pipeline, ctx: Any, resources: GPUCollapseResources, name: str, data: np.ndarray) -> None:
+def _write_dynamic_buffer(
+    pipeline, ctx: Any, resources: GPUCollapseResources, name: str, data: np.ndarray
+) -> None:
     buffer = getattr(resources, name)
     nbytes = max(4, int(data.nbytes))
     if buffer.size < nbytes:
@@ -155,7 +160,9 @@ def _write_dynamic_buffer(pipeline, ctx: Any, resources: GPUCollapseResources, n
         buffer.write(np.ascontiguousarray(data).tobytes())
 
 
-def _materialize_material_params(pipeline, world: "WorldEngine") -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _materialize_material_params(
+    pipeline, world: "WorldEngine"
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     material_table = world.bridge.shadow_typed_tables.get("material_table")
     if material_table is not None:
         collapse_generation = material_table["collapse_generation_id"].astype(np.int32, copy=True)
@@ -175,9 +182,13 @@ def _materialize_material_params(pipeline, world: "WorldEngine") -> tuple[np.nda
         collapse_generation = np.zeros(count, dtype=np.int32)
         base_integrity = np.zeros(count, dtype=np.float32)
         spawn_temperature = np.full(count, np.nan, dtype=np.float32)
-        collapse_generation[: world.material_collapse_generation_id.shape[0]] = world.material_collapse_generation_id
+        collapse_generation[: world.material_collapse_generation_id.shape[0]] = (
+            world.material_collapse_generation_id
+        )
         base_integrity[: world.material_base_integrity.shape[0]] = world.material_base_integrity
-        spawn_temperature[: world.material_spawn_temperature.shape[0]] = world.material_spawn_temperature
+        spawn_temperature[: world.material_spawn_temperature.shape[0]] = (
+            world.material_spawn_temperature
+        )
     spawn_temperature = np.nan_to_num(
         spawn_temperature,
         nan=np.float32(-3.4028234663852886e38),
@@ -190,7 +201,9 @@ def _materialize_material_params(pipeline, world: "WorldEngine") -> tuple[np.nda
     )
 
 
-def _classification_material_params(pipeline, world: "WorldEngine") -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _classification_material_params(
+    pipeline, world: "WorldEngine"
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     material_table = world.bridge.shadow_typed_tables.get("material_table")
     if material_table is not None:
         structural = material_table["is_structural"].astype(np.int32, copy=True)
@@ -210,9 +223,15 @@ def _classification_material_params(pipeline, world: "WorldEngine") -> tuple[np.
         structural = np.zeros(count, dtype=np.int32)
         support_anchor = np.zeros(count, dtype=np.int32)
         behavior = np.zeros(count, dtype=np.int32)
-        structural[: world.material_is_structural.shape[0]] = world.material_is_structural.astype(np.int32)
-        support_anchor[: world.material_is_support_anchor.shape[0]] = world.material_is_support_anchor.astype(np.int32)
-        behavior[: world.material_collapse_behavior.shape[0]] = world.material_collapse_behavior.astype(np.int32)
+        structural[: world.material_is_structural.shape[0]] = world.material_is_structural.astype(
+            np.int32
+        )
+        support_anchor[: world.material_is_support_anchor.shape[0]] = (
+            world.material_is_support_anchor.astype(np.int32)
+        )
+        behavior[: world.material_collapse_behavior.shape[0]] = (
+            world.material_collapse_behavior.astype(np.int32)
+        )
     return (
         np.ascontiguousarray(structural, dtype=np.int32),
         np.ascontiguousarray(support_anchor, dtype=np.int32),

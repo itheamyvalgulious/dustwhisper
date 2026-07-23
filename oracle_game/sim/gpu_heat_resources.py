@@ -7,6 +7,7 @@ import numpy as np
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
+from oracle_game.sim.gpu_base import release_resource_fields
 from oracle_game.sim.gpu_heat import (
     LOCAL_SIZE,
     MAX_GAS_SPECIES,
@@ -22,47 +23,20 @@ def release(pipeline) -> None:
     pipeline._motion_handoff_candidate = None
     if pipeline.resources is None:
         return
-    for resource in (
-        pipeline.resources.cell_state_tex,
-        pipeline.resources.cell_state_out_tex,
-        pipeline.resources.timer_tex,
-        pipeline.resources.timer_out_tex,
-        pipeline.resources.integrity_tex,
-        pipeline.resources.integrity_out_tex,
-        pipeline.resources.island_id_tex,
-        pipeline.resources.island_id_out_tex,
-        pipeline.resources.entity_id_tex,
-        pipeline.resources.entity_id_out_tex,
-        pipeline.resources.displaced_tex,
-        pipeline.resources.displaced_out_tex,
-        pipeline.resources.velocity_tex,
-        pipeline.resources.velocity_out_tex,
-        pipeline.resources.temp_ping,
-        pipeline.resources.temp_pong,
-        pipeline.resources.phase_target_tex,
-        pipeline.resources.boil_target_tex,
-        pipeline.resources.gas_tex,
-        pipeline.resources.gas_out_tex,
-        pipeline.resources.condense_target_tex,
-        pipeline.resources.ambient_ping,
-        pipeline.resources.ambient_pong,
-        pipeline.resources.active_tile_tex,
-        pipeline.resources.material_params,
-        pipeline.resources.material_response_params,
-        pipeline.resources.material_phase_params,
-        pipeline.resources.gas_params,
-    ):
-        try:
-            resource.release()
-        except Exception:
-            pass
+    release_resource_fields(pipeline.resources)
     pipeline.resources = None
 
 
 def _ensure_resources(pipeline, world: "WorldEngine") -> GPUHeatResources:
     ctx = world.bridge.ctx
     assert ctx is not None
-    signature = (world.width, world.height, world.gas_width, world.gas_height, world.gas_concentration.shape[0])
+    signature = (
+        world.width,
+        world.height,
+        world.gas_width,
+        world.gas_height,
+        world.gas_concentration.shape[0],
+    )
     if pipeline.resources is not None and pipeline.resources.signature == signature:
         return pipeline.resources
     pipeline.release()
@@ -87,10 +61,14 @@ def _ensure_resources(pipeline, world: "WorldEngine") -> GPUHeatResources:
     boil_target_tex = ctx.texture((world.width, world.height), 1, dtype="f4")
     gas_tex = ctx.texture_array((world.gas_width, world.gas_height, gas_count), 1, dtype="f4")
     gas_out_tex = ctx.texture_array((world.gas_width, world.gas_height, gas_count), 1, dtype="f4")
-    condense_target_tex = ctx.texture_array((world.gas_width, world.gas_height, gas_count), 1, dtype="f4")
+    condense_target_tex = ctx.texture_array(
+        (world.gas_width, world.gas_height, gas_count), 1, dtype="f4"
+    )
     ambient_ping = ctx.texture((world.gas_width, world.gas_height), 1, dtype="f4")
     ambient_pong = ctx.texture((world.gas_width, world.gas_height), 1, dtype="f4")
-    active_tile_tex = ctx.texture((world.active.tile_width, world.active.tile_height), 1, dtype="f4")
+    active_tile_tex = ctx.texture(
+        (world.active.tile_width, world.active.tile_height), 1, dtype="f4"
+    )
     for texture in (
         cell_state_tex,
         cell_state_out_tex,
@@ -156,7 +134,9 @@ def _ensure_resources(pipeline, world: "WorldEngine") -> GPUHeatResources:
     return pipeline.resources
 
 
-def _upload_inputs(pipeline, world: "WorldEngine", resources: GPUHeatResources, solve_tile_mask: np.ndarray) -> None:
+def _upload_inputs(
+    pipeline, world: "WorldEngine", resources: GPUHeatResources, solve_tile_mask: np.ndarray
+) -> None:
     world.bridge.sync_rule_tables(world)
     authoritative = world.bridge.gpu_authoritative_resources
     formal_gpu_frame = pipeline._formal_gpu_frame(world)
@@ -173,7 +153,9 @@ def _upload_inputs(pipeline, world: "WorldEngine", resources: GPUHeatResources, 
     upload_cell_state_from_cpu = not (formal_gpu_frame and "cell_core" in authoritative)
     upload_island_id_from_cpu = not (formal_gpu_frame and "island_id" in authoritative)
     upload_entity_id_from_cpu = not (formal_gpu_frame and "entity_id" in authoritative)
-    upload_displaced_from_cpu = not (formal_gpu_frame and "placeholder_displaced_material" in authoritative)
+    upload_displaced_from_cpu = not (
+        formal_gpu_frame and "placeholder_displaced_material" in authoritative
+    )
     upload_ambient_from_cpu = not (formal_gpu_frame and "ambient_temperature" in authoritative)
     upload_gas_from_cpu = not (formal_gpu_frame and "gas_concentration" in authoritative)
     upload_active_from_cpu = not (formal_gpu_frame and "active_tile_ttl" in authoritative)
@@ -211,7 +193,10 @@ def _upload_inputs(pipeline, world: "WorldEngine", resources: GPUHeatResources, 
     else:
         pipeline._load_authoritative_active_tile_mask(world, resources, expansion_radius=1)
     material_table = world.bridge.shadow_typed_tables["material_table"]
-    material_signature = (world.bridge.table_generations.get("materials", 0), int(material_table.shape[0]))
+    material_signature = (
+        world.bridge.table_generations.get("materials", 0),
+        int(material_table.shape[0]),
+    )
     if resources.material_params_signature != material_signature:
         params = np.zeros((MAX_MATERIALS, 4), dtype="f4")
         response_params = np.zeros((MAX_MATERIALS, 4), dtype="f4")

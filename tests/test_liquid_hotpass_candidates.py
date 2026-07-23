@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 
-from oracle_game.sim.gpu_liquid import GPULiquidPipeline, _SHADER_SUBS
+from oracle_game.sim.gpu_liquid import _SHADER_SUBS, GPULiquidPipeline
 from oracle_game.sim.shader_loader import shader_source
 
 
@@ -113,11 +113,7 @@ def test_liquid_terminal_lazy_aux_reads_only_reachable_empty_candidates() -> Non
 
 def test_liquid_forward_halo_covers_every_flow_probe() -> None:
     pass_size = 8
-    loaded_offsets = {
-        (x - 1, y)
-        for y in range(pass_size + 1)
-        for x in range(pass_size + 2)
-    }
+    loaded_offsets = {(x - 1, y) for y in range(pass_size + 1) for x in range(pass_size + 2)}
     for y in range(pass_size):
         for x in range(pass_size):
             required_offsets = {

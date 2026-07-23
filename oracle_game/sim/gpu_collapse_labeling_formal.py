@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 if TYPE_CHECKING:
-    from oracle_game.world import WorldEngine
     from oracle_game.sim.gpu_collapse import GPUCollapseResources
-
-from oracle_game.types import Phase
+    from oracle_game.world import WorldEngine
 
 from oracle_game.sim.gpu_collapse import (
     FORMAL_CONNECTED_CELL_FRONTIER_TILE_COUNT_BUFFER,
@@ -20,9 +18,9 @@ from oracle_game.sim.gpu_collapse import (
     FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER,
     FORMAL_CONNECTED_TILE_LIST_BUFFER,
     FORMAL_CONNECTED_TILE_LOCAL_SIZE,
-    LOCAL_SIZE
+    LOCAL_SIZE,
 )
-
+from oracle_game.types import Phase
 
 
 def _label_component_texture(
@@ -55,7 +53,9 @@ def _label_component_texture(
             tile_mask_name=tile_mask_name,
         )
     if pipeline._formal_gpu_frame(world):
-        region_tile_mask_name = pipeline._seed_formal_texture_region_tile_worklist(world, width, height)
+        region_tile_mask_name = pipeline._seed_formal_texture_region_tile_worklist(
+            world, width, height
+        )
         if region_tile_mask_name is not None:
             return pipeline._label_component_texture_connected_tiles_from_texture_init(
                 world,
@@ -425,8 +425,7 @@ def _ensure_formal_connected_component_label_union_buffers(
         raise RuntimeError("formal component label tile union requires tile_size <= 32")
     edge_capacity = max(
         1,
-        max(0, tile_width - 1) * int(height)
-        + max(0, tile_height - 1) * int(width),
+        max(0, tile_width - 1) * int(height) + max(0, tile_height - 1) * int(width),
     )
     _ensure_support_tile_union_buffers(
         pipeline,
@@ -622,7 +621,9 @@ def _seed_formal_component_labels_and_axis_masks(
         raise RuntimeError("formal connected component labeling requires tile_size <= 32")
     program = pipeline.programs["seed_formal_component_labels_and_axis_masks"]
     if not hasattr(program, "run_indirect"):
-        raise RuntimeError("formal connected fused component label seed requires ComputeShader.run_indirect")
+        raise RuntimeError(
+            "formal connected fused component label seed requires ComputeShader.run_indirect"
+        )
     program["cell_grid_size"].value = (int(width), int(height))
     program["tile_grid_size"].value = (
         int(getattr(world.active, "tile_width", 1)),
@@ -662,7 +663,9 @@ def _seed_formal_component_label_frontier(
         raise RuntimeError("formal connected component labeling requires tile_size <= 32")
     program = pipeline.programs["seed_formal_component_label_frontier"]
     if not hasattr(program, "run_indirect"):
-        raise RuntimeError("formal connected component label seed requires ComputeShader.run_indirect")
+        raise RuntimeError(
+            "formal connected component label seed requires ComputeShader.run_indirect"
+        )
     program["cell_grid_size"].value = (int(width), int(height))
     program["tile_grid_size"].value = (
         int(getattr(world.active, "tile_width", 1)),
@@ -713,14 +716,18 @@ def _expand_formal_component_label_frontier(
         raise RuntimeError("formal connected component labeling requires tile_size <= 32")
     program = pipeline.programs["expand_formal_component_label_frontier"]
     if not hasattr(program, "run_indirect"):
-        raise RuntimeError("formal connected component label propagation requires ComputeShader.run_indirect")
+        raise RuntimeError(
+            "formal connected component label propagation requires ComputeShader.run_indirect"
+        )
     program["cell_grid_size"].value = (int(width), int(height))
     program["tile_grid_size"].value = (
         int(getattr(world.active, "tile_width", 1)),
         int(getattr(world.active, "tile_height", 1)),
     )
     program["tile_size"].value = int(tile_size)
-    current_flags_name, current_list_name, current_count_name, current_dispatch_args_name = current_frontier
+    current_flags_name, current_list_name, current_count_name, current_dispatch_args_name = (
+        current_frontier
+    )
     next_flags_name, next_list_name, next_count_name, next_dispatch_args_name = next_frontier
     component_texture.use(location=0)
     bridge.buffers[FORMAL_CONNECTED_FRONTIER_BUFFER].bind_to_storage_buffer(binding=0)
@@ -772,7 +779,9 @@ def _run_formal_connected_component_label_pass(
         raise RuntimeError("formal connected component labeling requires tile_size <= 32")
     program = pipeline.programs["propagate_formal_connected_component_labels"]
     if not hasattr(program, "run_indirect"):
-        raise RuntimeError("formal connected component label propagation requires ComputeShader.run_indirect")
+        raise RuntimeError(
+            "formal connected component label propagation requires ComputeShader.run_indirect"
+        )
     program["cell_grid_size"].value = (int(width), int(height))
     program["tile_grid_size"].value = (
         int(getattr(world.active, "tile_width", 1)),
@@ -845,7 +854,9 @@ def _copy_formal_component_label_buffer_to_texture(
     tile_size = max(1, int(getattr(world.active, "tile_size", FORMAL_CONNECTED_TILE_LOCAL_SIZE)))
     program = pipeline.programs["copy_formal_component_label_buffer_to_texture"]
     if not hasattr(program, "run_indirect"):
-        raise RuntimeError("formal connected component label copy requires ComputeShader.run_indirect")
+        raise RuntimeError(
+            "formal connected component label copy requires ComputeShader.run_indirect"
+        )
     program["cell_grid_size"].value = (int(width), int(height))
     program["tile_grid_size"].value = (
         int(getattr(world.active, "tile_width", 1)),
@@ -920,10 +931,18 @@ def materialize_labeled_component_texture(
     pipeline._ensure_programs(ctx)
     resources = pipeline._ensure_resources(ctx, width, height)
     pipeline._upload_region_state(world, resources, x0, y0, width, height)
-    collapse_generation, base_integrity, spawn_temperature = pipeline._materialize_material_params(world)
-    pipeline._write_dynamic_buffer(ctx, resources, "component_labels", component_labels.astype(np.int32, copy=False))
-    pipeline._write_dynamic_buffer(ctx, resources, "component_island_ids", component_island_ids.astype(np.int32, copy=False))
-    pipeline._write_dynamic_buffer(ctx, resources, "material_collapse_generation", collapse_generation)
+    collapse_generation, base_integrity, spawn_temperature = pipeline._materialize_material_params(
+        world
+    )
+    pipeline._write_dynamic_buffer(
+        ctx, resources, "component_labels", component_labels.astype(np.int32, copy=False)
+    )
+    pipeline._write_dynamic_buffer(
+        ctx, resources, "component_island_ids", component_island_ids.astype(np.int32, copy=False)
+    )
+    pipeline._write_dynamic_buffer(
+        ctx, resources, "material_collapse_generation", collapse_generation
+    )
     pipeline._write_dynamic_buffer(ctx, resources, "material_base_integrity", base_integrity)
     pipeline._write_dynamic_buffer(ctx, resources, "material_spawn_temperature", spawn_temperature)
 

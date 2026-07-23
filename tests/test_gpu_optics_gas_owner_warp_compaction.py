@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 
-from oracle_game.sim.gpu_optics import GPUOpticsPipeline, _SHADER_SUBS
+from oracle_game.sim.gpu_optics import _SHADER_SUBS, GPUOpticsPipeline
 from oracle_game.sim.shader_loader import shader_source
 
 
@@ -55,5 +55,5 @@ def test_gpu_optics_gas_owner_warp_compaction_probes_nv32_before_compiling() -> 
         "GL_NV_shader_thread_shuffle",
     ):
         assert extension in ensure
-    assert '"optics/query_nv_warp_size.comp"' in ensure
+    assert '"_shared/query_nv_warp_size.comp"' in ensure
     assert "owner_warp_size == 32" in ensure

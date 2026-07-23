@@ -5,15 +5,15 @@ import inspect
 import numpy as np
 
 from oracle_game.sim.gpu_reactions import (
-    GPUReactionPipeline,
     MATERIAL_LIGHT_PACKED_DESCRIPTOR_OFFSET,
     MATERIAL_LIGHT_PACKED_HEADER_OFFSET,
     MATERIAL_PAIR_PACKED_DESCRIPTOR_OFFSET,
     MATERIAL_PAIR_PACKED_HEADER_OFFSET,
     MATERIAL_PAIR_RULE_I_ENTRY_COUNT,
-    MAX_MATERIALS,
     MAX_MATERIAL_LIGHT_PACKED_RULES,
+    MAX_MATERIALS,
     MAX_RULES,
+    GPUReactionPipeline,
 )
 from oracle_game.world import WorldEngine
 
@@ -52,9 +52,7 @@ def test_material_triplet_packed_descriptors_are_dense_and_source_ordered() -> N
                 operation = int(descriptor[0])
                 direct_action = int(rule["result_action"]) >= 0
                 expected_index = (
-                    int(rule["result_action"])
-                    if direct_action
-                    else int(rule["trigger_slot_index"])
+                    int(rule["result_action"]) if direct_action else int(rule["trigger_slot_index"])
                 )
                 assert operation & 0xFF == expected_index
                 assert bool(operation & 0x100) is direct_action
@@ -103,9 +101,10 @@ def test_material_triplet_packed_descriptors_keep_strict_fallback() -> None:
         ):
             candidate = rules.copy()
             candidate[0][field] = value
-            assert pipeline._compile_material_light_packed_descriptors(
-                candidate, materials, lights
-            ) is None, field
+            assert (
+                pipeline._compile_material_light_packed_descriptors(candidate, materials, lights)
+                is None
+            ), field
 
         source = inspect.getsource(GPUReactionPipeline._compile_material_pair_plan)
         shader = inspect.getsource(GPUReactionPipeline._run_material_pair_fused_pass)

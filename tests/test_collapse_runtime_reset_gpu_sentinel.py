@@ -4,7 +4,6 @@ import numpy as np
 
 from oracle_game.world import WorldEngine
 
-
 _RUNTIME_MASK_ATTRIBUTES = (
     "last_structural_mask",
     "last_support_seed_mask",

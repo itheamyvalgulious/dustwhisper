@@ -71,7 +71,10 @@ def advect_scalar(field: np.ndarray, velocity: np.ndarray, dt: float) -> np.ndar
 
 
 def advect_vector(field: np.ndarray, velocity: np.ndarray, dt: float) -> np.ndarray:
-    return np.stack([advect_scalar(field[..., index], velocity, dt) for index in range(field.shape[-1])], axis=-1)
+    return np.stack(
+        [advect_scalar(field[..., index], velocity, dt) for index in range(field.shape[-1])],
+        axis=-1,
+    )
 
 
 def expand_bool_mask(mask: np.ndarray, radius: int = 1) -> np.ndarray:
@@ -79,7 +82,9 @@ def expand_bool_mask(mask: np.ndarray, radius: int = 1) -> np.ndarray:
     if expanded.size == 0 or radius <= 0:
         return expanded
     expanded.fill(False)
-    padded = np.pad(np.asarray(mask, dtype=np.bool_), radius, mode="constant", constant_values=False)
+    padded = np.pad(
+        np.asarray(mask, dtype=np.bool_), radius, mode="constant", constant_values=False
+    )
     height, width = expanded.shape
     diameter = radius * 2 + 1
     for offset_y in range(diameter):
@@ -88,7 +93,9 @@ def expand_bool_mask(mask: np.ndarray, radius: int = 1) -> np.ndarray:
     return expanded
 
 
-def tile_mask_to_cell_mask(tile_mask: np.ndarray, *, tile_size: int, width: int, height: int) -> np.ndarray:
+def tile_mask_to_cell_mask(
+    tile_mask: np.ndarray, *, tile_size: int, width: int, height: int
+) -> np.ndarray:
     tile_mask_bool = np.asarray(tile_mask, dtype=np.bool_)
     active_count = int(np.count_nonzero(tile_mask_bool))
     if active_count == 0:
@@ -132,7 +139,9 @@ def tile_mask_to_gas_mask(
     gas_cell_size = max(1, int(gas_cell_size))
     if tile_size % gas_cell_size == 0 and active_count * 4 >= int(tile_mask_bool.size):
         gas_cells_per_tile = tile_size // gas_cell_size
-        expanded = np.repeat(np.repeat(tile_mask_bool, gas_cells_per_tile, axis=0), gas_cells_per_tile, axis=1)
+        expanded = np.repeat(
+            np.repeat(tile_mask_bool, gas_cells_per_tile, axis=0), gas_cells_per_tile, axis=1
+        )
         return expanded[:gas_height, :gas_width].copy()
 
     gas_mask = np.zeros((gas_height, gas_width), dtype=np.bool_)

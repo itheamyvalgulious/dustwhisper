@@ -4,3 +4,11 @@
 - `enginedemo` performance target: 1920x1080 viewport with full active random materials must sustain 60 FPS on the GPU path.
 - Performance work must start from pass-level profiling evidence and optimize the measured hot passes directly. Do not skip solver stages or lower configuration as a substitute for optimization.
 - Do not write benchmark artifacts, timing outputs, or temporary work files to `/tmp`. Use the project-local `./tmp/` directory for temporary output.
+
+# Tooling
+
+- Lint/format: `ruff check` and `ruff format` (config in `pyproject.toml`, line-length 100, rules F+I). Keep them clean.
+- Tests: `pytest` (config in `pyproject.toml`). GPU-dependent tests should use the `gl_context`/`require_gpu` fixtures from `tests/conftest.py` so they skip cleanly on machines without a GPU.
+- Shader integrity: `python scripts/verify_shaders.py` validates every `oracle_game/shaders/<stage>/*.comp` marker against the owning stage's substitutions; run it after touching shaders or `_SHADER_SUBS`.
+- Behavior gate: `python scripts/behavior_snapshot.py` must stay byte-identical across simulation changes (record the hash before and after).
+- `tests/test_engine_core.py` can crash (SIGSEGV) in long single-process runs; split large runs into chunks.

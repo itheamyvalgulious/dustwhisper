@@ -26,7 +26,9 @@ def step(solver, world: "WorldEngine", dt: float) -> None:
     if formal_gpu_frame and not active_scheduler_gpu_authoritative:
         world._require_gpu_stage("active scheduler motion solve masks")
     if active_scheduler_gpu_authoritative:
-        solve_tile_mask = np.zeros((world.active.tile_height, world.active.tile_width), dtype=np.bool_)
+        solve_tile_mask = np.zeros(
+            (world.active.tile_height, world.active.tile_width), dtype=np.bool_
+        )
     else:
         solve_tile_mask = solver._solve_tile_mask(world)
     if not np.any(solve_tile_mask) and not active_scheduler_gpu_authoritative:
@@ -78,9 +80,12 @@ def step(solver, world: "WorldEngine", dt: float) -> None:
         solver.last_backend = "gpu"
     else:
         solver.last_backend = "cpu"
-    solver.last_public_powder_reservations = solver._capture_public_powder_reservations(world, solver.last_powder_reservations)
-    solver.last_public_island_reservations = solver._capture_public_island_reservations(world, solver.last_island_reservations)
-
+    solver.last_public_powder_reservations = solver._capture_public_powder_reservations(
+        world, solver.last_powder_reservations
+    )
+    solver.last_public_island_reservations = solver._capture_public_island_reservations(
+        world, solver.last_island_reservations
+    )
 
 
 def _solve_tile_mask(solver, world: "WorldEngine") -> np.ndarray:
@@ -89,7 +94,12 @@ def _solve_tile_mask(solver, world: "WorldEngine") -> np.ndarray:
         and bool(getattr(world, "_world_simulation_frame_active", False))
         and "active_tile_ttl" in world.bridge.gpu_authoritative_resources
     )
-    if formal_gpu_frame and world.bridge.enabled and world.bridge.ctx is not None and "active_tile_ttl" in world.bridge.buffers:
+    if (
+        formal_gpu_frame
+        and world.bridge.enabled
+        and world.bridge.ctx is not None
+        and "active_tile_ttl" in world.bridge.buffers
+    ):
         active_tiles = (
             np.frombuffer(
                 world.bridge.buffers["active_tile_ttl"].read(
@@ -113,24 +123,36 @@ def _solve_tile_mask(solver, world: "WorldEngine") -> np.ndarray:
     return expand_bool_mask(seeded_tiles, radius=1)
 
 
-
-def _integrate_velocity(solver, world: "WorldEngine", dt: float, solve_cell_mask: np.ndarray) -> None:
+def _integrate_velocity(
+    solver, world: "WorldEngine", dt: float, solve_cell_mask: np.ndarray
+) -> None:
     non_empty = (world.material_id != 0) & solve_cell_mask
     if not non_empty.any():
         return
-    gravity = solver._material_scalar_field(world, world.material_id, "gravity_scale", world.material_gravity) * dt * 24.0
+    gravity = (
+        solver._material_scalar_field(
+            world, world.material_id, "gravity_scale", world.material_gravity
+        )
+        * dt
+        * 24.0
+    )
     world.velocity[..., 1][non_empty] += gravity[non_empty]
     cell_flow = world.sample_flow_to_cells()
     wind_delta = (
         cell_flow
-        * solver._material_scalar_field(world, world.material_id, "wind_coupling", world.material_wind)[..., None]
+        * solver._material_scalar_field(
+            world, world.material_id, "wind_coupling", world.material_wind
+        )[..., None]
         * dt
         * 4.0
     )
     world.velocity[non_empty] += wind_delta[non_empty]
     drag = np.maximum(
         0.0,
-        1.0 - solver._material_scalar_field(world, world.material_id, "drag_scale", world.material_drag)[..., None] * dt,
+        1.0
+        - solver._material_scalar_field(
+            world, world.material_id, "drag_scale", world.material_drag
+        )[..., None]
+        * dt,
     )
     world.velocity[non_empty] *= drag[non_empty]
-

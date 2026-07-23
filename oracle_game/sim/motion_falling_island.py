@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 if TYPE_CHECKING:
+    from oracle_game.types import FallingIslandRecord
     from oracle_game.world import WorldEngine
 
 from oracle_game.sim.gpu_motion import (
@@ -33,8 +34,18 @@ def _falling_island_contact_material_response(
     if len(coords) == 0:
         return velocity_xy
     material_ids = world.material_id[coords[:, 0], coords[:, 1]]
-    friction = float(np.mean(solver._material_scalar_field(world, material_ids, "friction", world.material_friction)))
-    elasticity = float(np.mean(solver._material_scalar_field(world, material_ids, "elasticity", world.material_elasticity)))
+    friction = float(
+        np.mean(
+            solver._material_scalar_field(world, material_ids, "friction", world.material_friction)
+        )
+    )
+    elasticity = float(
+        np.mean(
+            solver._material_scalar_field(
+                world, material_ids, "elasticity", world.material_elasticity
+            )
+        )
+    )
     return solver._collision_response(
         velocity_xy,
         attempted_delta,
@@ -42,7 +53,6 @@ def _falling_island_contact_material_response(
         friction=friction,
         elasticity=elasticity,
     )
-
 
 
 def _move_falling_islands(solver, world: "WorldEngine", *, dt: float, use_gpu: bool) -> bool:
@@ -56,34 +66,50 @@ def _move_falling_islands(solver, world: "WorldEngine", *, dt: float, use_gpu: b
             and solver._can_seed_bridge_runtime_fast_path(world)
         ):
             seeded_count = solver.gpu_pipeline.seed_bridge_falling_island_runtime_from_cpu(world)
-            bridge_authoritative = seeded_count > 0 and {"cell_core", "island_id", "island_runtime"}.issubset(
-                world.bridge.gpu_authoritative_resources
-            )
-        runtime_capacity = int(getattr(solver.gpu_pipeline, "last_published_island_runtime_capacity", 0))
+            bridge_authoritative = seeded_count > 0 and {
+                "cell_core",
+                "island_id",
+                "island_runtime",
+            }.issubset(world.bridge.gpu_authoritative_resources)
+        runtime_capacity = int(
+            getattr(solver.gpu_pipeline, "last_published_island_runtime_capacity", 0)
+        )
         if bridge_authoritative and runtime_capacity > 0:
-            reservation_capacity = solver.gpu_pipeline.plan_uploaded_falling_island_reservations_from_bridge_runtime(
-                world,
-                dt,
-                runtime_capacity,
+            reservation_capacity = (
+                solver.gpu_pipeline.plan_uploaded_falling_island_reservations_from_bridge_runtime(
+                    world,
+                    dt,
+                    runtime_capacity,
+                )
             )
             if reservation_capacity <= 0:
-                solver.last_island_reservations = np.zeros((0,), dtype=falling_island_reservation_dtype())
+                solver.last_island_reservations = np.zeros(
+                    (0,), dtype=falling_island_reservation_dtype()
+                )
                 world.islands.clear()
                 return False
             solver.gpu_pipeline.resolve_uploaded_falling_island_reservations(
                 world,
                 reservation_capacity,
             )
-            solver.gpu_pipeline.apply_uploaded_falling_island_settlements(world, reservation_capacity)
-            solver.gpu_pipeline.apply_uploaded_falling_island_reservations(world, reservation_capacity)
-            solver.last_island_reservations = np.zeros((0,), dtype=falling_island_reservation_dtype())
+            solver.gpu_pipeline.apply_uploaded_falling_island_settlements(
+                world, reservation_capacity
+            )
+            solver.gpu_pipeline.apply_uploaded_falling_island_reservations(
+                world, reservation_capacity
+            )
+            solver.last_island_reservations = np.zeros(
+                (0,), dtype=falling_island_reservation_dtype()
+            )
             world.islands.clear()
             return True
         solver.last_island_reservations = np.zeros((0,), dtype=falling_island_reservation_dtype())
         return False
     used_gpu = False
     processed_ids: set[int] = set()
-    pending_components: list[tuple[int, np.ndarray, object, tuple[int, int], tuple[float, float], tuple[int, int]]] = []
+    pending_components: list[
+        tuple[int, np.ndarray, object, tuple[int, int], tuple[float, float], tuple[int, int]]
+    ] = []
     gpu_shed_fragments = bool(use_gpu and world.islands)
     if gpu_shed_fragments:
         used_gpu = solver.gpu_pipeline.shed_falling_island_fragments(world) or used_gpu
@@ -148,7 +174,9 @@ def _move_falling_islands(solver, world: "WorldEngine", *, dt: float, use_gpu: b
     reservation_by_id = {int(record["island_id"]): record for record in island_reservations}
     ordered_components = sorted(
         pending_components,
-        key=lambda item: solver._falling_island_reservation_order_key(reservation_by_id.get(item[0])),
+        key=lambda item: solver._falling_island_reservation_order_key(
+            reservation_by_id.get(item[0])
+        ),
     )
     gpu_apply_shifted = bool(
         use_gpu
@@ -229,12 +257,19 @@ def _move_falling_islands(solver, world: "WorldEngine", *, dt: float, use_gpu: b
                 for y, x in coords:
                     material_id = int(world.material_id[y, x])
                     powder_generation_id = solver._material_powder_generation_id(world, material_id)
-                    if solver._same_island_neighbors(world, x, y, component_id) < 2 and powder_generation_id > 0:
+                    if (
+                        solver._same_island_neighbors(world, x, y, component_id) < 2
+                        and powder_generation_id > 0
+                    ):
                         world.set_cell_by_id(x, y, powder_generation_id, phase=Phase.POWDER)
                     else:
                         default_phase = solver._material_default_phase(world, material_id)
-                        world.phase[y, x] = int(Phase.STATIC_SOLID) if default_phase is None else default_phase
-                        if material_id <= 0 or not solver._material_is_placeholder(world, material_id):
+                        world.phase[y, x] = (
+                            int(Phase.STATIC_SOLID) if default_phase is None else default_phase
+                        )
+                        if material_id <= 0 or not solver._material_is_placeholder(
+                            world, material_id
+                        ):
                             world.entity_id[y, x] = 0
                             world.placeholder_displaced_material[y, x] = 0
                     world.island_id[y, x] = 0
@@ -244,17 +279,22 @@ def _move_falling_islands(solver, world: "WorldEngine", *, dt: float, use_gpu: b
         world.islands[component_id] = component_record
         world._mark_active_rect_runtime(*component_record.bbox)
     if gpu_apply_settled:
-        used_gpu = solver.gpu_pipeline.apply_uploaded_falling_island_settlements(
-            world,
-            int(len(island_reservations)),
-        ) or used_gpu
+        used_gpu = (
+            solver.gpu_pipeline.apply_uploaded_falling_island_settlements(
+                world,
+                int(len(island_reservations)),
+            )
+            or used_gpu
+        )
     if gpu_apply_shifted:
-        used_gpu = solver.gpu_pipeline.apply_uploaded_falling_island_reservations(
-            world,
-            int(len(island_reservations)),
-        ) or used_gpu
+        used_gpu = (
+            solver.gpu_pipeline.apply_uploaded_falling_island_reservations(
+                world,
+                int(len(island_reservations)),
+            )
+            or used_gpu
+        )
     return used_gpu
-
 
 
 def _can_seed_bridge_runtime_fast_path(solver, world: "WorldEngine") -> bool:
@@ -278,11 +318,12 @@ def _can_seed_bridge_runtime_fast_path(solver, world: "WorldEngine") -> bool:
     return True
 
 
-
 def _plan_falling_island_reservations(
     solver,
     world: "WorldEngine",
-    pending_components: list[tuple[int, np.ndarray, object, tuple[int, int], tuple[float, float], tuple[int, int]]],
+    pending_components: list[
+        tuple[int, np.ndarray, object, tuple[int, int], tuple[float, float], tuple[int, int]]
+    ],
     *,
     dt: float,
     use_gpu: bool,
@@ -294,13 +335,24 @@ def _plan_falling_island_reservations(
     reservation_index_by_id: dict[int, int] = {}
     motion_overrides: dict[int, tuple[tuple[float, float], tuple[float, float]]] = {}
     gpu_island_ids: list[int] = []
-    for index, (component_id, _, component_record, (target_dx, target_dy), _, (vx, vy)) in enumerate(pending_components):
+    for index, (
+        component_id,
+        _,
+        component_record,
+        (target_dx, target_dy),
+        _,
+        (vx, vy),
+    ) in enumerate(pending_components):
         reservations[index]["island_id"] = int(component_id)
         reservations[index]["buffer_bbox"] = np.asarray(component_record.bbox, dtype=np.int32)
         reservations[index]["velocity_xy"] = np.asarray((vx, vy), dtype=np.float32)
-        reservations[index]["subcell_offset"] = np.asarray(component_record.subcell_offset, dtype=np.float32)
+        reservations[index]["subcell_offset"] = np.asarray(
+            component_record.subcell_offset, dtype=np.float32
+        )
         reservations[index]["target_shift"] = np.asarray((target_dx, target_dy), dtype=np.int32)
-        reservations[index]["resolve_state"] = ISLAND_RESOLVE_DIRECT if target_dx == 0 and target_dy == 0 else ISLAND_RESOLVE_BLOCKED
+        reservations[index]["resolve_state"] = (
+            ISLAND_RESOLVE_DIRECT if target_dx == 0 and target_dy == 0 else ISLAND_RESOLVE_BLOCKED
+        )
         reservation_index_by_id[component_id] = index
         if use_gpu:
             gpu_island_ids.append(component_id)
@@ -329,11 +381,21 @@ def _plan_falling_island_reservations(
             index = reservation_index_by_id.get(island_id)
             if index is None:
                 continue
-            reservations[index]["target_shift"] = np.asarray(reservation["target_shift"], dtype=np.int32)
-            reservations[index]["reserved_shift"] = np.asarray(reservation["reserved_shift"], dtype=np.int32)
-            reservations[index]["resolved_shift"] = np.asarray(reservation["reserved_shift"], dtype=np.int32)
-            reservations[index]["velocity_xy"] = np.asarray(reservation["velocity_xy"], dtype=np.float32)
-            reservations[index]["subcell_offset"] = np.asarray(reservation["subcell_offset"], dtype=np.float32)
+            reservations[index]["target_shift"] = np.asarray(
+                reservation["target_shift"], dtype=np.int32
+            )
+            reservations[index]["reserved_shift"] = np.asarray(
+                reservation["reserved_shift"], dtype=np.int32
+            )
+            reservations[index]["resolved_shift"] = np.asarray(
+                reservation["reserved_shift"], dtype=np.int32
+            )
+            reservations[index]["velocity_xy"] = np.asarray(
+                reservation["velocity_xy"], dtype=np.float32
+            )
+            reservations[index]["subcell_offset"] = np.asarray(
+                reservation["subcell_offset"], dtype=np.float32
+            )
             reservations[index]["resolve_state"] = int(reservation["resolve_state"])
             gpu_handled.add(island_id)
         used_gpu = True
@@ -360,13 +422,16 @@ def _plan_falling_island_reservations(
         used_gpu = True
     else:
         world._require_cpu_oracle_backend("motion falling island reservations")
-        reservations = solver._resolve_falling_island_reservations(world, pending_components, reservations)
+        reservations = solver._resolve_falling_island_reservations(
+            world, pending_components, reservations
+        )
         solver.gpu_pipeline.upload_falling_island_reservations(world, reservations)
     return reservations, used_gpu
 
 
-
-def _falling_island_reservation_order_key(solver, reservation: np.ndarray | None) -> tuple[int, int, int, int]:
+def _falling_island_reservation_order_key(
+    solver, reservation: np.ndarray | None
+) -> tuple[int, int, int, int]:
     if reservation is None:
         return (4, 0, 0, 0)
     island_id = int(reservation["island_id"])
@@ -384,11 +449,12 @@ def _falling_island_reservation_order_key(solver, reservation: np.ndarray | None
     return (4, y0, x0, island_id)
 
 
-
 def _resolve_falling_island_reservations(
     solver,
     world: "WorldEngine",
-    pending_components: list[tuple[int, np.ndarray, object, tuple[int, int], tuple[float, float], tuple[int, int]]],
+    pending_components: list[
+        tuple[int, np.ndarray, object, tuple[int, int], tuple[float, float], tuple[int, int]]
+    ],
     reservations: np.ndarray,
 ) -> np.ndarray:
     if len(reservations) == 0:
@@ -396,7 +462,10 @@ def _resolve_falling_island_reservations(
     resolved = reservations.copy()
     coords_by_id = {int(component_id): coords for component_id, coords, *_ in pending_components}
     shadow_material = world.material_id.copy()
-    order = sorted(range(len(resolved)), key=lambda index: solver._falling_island_reservation_order_key(resolved[index]))
+    order = sorted(
+        range(len(resolved)),
+        key=lambda index: solver._falling_island_reservation_order_key(resolved[index]),
+    )
     for index in order:
         island_id = int(resolved[index]["island_id"])
         coords = coords_by_id.get(island_id)
@@ -428,7 +497,6 @@ def _resolve_falling_island_reservations(
     return resolved
 
 
-
 def _shed_falling_island_fragments(solver, world: "WorldEngine", island_id: int) -> np.ndarray:
     coords = solver._falling_island_coords(world, island_id)
     if len(coords) == 0:
@@ -450,12 +518,16 @@ def _shed_falling_island_fragments(solver, world: "WorldEngine", island_id: int)
     return solver._falling_island_coords(world, island_id)
 
 
-
-def _falling_island_fragment_neighbor_threshold(solver, world: "WorldEngine", material_id: int) -> int:
-    if material_id > 0 and solver._material_falling_island_break_kind(world, material_id) == FALLING_ISLAND_BREAK_STABLE:
+def _falling_island_fragment_neighbor_threshold(
+    solver, world: "WorldEngine", material_id: int
+) -> int:
+    if (
+        material_id > 0
+        and solver._material_falling_island_break_kind(world, material_id)
+        == FALLING_ISLAND_BREAK_STABLE
+    ):
         return 0
     return 2
-
 
 
 def _resolve_falling_island_components(
@@ -468,7 +540,9 @@ def _resolve_falling_island_components(
     use_gpu_components: bool = False,
 ) -> list[tuple[int, np.ndarray]]:
     component_label_texture: Any | None = None
-    if use_gpu_components and world._gpu_pipeline_available(solver.gpu_pipeline, "motion components"):
+    if use_gpu_components and world._gpu_pipeline_available(
+        solver.gpu_pipeline, "motion components"
+    ):
         component_label_texture, component_entries = solver._gpu_connected_island_component_entries(
             world,
             island_id,
@@ -532,13 +606,14 @@ def _resolve_falling_island_components(
             np.asarray(component_island_ids, dtype=np.int32),
         )
     if not relabeled_on_gpu and use_gpu_components:
-        raise RuntimeError("GPU motion pipeline did not relabel falling-island components; CPU fallback is disabled")
+        raise RuntimeError(
+            "GPU motion pipeline did not relabel falling-island components; CPU fallback is disabled"
+        )
     if not relabeled_on_gpu:
         world._require_cpu_oracle_backend("motion component relabeling")
         for new_island_id, component in split_components:
             solver._assign_split_component_cells_cpu(world, component, new_island_id)
     return result
-
 
 
 def _component_entry_from_coords(solver, label: int, coords: np.ndarray) -> _IslandComponentEntry:
@@ -548,7 +623,6 @@ def _component_entry_from_coords(solver, label: int, coords: np.ndarray) -> _Isl
         bbox=solver._bbox_from_coords(coords, 0, 0),
         cell_count=int(len(coords)),
     )
-
 
 
 def _component_entry_from_gpu_metadata(solver, metadata: np.ndarray) -> _IslandComponentEntry:
@@ -573,7 +647,6 @@ def _component_entry_from_gpu_metadata(solver, metadata: np.ndarray) -> _IslandC
     )
 
 
-
 def _assign_split_component_cells_cpu(
     solver,
     world: "WorldEngine",
@@ -584,14 +657,12 @@ def _assign_split_component_cells_cpu(
         world.island_id[int(y), int(x)] = int(island_id)
 
 
-
 def _clear_stale_island_cells(solver, world: "WorldEngine", island_id: int) -> None:
     invalid_mask = (world.island_id == island_id) & (
         (world.phase != int(Phase.FALLING_ISLAND)) | (world.material_id <= 0)
     )
     if np.any(invalid_mask):
         world.island_id[invalid_mask] = 0
-
 
 
 def _gpu_connected_island_components(
@@ -604,18 +675,18 @@ def _gpu_connected_island_components(
     return [entry.coords for entry in entries]
 
 
-
 def _gpu_connected_island_component_entries(
     solver,
     world: "WorldEngine",
     island_id: int,
     bbox: tuple[int, int, int, int],
 ) -> tuple[Any, list[_IslandComponentEntry]]:
-    labels, metadata = solver.gpu_pipeline.label_falling_island_component_metadata_texture(world, island_id, bbox)
+    labels, metadata = solver.gpu_pipeline.label_falling_island_component_metadata_texture(
+        world, island_id, bbox
+    )
     if metadata.size == 0:
         return labels, []
     return labels, [solver._component_entry_from_gpu_metadata(record) for record in metadata]
-
 
 
 def _resolve_island_dda_shift(
@@ -632,7 +703,6 @@ def _resolve_island_dda_shift(
     return target_dx, target_dy, residual
 
 
-
 def _falling_island_gravity_fallback_dy(
     solver,
     world: "WorldEngine",
@@ -642,14 +712,15 @@ def _falling_island_gravity_fallback_dy(
     if len(coords) == 0:
         return 0
     material_ids = world.material_id[coords[:, 0], coords[:, 1]]
-    gravity = solver._material_scalar_field(world, material_ids, "gravity_scale", world.material_gravity)
+    gravity = solver._material_scalar_field(
+        world, material_ids, "gravity_scale", world.material_gravity
+    )
     mean_gravity = float(np.mean(gravity)) if gravity.size else 0.0
     if abs(mean_gravity) > 1.0e-6:
         return 1 if mean_gravity > 0.0 else -1
     if abs(float(velocity_y)) <= 1.0e-6:
         return 0
     return 1 if float(velocity_y) > 0.0 else -1
-
 
 
 def _resolve_island_dda_target(
@@ -670,7 +741,6 @@ def _resolve_island_dda_target(
     return furthest
 
 
-
 def _resolve_island_dda_target_material(
     solver,
     material_id: np.ndarray,
@@ -686,7 +756,6 @@ def _resolve_island_dda_target_material(
             break
         furthest = (dx, dy)
     return furthest
-
 
 
 def _connected_island_components(solver, coords: np.ndarray) -> list[np.ndarray]:
@@ -713,12 +782,10 @@ def _connected_island_components(solver, coords: np.ndarray) -> list[np.ndarray]
     return components
 
 
-
 def _bbox_from_coords(solver, coords: np.ndarray, dx: int, dy: int) -> tuple[int, int, int, int]:
     xs = coords[:, 1] + dx
     ys = coords[:, 0] + dy
     return (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
-
 
 
 def _same_island_neighbors(solver, world: "WorldEngine", x: int, y: int, island_id: int) -> int:
@@ -735,7 +802,6 @@ def _same_island_neighbors(solver, world: "WorldEngine", x: int, y: int, island_
     return count
 
 
-
 def _falling_island_coords(solver, world: "WorldEngine", island_id: int) -> np.ndarray:
     solver._clear_stale_island_cells(world, island_id)
     return np.argwhere(
@@ -745,8 +811,9 @@ def _falling_island_coords(solver, world: "WorldEngine", island_id: int) -> np.n
     )
 
 
-
-def _can_shift_island(solver, world: "WorldEngine", coords: np.ndarray, dx: int, dy: int, island_id: int) -> bool:
+def _can_shift_island(
+    solver, world: "WorldEngine", coords: np.ndarray, dx: int, dy: int, island_id: int
+) -> bool:
     occupied = {(int(x), int(y)) for y, x in coords}
     for y, x in coords:
         nx = int(x) + dx
@@ -762,8 +829,9 @@ def _can_shift_island(solver, world: "WorldEngine", coords: np.ndarray, dx: int,
     return True
 
 
-
-def _can_shift_island_material(solver, material_id: np.ndarray, coords: np.ndarray, dx: int, dy: int) -> bool:
+def _can_shift_island_material(
+    solver, material_id: np.ndarray, coords: np.ndarray, dx: int, dy: int
+) -> bool:
     height, width = material_id.shape
     occupied = {(int(x), int(y)) for y, x in coords}
     for y, x in coords:
@@ -780,8 +848,9 @@ def _can_shift_island_material(solver, material_id: np.ndarray, coords: np.ndarr
     return True
 
 
-
-def _shadow_shift_island_material(solver, material_id: np.ndarray, coords: np.ndarray, dx: int, dy: int) -> None:
+def _shadow_shift_island_material(
+    solver, material_id: np.ndarray, coords: np.ndarray, dx: int, dy: int
+) -> None:
     ys = coords[:, 0].astype(np.int32)
     xs = coords[:, 1].astype(np.int32)
     new_ys = ys + int(dy)
@@ -791,8 +860,9 @@ def _shadow_shift_island_material(solver, material_id: np.ndarray, coords: np.nd
     material_id[new_ys, new_xs] = payload
 
 
-
-def _shift_island(solver, world: "WorldEngine", coords: np.ndarray, dx: int, dy: int, island_id: int) -> None:
+def _shift_island(
+    solver, world: "WorldEngine", coords: np.ndarray, dx: int, dy: int, island_id: int
+) -> None:
     ys = coords[:, 0].astype(np.int32)
     xs = coords[:, 1].astype(np.int32)
     new_ys = ys + int(dy)
@@ -842,4 +912,3 @@ def _shift_island(solver, world: "WorldEngine", coords: np.ndarray, dx: int, dy:
         min(world.width, max(old_bbox[2], new_bbox[2]) + 1),
         min(world.height, max(old_bbox[3], new_bbox[3]) + 1),
     )
-

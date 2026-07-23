@@ -1,17 +1,19 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import threading
-from typing import Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from oracle_game.gpu import RENDER_GROUP_IDS, moderngl, typed_gas_id, typed_material_id
-from oracle_game.sim.gpu_base import GPUPipelineBase
-from oracle_game.sim.gpu_placeholders import MAX_MATERIALS, PASS_LOCAL_SIZE
-from oracle_game.sim.shader_loader import build_compute_shader, shader_source
-from oracle_game.types import Phase, WorldCommand
+if TYPE_CHECKING:
+    from oracle_game.world import WorldEngine
 
+from oracle_game.gpu import RENDER_GROUP_IDS, moderngl, typed_gas_id, typed_material_id
+from oracle_game.sim.gpu_base import GPUPipelineBase, release_resource_fields
+from oracle_game.sim.gpu_placeholders import MAX_MATERIALS, PASS_LOCAL_SIZE
+from oracle_game.sim.shader_loader import build_compute_shader
+from oracle_game.types import Phase, WorldCommand
 
 COMMAND_KIND_IDS = {
     "inject_material": 1,
@@ -88,7 +90,11 @@ class GPUWorldCommandPipeline(GPUPipelineBase):
             return False
         return bool(
             (moderngl is not None)
-            or (world.bridge.enabled and world.bridge.ctx is not None and world.bridge.ctx.version_code >= 430)
+            or (
+                world.bridge.enabled
+                and world.bridge.ctx is not None
+                and world.bridge.ctx.version_code >= 430
+            )
         )
 
     def apply(self, world: "WorldEngine", commands: list[WorldCommand]) -> None:
@@ -119,30 +125,7 @@ class GPUWorldCommandPipeline(GPUPipelineBase):
 
     def release(self) -> None:
         for resources in list(self._thread_resources.values()):
-            for resource in (
-                resources.material,
-                resources.phase,
-                resources.flags,
-                resources.timer,
-                resources.temp,
-                resources.integrity,
-                resources.velocity,
-                resources.island,
-                resources.entity,
-                resources.displaced,
-                resources.ambient,
-                resources.flow_velocity,
-                resources.gas_concentration,
-                resources.command_i0,
-                resources.command_i1,
-                resources.command_i2,
-                resources.command_f,
-                resources.material_params,
-            ):
-                try:
-                    resource.release()
-                except Exception:
-                    pass
+            release_resource_fields(resources)
         for programs in list(self._thread_programs.values()):
             for program in programs.values():
                 try:
@@ -205,30 +188,7 @@ class GPUWorldCommandPipeline(GPUPipelineBase):
     def _release_context_key(self, key: int) -> None:
         resources = self._thread_resources.pop(key, None)
         if resources is not None:
-            for resource in (
-                resources.material,
-                resources.phase,
-                resources.flags,
-                resources.timer,
-                resources.temp,
-                resources.integrity,
-                resources.velocity,
-                resources.island,
-                resources.entity,
-                resources.displaced,
-                resources.ambient,
-                resources.flow_velocity,
-                resources.gas_concentration,
-                resources.command_i0,
-                resources.command_i1,
-                resources.command_i2,
-                resources.command_f,
-                resources.material_params,
-            ):
-                try:
-                    resource.release()
-                except Exception:
-                    pass
+            release_resource_fields(resources)
         programs = self._thread_programs.pop(key, None)
         if programs is not None:
             for program in programs.values():
@@ -270,30 +230,7 @@ class GPUWorldCommandPipeline(GPUPipelineBase):
         if self.resources is not None and self.resources.signature == signature:
             return self.resources
         if self.resources is not None:
-            for resource in (
-                self.resources.material,
-                self.resources.phase,
-                self.resources.flags,
-                self.resources.timer,
-                self.resources.temp,
-                self.resources.integrity,
-                self.resources.velocity,
-                self.resources.island,
-                self.resources.entity,
-                self.resources.displaced,
-                self.resources.ambient,
-                self.resources.flow_velocity,
-                self.resources.gas_concentration,
-                self.resources.command_i0,
-                self.resources.command_i1,
-                self.resources.command_i2,
-                self.resources.command_f,
-                self.resources.material_params,
-            ):
-                try:
-                    resource.release()
-                except Exception:
-                    pass
+            release_resource_fields(self.resources)
         cell_count = world.width * world.height
         gas_count = world.gas_width * world.gas_height
         species_count = int(world.gas_concentration.shape[0])
@@ -311,7 +248,9 @@ class GPUWorldCommandPipeline(GPUPipelineBase):
             displaced=ctx.buffer(reserve=max(4, cell_count * 4), dynamic=True),
             ambient=ctx.buffer(reserve=max(4, gas_count * 4), dynamic=True),
             flow_velocity=ctx.buffer(reserve=max(4, gas_count * 2 * 4), dynamic=True),
-            gas_concentration=ctx.buffer(reserve=max(4, species_count * gas_count * 4), dynamic=True),
+            gas_concentration=ctx.buffer(
+                reserve=max(4, species_count * gas_count * 4), dynamic=True
+            ),
             command_i0=ctx.buffer(reserve=4 * 4, dynamic=True),
             command_i1=ctx.buffer(reserve=4 * 4, dynamic=True),
             command_i2=ctx.buffer(reserve=4 * 4, dynamic=True),
@@ -326,27 +265,41 @@ class GPUWorldCommandPipeline(GPUPipelineBase):
         if self.programs:
             return
         self.programs["cell_commands"] = build_compute_shader(
-            ctx, "world_commands/cell_commands.comp", _SHADER_SUBS,
+            ctx,
+            "world_commands/cell_commands.comp",
+            _SHADER_SUBS,
             includes=["world_commands/_common.comp"],
         )
         self.programs["gas_commands"] = build_compute_shader(
-            ctx, "world_commands/gas_commands.comp", _SHADER_SUBS,
+            ctx,
+            "world_commands/gas_commands.comp",
+            _SHADER_SUBS,
             includes=["world_commands/_common.comp"],
         )
         self.programs["load_bridge_cell"] = build_compute_shader(
-            ctx, "world_commands/load_bridge_cell.comp", _SHADER_SUBS,
+            ctx,
+            "world_commands/load_bridge_cell.comp",
+            _SHADER_SUBS,
         )
         self.programs["load_bridge_gas"] = build_compute_shader(
-            ctx, "world_commands/load_bridge_gas.comp", _SHADER_SUBS,
+            ctx,
+            "world_commands/load_bridge_gas.comp",
+            _SHADER_SUBS,
         )
         self.programs["publish_bridge_cell"] = build_compute_shader(
-            ctx, "world_commands/publish_bridge_cell.comp", _SHADER_SUBS,
+            ctx,
+            "world_commands/publish_bridge_cell.comp",
+            _SHADER_SUBS,
         )
         self.programs["publish_bridge_gas"] = build_compute_shader(
-            ctx, "world_commands/publish_bridge_gas.comp", _SHADER_SUBS,
+            ctx,
+            "world_commands/publish_bridge_gas.comp",
+            _SHADER_SUBS,
         )
 
-    def _pack_commands(self, world: "WorldEngine", commands: list[WorldCommand]) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def _pack_commands(
+        self, world: "WorldEngine", commands: list[WorldCommand]
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         material_table = world.bridge.shadow_typed_tables["material_table"]
         gas_table = world.bridge.shadow_typed_tables["gas_table"]
         command_i0 = np.zeros((len(commands), 4), dtype=np.int32)
@@ -367,12 +320,16 @@ class GPUWorldCommandPipeline(GPUPipelineBase):
             command_i0[index, 3] = int(command.payload.get("radius", 0))
 
             if command.kind == "inject_material":
-                material_id = self._typed_material_alias_id(world, material_table, str(command.payload["material"]))
+                material_id = self._typed_material_alias_id(
+                    world, material_table, str(command.payload["material"])
+                )
                 if material_id <= 0:
                     raise KeyError(command.payload["material"])
                 command_i1[index, 2] = material_id
             elif command.kind == "write_material_region":
-                material_id = self._typed_material_alias_id(world, material_table, str(command.payload["material"]))
+                material_id = self._typed_material_alias_id(
+                    world, material_table, str(command.payload["material"])
+                )
                 if material_id <= 0:
                     raise KeyError(command.payload["material"])
                 command_i0[index, 1] = int(x)
@@ -392,7 +349,11 @@ class GPUWorldCommandPipeline(GPUPipelineBase):
                 if carrier in {"flow", "both"}:
                     gas_center_x = min(world.gas_width - 1, max(0, int(x) // world.gas_cell_size))
                     gas_center_y = min(world.gas_height - 1, max(0, int(y) // world.gas_cell_size))
-                    gas_radius = max(0, (int(command.payload.get("radius", 0)) + world.gas_cell_size - 1) // world.gas_cell_size)
+                    gas_radius = max(
+                        0,
+                        (int(command.payload.get("radius", 0)) + world.gas_cell_size - 1)
+                        // world.gas_cell_size,
+                    )
                     command_i1[index, 0] = int(gas_center_x)
                     command_i1[index, 1] = int(gas_center_y)
                     command_i1[index, 2] = int(gas_radius)
@@ -409,7 +370,9 @@ class GPUWorldCommandPipeline(GPUPipelineBase):
                 command_f[index, 0] = float(command.payload["amount"])
         return command_i0, command_i1, command_i2, command_f
 
-    def _typed_material_alias_id(self, world: "WorldEngine", material_table: np.ndarray, name: str) -> int:
+    def _typed_material_alias_id(
+        self, world: "WorldEngine", material_table: np.ndarray, name: str
+    ) -> int:
         candidates = [str(name)]
         canonical = world._canonical_material_input_name(name)
         if canonical is not None and canonical not in candidates:
@@ -446,19 +409,45 @@ class GPUWorldCommandPipeline(GPUPipelineBase):
             "gas_concentration",
         )
         if not formal_gpu_frame:
-            resources.material.write(np.ascontiguousarray(world.material_id.astype(np.int32)).tobytes())
+            resources.material.write(
+                np.ascontiguousarray(world.material_id.astype(np.int32)).tobytes()
+            )
             resources.phase.write(np.ascontiguousarray(world.phase.astype(np.int32)).tobytes())
             resources.flags.write(np.ascontiguousarray(world.cell_flags.astype(np.int32)).tobytes())
-            resources.timer.write(np.ascontiguousarray(world.timer_pack.astype(np.int32).reshape(cell_count, 4)).tobytes())
-            resources.temp.write(np.ascontiguousarray(world.cell_temperature.astype(np.float32)).tobytes())
-            resources.integrity.write(np.ascontiguousarray(world.integrity.astype(np.float32)).tobytes())
-            resources.velocity.write(np.ascontiguousarray(world.velocity.astype(np.float32).reshape(cell_count, 2)).tobytes())
+            resources.timer.write(
+                np.ascontiguousarray(
+                    world.timer_pack.astype(np.int32).reshape(cell_count, 4)
+                ).tobytes()
+            )
+            resources.temp.write(
+                np.ascontiguousarray(world.cell_temperature.astype(np.float32)).tobytes()
+            )
+            resources.integrity.write(
+                np.ascontiguousarray(world.integrity.astype(np.float32)).tobytes()
+            )
+            resources.velocity.write(
+                np.ascontiguousarray(
+                    world.velocity.astype(np.float32).reshape(cell_count, 2)
+                ).tobytes()
+            )
             resources.island.write(np.ascontiguousarray(world.island_id.astype(np.int32)).tobytes())
             resources.entity.write(np.ascontiguousarray(world.entity_id.astype(np.int32)).tobytes())
-            resources.displaced.write(np.ascontiguousarray(world.placeholder_displaced_material.astype(np.int32)).tobytes())
-            resources.ambient.write(np.ascontiguousarray(world.ambient_temperature.astype(np.float32)).tobytes())
-            resources.flow_velocity.write(np.ascontiguousarray(world.flow_velocity.astype(np.float32).reshape(gas_count, 2)).tobytes())
-            resources.gas_concentration.write(np.ascontiguousarray(world.gas_concentration.astype(np.float32)).tobytes())
+            resources.displaced.write(
+                np.ascontiguousarray(
+                    world.placeholder_displaced_material.astype(np.int32)
+                ).tobytes()
+            )
+            resources.ambient.write(
+                np.ascontiguousarray(world.ambient_temperature.astype(np.float32)).tobytes()
+            )
+            resources.flow_velocity.write(
+                np.ascontiguousarray(
+                    world.flow_velocity.astype(np.float32).reshape(gas_count, 2)
+                ).tobytes()
+            )
+            resources.gas_concentration.write(
+                np.ascontiguousarray(world.gas_concentration.astype(np.float32)).tobytes()
+            )
         self._write_dynamic_buffer(world, resources, "command_i0", command_i0)
         self._write_dynamic_buffer(world, resources, "command_i1", command_i1)
         self._write_dynamic_buffer(world, resources, "command_i2", command_i2)
@@ -485,20 +474,35 @@ class GPUWorldCommandPipeline(GPUPipelineBase):
         if data.nbytes > 0:
             buffer.write(np.ascontiguousarray(data).tobytes())
 
-    def _write_material_params(self, world: "WorldEngine", resources: GPUWorldCommandResources) -> None:
+    def _write_material_params(
+        self, world: "WorldEngine", resources: GPUWorldCommandResources
+    ) -> None:
         material_table = world.bridge.shadow_typed_tables["material_table"]
         params = np.zeros((MAX_MATERIALS, 4), dtype=np.float32)
         params[:, 3] = np.nan
         count = min(MAX_MATERIALS, int(material_table.shape[0]))
         valid_indices = np.nonzero(material_table[:count]["name_hash"] != 0)[0]
-        params[valid_indices, 0] = material_table[:count]["default_phase"][valid_indices].astype(np.float32)
-        params[valid_indices, 1] = material_table[:count]["base_integrity"][valid_indices].astype(np.float32)
-        params[valid_indices, 2] = material_table[:count]["render_group_id"][valid_indices].astype(np.float32)
-        params[valid_indices, 3] = material_table[:count]["spawn_temperature"][valid_indices].astype(np.float32)
+        params[valid_indices, 0] = material_table[:count]["default_phase"][valid_indices].astype(
+            np.float32
+        )
+        params[valid_indices, 1] = material_table[:count]["base_integrity"][valid_indices].astype(
+            np.float32
+        )
+        params[valid_indices, 2] = material_table[:count]["render_group_id"][valid_indices].astype(
+            np.float32
+        )
+        params[valid_indices, 3] = material_table[:count]["spawn_temperature"][
+            valid_indices
+        ].astype(np.float32)
         resources.material_params.write(params.tobytes())
-        resources.material_params_signature = (world.bridge.table_generations.get("materials", 0), int(material_table.shape[0]))
+        resources.material_params_signature = (
+            world.bridge.table_generations.get("materials", 0),
+            int(material_table.shape[0]),
+        )
 
-    def _run_cell_commands(self, world: "WorldEngine", resources: GPUWorldCommandResources, *, command_count: int) -> None:
+    def _run_cell_commands(
+        self, world: "WorldEngine", resources: GPUWorldCommandResources, *, command_count: int
+    ) -> None:
         ctx = self._active_context()
         program = self.programs["cell_commands"]
         program["cell_grid_size"].value = (world.width, world.height)
@@ -528,7 +532,9 @@ class GPUWorldCommandPipeline(GPUPipelineBase):
         )
         ctx.memory_barrier(ctx.SHADER_STORAGE_BARRIER_BIT)
 
-    def _run_gas_commands(self, world: "WorldEngine", resources: GPUWorldCommandResources, *, command_count: int) -> None:
+    def _run_gas_commands(
+        self, world: "WorldEngine", resources: GPUWorldCommandResources, *, command_count: int
+    ) -> None:
         ctx = self._active_context()
         program = self.programs["gas_commands"]
         program["gas_grid_size"].value = (world.gas_width, world.gas_height)
@@ -553,15 +559,21 @@ class GPUWorldCommandPipeline(GPUPipelineBase):
     def _bridge_context_active(self, world: "WorldEngine") -> bool:
         return self._active_context() is world.bridge.ctx
 
-    def _load_authoritative_bridge_inputs(self, world: "WorldEngine", resources: GPUWorldCommandResources) -> None:
+    def _load_authoritative_bridge_inputs(
+        self, world: "WorldEngine", resources: GPUWorldCommandResources
+    ) -> None:
         if not self._formal_gpu_frame(world):
             return
         bridge = world.bridge
         bridge.ensure_world_resources(world)
         if not bridge.enabled or bridge.ctx is None:
-            raise RuntimeError("GPU world command pipeline requires bridge GPU resources for authoritative input state")
+            raise RuntimeError(
+                "GPU world command pipeline requires bridge GPU resources for authoritative input state"
+            )
         if not self._bridge_context_active(world):
-            raise RuntimeError("GPU world command pipeline cannot consume authoritative bridge state from a separate GL context")
+            raise RuntimeError(
+                "GPU world command pipeline cannot consume authoritative bridge state from a separate GL context"
+            )
 
         authoritative = bridge.gpu_authoritative_resources
         copy_cell_core = "cell_core" in authoritative
@@ -617,19 +629,33 @@ class GPUWorldCommandPipeline(GPUPipelineBase):
                 int(world.gas_concentration.shape[0]),
             )
 
-        if copy_cell_core or copy_island_id or copy_entity_id or copy_displaced or copy_flow_velocity or copy_gas_concentration or copy_ambient:
+        if (
+            copy_cell_core
+            or copy_island_id
+            or copy_entity_id
+            or copy_displaced
+            or copy_flow_velocity
+            or copy_gas_concentration
+            or copy_ambient
+        ):
             self._sync_compute_writes(self._active_context())
 
-    def _publish_bridge_outputs(self, world: "WorldEngine", resources: GPUWorldCommandResources) -> None:
+    def _publish_bridge_outputs(
+        self, world: "WorldEngine", resources: GPUWorldCommandResources
+    ) -> None:
         bridge = world.bridge
         bridge.ensure_world_resources(world)
         if not bridge.enabled or bridge.ctx is None:
             if self._formal_gpu_frame(world):
-                raise RuntimeError("GPU world command pipeline requires bridge GPU resources for authoritative output state")
+                raise RuntimeError(
+                    "GPU world command pipeline requires bridge GPU resources for authoritative output state"
+                )
             return
         if not self._bridge_context_active(world):
             if self._formal_gpu_frame(world):
-                raise RuntimeError("GPU world command pipeline cannot publish authoritative state from a separate GL context")
+                raise RuntimeError(
+                    "GPU world command pipeline cannot publish authoritative state from a separate GL context"
+                )
             return
 
         cell_program = self.programs["publish_bridge_cell"]
@@ -684,22 +710,44 @@ class GPUWorldCommandPipeline(GPUPipelineBase):
     # default (SHADER_IMAGE_ACCESS | TEXTURE_FETCH | SHADER_STORAGE).
 
     def _download_outputs(self, world: "WorldEngine", resources: GPUWorldCommandResources) -> None:
-        world.material_id[:] = np.frombuffer(resources.material.read(), dtype=np.int32).reshape((world.height, world.width))
-        world.phase[:] = np.frombuffer(resources.phase.read(), dtype=np.int32).reshape((world.height, world.width)).astype(np.uint8)
-        world.cell_flags[:] = np.frombuffer(resources.flags.read(), dtype=np.int32).reshape((world.height, world.width)).astype(np.uint8)
-        timer = np.frombuffer(resources.timer.read(), dtype=np.int32).reshape((world.height, world.width, 4))
-        world.timer_pack[:] = np.clip(timer, 0, 255).astype(np.uint8)
-        world.cell_temperature[:] = np.frombuffer(resources.temp.read(), dtype=np.float32).reshape((world.height, world.width))
-        world.integrity[:] = np.frombuffer(resources.integrity.read(), dtype=np.float32).reshape((world.height, world.width))
-        world.velocity[:] = np.frombuffer(resources.velocity.read(), dtype=np.float32).reshape((world.height, world.width, 2))
-        world.island_id[:] = np.frombuffer(resources.island.read(), dtype=np.int32).reshape((world.height, world.width))
-        world.entity_id[:] = np.frombuffer(resources.entity.read(), dtype=np.int32).reshape((world.height, world.width))
-        world.placeholder_displaced_material[:] = np.frombuffer(resources.displaced.read(), dtype=np.int32).reshape(
+        world.material_id[:] = np.frombuffer(resources.material.read(), dtype=np.int32).reshape(
             (world.height, world.width)
         )
-        world.flow_velocity[:] = np.frombuffer(resources.flow_velocity.read(), dtype=np.float32).reshape(
-            (world.gas_height, world.gas_width, 2)
+        world.phase[:] = (
+            np.frombuffer(resources.phase.read(), dtype=np.int32)
+            .reshape((world.height, world.width))
+            .astype(np.uint8)
         )
-        world.gas_concentration[:] = np.frombuffer(resources.gas_concentration.read(), dtype=np.float32).reshape(
-            world.gas_concentration.shape
+        world.cell_flags[:] = (
+            np.frombuffer(resources.flags.read(), dtype=np.int32)
+            .reshape((world.height, world.width))
+            .astype(np.uint8)
         )
+        timer = np.frombuffer(resources.timer.read(), dtype=np.int32).reshape(
+            (world.height, world.width, 4)
+        )
+        world.timer_pack[:] = np.clip(timer, 0, 255).astype(np.uint8)
+        world.cell_temperature[:] = np.frombuffer(resources.temp.read(), dtype=np.float32).reshape(
+            (world.height, world.width)
+        )
+        world.integrity[:] = np.frombuffer(resources.integrity.read(), dtype=np.float32).reshape(
+            (world.height, world.width)
+        )
+        world.velocity[:] = np.frombuffer(resources.velocity.read(), dtype=np.float32).reshape(
+            (world.height, world.width, 2)
+        )
+        world.island_id[:] = np.frombuffer(resources.island.read(), dtype=np.int32).reshape(
+            (world.height, world.width)
+        )
+        world.entity_id[:] = np.frombuffer(resources.entity.read(), dtype=np.int32).reshape(
+            (world.height, world.width)
+        )
+        world.placeholder_displaced_material[:] = np.frombuffer(
+            resources.displaced.read(), dtype=np.int32
+        ).reshape((world.height, world.width))
+        world.flow_velocity[:] = np.frombuffer(
+            resources.flow_velocity.read(), dtype=np.float32
+        ).reshape((world.gas_height, world.gas_width, 2))
+        world.gas_concentration[:] = np.frombuffer(
+            resources.gas_concentration.read(), dtype=np.float32
+        ).reshape(world.gas_concentration.shape)

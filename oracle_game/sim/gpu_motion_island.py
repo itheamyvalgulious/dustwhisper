@@ -1,26 +1,25 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 if TYPE_CHECKING:
-    from oracle_game.world import WorldEngine
     from oracle_game.sim.gpu_motion import GPUMotionResources
+    from oracle_game.world import WorldEngine
 
 from oracle_game.gpu import pack_island_runtime_upload
-from oracle_game.types import Phase
-
 from oracle_game.sim.gpu_motion import (
-    LOCAL_SIZE,
-    ISLAND_RESERVATION_LINEAR_LOCAL_SIZE,
-    FALLING_ISLAND_INDEX_CLEAR_SOURCE,
     FALLING_ISLAND_INDEX_CLEAR_APPLY,
     FALLING_ISLAND_INDEX_CLEAR_MATERIALIZATION,
+    FALLING_ISLAND_INDEX_CLEAR_SOURCE,
     FALLING_ISLAND_RESERVATION_DTYPE,
-    ISLAND_RESOLVE_STALE
+    ISLAND_RESERVATION_LINEAR_LOCAL_SIZE,
+    ISLAND_RESOLVE_STALE,
+    LOCAL_SIZE,
 )
 from oracle_game.sim.gpu_motion_bridge import _pack_cell_state_texture
+from oracle_game.types import Phase
 
 
 def _dispatch_index_falling_island_reservation_sources(
@@ -131,7 +130,9 @@ def _dispatch_index_falling_island_materialization(
         ctx.memory_barrier(ctx.SHADER_STORAGE_BARRIER_BIT | ctx.TEXTURE_FETCH_BARRIER_BIT)
 
 
-def apply_falling_island_reservations(pipeline, world: "WorldEngine", reservations: np.ndarray) -> bool:
+def apply_falling_island_reservations(
+    pipeline, world: "WorldEngine", reservations: np.ndarray
+) -> bool:
     ctx = world.bridge.ctx
     if ctx is None or len(reservations) == 0:
         return False
@@ -146,14 +147,18 @@ def apply_falling_island_reservations(pipeline, world: "WorldEngine", reservatio
     return True
 
 
-def apply_uploaded_falling_island_reservations(pipeline, world: "WorldEngine", reservation_count: int) -> bool:
+def apply_uploaded_falling_island_reservations(
+    pipeline, world: "WorldEngine", reservation_count: int
+) -> bool:
     ctx = world.bridge.ctx
     if ctx is None or int(reservation_count) <= 0:
         return False
     pipeline._ensure_programs(ctx)
     resources = pipeline._ensure_resources(world)
     if not pipeline._formal_gpu_frame(world):
-        resources.island_reservation_count.write(np.array([int(reservation_count)], dtype=np.int32).tobytes())
+        resources.island_reservation_count.write(
+            np.array([int(reservation_count)], dtype=np.int32).tobytes()
+        )
     pipeline._dispatch_apply_falling_island_reservations(world, resources, int(reservation_count))
     if pipeline._formal_gpu_frame(world):
         pipeline._dispatch_apply_falling_island_materialization(
@@ -172,12 +177,18 @@ def shed_falling_island_fragments(pipeline, world: "WorldEngine") -> bool:
         return False
     pipeline._ensure_programs(ctx)
     resources = pipeline._ensure_resources(world)
-    pipeline.upload_falling_island_reservations(world, np.zeros((0,), dtype=FALLING_ISLAND_RESERVATION_DTYPE))
-    pipeline._dispatch_apply_falling_island_materialization(world, resources, reservation_count=0, mode=0)
+    pipeline.upload_falling_island_reservations(
+        world, np.zeros((0,), dtype=FALLING_ISLAND_RESERVATION_DTYPE)
+    )
+    pipeline._dispatch_apply_falling_island_materialization(
+        world, resources, reservation_count=0, mode=0
+    )
     return True
 
 
-def apply_falling_island_settlements(pipeline, world: "WorldEngine", reservations: np.ndarray) -> bool:
+def apply_falling_island_settlements(
+    pipeline, world: "WorldEngine", reservations: np.ndarray
+) -> bool:
     ctx = world.bridge.ctx
     if ctx is None or len(reservations) == 0:
         return False
@@ -192,19 +203,27 @@ def apply_falling_island_settlements(pipeline, world: "WorldEngine", reservation
     pipeline._ensure_programs(ctx)
     resources = pipeline._ensure_resources(world)
     pipeline.upload_falling_island_reservations(world, reservations)
-    pipeline._dispatch_apply_falling_island_materialization(world, resources, int(len(reservations)), mode=1)
+    pipeline._dispatch_apply_falling_island_materialization(
+        world, resources, int(len(reservations)), mode=1
+    )
     return True
 
 
-def apply_uploaded_falling_island_settlements(pipeline, world: "WorldEngine", reservation_count: int) -> bool:
+def apply_uploaded_falling_island_settlements(
+    pipeline, world: "WorldEngine", reservation_count: int
+) -> bool:
     ctx = world.bridge.ctx
     if ctx is None or int(reservation_count) <= 0:
         return False
     pipeline._ensure_programs(ctx)
     resources = pipeline._ensure_resources(world)
     if not pipeline._formal_gpu_frame(world):
-        resources.island_reservation_count.write(np.array([int(reservation_count)], dtype=np.int32).tobytes())
-    pipeline._dispatch_apply_falling_island_materialization(world, resources, int(reservation_count), mode=1)
+        resources.island_reservation_count.write(
+            np.array([int(reservation_count)], dtype=np.int32).tobytes()
+        )
+    pipeline._dispatch_apply_falling_island_materialization(
+        world, resources, int(reservation_count), mode=1
+    )
     return True
 
 
@@ -265,7 +284,9 @@ def _dispatch_apply_falling_island_materialization(
                     resources,
                     use_existing_active_tile_dispatch=reuse_active_dispatch,
                 ):
-                    raise RuntimeError("minimal materialization hydration requires authoritative bridge inputs")
+                    raise RuntimeError(
+                        "minimal materialization hydration requires authoritative bridge inputs"
+                    )
         else:
             pipeline._load_authoritative_bridge_inputs(
                 world,
@@ -458,8 +479,7 @@ def _dispatch_apply_falling_island_reservations(
         and not bool(getattr(world, "phase_c_defer_cell_publish", False))
     )
     changed_only = bool(
-        direct_bridge_outputs
-        and pipeline._falling_island_apply_changed_only_enabled
+        direct_bridge_outputs and pipeline._falling_island_apply_changed_only_enabled
     )
     program = pipeline.programs[
         "apply_falling_island_reservations_bridge_changed_only"
@@ -510,7 +530,9 @@ def _dispatch_apply_falling_island_reservations(
         resources.integrity_out_tex.bind_to_image(6, read=False, write=True)
     with pipeline._profile_pass(world, "island_apply_main"):
         if formal_frame:
-            pipeline._run_active_tile_indirect(program, resources, "falling island reservation apply")
+            pipeline._run_active_tile_indirect(
+                program, resources, "falling island reservation apply"
+            )
         else:
             program.run(group_x, group_y, 1)
         pipeline._sync_compute_writes(ctx)
@@ -555,12 +577,16 @@ def _dispatch_apply_falling_island_reservations(
     resources.displaced_out_tex.bind_to_image(2, read=False, write=True)
     with pipeline._profile_pass(world, "island_apply_aux"):
         if formal_frame:
-            pipeline._run_active_tile_indirect(aux_program, resources, "falling island reservation aux apply")
+            pipeline._run_active_tile_indirect(
+                aux_program, resources, "falling island reservation aux apply"
+            )
         else:
             aux_program.run(group_x, group_y, 1)
         pipeline._sync_compute_writes(ctx)
     with pipeline._profile_pass(world, "island_apply_bridge_publish"):
-        pipeline._publish_bridge_outputs(world, resources, output_textures=True, active_tile_indirect=formal_frame)
+        pipeline._publish_bridge_outputs(
+            world, resources, output_textures=True, active_tile_indirect=formal_frame
+        )
     pipeline._refresh_authoritative_active_scheduler_after_apply(
         world,
         "active_refresh_after_falling_island_reservation",
@@ -587,7 +613,9 @@ def plan_uploaded_falling_island_reservations(
     runtime = pack_island_runtime_upload(world)
     if island_ids is not None:
         wanted = set(int(island_id) for island_id in island_ids)
-        runtime = runtime[np.isin(runtime["island_id"], np.fromiter(wanted, dtype=np.int32, count=len(wanted)))]
+        runtime = runtime[
+            np.isin(runtime["island_id"], np.fromiter(wanted, dtype=np.int32, count=len(wanted)))
+        ]
     if motion_overrides:
         for island_id, (velocity_xy, subcell_offset) in motion_overrides.items():
             matches = np.nonzero(runtime["island_id"] == int(island_id))[0]
@@ -624,7 +652,9 @@ def plan_uploaded_falling_island_reservations(
     pipeline._write_dynamic_buffer(ctx, resources, "island_motion", packed_motion)
     pipeline._write_dynamic_buffer(ctx, resources, "island_shift_results", packed_shifts)
     pipeline._write_dynamic_buffer(ctx, resources, "island_reservations", empty_reservations)
-    resources.island_reservation_count.write(np.array([int(runtime.shape[0])], dtype=np.int32).tobytes())
+    resources.island_reservation_count.write(
+        np.array([int(runtime.shape[0])], dtype=np.int32).tobytes()
+    )
     program = pipeline.programs["island_shifts"]
     program["cell_grid_size"].value = (world.width, world.height)
     program["island_count"].value = int(runtime.shape[0])
@@ -653,7 +683,9 @@ def plan_uploaded_falling_island_reservations(
     resources.island_shift_results.bind_to_storage_buffer(binding=3)
     resources.island_reservations.bind_to_storage_buffer(binding=4)
     resources.island_reservation_count.bind_to_storage_buffer(binding=5)
-    pack_group_x = (runtime.shape[0] + ISLAND_RESERVATION_LINEAR_LOCAL_SIZE - 1) // ISLAND_RESERVATION_LINEAR_LOCAL_SIZE
+    pack_group_x = (
+        runtime.shape[0] + ISLAND_RESERVATION_LINEAR_LOCAL_SIZE - 1
+    ) // ISLAND_RESERVATION_LINEAR_LOCAL_SIZE
     pack_program.run(pack_group_x, 1, 1)
     ctx.memory_barrier(ctx.SHADER_STORAGE_BARRIER_BIT)
     return int(runtime.shape[0])
@@ -678,11 +710,20 @@ def plan_uploaded_falling_island_reservations_from_bridge_runtime(
     bridge = world.bridge
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("GPU motion pipeline requires bridge GPU resources for island runtime planning")
-    if pipeline._formal_gpu_frame(world) and "island_runtime" not in bridge.gpu_authoritative_resources:
-        raise RuntimeError("GPU motion pipeline requires GPU-authoritative island_runtime for bridge runtime planning")
+        raise RuntimeError(
+            "GPU motion pipeline requires bridge GPU resources for island runtime planning"
+        )
+    if (
+        pipeline._formal_gpu_frame(world)
+        and "island_runtime" not in bridge.gpu_authoritative_resources
+    ):
+        raise RuntimeError(
+            "GPU motion pipeline requires GPU-authoritative island_runtime for bridge runtime planning"
+        )
     if not pipeline._bridge_context_active(world):
-        raise RuntimeError("GPU motion pipeline cannot consume island runtime from a separate GL context")
+        raise RuntimeError(
+            "GPU motion pipeline cannot consume island runtime from a separate GL context"
+        )
 
     pipeline._ensure_programs(ctx)
     resources = pipeline._ensure_resources(world)
@@ -695,14 +736,18 @@ def plan_uploaded_falling_island_reservations_from_bridge_runtime(
             use_bridge_state = pipeline._bridge_authoritative_island_state(world)
             if upload_plan["cell_core"]:
                 resources.cell_state_tex.write(
-                    _pack_cell_state_texture(world.material_id, world.phase, world.cell_flags).tobytes()
+                    _pack_cell_state_texture(
+                        world.material_id, world.phase, world.cell_flags
+                    ).tobytes()
                 )
             if upload_plan["island_id"]:
                 resources.island_id_tex.write(world.island_id.astype("f4").tobytes())
             if not use_bridge_state:
                 cell_group_x = (world.width + LOCAL_SIZE - 1) // LOCAL_SIZE
                 cell_group_y = (world.height + LOCAL_SIZE - 1) // LOCAL_SIZE
-                pipeline._load_authoritative_bridge_inputs(world, resources, cell_group_x, cell_group_y)
+                pipeline._load_authoritative_bridge_inputs(
+                    world, resources, cell_group_x, cell_group_y
+                )
             pipeline._upload_material_rule_params(world, resources)
             program = pipeline.programs["plan_bridge_runtime_falling_island_reservations"]
             program["cell_grid_size"].value = (world.width, world.height)
@@ -718,6 +763,7 @@ def plan_uploaded_falling_island_reservations_from_bridge_runtime(
             resources.material_params.bind_to_storage_buffer(binding=4)
             before_plan_run = None
             if use_bridge_state:
+
                 def rebind_bridge_island_state() -> None:
                     pipeline._bind_bridge_island_state(world, cell_binding=7)
 
@@ -785,6 +831,7 @@ def plan_uploaded_falling_island_reservations_from_bridge_runtime(
         resources.material_params.bind_to_storage_buffer(binding=5)
         before_shift_run = None
         if use_bridge_state:
+
             def rebind_bridge_island_state() -> None:
                 pipeline._bind_bridge_island_state(world, cell_binding=7)
 
@@ -842,16 +889,22 @@ def plan_falling_island_reservations(
     return pipeline._read_falling_island_reservations(resources, reservation_count)
 
 
-def upload_falling_island_reservations(pipeline, world: "WorldEngine", reservations: np.ndarray) -> None:
+def upload_falling_island_reservations(
+    pipeline, world: "WorldEngine", reservations: np.ndarray
+) -> None:
     ctx = world.bridge.ctx
     if ctx is None:
         return
     resources = pipeline._ensure_resources(world)
     pipeline._write_dynamic_buffer(ctx, resources, "island_reservations", reservations)
-    resources.island_reservation_count.write(np.array([len(reservations)], dtype=np.int32).tobytes())
+    resources.island_reservation_count.write(
+        np.array([len(reservations)], dtype=np.int32).tobytes()
+    )
 
 
-def resolve_falling_island_reservations(pipeline, world: "WorldEngine", reservations: np.ndarray) -> np.ndarray:
+def resolve_falling_island_reservations(
+    pipeline, world: "WorldEngine", reservations: np.ndarray
+) -> np.ndarray:
     ctx = world.bridge.ctx
     if ctx is None:
         raise RuntimeError("GPU motion pipeline requires a valid ModernGL context")
@@ -861,7 +914,9 @@ def resolve_falling_island_reservations(pipeline, world: "WorldEngine", reservat
     pipeline._ensure_programs(ctx)
     resources = pipeline._ensure_resources(world)
     pipeline._write_dynamic_buffer(ctx, resources, "island_reservations", reservations)
-    resources.island_reservation_count.write(np.array([len(reservations)], dtype=np.int32).tobytes())
+    resources.island_reservation_count.write(
+        np.array([len(reservations)], dtype=np.int32).tobytes()
+    )
     pipeline._dispatch_resolve_falling_island_reservations(world, resources, int(len(reservations)))
     pipeline.publish_bridge_falling_island_reservations(world, int(len(reservations)))
     pipeline.publish_bridge_falling_island_runtime_from_reservations(world, int(len(reservations)))
@@ -886,7 +941,9 @@ def resolve_uploaded_falling_island_reservations(
     pipeline._ensure_programs(ctx)
     resources = pipeline._ensure_resources(world)
     if not pipeline._formal_gpu_frame(world):
-        resources.island_reservation_count.write(np.array([reservation_count], dtype=np.int32).tobytes())
+        resources.island_reservation_count.write(
+            np.array([reservation_count], dtype=np.int32).tobytes()
+        )
     pipeline._dispatch_resolve_falling_island_reservations(world, resources, reservation_count)
     if not pipeline._formal_gpu_frame(world):
         pipeline.publish_bridge_falling_island_reservations(world, reservation_count)
@@ -978,12 +1035,16 @@ def _dispatch_resolve_falling_island_reservations(
         ctx.finish()
 
 
-def _read_falling_island_reservations(pipeline, resources: GPUMotionResources, reservation_count: int) -> np.ndarray:
+def _read_falling_island_reservations(
+    pipeline, resources: GPUMotionResources, reservation_count: int
+) -> np.ndarray:
     reservation_count = int(reservation_count)
     if reservation_count <= 0:
         return np.zeros((0,), dtype=FALLING_ISLAND_RESERVATION_DTYPE)
     return np.frombuffer(
-        resources.island_reservations.read(size=reservation_count * FALLING_ISLAND_RESERVATION_DTYPE.itemsize),
+        resources.island_reservations.read(
+            size=reservation_count * FALLING_ISLAND_RESERVATION_DTYPE.itemsize
+        ),
         dtype=FALLING_ISLAND_RESERVATION_DTYPE,
         count=reservation_count,
     ).copy()
@@ -1004,6 +1065,9 @@ def resolve_falling_island_shifts(
         motion_overrides=motion_overrides,
     )
     return {
-        int(record["island_id"]): (int(record["reserved_shift"][0]), int(record["reserved_shift"][1]))
+        int(record["island_id"]): (
+            int(record["reserved_shift"][0]),
+            int(record["reserved_shift"][1]),
+        )
         for record in reservations
     }

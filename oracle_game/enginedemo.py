@@ -1,78 +1,76 @@
 from __future__ import annotations
 
-from dataclasses import replace
 import threading
 import time as _time
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
 
-from oracle_game.http_console import EngineHTTPConsole, EngineRunState
-from oracle_game.types import DebugView
-from oracle_game.world import WorldEngine
-
 from oracle_game.demo_input import (
+    BRUSH_MODE_CYCLE_KEYS,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
     BRUSH_MODES,
-    BRUSH_MODE_CYCLE_KEYS,
-    CONTROLLER_TOGGLE_KEYS,
-    DEBUG_VIEW_KEYMAP,
-    GAS_SPECIES_CYCLE_KEYS,
+    CONTROLLER_TOGGLE_KEYS,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
+    DEBUG_VIEW_KEYMAP,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
+    GAS_SPECIES_CYCLE_KEYS,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
     MATERIAL_KEYS,
-    OPTICS_LIGHT_CYCLE_KEYS,
-    RESET_WORLD_KEYS,
-    _alpha_keys,
-    apply_demo_paint,
+    OPTICS_LIGHT_CYCLE_KEYS,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
+    RESET_WORLD_KEYS,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
+    _alpha_keys,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
+    apply_demo_paint,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
     clamp_demo_brush_radius,
     cycle_demo_brush_mode,
     cycle_demo_named_choice,
     demo_debug_view_for_key,
-    demo_force_direction_from_drag,
-    demo_light_direction_and_spread_from_drag,
+    demo_force_direction_from_drag,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
+    demo_light_direction_and_spread_from_drag,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
     demo_material_for_key,
-    demo_screen_to_buffer_cell,
+    demo_screen_to_buffer_cell,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
     demo_screen_to_world_cell,
-    demo_velocity_from_drag,
+    demo_velocity_from_drag,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
     is_demo_brush_cycle_key,
     is_demo_controller_toggle_key,
     is_demo_gas_cycle_key,
     is_demo_optics_cycle_key,
     is_demo_reset_key,
     queue_demo_paint,
-    resolve_demo_paint_command,
+    resolve_demo_paint_command,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
 )
 from oracle_game.demo_render import (
-    DEMO_AMBIENT_BOTTOM_LIGHT,
-    DEMO_AMBIENT_TOP_LIGHT,
-    DEMO_PATTERN_SCALE,
+    DEMO_AMBIENT_BOTTOM_LIGHT,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
+    DEMO_AMBIENT_TOP_LIGHT,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
+    DEMO_PATTERN_SCALE,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
     apply_demo_render_uniforms,
     build_demo_render_uniforms,
 )
 from oracle_game.demo_sizing import (
-    DEMO_ACTIVE_SCALE,
+    DEMO_ACTIVE_SCALE,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
     DEMO_CONTROLLER_ENTITY_ID,
-    DEMO_LOGICAL_WORLD_SCALE,
-    DEMO_TARGET_CELL_PIXELS,
+    DEMO_LOGICAL_WORLD_SCALE,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
+    DEMO_TARGET_CELL_PIXELS,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
     ENGINE_DEMO_TITLE,
-    _demo_shadow_material_name,
-    _format_demo_probe_rgb,
-    _format_demo_probe_vector,
-    build_demo_controller_entities,
+    _demo_shadow_material_name,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
+    _format_demo_probe_rgb,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
+    _format_demo_probe_vector,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
+    build_demo_controller_entities,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
     build_demo_controller_entities_for_world_focus,
-    build_demo_controller_probe_entity,
+    build_demo_controller_probe_entity,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
     build_demo_controller_state,
     compute_demo_grid_sizing,
     demo_backend_report,
-    demo_brush_selection_label,
+    demo_brush_selection_label,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
     demo_default_focus_world,
-    demo_display_material_name,
-    demo_view_focus_label,
+    demo_display_material_name,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
+    demo_view_focus_label,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
     format_demo_controller_observation_summary,
     format_demo_controller_status,
     format_demo_focus_probe,
     format_demo_status_title,
     request_demo_redraw,
 )
-
+from oracle_game.http_console import EngineHTTPConsole, EngineRunState
+from oracle_game.types import DebugView
+from oracle_game.world import WorldEngine
 
 DEMO_REALTIME_BUDGET_CELL_THRESHOLD = 1_000_000
 DEMO_DEBUG_TEXTURE_REFRESH_SECONDS = 1.0 / 15.0
@@ -142,7 +140,9 @@ def main() -> None:
         import moderngl  # noqa: F401
         import moderngl_window as mglw
     except ImportError as exc:  # pragma: no cover
-        raise SystemExit("Install moderngl and moderngl-window inside the venv before running enginedemo.") from exc
+        raise SystemExit(
+            "Install moderngl and moderngl-window inside the venv before running enginedemo."
+        ) from exc
 
     class EngineDemo(mglw.WindowConfig):
         gl_version = (4, 3)
@@ -335,10 +335,19 @@ def main() -> None:
                 light_dose_channel = -1
                 if self.debug_view != DebugView.MATERIAL:
                     if self.debug_view == DebugView.GAS:
-                        gas_species_id = self.engine._resolve_sanctioned_gas_id(self.gas_view_species)
-                    if self.debug_view in {DebugView.LIGHT, DebugView.OPTICS} and self.optics_view_light is not None:
+                        gas_species_id = self.engine._resolve_sanctioned_gas_id(
+                            self.gas_view_species
+                        )
+                    if (
+                        self.debug_view in {DebugView.LIGHT, DebugView.OPTICS}
+                        and self.optics_view_light is not None
+                    ):
                         light_id = self.engine._resolve_sanctioned_light_id(self.optics_view_light)
-                        dose_channel = self.engine._shadow_light_dose_channel(light_id) if light_id >= 0 else None
+                        dose_channel = (
+                            self.engine._shadow_light_dose_channel(light_id)
+                            if light_id >= 0
+                            else None
+                        )
                         light_dose_channel = -1 if dose_channel is None else int(dose_channel)
                 sync_start = _time.perf_counter()
                 if self.debug_view == DebugView.MATERIAL:
@@ -347,7 +356,9 @@ def main() -> None:
                         sync_display(self.engine)
                 else:
                     gpu_backend = getattr(self.engine, "simulation_backend", "") == "gpu"
-                    sync_debug_display = getattr(self.engine.bridge, "sync_debug_display_texture", None)
+                    sync_debug_display = getattr(
+                        self.engine.bridge, "sync_debug_display_texture", None
+                    )
                     if callable(sync_debug_display):
                         gpu_debug_synced = bool(
                             sync_debug_display(
@@ -406,11 +417,20 @@ def main() -> None:
                     "debug_view": self.debug_view.value,
                     "force_debug_texture": self.debug_view != DebugView.MATERIAL,
                     "visible_size": [int(self.demo_visible_width), int(self.demo_visible_height)],
-                    "active_size": [int(self.engine.paging.active_width), int(self.engine.paging.active_height)],
+                    "active_size": [
+                        int(self.engine.paging.active_width),
+                        int(self.engine.paging.active_height),
+                    ],
                     "buffer_size": [int(self.engine.width), int(self.engine.height)],
-                    "logical_world_size": [int(self.demo_logical_world_width), int(self.demo_logical_world_height)],
+                    "logical_world_size": [
+                        int(self.demo_logical_world_width),
+                        int(self.demo_logical_world_height),
+                    ],
                     "origin": [int(self.engine.paging.origin_x), int(self.engine.paging.origin_y)],
-                    "buffer_origin": [int(self.engine.paging.buffer_origin_x), int(self.engine.paging.buffer_origin_y)],
+                    "buffer_origin": [
+                        int(self.engine.paging.buffer_origin_x),
+                        int(self.engine.paging.buffer_origin_y),
+                    ],
                     "cpu_fps": float(getattr(self, "cpu_fps", 0.0)),
                     "gpu_fps": float(getattr(self, "gpu_fps", 0.0)),
                     "frame_ms": float(self.frame_ms),
@@ -501,7 +521,9 @@ def main() -> None:
                     self.focus_x, self.focus_y = demo_default_focus_world(self.engine.paging)
                     self.controller_debug_cycle = 0
                     self.controller_debug_label = None
-                    self.controller_debug_saved_state = self.engine.serialize_controller_state()["controller_state"]
+                    self.controller_debug_saved_state = self.engine.serialize_controller_state()[
+                        "controller_state"
+                    ]
                     self.controller_debug_dirty = self.controller_debug_enabled
                 elif key in (ord("W"), ord("w")):
                     self._move_focus(0, -self.engine.paging.tile_size)
@@ -631,7 +653,9 @@ def main() -> None:
             self.controller_debug_dirty = enabled
             self.controller_debug_cycle = 0
             if enabled:
-                self.controller_debug_saved_state = self.engine.serialize_controller_state()["controller_state"]
+                self.controller_debug_saved_state = self.engine.serialize_controller_state()[
+                    "controller_state"
+                ]
                 return
 
             surviving_entities = [

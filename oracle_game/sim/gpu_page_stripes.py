@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import threading
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from oracle_game.types import PageStripeUpdate
+    from oracle_game.world import WorldEngine
 
 from oracle_game.gpu import moderngl, unpack_cell_core
 from oracle_game.sim.gpu_base import GPUPipelineBase
 from oracle_game.sim.shader_loader import build_compute_shader
 from oracle_game.types import Phase
-
 
 LOCAL_SIZE = 128
 
@@ -31,7 +34,9 @@ class GPUPageStripePipeline(GPUPipelineBase):
             or moderngl is not None
         )
 
-    def apply(self, world: "WorldEngine", update: "PageStripeUpdate", payload: dict[str, Any]) -> None:
+    def apply(
+        self, world: "WorldEngine", update: "PageStripeUpdate", payload: dict[str, Any]
+    ) -> None:
         ctx, release_context = self._context_for_current_thread(world)
         try:
             if ctx is None or getattr(ctx, "version_code", 0) < 430:
@@ -52,15 +57,78 @@ class GPUPageStripePipeline(GPUPipelineBase):
             gas_axis = 1 if update.axis == "x" else 0
             gas_dose_axis = 2 if update.axis == "x" else 1
 
-            self._write_stripe_array(ctx, world.material_id, update, cell_payload["material_id"], stripe_axis=cell_axis, ranges=cell_ranges)
-            self._write_stripe_array(ctx, world.phase, update, cell_payload["phase"], stripe_axis=cell_axis, ranges=cell_ranges)
-            self._write_stripe_array(ctx, world.cell_flags, update, cell_payload["cell_flags"], stripe_axis=cell_axis, ranges=cell_ranges)
-            self._write_stripe_array(ctx, world.velocity, update, cell_payload["velocity"], stripe_axis=cell_axis, ranges=cell_ranges)
-            self._write_stripe_array(ctx, world.cell_temperature, update, cell_payload["cell_temperature"], stripe_axis=cell_axis, ranges=cell_ranges)
-            self._write_stripe_array(ctx, world.timer_pack, update, cell_payload["timer_pack"], stripe_axis=cell_axis, ranges=cell_ranges)
-            self._write_stripe_array(ctx, world.integrity, update, cell_payload["integrity"], stripe_axis=cell_axis, ranges=cell_ranges)
-            self._write_stripe_array(ctx, world.island_id, update, cell_payload["island_id"], stripe_axis=cell_axis, ranges=cell_ranges)
-            self._write_stripe_array(ctx, world.entity_id, update, cell_payload["entity_id"], stripe_axis=cell_axis, ranges=cell_ranges)
+            self._write_stripe_array(
+                ctx,
+                world.material_id,
+                update,
+                cell_payload["material_id"],
+                stripe_axis=cell_axis,
+                ranges=cell_ranges,
+            )
+            self._write_stripe_array(
+                ctx,
+                world.phase,
+                update,
+                cell_payload["phase"],
+                stripe_axis=cell_axis,
+                ranges=cell_ranges,
+            )
+            self._write_stripe_array(
+                ctx,
+                world.cell_flags,
+                update,
+                cell_payload["cell_flags"],
+                stripe_axis=cell_axis,
+                ranges=cell_ranges,
+            )
+            self._write_stripe_array(
+                ctx,
+                world.velocity,
+                update,
+                cell_payload["velocity"],
+                stripe_axis=cell_axis,
+                ranges=cell_ranges,
+            )
+            self._write_stripe_array(
+                ctx,
+                world.cell_temperature,
+                update,
+                cell_payload["cell_temperature"],
+                stripe_axis=cell_axis,
+                ranges=cell_ranges,
+            )
+            self._write_stripe_array(
+                ctx,
+                world.timer_pack,
+                update,
+                cell_payload["timer_pack"],
+                stripe_axis=cell_axis,
+                ranges=cell_ranges,
+            )
+            self._write_stripe_array(
+                ctx,
+                world.integrity,
+                update,
+                cell_payload["integrity"],
+                stripe_axis=cell_axis,
+                ranges=cell_ranges,
+            )
+            self._write_stripe_array(
+                ctx,
+                world.island_id,
+                update,
+                cell_payload["island_id"],
+                stripe_axis=cell_axis,
+                ranges=cell_ranges,
+            )
+            self._write_stripe_array(
+                ctx,
+                world.entity_id,
+                update,
+                cell_payload["entity_id"],
+                stripe_axis=cell_axis,
+                ranges=cell_ranges,
+            )
             self._write_stripe_array(
                 ctx,
                 world.placeholder_displaced_material,
@@ -146,7 +214,9 @@ class GPUPageStripePipeline(GPUPipelineBase):
 
     def capture(self, world: "WorldEngine", update: "PageStripeUpdate") -> dict[str, Any]:
         if not self._formal_gpu_frame(world) and getattr(world, "simulation_backend", "") != "gpu":
-            raise RuntimeError("GPU page stripe capture is only available for GPU-authoritative worlds")
+            raise RuntimeError(
+                "GPU page stripe capture is only available for GPU-authoritative worlds"
+            )
         bridge = world.bridge
         bridge.ensure_world_resources(world)
         if not bridge.enabled or bridge.ctx is None:
@@ -168,7 +238,8 @@ class GPUPageStripePipeline(GPUPipelineBase):
         missing = sorted(required.difference(bridge.gpu_authoritative_resources))
         if missing:
             raise RuntimeError(
-                "GPU page stripe capture requires GPU-authoritative resources: " + ", ".join(missing)
+                "GPU page stripe capture requires GPU-authoritative resources: "
+                + ", ".join(missing)
             )
 
         cell_ranges = world._stripe_buffer_ranges(update, gas_grid=False)
@@ -184,8 +255,12 @@ class GPUPageStripePipeline(GPUPipelineBase):
             dtype=np.uint32,
         ).reshape((world.height, world.width, 5))
         cell_core = unpack_cell_core(packed_cell_core)
-        material_id = self._capture_array_stripe(cell_core["material_id"], stripe_axis=cell_axis, ranges=cell_ranges).astype(np.int32)
-        phase = self._capture_array_stripe(cell_core["phase"], stripe_axis=cell_axis, ranges=cell_ranges).astype(np.uint8)
+        material_id = self._capture_array_stripe(
+            cell_core["material_id"], stripe_axis=cell_axis, ranges=cell_ranges
+        ).astype(np.int32)
+        phase = self._capture_array_stripe(
+            cell_core["phase"], stripe_axis=cell_axis, ranges=cell_ranges
+        ).astype(np.uint8)
         island_id = self._capture_bridge_buffer_stripe(
             bridge.ctx,
             bridge.buffers["island_id"],
@@ -210,17 +285,21 @@ class GPUPageStripePipeline(GPUPipelineBase):
             stripe_axis=cell_axis,
             ranges=cell_ranges,
         )
-        phase, island_id, entity_id, placeholder_displaced_material = world._normalize_cell_runtime_arrays(
-            material_id,
-            phase,
-            island_id,
-            entity_id,
-            placeholder_displaced_material,
+        phase, island_id, entity_id, placeholder_displaced_material = (
+            world._normalize_cell_runtime_arrays(
+                material_id,
+                phase,
+                island_id,
+                entity_id,
+                placeholder_displaced_material,
+            )
         )
         runtime_payload = world._capture_page_stripe_island_runtime(island_id)
-        runtime_payload["entity_placeholder_entity_id"] = world._capture_page_stripe_entity_placeholder_runtime(
-            update,
-            stripe_axis=cell_axis,
+        runtime_payload["entity_placeholder_entity_id"] = (
+            world._capture_page_stripe_entity_placeholder_runtime(
+                update,
+                stripe_axis=cell_axis,
+            )
         )
 
         visible_rgba = np.frombuffer(
@@ -241,15 +320,23 @@ class GPUPageStripePipeline(GPUPipelineBase):
             "cell": {
                 "material_id": material_id,
                 "phase": phase,
-                "cell_flags": self._capture_array_stripe(cell_core["cell_flags"], stripe_axis=cell_axis, ranges=cell_ranges),
-                "velocity": self._capture_array_stripe(cell_core["velocity"], stripe_axis=cell_axis, ranges=cell_ranges),
+                "cell_flags": self._capture_array_stripe(
+                    cell_core["cell_flags"], stripe_axis=cell_axis, ranges=cell_ranges
+                ),
+                "velocity": self._capture_array_stripe(
+                    cell_core["velocity"], stripe_axis=cell_axis, ranges=cell_ranges
+                ),
                 "cell_temperature": self._capture_array_stripe(
                     cell_core["cell_temperature"],
                     stripe_axis=cell_axis,
                     ranges=cell_ranges,
                 ),
-                "timer_pack": self._capture_array_stripe(cell_core["timer_pack"], stripe_axis=cell_axis, ranges=cell_ranges),
-                "integrity": self._capture_array_stripe(cell_core["integrity"], stripe_axis=cell_axis, ranges=cell_ranges),
+                "timer_pack": self._capture_array_stripe(
+                    cell_core["timer_pack"], stripe_axis=cell_axis, ranges=cell_ranges
+                ),
+                "integrity": self._capture_array_stripe(
+                    cell_core["integrity"], stripe_axis=cell_axis, ranges=cell_ranges
+                ),
                 "island_id": island_id,
                 "entity_id": entity_id,
                 "placeholder_displaced_material": placeholder_displaced_material,
@@ -368,7 +455,9 @@ class GPUPageStripePipeline(GPUPipelineBase):
         island = np.ascontiguousarray(world.island_id, dtype=np.int32)
         entity = np.ascontiguousarray(world.entity_id, dtype=np.int32)
         displaced = np.ascontiguousarray(world.placeholder_displaced_material, dtype=np.int32)
-        placeholder_flags = np.ascontiguousarray(world.material_is_placeholder.astype(np.int32, copy=False))
+        placeholder_flags = np.ascontiguousarray(
+            world.material_is_placeholder.astype(np.int32, copy=False)
+        )
         material_buffer = ctx.buffer(reserve=max(4, material.nbytes), dynamic=True)
         phase_buffer = ctx.buffer(reserve=max(4, phase.nbytes), dynamic=True)
         island_buffer = ctx.buffer(reserve=max(4, island.nbytes), dynamic=True)
@@ -409,18 +498,31 @@ class GPUPageStripePipeline(GPUPipelineBase):
                 program.run((total + LOCAL_SIZE - 1) // LOCAL_SIZE, 1, 1)
                 ctx.memory_barrier()
             ctx.finish()
-            world.phase[:] = np.frombuffer(phase_buffer.read(size=phase.nbytes), dtype=np.int32).reshape(phase.shape).astype(
-                world.phase.dtype
+            world.phase[:] = (
+                np.frombuffer(phase_buffer.read(size=phase.nbytes), dtype=np.int32)
+                .reshape(phase.shape)
+                .astype(world.phase.dtype)
             )
-            world.island_id[:] = np.frombuffer(island_buffer.read(size=island.nbytes), dtype=np.int32).reshape(island.shape)
-            world.entity_id[:] = np.frombuffer(entity_buffer.read(size=entity.nbytes), dtype=np.int32).reshape(entity.shape)
-            world.placeholder_displaced_material[:] = np.frombuffer(displaced_buffer.read(size=displaced.nbytes), dtype=np.int32).reshape(
-                displaced.shape
-            )
+            world.island_id[:] = np.frombuffer(
+                island_buffer.read(size=island.nbytes), dtype=np.int32
+            ).reshape(island.shape)
+            world.entity_id[:] = np.frombuffer(
+                entity_buffer.read(size=entity.nbytes), dtype=np.int32
+            ).reshape(entity.shape)
+            world.placeholder_displaced_material[:] = np.frombuffer(
+                displaced_buffer.read(size=displaced.nbytes), dtype=np.int32
+            ).reshape(displaced.shape)
             self.last_backend = "gpu"
             self.last_cpu_mirror_downloaded = True
         finally:
-            for buffer in (material_buffer, phase_buffer, island_buffer, entity_buffer, displaced_buffer, placeholder_buffer):
+            for buffer in (
+                material_buffer,
+                phase_buffer,
+                island_buffer,
+                entity_buffer,
+                displaced_buffer,
+                placeholder_buffer,
+            ):
                 try:
                     buffer.release()
                 except Exception:
@@ -434,7 +536,9 @@ class GPUPageStripePipeline(GPUPipelineBase):
 
     # ``_formal_gpu_frame`` is inherited from :class:`GPUPipelineBase`.
 
-    def _apply_bridge(self, world: "WorldEngine", update: "PageStripeUpdate", payload: dict[str, Any]) -> None:
+    def _apply_bridge(
+        self, world: "WorldEngine", update: "PageStripeUpdate", payload: dict[str, Any]
+    ) -> None:
         bridge = world.bridge
         bridge.ensure_world_resources(world)
         if not bridge.enabled or bridge.ctx is None:
@@ -575,13 +679,19 @@ class GPUPageStripePipeline(GPUPipelineBase):
             "gas_optical_dose",
         )
 
-    def _normalize_bridge_cell_runtime(self, world: "WorldEngine", update: "PageStripeUpdate") -> None:
+    def _normalize_bridge_cell_runtime(
+        self, world: "WorldEngine", update: "PageStripeUpdate"
+    ) -> None:
         bridge = world.bridge
         bridge.ensure_world_resources(world)
         if not bridge.enabled or bridge.ctx is None:
             raise RuntimeError("GPU page stripe normalization requires bridge GPU resources")
-        placeholder_flags = np.ascontiguousarray(world.material_is_placeholder.astype(np.int32, copy=False))
-        placeholder_buffer = bridge.ctx.buffer(reserve=max(4, placeholder_flags.nbytes), dynamic=True)
+        placeholder_flags = np.ascontiguousarray(
+            world.material_is_placeholder.astype(np.int32, copy=False)
+        )
+        placeholder_buffer = bridge.ctx.buffer(
+            reserve=max(4, placeholder_flags.nbytes), dynamic=True
+        )
         try:
             if placeholder_flags.nbytes > 0:
                 placeholder_buffer.write(placeholder_flags.tobytes())
@@ -622,7 +732,9 @@ class GPUPageStripePipeline(GPUPipelineBase):
         program = self.programs.get(key)
         if program is not None:
             return program
-        program = build_compute_shader(ctx, "page_stripes/normalize_bridge.comp", {"LOCAL_SIZE": LOCAL_SIZE})
+        program = build_compute_shader(
+            ctx, "page_stripes/normalize_bridge.comp", {"LOCAL_SIZE": LOCAL_SIZE}
+        )
         self.programs[key] = program
         return program
 
@@ -651,7 +763,9 @@ class GPUPageStripePipeline(GPUPipelineBase):
     def _pack_half2x16(velocity: np.ndarray) -> np.ndarray:
         half = np.asarray(velocity, dtype=np.float32).astype(np.float16)
         raw = half.view(np.uint16)
-        return (raw[..., 0].astype(np.uint32) | (raw[..., 1].astype(np.uint32) << 16)).astype(np.uint32)
+        return (raw[..., 0].astype(np.uint32) | (raw[..., 1].astype(np.uint32) << 16)).astype(
+            np.uint32
+        )
 
     def _write_bridge_buffer_stripe(
         self,
@@ -698,10 +812,14 @@ class GPUPageStripePipeline(GPUPipelineBase):
             if span <= 0:
                 continue
             if stripe_axis == 1:
-                data = np.ascontiguousarray(source[:, source_offset : source_offset + span, ...], dtype=np.float32)
+                data = np.ascontiguousarray(
+                    source[:, source_offset : source_offset + span, ...], dtype=np.float32
+                )
                 viewport = (int(start), 0, int(span), int(source.shape[0]))
             elif stripe_axis == 0:
-                data = np.ascontiguousarray(source[source_offset : source_offset + span, ...], dtype=np.float32)
+                data = np.ascontiguousarray(
+                    source[source_offset : source_offset + span, ...], dtype=np.float32
+                )
                 viewport = (0, int(start), int(source.shape[1]), int(span))
             else:
                 raise ValueError("texture stripe axis must be 0 or 1")
@@ -719,7 +837,9 @@ class GPUPageStripePipeline(GPUPipelineBase):
         stripe_axis: int,
         ranges: list[tuple[int, int]],
     ) -> np.ndarray:
-        source = np.frombuffer(self._read_bridge_buffer(ctx, buffer), dtype=dtype).reshape(src_shape)
+        source = np.frombuffer(self._read_bridge_buffer(ctx, buffer), dtype=dtype).reshape(
+            src_shape
+        )
         return self._capture_array_stripe(source, stripe_axis=stripe_axis, ranges=ranges)
 
     def _capture_bridge_texture_stripe(
@@ -730,7 +850,9 @@ class GPUPageStripePipeline(GPUPipelineBase):
         stripe_axis: int,
         ranges: list[tuple[int, int]],
     ) -> np.ndarray:
-        source = np.frombuffer(self._read_bridge_texture(texture), dtype=np.float32).reshape(src_shape)
+        source = np.frombuffer(self._read_bridge_texture(texture), dtype=np.float32).reshape(
+            src_shape
+        )
         return self._capture_array_stripe(source, stripe_axis=stripe_axis, ranges=ranges)
 
     @staticmethod
@@ -780,7 +902,9 @@ class GPUPageStripePipeline(GPUPipelineBase):
         if program is not None:
             return program
         scalar_type = "float" if kind == "float" else "int"
-        program = build_compute_shader(ctx, "page_stripes/program.comp", {"LOCAL_SIZE": LOCAL_SIZE, "scalar_type": scalar_type})
+        program = build_compute_shader(
+            ctx, "page_stripes/program.comp", {"LOCAL_SIZE": LOCAL_SIZE, "scalar_type": scalar_type}
+        )
         self.programs[key] = program
         return program
 
@@ -789,7 +913,9 @@ class GPUPageStripePipeline(GPUPipelineBase):
         program = self.programs.get(key)
         if program is not None:
             return program
-        program = build_compute_shader(ctx, "page_stripes/normalize.comp", {"LOCAL_SIZE": LOCAL_SIZE})
+        program = build_compute_shader(
+            ctx, "page_stripes/normalize.comp", {"LOCAL_SIZE": LOCAL_SIZE}
+        )
         self.programs[key] = program
         return program
 
@@ -848,7 +974,11 @@ class GPUPageStripePipeline(GPUPipelineBase):
                 ctx.memory_barrier()
                 offset += span
             ctx.finish()
-            array[:] = np.frombuffer(dst_buffer.read(size=dest.nbytes), dtype=work_dtype).reshape(dest.shape).astype(dst_dtype)
+            array[:] = (
+                np.frombuffer(dst_buffer.read(size=dest.nbytes), dtype=work_dtype)
+                .reshape(dest.shape)
+                .astype(dst_dtype)
+            )
         finally:
             try:
                 src_buffer.release()

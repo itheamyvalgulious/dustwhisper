@@ -3,10 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from oracle_game.types import ReadbackRequest
-
 from oracle_game.gpu._common import CPU_READBACK_LATENCY_FRAMES
-
+from oracle_game.types import ReadbackRequest
 
 
 @dataclass(slots=True)

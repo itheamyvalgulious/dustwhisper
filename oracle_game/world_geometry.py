@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+import zlib
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
-import zlib
 
 from oracle_game.types import ForceSource, Phase, TargetQuery
 from oracle_game.world_constants import CARDINAL_DIRECTION_VECTORS
@@ -12,7 +12,9 @@ if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
 
-def _disk_world_cells(engine: "WorldEngine", center_world_position: tuple[int, int], radius: int) -> list[tuple[int, int]]:
+def _disk_world_cells(
+    engine: "WorldEngine", center_world_position: tuple[int, int], radius: int
+) -> list[tuple[int, int]]:
     radius = max(0, int(radius))
     cx, cy = center_world_position
     cells: list[tuple[int, int]] = []
@@ -26,7 +28,9 @@ def _disk_world_cells(engine: "WorldEngine", center_world_position: tuple[int, i
     return sorted(set(cells))
 
 
-def _disk_world_cells_raw(center_world_position: tuple[int, int], radius: int) -> list[tuple[int, int]]:
+def _disk_world_cells_raw(
+    center_world_position: tuple[int, int], radius: int
+) -> list[tuple[int, int]]:
     radius = max(0, int(radius))
     cx, cy = center_world_position
     cells: list[tuple[int, int]] = []
@@ -164,7 +168,8 @@ def _resolve_legal_world_position(
         search_radius = max(0, int(fallback_radius))
         if search_radius <= 0:
             search_radius = max(1, int(effective_radius) + 1)
-        empty_world_position = _find_nearest_empty_world_position(engine,
+        empty_world_position = _find_nearest_empty_world_position(
+            engine,
             clamped_world_position,
             radius=search_radius,
         )
@@ -174,7 +179,11 @@ def _resolve_legal_world_position(
 
     if fallback_mode == "source":
         if source_world_position is None:
-            return None, False, "occupied target requested source fallback without a source position"
+            return (
+                None,
+                False,
+                "occupied target requested source fallback without a source position",
+            )
         fallback_world_position = engine._clamp_world_position(*source_world_position)
         if _world_cell_is_empty(engine, *fallback_world_position):
             return fallback_world_position, True, "occupied target fell back to source cell"
@@ -196,13 +205,16 @@ def _resolve_entity_anchor(
             if entity.entity_id != int(query.anchor_entity_id):
                 continue
         else:
-            if query.source_entity_id is not None and entity.entity_id == int(query.source_entity_id):
+            if query.source_entity_id is not None and entity.entity_id == int(
+                query.source_entity_id
+            ):
                 continue
             if not engine._entity_matches_anchor_filters(entity, query.anchor_filters):
                 continue
         world_position = engine._entity_center_world_position(entity)
         buffer_position = _world_to_buffer_clamped(engine, *world_position)
-        if direction_filter is not None and not _matches_direction_filter(engine,
+        if direction_filter is not None and not _matches_direction_filter(
+            engine,
             source_world_position,
             world_position,
             direction_filter,
@@ -238,7 +250,8 @@ def _resolve_terrain_anchor(
                 if not _terrain_cell_matches(engine, x, y, terrain_filter):
                     continue
                 world_position = _buffer_to_world_position(engine, (x, y))
-                if direction_filter is not None and not _matches_direction_filter(engine,
+                if direction_filter is not None and not _matches_direction_filter(
+                    engine,
                     source_world_position,
                     world_position,
                     direction_filter,
@@ -280,38 +293,50 @@ def _terrain_cell_matches(engine: "WorldEngine", x: int, y: int, terrain_filter:
     if terrain_filter == "wall":
         if material_id == 0 or phase == int(Phase.LIQUID):
             return False
-        above_material, above_phase = (0, 0) if y <= 0 else engine._material_state_for_position(
-            x,
-            y - 1,
-            blocked_cells=engine._resolver_blocked_cells,
-            released_cells=engine._resolver_released_cells,
+        above_material, above_phase = (
+            (0, 0)
+            if y <= 0
+            else engine._material_state_for_position(
+                x,
+                y - 1,
+                blocked_cells=engine._resolver_blocked_cells,
+                released_cells=engine._resolver_released_cells,
+            )
         )
-        below_material, below_phase = (0, 0) if y + 1 >= engine.height else engine._material_state_for_position(
-            x,
-            y + 1,
-            blocked_cells=engine._resolver_blocked_cells,
-            released_cells=engine._resolver_released_cells,
+        below_material, below_phase = (
+            (0, 0)
+            if y + 1 >= engine.height
+            else engine._material_state_for_position(
+                x,
+                y + 1,
+                blocked_cells=engine._resolver_blocked_cells,
+                released_cells=engine._resolver_released_cells,
+            )
         )
-        left_material, _ = (0, 0) if x <= 0 else engine._material_state_for_position(
-            x - 1,
-            y,
-            blocked_cells=engine._resolver_blocked_cells,
-            released_cells=engine._resolver_released_cells,
+        left_material, _ = (
+            (0, 0)
+            if x <= 0
+            else engine._material_state_for_position(
+                x - 1,
+                y,
+                blocked_cells=engine._resolver_blocked_cells,
+                released_cells=engine._resolver_released_cells,
+            )
         )
-        right_material, _ = (0, 0) if x + 1 >= engine.width else engine._material_state_for_position(
-            x + 1,
-            y,
-            blocked_cells=engine._resolver_blocked_cells,
-            released_cells=engine._resolver_released_cells,
+        right_material, _ = (
+            (0, 0)
+            if x + 1 >= engine.width
+            else engine._material_state_for_position(
+                x + 1,
+                y,
+                blocked_cells=engine._resolver_blocked_cells,
+                released_cells=engine._resolver_released_cells,
+            )
         )
-        vertical_neighbor = (
-            (above_material != 0 and above_phase != int(Phase.LIQUID))
-            or (below_material != 0 and below_phase != int(Phase.LIQUID))
+        vertical_neighbor = (above_material != 0 and above_phase != int(Phase.LIQUID)) or (
+            below_material != 0 and below_phase != int(Phase.LIQUID)
         )
-        horizontal_edge = (
-            (left_material == 0)
-            or (right_material == 0)
-        )
+        horizontal_edge = (left_material == 0) or (right_material == 0)
         return vertical_neighbor and horizontal_edge
     if terrain_filter == "hole":
         if material_id != 0 or y + 1 >= engine.height or x == 0 or x + 1 >= engine.width:
@@ -423,13 +448,21 @@ def _buffer_to_world_position(engine: "WorldEngine", position: tuple[int, int]) 
     return (int(world_x), int(world_y))
 
 
-def _buffer_to_world_float_position(engine: "WorldEngine", position: tuple[float, float]) -> tuple[float, float]:
-    world_x = float(engine.paging.origin_x) + ((float(position[0]) - float(engine.paging.buffer_origin_x)) % float(engine.width))
-    world_y = float(engine.paging.origin_y) + ((float(position[1]) - float(engine.paging.buffer_origin_y)) % float(engine.height))
+def _buffer_to_world_float_position(
+    engine: "WorldEngine", position: tuple[float, float]
+) -> tuple[float, float]:
+    world_x = float(engine.paging.origin_x) + (
+        (float(position[0]) - float(engine.paging.buffer_origin_x)) % float(engine.width)
+    )
+    world_y = float(engine.paging.origin_y) + (
+        (float(position[1]) - float(engine.paging.buffer_origin_y)) % float(engine.height)
+    )
     return (float(world_x), float(world_y))
 
 
-def _world_to_buffer_float_position(engine: "WorldEngine", position: tuple[float, float]) -> tuple[float, float]:
+def _world_to_buffer_float_position(
+    engine: "WorldEngine", position: tuple[float, float]
+) -> tuple[float, float]:
     buffer_x = (
         float(position[0]) - float(engine.paging.origin_x) + float(engine.paging.buffer_origin_x)
     ) % float(engine.width)
@@ -439,26 +472,36 @@ def _world_to_buffer_float_position(engine: "WorldEngine", position: tuple[float
     return (float(buffer_x), float(buffer_y))
 
 
-def _force_source_world_position(engine: "WorldEngine", force_source: ForceSource) -> tuple[float, float]:
+def _force_source_world_position(
+    engine: "WorldEngine", force_source: ForceSource
+) -> tuple[float, float]:
     if force_source.world_x is not None and force_source.world_y is not None:
         return (float(force_source.world_x), float(force_source.world_y))
     return _buffer_to_world_float_position(engine, (float(force_source.x), float(force_source.y)))
 
 
-def _force_source_buffer_position(engine: "WorldEngine", force_source: ForceSource) -> tuple[float, float]:
+def _force_source_buffer_position(
+    engine: "WorldEngine", force_source: ForceSource
+) -> tuple[float, float]:
     if force_source.world_x is not None and force_source.world_y is not None:
-        return _world_to_buffer_float_position(engine, (float(force_source.world_x), float(force_source.world_y)))
+        return _world_to_buffer_float_position(
+            engine, (float(force_source.world_x), float(force_source.world_y))
+        )
     return (float(force_source.x), float(force_source.y))
 
 
-def _buffer_gas_to_world_position(engine: "WorldEngine", position: tuple[int, int]) -> tuple[int, int]:
+def _buffer_gas_to_world_position(
+    engine: "WorldEngine", position: tuple[int, int]
+) -> tuple[int, int]:
     cell_x = int(position[0]) * int(engine.gas_cell_size)
     cell_y = int(position[1]) * int(engine.gas_cell_size)
     world_x, world_y = _buffer_to_world_position(engine, (cell_x, cell_y))
     return (int(world_x // engine.gas_cell_size), int(world_y // engine.gas_cell_size))
 
 
-def _buffer_bbox_to_world_bbox(engine: "WorldEngine", bbox: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+def _buffer_bbox_to_world_bbox(
+    engine: "WorldEngine", bbox: tuple[int, int, int, int]
+) -> tuple[int, int, int, int]:
     x0, y0, x1, y1 = (int(value) for value in bbox)
     world_x0, world_y0 = _buffer_to_world_position(engine, (x0, y0))
     width = max(0, x1 - x0)
@@ -466,13 +509,19 @@ def _buffer_bbox_to_world_bbox(engine: "WorldEngine", bbox: tuple[int, int, int,
     return (int(world_x0), int(world_y0), int(world_x0) + width, int(world_y0) + height)
 
 
-def _clamped_world_window(engine: "WorldEngine", world_x: int, world_y: int, width: int, height: int) -> tuple[int, int, int, int]:
+def _clamped_world_window(
+    engine: "WorldEngine", world_x: int, world_y: int, width: int, height: int
+) -> tuple[int, int, int, int]:
     min_world_x = int(engine.paging.origin_x)
     min_world_y = int(engine.paging.origin_y)
     max_world_x = min_world_x + engine.width
     max_world_y = min_world_y + engine.height
-    clamped_world_x = min_world_x if engine.width <= 0 else max(min_world_x, min(max_world_x - 1, int(world_x)))
-    clamped_world_y = min_world_y if engine.height <= 0 else max(min_world_y, min(max_world_y - 1, int(world_y)))
+    clamped_world_x = (
+        min_world_x if engine.width <= 0 else max(min_world_x, min(max_world_x - 1, int(world_x)))
+    )
+    clamped_world_y = (
+        min_world_y if engine.height <= 0 else max(min_world_y, min(max_world_y - 1, int(world_y)))
+    )
     span_x = max(0, int(width))
     span_y = max(0, int(height))
     return (
@@ -483,7 +532,9 @@ def _clamped_world_window(engine: "WorldEngine", world_x: int, world_y: int, wid
     )
 
 
-def _centered_world_window(engine: "WorldEngine", center_x: int, center_y: int, width: int, height: int) -> tuple[int, int, int, int]:
+def _centered_world_window(
+    engine: "WorldEngine", center_x: int, center_y: int, width: int, height: int
+) -> tuple[int, int, int, int]:
     clamped_center_x, clamped_center_y = engine._clamp_world_position(center_x, center_y)
     min_world_x = int(engine.paging.origin_x)
     min_world_y = int(engine.paging.origin_y)
@@ -542,7 +593,9 @@ def _world_axis_spans(
     return spans
 
 
-def _world_axis_indices(engine: "WorldEngine", world_start: int, world_end: int, *, axis: str, gas_grid: bool = False) -> np.ndarray:
+def _world_axis_indices(
+    engine: "WorldEngine", world_start: int, world_end: int, *, axis: str, gas_grid: bool = False
+) -> np.ndarray:
     span = max(0, int(world_end) - int(world_start))
     if span <= 0:
         return np.empty((0,), dtype=np.intp)
@@ -587,8 +640,11 @@ def _extract_world_window(
     return np.ascontiguousarray(window)
 
 
-def _pack_cell_core_world_window(engine: "WorldEngine", world_x0: int, world_y0: int, world_x1: int, world_y1: int) -> np.ndarray:
-    material_id = _extract_world_window(engine,
+def _pack_cell_core_world_window(
+    engine: "WorldEngine", world_x0: int, world_y0: int, world_x1: int, world_y1: int
+) -> np.ndarray:
+    material_id = _extract_world_window(
+        engine,
         engine.material_id,
         world_x0,
         world_y0,
@@ -597,10 +653,17 @@ def _pack_cell_core_world_window(engine: "WorldEngine", world_x0: int, world_y0:
         x_axis=1,
         y_axis=0,
     )
-    phase = _extract_world_window(engine, engine.phase, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0)
-    cell_flags = _extract_world_window(engine, engine.cell_flags, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0)
-    velocity = _extract_world_window(engine, engine.velocity, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0)
-    cell_temperature = _extract_world_window(engine,
+    phase = _extract_world_window(
+        engine, engine.phase, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0
+    )
+    cell_flags = _extract_world_window(
+        engine, engine.cell_flags, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0
+    )
+    velocity = _extract_world_window(
+        engine, engine.velocity, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0
+    )
+    cell_temperature = _extract_world_window(
+        engine,
         engine.cell_temperature,
         world_x0,
         world_y0,
@@ -609,10 +672,16 @@ def _pack_cell_core_world_window(engine: "WorldEngine", world_x0: int, world_y0:
         x_axis=1,
         y_axis=0,
     )
-    timer_pack = _extract_world_window(engine, engine.timer_pack, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0)
-    integrity = _extract_world_window(engine, engine.integrity, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0)
+    timer_pack = _extract_world_window(
+        engine, engine.timer_pack, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0
+    )
+    integrity = _extract_world_window(
+        engine, engine.integrity, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0
+    )
 
-    packed = np.zeros((max(0, world_y1 - world_y0), max(0, world_x1 - world_x0), 5), dtype=np.uint32)
+    packed = np.zeros(
+        (max(0, world_y1 - world_y0), max(0, world_x1 - world_x0), 5), dtype=np.uint32
+    )
     packed[..., 0] = (
         material_id.astype(np.uint32)
         | (phase.astype(np.uint32) << 16)
@@ -676,4 +745,3 @@ def _world_cell_is_empty(engine: "WorldEngine", world_x: int, world_y: int) -> b
         released_cells=engine._resolver_released_cells,
     )
     return material_id == 0
-

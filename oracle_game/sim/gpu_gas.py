@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from oracle_game.gpu import typed_gas_id
-from oracle_game.sim.gpu_base import GPUPipelineBase
-from oracle_game.sim.shader_loader import build_compute_shader
+if TYPE_CHECKING:
+    from oracle_game.world import WorldEngine
 
+from oracle_game.gpu import typed_gas_id
+from oracle_game.sim.gpu_base import GPUPipelineBase, release_resource_fields
+from oracle_game.sim.shader_loader import build_compute_shader
 
 LOCAL_SIZE = 8
 REDUCE_LOCAL_SIZE = 256
@@ -172,30 +174,7 @@ class GPUGasPipeline(GPUPipelineBase):
     def release(self) -> None:
         if self.resources is None:
             return
-        for resource in (
-            self.resources.velocity_ping,
-            self.resources.velocity_pong,
-            self.resources.divergence,
-            self.resources.thermo_pressure,
-            self.resources.density_tex,
-            self.resources.pressure_ping,
-            self.resources.pressure_pong,
-            self.resources.pressure_cone_shadow,
-            self.resources.ambient_ping,
-            self.resources.ambient_pong,
-            self.resources.gas_ping,
-            self.resources.gas_pong,
-            self.resources.active_gas_tex,
-            self.resources.species_params,
-            self.resources.species_force_params,
-            self.resources.force_sources,
-            self.resources.density_reduce_ping,
-            self.resources.density_reduce_pong,
-        ):
-            try:
-                resource.release()
-            except Exception:
-                pass
+        release_resource_fields(self.resources)
         self.resources = None
 
     def _ensure_resources(self, world: "WorldEngine") -> GPUGasResources:
@@ -216,8 +195,12 @@ class GPUGasPipeline(GPUPipelineBase):
         pressure_cone_shadow = ctx.texture((world.gas_width, world.gas_height), 1, dtype="f4")
         ambient_ping = ctx.texture((world.gas_width, world.gas_height), 1, dtype="f4")
         ambient_pong = ctx.texture((world.gas_width, world.gas_height), 1, dtype="f4")
-        gas_ping = ctx.texture_array((world.gas_width, world.gas_height, species_count), 1, dtype="f4")
-        gas_pong = ctx.texture_array((world.gas_width, world.gas_height, species_count), 1, dtype="f4")
+        gas_ping = ctx.texture_array(
+            (world.gas_width, world.gas_height, species_count), 1, dtype="f4"
+        )
+        gas_pong = ctx.texture_array(
+            (world.gas_width, world.gas_height, species_count), 1, dtype="f4"
+        )
         active_gas_tex = ctx.texture((world.gas_width, world.gas_height), 1, dtype="f4")
         for texture in (
             velocity_ping,
@@ -238,8 +221,12 @@ class GPUGasPipeline(GPUPipelineBase):
         species_params = ctx.buffer(reserve=MAX_SPECIES * 4 * 4, dynamic=True)
         species_force_params = ctx.buffer(reserve=MAX_SPECIES * 4 * 4, dynamic=True)
         force_sources = ctx.buffer(reserve=4, dynamic=True)
-        density_reduce_ping = ctx.buffer(reserve=max(4, world.gas_width * world.gas_height * 4), dynamic=True)
-        density_reduce_pong = ctx.buffer(reserve=max(4, world.gas_width * world.gas_height * 4), dynamic=True)
+        density_reduce_ping = ctx.buffer(
+            reserve=max(4, world.gas_width * world.gas_height * 4), dynamic=True
+        )
+        density_reduce_pong = ctx.buffer(
+            reserve=max(4, world.gas_width * world.gas_height * 4), dynamic=True
+        )
         self.resources = GPUGasResources(
             signature=signature,
             velocity_ping=velocity_ping,
@@ -266,60 +253,90 @@ class GPUGasPipeline(GPUPipelineBase):
     def _ensure_programs(self, ctx: Any) -> None:
         if self.programs:
             return
-        self.programs["load_bridge"] = build_compute_shader(ctx, "gas/load_bridge.comp", _SHADER_SUBS)
-        self.programs["load_active_gas"] = build_compute_shader(ctx, "gas/load_active_gas.comp", _SHADER_SUBS)
-        self.programs["advect_velocity"] = build_compute_shader(ctx, "gas/advect_velocity.comp", _SHADER_SUBS, includes=["gas/_common.comp"])
-        self.programs["divergence"] = build_compute_shader(ctx, "gas/divergence.comp", _SHADER_SUBS, includes=["gas/_common.comp"])
+        self.programs["load_bridge"] = build_compute_shader(
+            ctx, "gas/load_bridge.comp", _SHADER_SUBS
+        )
+        self.programs["load_active_gas"] = build_compute_shader(
+            ctx, "gas/load_active_gas.comp", _SHADER_SUBS
+        )
+        self.programs["advect_velocity"] = build_compute_shader(
+            ctx, "gas/advect_velocity.comp", _SHADER_SUBS, includes=["gas/_common.comp"]
+        )
+        self.programs["divergence"] = build_compute_shader(
+            ctx, "gas/divergence.comp", _SHADER_SUBS, includes=["gas/_common.comp"]
+        )
         self.programs["divergence_pressure_seed"] = build_compute_shader(
             ctx,
             "gas/divergence_pressure_seed.comp",
             _SHADER_SUBS,
             includes=["gas/_common.comp"],
         )
-        self.programs["force_sources"] = build_compute_shader(ctx, "gas/force_sources.comp", _SHADER_SUBS, includes=["gas/_common.comp"])
+        self.programs["force_sources"] = build_compute_shader(
+            ctx, "gas/force_sources.comp", _SHADER_SUBS, includes=["gas/_common.comp"]
+        )
         self.programs["force_sources_thermo_fields_density_buffer"] = build_compute_shader(
             ctx,
             "gas/force_sources_thermo_fields_density_buffer.comp",
             _SHADER_SUBS,
             includes=["gas/_common.comp"],
         )
-        self.programs["thermo_fields"] = build_compute_shader(ctx, "gas/thermo_fields.comp", _SHADER_SUBS, includes=["gas/_common.comp"])
+        self.programs["thermo_fields"] = build_compute_shader(
+            ctx, "gas/thermo_fields.comp", _SHADER_SUBS, includes=["gas/_common.comp"]
+        )
         self.programs["thermo_fields_density_buffer"] = build_compute_shader(
             ctx,
             "gas/thermo_fields_density_buffer.comp",
             _SHADER_SUBS,
             includes=["gas/_common.comp"],
         )
-        self.programs["density_extract"] = build_compute_shader(ctx, "gas/density_extract.comp", _SHADER_SUBS)
-        self.programs["density_reduce"] = build_compute_shader(ctx, "gas/density_reduce.comp", _SHADER_SUBS)
+        self.programs["density_extract"] = build_compute_shader(
+            ctx, "gas/density_extract.comp", _SHADER_SUBS
+        )
+        self.programs["density_reduce"] = build_compute_shader(
+            ctx, "gas/density_reduce.comp", _SHADER_SUBS
+        )
         self.programs["density_reduce_tree"] = build_compute_shader(
             ctx,
             "gas/density_reduce_tree.comp",
             _SHADER_SUBS,
         )
-        self.programs["jacobi"] = build_compute_shader(ctx, "gas/jacobi.comp", _SHADER_SUBS, includes=["gas/_common.comp"])
+        self.programs["jacobi"] = build_compute_shader(
+            ctx, "gas/jacobi.comp", _SHADER_SUBS, includes=["gas/_common.comp"]
+        )
         self.programs["jacobi_pair"] = build_compute_shader(
             ctx,
             "gas/jacobi_pair.comp",
             _SHADER_SUBS,
         )
-        self.programs["thermo_forces"] = build_compute_shader(ctx, "gas/thermo_forces.comp", _SHADER_SUBS, includes=["gas/_common.comp"])
-        self.programs["projection"] = build_compute_shader(ctx, "gas/projection.comp", _SHADER_SUBS, includes=["gas/_common.comp"])
+        self.programs["thermo_forces"] = build_compute_shader(
+            ctx, "gas/thermo_forces.comp", _SHADER_SUBS, includes=["gas/_common.comp"]
+        )
+        self.programs["projection"] = build_compute_shader(
+            ctx, "gas/projection.comp", _SHADER_SUBS, includes=["gas/_common.comp"]
+        )
         self.programs["pressure_projection_dependency_cone"] = build_compute_shader(
             ctx,
             "gas/pressure_projection_dependency_cone.comp",
             _SHADER_SUBS,
         )
-        self.programs["species"] = build_compute_shader(ctx, "gas/species.comp", _SHADER_SUBS, includes=["gas/_common.comp"])
+        self.programs["species"] = build_compute_shader(
+            ctx, "gas/species.comp", _SHADER_SUBS, includes=["gas/_common.comp"]
+        )
         self.programs["species_terminal_cooperative"] = build_compute_shader(
             ctx,
             "gas/species_terminal_cooperative.comp",
             _SHADER_SUBS,
         )
-        self.programs["ambient"] = build_compute_shader(ctx, "gas/ambient.comp", _SHADER_SUBS, includes=["gas/_common.comp"])
-        self.programs["publish_bridge"] = build_compute_shader(ctx, "gas/publish_bridge.comp", _SHADER_SUBS)
+        self.programs["ambient"] = build_compute_shader(
+            ctx, "gas/ambient.comp", _SHADER_SUBS, includes=["gas/_common.comp"]
+        )
+        self.programs["publish_bridge"] = build_compute_shader(
+            ctx, "gas/publish_bridge.comp", _SHADER_SUBS
+        )
 
-    def _upload_inputs(self, world: "WorldEngine", resources: GPUGasResources, solve_gas_mask: np.ndarray) -> None:
+    def _upload_inputs(
+        self, world: "WorldEngine", resources: GPUGasResources, solve_gas_mask: np.ndarray
+    ) -> None:
         world.bridge.sync_rule_tables(world)
         authoritative = world.bridge.gpu_authoritative_resources
         formal_gpu_frame = self._formal_gpu_frame(world)
@@ -426,7 +443,9 @@ class GPUGasPipeline(GPUPipelineBase):
             )
         return force_data
 
-    def _write_dynamic_buffer(self, ctx: Any, resources: GPUGasResources, name: str, data: np.ndarray) -> None:
+    def _write_dynamic_buffer(
+        self, ctx: Any, resources: GPUGasResources, name: str, data: np.ndarray
+    ) -> None:
         buffer = getattr(resources, name)
         nbytes = max(4, int(data.nbytes))
         if buffer.size < nbytes:
@@ -458,7 +477,9 @@ class GPUGasPipeline(GPUPipelineBase):
             return
         bridge.ensure_world_resources(world)
         if not bridge.enabled or bridge.ctx is None:
-            raise RuntimeError("GPU gas pipeline requires bridge GPU resources for authoritative input state")
+            raise RuntimeError(
+                "GPU gas pipeline requires bridge GPU resources for authoritative input state"
+            )
         program = self.programs["load_bridge"]
         program["grid_size"].value = (world.gas_width, world.gas_height)
         program["species_count"].value = int(world.gas_concentration.shape[0])
@@ -474,7 +495,14 @@ class GPUGasPipeline(GPUPipelineBase):
         program.run(group_x, group_y, int(world.gas_concentration.shape[0]))
         self._sync_compute_writes(bridge.ctx)
 
-    def _run_advect_velocity(self, world: "WorldEngine", dt: float, resources: GPUGasResources, group_x: int, group_y: int) -> None:
+    def _run_advect_velocity(
+        self,
+        world: "WorldEngine",
+        dt: float,
+        resources: GPUGasResources,
+        group_x: int,
+        group_y: int,
+    ) -> None:
         program = self.programs["advect_velocity"]
         ctx = world.bridge.ctx
         assert ctx is not None
@@ -487,7 +515,14 @@ class GPUGasPipeline(GPUPipelineBase):
         program.run(group_x, group_y, 1)
         self._sync_compute_writes(ctx)
 
-    def _run_force_sources(self, world: "WorldEngine", dt: float, resources: GPUGasResources, group_x: int, group_y: int) -> None:
+    def _run_force_sources(
+        self,
+        world: "WorldEngine",
+        dt: float,
+        resources: GPUGasResources,
+        group_x: int,
+        group_y: int,
+    ) -> None:
         if not world.force_sources:
             return
         program = self.programs["force_sources"]
@@ -505,7 +540,10 @@ class GPUGasPipeline(GPUPipelineBase):
         resources.velocity_ping.bind_to_image(1, read=False, write=True)
         program.run(group_x, group_y, 1)
         self._sync_compute_writes(ctx)
-        resources.velocity_ping, resources.velocity_pong = resources.velocity_pong, resources.velocity_ping
+        resources.velocity_ping, resources.velocity_pong = (
+            resources.velocity_pong,
+            resources.velocity_ping,
+        )
         for force in list(world.force_sources):
             force.lifetime -= dt
         world.force_sources[:] = [force for force in world.force_sources if force.lifetime > 0.0]
@@ -549,12 +587,17 @@ class GPUGasPipeline(GPUPipelineBase):
         resources.density_reduce_ping.bind_to_storage_buffer(binding=5)
         program.run(group_x, group_y, 1)
         self._sync_compute_writes(ctx)
-        resources.velocity_ping, resources.velocity_pong = resources.velocity_pong, resources.velocity_ping
+        resources.velocity_ping, resources.velocity_pong = (
+            resources.velocity_pong,
+            resources.velocity_ping,
+        )
         for force in list(world.force_sources):
             force.lifetime -= dt
         world.force_sources[:] = [force for force in world.force_sources if force.lifetime > 0.0]
 
-    def _run_divergence(self, world: "WorldEngine", resources: GPUGasResources, group_x: int, group_y: int) -> None:
+    def _run_divergence(
+        self, world: "WorldEngine", resources: GPUGasResources, group_x: int, group_y: int
+    ) -> None:
         pressure_seed = self._use_divergence_pressure_seed()
         program = self.programs["divergence_pressure_seed" if pressure_seed else "divergence"]
         ctx = world.bridge.ctx
@@ -568,12 +611,19 @@ class GPUGasPipeline(GPUPipelineBase):
         program.run(group_x, group_y, 1)
         self._sync_compute_writes(ctx)
         if pressure_seed:
-            resources.pressure_ping, resources.pressure_pong = resources.pressure_pong, resources.pressure_ping
+            resources.pressure_ping, resources.pressure_pong = (
+                resources.pressure_pong,
+                resources.pressure_ping,
+            )
             self.last_divergence_pressure_seed_used = True
 
-    def _run_thermo_fields(self, world: "WorldEngine", resources: GPUGasResources, group_x: int, group_y: int) -> None:
+    def _run_thermo_fields(
+        self, world: "WorldEngine", resources: GPUGasResources, group_x: int, group_y: int
+    ) -> None:
         tree_reduction = bool(self._density_tree_reduction_enabled)
-        program = self.programs["thermo_fields_density_buffer" if tree_reduction else "thermo_fields"]
+        program = self.programs[
+            "thermo_fields_density_buffer" if tree_reduction else "thermo_fields"
+        ]
         ctx = world.bridge.ctx
         assert ctx is not None
         program["grid_size"].value = (world.gas_width, world.gas_height)
@@ -589,7 +639,9 @@ class GPUGasPipeline(GPUPipelineBase):
         program.run(group_x, group_y, 1)
         self._sync_compute_writes(ctx)
 
-    def _run_density_reduction(self, world: "WorldEngine", resources: GPUGasResources, group_x: int, group_y: int) -> None:
+    def _run_density_reduction(
+        self, world: "WorldEngine", resources: GPUGasResources, group_x: int, group_y: int
+    ) -> None:
         ctx = world.bridge.ctx
         assert ctx is not None
         cell_count = int(world.gas_width * world.gas_height)
@@ -608,14 +660,20 @@ class GPUGasPipeline(GPUPipelineBase):
         src = resources.density_reduce_ping
         dst = resources.density_reduce_pong
         input_count = cell_count
-        reduce_program = self.programs["density_reduce_tree" if tree_reduction else "density_reduce"]
+        reduce_program = self.programs[
+            "density_reduce_tree" if tree_reduction else "density_reduce"
+        ]
         while input_count > 1:
             values_per_group = REDUCE_LOCAL_SIZE * 2 if tree_reduction else 2
             output_count = (input_count + values_per_group - 1) // values_per_group
             reduce_program["input_count"].value = input_count
             src.bind_to_storage_buffer(binding=0)
             dst.bind_to_storage_buffer(binding=1)
-            dispatch_groups = output_count if tree_reduction else (output_count + REDUCE_LOCAL_SIZE - 1) // REDUCE_LOCAL_SIZE
+            dispatch_groups = (
+                output_count
+                if tree_reduction
+                else (output_count + REDUCE_LOCAL_SIZE - 1) // REDUCE_LOCAL_SIZE
+            )
             reduce_program.run(dispatch_groups, 1, 1)
             self._sync_compute_writes(ctx)
             src, dst = dst, src
@@ -624,7 +682,14 @@ class GPUGasPipeline(GPUPipelineBase):
         resources.density_reduce_pong = dst
         self.last_density_tree_reduction_used = tree_reduction
 
-    def _run_thermo_forces(self, world: "WorldEngine", dt: float, resources: GPUGasResources, group_x: int, group_y: int) -> None:
+    def _run_thermo_forces(
+        self,
+        world: "WorldEngine",
+        dt: float,
+        resources: GPUGasResources,
+        group_x: int,
+        group_y: int,
+    ) -> None:
         self._run_density_reduction(world, resources, group_x, group_y)
         program = self.programs["thermo_forces"]
         ctx = world.bridge.ctx
@@ -652,7 +717,9 @@ class GPUGasPipeline(GPUPipelineBase):
         assert ctx is not None
         program = self.programs["jacobi"]
         program["grid_size"].value = (world.gas_width, world.gas_height)
-        remaining_iterations = self.pressure_iterations - (1 if self._use_divergence_pressure_seed() else 0)
+        remaining_iterations = self.pressure_iterations - (
+            1 if self._use_divergence_pressure_seed() else 0
+        )
         remaining_iterations = max(0, remaining_iterations)
         pair_count = 0
         if self._can_run_pressure_jacobi_pair(world):
@@ -695,7 +762,10 @@ class GPUGasPipeline(GPUPipelineBase):
             resources.pressure_pong.bind_to_image(2, read=False, write=True)
             program.run(group_x, group_y, 1)
             self._sync_compute_writes(ctx)
-            resources.pressure_ping, resources.pressure_pong = resources.pressure_pong, resources.pressure_ping
+            resources.pressure_ping, resources.pressure_pong = (
+                resources.pressure_pong,
+                resources.pressure_ping,
+            )
 
     def _can_run_pressure_jacobi_pair(self, world: "WorldEngine") -> bool:
         return bool(
@@ -741,13 +811,18 @@ class GPUGasPipeline(GPUPipelineBase):
             resources.pressure_cone_shadow,
             resources.pressure_ping,
         )
-        resources.velocity_ping, resources.velocity_pong = resources.velocity_pong, resources.velocity_ping
+        resources.velocity_ping, resources.velocity_pong = (
+            resources.velocity_pong,
+            resources.velocity_ping,
+        )
 
     def _can_run_species_terminal_cooperative(self, world: "WorldEngine") -> bool:
         species_count = int(world.gas_concentration.shape[0])
         return bool(self._species_terminal_cooperative_enabled and 0 < species_count <= MAX_SPECIES)
 
-    def _run_projection(self, world: "WorldEngine", resources: GPUGasResources, group_x: int, group_y: int) -> None:
+    def _run_projection(
+        self, world: "WorldEngine", resources: GPUGasResources, group_x: int, group_y: int
+    ) -> None:
         program = self.programs["projection"]
         ctx = world.bridge.ctx
         assert ctx is not None
@@ -758,9 +833,19 @@ class GPUGasPipeline(GPUPipelineBase):
         resources.velocity_pong.bind_to_image(2, read=False, write=True)
         program.run(group_x, group_y, 1)
         self._sync_compute_writes(ctx)
-        resources.velocity_ping, resources.velocity_pong = resources.velocity_pong, resources.velocity_ping
+        resources.velocity_ping, resources.velocity_pong = (
+            resources.velocity_pong,
+            resources.velocity_ping,
+        )
 
-    def _run_species(self, world: "WorldEngine", dt: float, resources: GPUGasResources, group_x: int, group_y: int) -> None:
+    def _run_species(
+        self,
+        world: "WorldEngine",
+        dt: float,
+        resources: GPUGasResources,
+        group_x: int,
+        group_y: int,
+    ) -> None:
         program = self.programs["species"]
         ctx = world.bridge.ctx
         assert ctx is not None
@@ -779,7 +864,14 @@ class GPUGasPipeline(GPUPipelineBase):
         self._sync_compute_writes(ctx)
         resources.gas_ping, resources.gas_pong = resources.gas_pong, resources.gas_ping
 
-    def _run_ambient(self, world: "WorldEngine", dt: float, resources: GPUGasResources, group_x: int, group_y: int) -> None:
+    def _run_ambient(
+        self,
+        world: "WorldEngine",
+        dt: float,
+        resources: GPUGasResources,
+        group_x: int,
+        group_y: int,
+    ) -> None:
         program = self.programs["ambient"]
         ctx = world.bridge.ctx
         assert ctx is not None
@@ -794,7 +886,10 @@ class GPUGasPipeline(GPUPipelineBase):
         resources.ambient_pong.bind_to_image(4, read=False, write=True)
         program.run(group_x, group_y, 1)
         self._sync_compute_writes(ctx)
-        resources.ambient_ping, resources.ambient_pong = resources.ambient_pong, resources.ambient_ping
+        resources.ambient_ping, resources.ambient_pong = (
+            resources.ambient_pong,
+            resources.ambient_ping,
+        )
 
     def _run_species_terminal_cooperative(
         self,
@@ -833,7 +928,10 @@ class GPUGasPipeline(GPUPipelineBase):
         )
         self._sync_compute_writes(bridge.ctx)
         resources.gas_ping, resources.gas_pong = resources.gas_pong, resources.gas_ping
-        resources.ambient_ping, resources.ambient_pong = resources.ambient_pong, resources.ambient_ping
+        resources.ambient_ping, resources.ambient_pong = (
+            resources.ambient_pong,
+            resources.ambient_ping,
+        )
         bridge.mark_gpu_authoritative(
             "flow_velocity",
             "ambient_temperature",
@@ -843,11 +941,21 @@ class GPUGasPipeline(GPUPipelineBase):
         self.last_species_terminal_cooperative_used = True
 
     def _download_outputs(self, world: "WorldEngine", resources: GPUGasResources) -> None:
-        velocity = np.frombuffer(resources.velocity_ping.read(), dtype="f4").reshape((world.gas_height, world.gas_width, 2))
-        ambient = np.frombuffer(resources.ambient_ping.read(), dtype="f4").reshape((world.gas_height, world.gas_width))
-        pressure = np.frombuffer(resources.pressure_ping.read(), dtype="f4").reshape((world.gas_height, world.gas_width))
-        thermo_pressure = np.frombuffer(resources.thermo_pressure.read(), dtype="f4").reshape((world.gas_height, world.gas_width))
-        gas = np.frombuffer(resources.gas_ping.read(), dtype="f4").reshape((world.gas_concentration.shape[0], world.gas_height, world.gas_width))
+        velocity = np.frombuffer(resources.velocity_ping.read(), dtype="f4").reshape(
+            (world.gas_height, world.gas_width, 2)
+        )
+        ambient = np.frombuffer(resources.ambient_ping.read(), dtype="f4").reshape(
+            (world.gas_height, world.gas_width)
+        )
+        pressure = np.frombuffer(resources.pressure_ping.read(), dtype="f4").reshape(
+            (world.gas_height, world.gas_width)
+        )
+        thermo_pressure = np.frombuffer(resources.thermo_pressure.read(), dtype="f4").reshape(
+            (world.gas_height, world.gas_width)
+        )
+        gas = np.frombuffer(resources.gas_ping.read(), dtype="f4").reshape(
+            (world.gas_concentration.shape[0], world.gas_height, world.gas_width)
+        )
         world.flow_velocity[:] = velocity
         world.ambient_temperature[:] = ambient
         world.pressure_ping[:] = pressure + thermo_pressure
@@ -863,7 +971,9 @@ class GPUGasPipeline(GPUPipelineBase):
         bridge = world.bridge
         bridge.ensure_world_resources(world)
         if not bridge.enabled or bridge.ctx is None:
-            raise RuntimeError("GPU gas pipeline requires bridge GPU resources for authoritative gas state")
+            raise RuntimeError(
+                "GPU gas pipeline requires bridge GPU resources for authoritative gas state"
+            )
         program = self.programs["publish_bridge"]
         program["grid_size"].value = (world.gas_width, world.gas_height)
         program["species_count"].value = int(world.gas_concentration.shape[0])

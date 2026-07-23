@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from copy import deepcopy
+from typing import Any
 
 import numpy as np
 
-from copy import deepcopy
-from dataclasses import asdict
 from oracle_game.gpu import (
     GPUBufferReadbackSource,
     GPUCellCoreWindowReadbackSource,
@@ -15,36 +14,17 @@ from oracle_game.gpu import (
     GPUSegmentedTextureReadbackSource,
     GPUTextureReadbackSource,
 )
-from oracle_game.page_store import StoredStripeKey
 from oracle_game.types import (
-    CarrierIntent,
-    ChangeIntent,
-    DebugView,
-    EntityFeedback,
-    EntityObservationSpec,
     EntityPlaceholder,
-    EntityState,
-    EntityStatePatch,
     ForceSource,
-    ObservationResult,
     ObservationTarget,
     PageStripeUpdate,
-    Phase,
     ReadbackRequest,
-    ReadbackResult,
-    ResolvedCarrierIntent,
-    ResolvedChangeIntent,
-    ResolvedTarget,
     TargetQuery,
     WorldCommand,
     WorldFrameInput,
-    WorldFrameOutput,
-    WorldFramePreview,
 )
-from oracle_game.world_constants import ENTITY_STATE_PATCH_METADATA_FIELDS
 
-if TYPE_CHECKING:
-    from oracle_game.world import WorldEngine
 
 def serialize_pending_commands(engine) -> dict[str, Any]:
     return {
@@ -59,21 +39,17 @@ def serialize_readback_state(engine) -> dict[str, Any]:
         for command in engine.command_queue
         if command.kind == "request_readback"
     ]
-    bridge_runtime = engine.bridge.serialize_runtime_state()
-    readback_slots = [
-        slot
-        for slot in bridge_runtime.get("readback_slots", [])
-        if bool(slot.get("occupied", False))
-    ]
     return {
         "queued": len(queued_commands),
         "queued_commands": queued_commands,
         "pending": len(engine.pending_readbacks),
-        "pending_requests": [engine.serialize_readback_request(request) for request in engine.pending_readbacks],
+        "pending_requests": [
+            engine.serialize_readback_request(request) for request in engine.pending_readbacks
+        ],
         "inflight": len(engine.inflight_readbacks),
-        "inflight_requests": [engine.serialize_readback_request(request) for request in engine.inflight_readbacks],
-        "inflight_slots": readback_slots,
-        "readback_latency_frames": bridge_runtime.get("readback_latency_frames", {}),
+        "inflight_requests": [
+            engine.serialize_readback_request(request) for request in engine.inflight_readbacks
+        ],
         "ready": len(engine.completed_readbacks),
     }
 
@@ -81,7 +57,9 @@ def serialize_readback_state(engine) -> dict[str, Any]:
 def serialize_ready_readbacks(engine) -> dict[str, Any]:
     return {
         "ready": len(engine.completed_readbacks),
-        "results": [engine.serialize_readback_result(result) for result in engine.completed_readbacks],
+        "results": [
+            engine.serialize_readback_result(result) for result in engine.completed_readbacks
+        ],
     }
 
 
@@ -97,14 +75,19 @@ def serialize_frame_state(engine) -> dict[str, Any]:
         "pending_submission_ids": pending_submission_ids,
         "ready": len(engine.completed_frame_outputs),
         "ready_submission_ids": ready_submission_ids,
-        "canceled_submission_ids": sorted(int(submission_id) for submission_id in engine.canceled_frame_submission_ids),
+        "canceled_submission_ids": sorted(
+            int(submission_id) for submission_id in engine.canceled_frame_submission_ids
+        ),
     }
 
 
 def serialize_pending_frame_inputs(engine) -> dict[str, Any]:
     return {
         "pending": len(engine.pending_frame_inputs),
-        "frames": [engine.serialize_pending_frame_detail(frame_input) for frame_input in engine.pending_frame_inputs],
+        "frames": [
+            engine.serialize_pending_frame_detail(frame_input)
+            for frame_input in engine.pending_frame_inputs
+        ],
     }
 
 
@@ -122,7 +105,9 @@ def serialize_pending_frame_detail(engine, frame_input: WorldFrameInput) -> dict
 def serialize_ready_frame_outputs(engine) -> dict[str, Any]:
     return {
         "ready": len(engine.completed_frame_outputs),
-        "outputs": [engine.serialize_frame_output(output) for output in engine.completed_frame_outputs],
+        "outputs": [
+            engine.serialize_frame_output(output) for output in engine.completed_frame_outputs
+        ],
     }
 
 
@@ -190,7 +175,8 @@ def _serialize_preview_bridge_frame_snapshot(
             },
         ),
         "placeholders": [
-            engine.serialize_entity_placeholder_input(placeholder) for placeholder in placeholder_inputs
+            engine.serialize_entity_placeholder_input(placeholder)
+            for placeholder in placeholder_inputs
         ],
         "placeholder_stages": engine._serialize_bridge_index_stages(
             placeholder_inputs,
@@ -224,10 +210,18 @@ def serialize_local_cells(engine, x: int, y: int, width: int, height: int) -> di
     )
     size_x = max(0, world_x1 - world_x0)
     size_y = max(0, world_y1 - world_y0)
-    material_id = engine._extract_world_window(engine.material_id, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0)
-    phase = engine._extract_world_window(engine.phase, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0)
-    cell_flags = engine._extract_world_window(engine.cell_flags, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0)
-    velocity = engine._extract_world_window(engine.velocity, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0)
+    material_id = engine._extract_world_window(
+        engine.material_id, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0
+    )
+    phase = engine._extract_world_window(
+        engine.phase, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0
+    )
+    cell_flags = engine._extract_world_window(
+        engine.cell_flags, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0
+    )
+    velocity = engine._extract_world_window(
+        engine.velocity, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0
+    )
     cell_temperature = engine._extract_world_window(
         engine.cell_temperature,
         world_x0,
@@ -237,10 +231,18 @@ def serialize_local_cells(engine, x: int, y: int, width: int, height: int) -> di
         x_axis=1,
         y_axis=0,
     )
-    timer_pack = engine._extract_world_window(engine.timer_pack, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0)
-    integrity = engine._extract_world_window(engine.integrity, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0)
-    island_id = engine._extract_world_window(engine.island_id, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0)
-    entity_id = engine._extract_world_window(engine.entity_id, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0)
+    timer_pack = engine._extract_world_window(
+        engine.timer_pack, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0
+    )
+    integrity = engine._extract_world_window(
+        engine.integrity, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0
+    )
+    island_id = engine._extract_world_window(
+        engine.island_id, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0
+    )
+    entity_id = engine._extract_world_window(
+        engine.entity_id, world_x0, world_y0, world_x1, world_y1, x_axis=1, y_axis=0
+    )
     placeholder_displaced_material = engine._extract_world_window(
         engine.placeholder_displaced_material,
         world_x0,
@@ -300,54 +302,70 @@ def serialize_gas(engine, species: str) -> list[list[float]]:
     species_id = engine._resolve_sanctioned_gas_id(species)
     if species_id < 0:
         raise KeyError(species)
-    return engine._extract_world_window(
-        engine.gas_concentration[species_id],
-        int(engine.paging.origin_x) // int(engine.gas_cell_size),
-        int(engine.paging.origin_y) // int(engine.gas_cell_size),
-        int(engine.paging.origin_x) // int(engine.gas_cell_size) + int(engine.gas_width),
-        int(engine.paging.origin_y) // int(engine.gas_cell_size) + int(engine.gas_height),
-        x_axis=1,
-        y_axis=0,
-        gas_grid=True,
-    ).round(4).tolist()
+    return (
+        engine._extract_world_window(
+            engine.gas_concentration[species_id],
+            int(engine.paging.origin_x) // int(engine.gas_cell_size),
+            int(engine.paging.origin_y) // int(engine.gas_cell_size),
+            int(engine.paging.origin_x) // int(engine.gas_cell_size) + int(engine.gas_width),
+            int(engine.paging.origin_y) // int(engine.gas_cell_size) + int(engine.gas_height),
+            x_axis=1,
+            y_axis=0,
+            gas_grid=True,
+        )
+        .round(4)
+        .tolist()
+    )
 
 
 def serialize_pressure(engine) -> list[list[float]]:
-    return engine._extract_world_window(
-        engine.pressure_ping,
-        int(engine.paging.origin_x) // int(engine.gas_cell_size),
-        int(engine.paging.origin_y) // int(engine.gas_cell_size),
-        int(engine.paging.origin_x) // int(engine.gas_cell_size) + int(engine.gas_width),
-        int(engine.paging.origin_y) // int(engine.gas_cell_size) + int(engine.gas_height),
-        x_axis=1,
-        y_axis=0,
-        gas_grid=True,
-    ).round(4).tolist()
+    return (
+        engine._extract_world_window(
+            engine.pressure_ping,
+            int(engine.paging.origin_x) // int(engine.gas_cell_size),
+            int(engine.paging.origin_y) // int(engine.gas_cell_size),
+            int(engine.paging.origin_x) // int(engine.gas_cell_size) + int(engine.gas_width),
+            int(engine.paging.origin_y) // int(engine.gas_cell_size) + int(engine.gas_height),
+            x_axis=1,
+            y_axis=0,
+            gas_grid=True,
+        )
+        .round(4)
+        .tolist()
+    )
 
 
 def serialize_velocity(engine) -> list[list[list[float]]]:
-    return engine._extract_world_window(
-        engine.flow_velocity,
-        int(engine.paging.origin_x) // int(engine.gas_cell_size),
-        int(engine.paging.origin_y) // int(engine.gas_cell_size),
-        int(engine.paging.origin_x) // int(engine.gas_cell_size) + int(engine.gas_width),
-        int(engine.paging.origin_y) // int(engine.gas_cell_size) + int(engine.gas_height),
-        x_axis=1,
-        y_axis=0,
-        gas_grid=True,
-    ).round(4).tolist()
+    return (
+        engine._extract_world_window(
+            engine.flow_velocity,
+            int(engine.paging.origin_x) // int(engine.gas_cell_size),
+            int(engine.paging.origin_y) // int(engine.gas_cell_size),
+            int(engine.paging.origin_x) // int(engine.gas_cell_size) + int(engine.gas_width),
+            int(engine.paging.origin_y) // int(engine.gas_cell_size) + int(engine.gas_height),
+            x_axis=1,
+            y_axis=0,
+            gas_grid=True,
+        )
+        .round(4)
+        .tolist()
+    )
 
 
 def serialize_visible_illumination(engine) -> list[list[list[float]]]:
-    return engine._extract_world_window(
-        engine.visible_illumination,
-        int(engine.paging.origin_x),
-        int(engine.paging.origin_y),
-        int(engine.paging.origin_x) + int(engine.width),
-        int(engine.paging.origin_y) + int(engine.height),
-        x_axis=1,
-        y_axis=0,
-    ).round(4).tolist()
+    return (
+        engine._extract_world_window(
+            engine.visible_illumination,
+            int(engine.paging.origin_x),
+            int(engine.paging.origin_y),
+            int(engine.paging.origin_x) + int(engine.width),
+            int(engine.paging.origin_y) + int(engine.height),
+            x_axis=1,
+            y_axis=0,
+        )
+        .round(4)
+        .tolist()
+    )
 
 
 def serialize_material_table(engine) -> list[dict[str, Any]]:
@@ -368,14 +386,18 @@ def _serialize_force_source_record(engine, force_source: ForceSource) -> dict[st
 
 
 def serialize_force_sources(engine) -> list[dict[str, Any]]:
-    return [engine._serialize_force_source_record(force_source) for force_source in engine.force_sources]
+    return [
+        engine._serialize_force_source_record(force_source) for force_source in engine.force_sources
+    ]
 
 
 def _serialize_emitter_record(engine, emitter: dict[str, object]) -> dict[str, object]:
     if "world_origin" in emitter:
         world_x, world_y = (int(emitter["world_origin"][0]), int(emitter["world_origin"][1]))
     else:
-        world_x, world_y = engine._buffer_to_world_position((int(emitter["origin"][0]), int(emitter["origin"][1])))
+        world_x, world_y = engine._buffer_to_world_position(
+            (int(emitter["origin"][0]), int(emitter["origin"][1]))
+        )
     return {
         "x": int(world_x),
         "y": int(world_y),
@@ -389,8 +411,12 @@ def _serialize_emitter_record(engine, emitter: dict[str, object]) -> dict[str, o
 
 def serialize_emitters(engine) -> dict[str, list[dict[str, object]]]:
     return {
-        "persistent_emitters": [engine._serialize_emitter_record(emitter) for emitter in engine.persistent_emitters],
-        "queued_emitters": [engine._serialize_emitter_record(emitter) for emitter in engine.emitters],
+        "persistent_emitters": [
+            engine._serialize_emitter_record(emitter) for emitter in engine.persistent_emitters
+        ],
+        "queued_emitters": [
+            engine._serialize_emitter_record(emitter) for emitter in engine.emitters
+        ],
     }
 
 
@@ -405,7 +431,9 @@ def serialize_light_type_table(engine) -> list[dict[str, Any]]:
 
 
 def serialize_material_optics_table(engine) -> list[dict[str, Any]]:
-    payload = engine._stable_shadow_payload("optics", engine._material_optics_table_snapshot_payload)
+    payload = engine._stable_shadow_payload(
+        "optics", engine._material_optics_table_snapshot_payload
+    )
     return engine._normalize_json_payload_value(payload)
 
 
@@ -431,11 +459,13 @@ def serialize_optics(
         resolved_width,
         resolved_height,
     )
-    gas_world_x0, gas_world_y0, gas_world_x1, gas_world_y1 = engine._world_gas_window_for_cell_world_rect(
-        world_x0,
-        world_y0,
-        world_x1,
-        world_y1,
+    gas_world_x0, gas_world_y0, gas_world_x1, gas_world_y1 = (
+        engine._world_gas_window_for_cell_world_rect(
+            world_x0,
+            world_y0,
+            world_x1,
+            world_y1,
+        )
     )
     light_entries: list[tuple[str, int]] = []
     if light_type is None:
@@ -456,7 +486,10 @@ def serialize_optics(
         dose_channel = engine._shadow_light_dose_channel(light_id)
         if dose_channel is None:
             raise KeyError(light_type)
-        if not (0 <= dose_channel < engine.cell_optical_dose.shape[0] and 0 <= dose_channel < engine.gas_optical_dose.shape[0]):
+        if not (
+            0 <= dose_channel < engine.cell_optical_dose.shape[0]
+            and 0 <= dose_channel < engine.gas_optical_dose.shape[0]
+        ):
             raise KeyError(light_type)
         shadow_light_name = engine._shadow_light_name(light_id)
         if shadow_light_name is None:
@@ -590,12 +623,16 @@ def _serialize_readback_source_descriptor(engine, path: tuple[str, ...], value: 
         }
         if value.dst_step is not None:
             payload["dst_step"] = int(value.dst_step)
-        coord_space = engine._infer_readback_payload_coord_space(path, resource_name=value.resource_name)
+        coord_space = engine._infer_readback_payload_coord_space(
+            path, resource_name=value.resource_name
+        )
         if coord_space is not None:
             payload["coord_space"] = coord_space
         return payload
     if isinstance(value, GPUCellCoreWindowReadbackSource):
-        world_origin_x, world_origin_y = engine._buffer_to_world_position((value.origin_x, value.origin_y))
+        world_origin_x, world_origin_y = engine._buffer_to_world_position(
+            (value.origin_x, value.origin_y)
+        )
         payload = {
             "source_type": "cell_core_window",
             "resource_name": str(value.resource_name),
@@ -610,7 +647,9 @@ def _serialize_readback_source_descriptor(engine, path: tuple[str, ...], value: 
             payload["dst_cell_grid_width"] = int(value.dst_cell_grid_width)
         return payload
     if isinstance(value, GPUGasWindowReadbackSource):
-        gas_world_x, gas_world_y = engine._buffer_gas_to_world_position((value.origin_x, value.origin_y))
+        gas_world_x, gas_world_y = engine._buffer_gas_to_world_position(
+            (value.origin_x, value.origin_y)
+        )
         payload = {
             "source_type": "gas_window",
             "resource_name": str(value.resource_name),
@@ -626,7 +665,9 @@ def _serialize_readback_source_descriptor(engine, path: tuple[str, ...], value: 
             payload["dst_step"] = int(value.dst_step)
         return payload
     if isinstance(value, GPUTextureReadbackSource):
-        coord_space = engine._infer_readback_payload_coord_space(path, resource_name=value.resource_name)
+        coord_space = engine._infer_readback_payload_coord_space(
+            path, resource_name=value.resource_name
+        )
         payload = {
             "source_type": "texture_view",
             "resource_name": str(value.resource_name),
@@ -640,10 +681,14 @@ def _serialize_readback_source_descriptor(engine, path: tuple[str, ...], value: 
         if coord_space is not None:
             payload["coord_space"] = coord_space
             if coord_space == "world":
-                world_origin_x, world_origin_y = engine._buffer_to_world_position((value.viewport[0], value.viewport[1]))
+                world_origin_x, world_origin_y = engine._buffer_to_world_position(
+                    (value.viewport[0], value.viewport[1])
+                )
                 payload["world_origin"] = [int(world_origin_x), int(world_origin_y)]
             elif coord_space == "gas":
-                gas_world_x, gas_world_y = engine._buffer_gas_to_world_position((value.viewport[0], value.viewport[1]))
+                gas_world_x, gas_world_y = engine._buffer_gas_to_world_position(
+                    (value.viewport[0], value.viewport[1])
+                )
                 payload["gas_origin"] = [int(gas_world_x), int(gas_world_y)]
         return payload
     if isinstance(value, GPUSegmentedBufferReadbackSource):
@@ -663,7 +708,9 @@ def _serialize_readback_source_descriptor(engine, path: tuple[str, ...], value: 
                 for segment in value.segments
             ],
         }
-        coord_space = engine._infer_readback_payload_coord_space(path, resource_name=value.resource_name)
+        coord_space = engine._infer_readback_payload_coord_space(
+            path, resource_name=value.resource_name
+        )
         if coord_space is not None:
             payload["coord_space"] = coord_space
         return payload
@@ -686,7 +733,9 @@ def _serialize_readback_source_descriptor(engine, path: tuple[str, ...], value: 
         }
         return payload
     if isinstance(value, GPUSegmentedTextureReadbackSource):
-        coord_space = engine._infer_readback_payload_coord_space(path, resource_name=value.resource_name)
+        coord_space = engine._infer_readback_payload_coord_space(
+            path, resource_name=value.resource_name
+        )
         payload = {
             "source_type": "segmented_texture_view",
             "resource_name": str(value.resource_name),
@@ -726,7 +775,9 @@ def _serialize_readback_plan_for_request(engine, request: ReadbackRequest) -> di
     }
 
 
-def _serialize_readback_plans_for_requests(engine, requests: list[ReadbackRequest]) -> list[dict[str, Any]]:
+def _serialize_readback_plans_for_requests(
+    engine, requests: list[ReadbackRequest]
+) -> list[dict[str, Any]]:
     return [engine._serialize_readback_plan_for_request(request) for request in requests]
 
 
@@ -791,36 +842,36 @@ def serialize_observation_plan(
 
 
 from oracle_game.world_payload_serializers_extra import (
-    _serialize_cpu_visible_entity_placeholders,
-    _serialize_readback_payload,
-    serialize_carrier_intent_input,
-    serialize_change_intent_input,
-    serialize_consumed_entity_feedback_snapshot,
-    serialize_debug_frame,
-    serialize_entity_feedback,
-    serialize_entity_feedback_snapshot,
-    serialize_entity_observation_consume_state,
-    serialize_entity_observation_spec,
-    serialize_entity_observation_state,
-    serialize_entity_placeholder_index_snapshot,
-    serialize_entity_placeholder_input,
-    serialize_entity_placeholders,
-    serialize_entity_state,
-    serialize_entity_state_input,
-    serialize_entity_state_patch,
-    serialize_entity_states,
-    serialize_frame_input,
-    serialize_frame_output,
-    serialize_frame_preview,
-    serialize_observation_result,
-    serialize_observation_target,
-    serialize_page_store_key,
-    serialize_page_stripe_payload,
-    serialize_page_stripe_update,
-    serialize_readback_result,
-    serialize_resolved_carrier_intent,
-    serialize_resolved_change_intent,
-    serialize_resolved_target,
-    serialize_target_query_input,
-    serialize_world_command,
+    _serialize_cpu_visible_entity_placeholders,  # noqa: F401  # re-exported to oracle_game.world
+    _serialize_readback_payload,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_carrier_intent_input,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_change_intent_input,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_consumed_entity_feedback_snapshot,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_debug_frame,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_entity_feedback,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_entity_feedback_snapshot,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_entity_observation_consume_state,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_entity_observation_spec,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_entity_observation_state,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_entity_placeholder_index_snapshot,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_entity_placeholder_input,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_entity_placeholders,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_entity_state,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_entity_state_input,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_entity_state_patch,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_entity_states,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_frame_input,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_frame_output,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_frame_preview,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_observation_result,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_observation_target,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_page_store_key,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_page_stripe_payload,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_page_stripe_update,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_readback_result,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_resolved_carrier_intent,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_resolved_change_intent,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_resolved_target,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_target_query_input,  # noqa: F401  # re-exported to oracle_game.world
+    serialize_world_command,  # noqa: F401  # re-exported to oracle_game.world
 )

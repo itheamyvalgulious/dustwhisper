@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
-
 from copy import deepcopy
+from typing import TYPE_CHECKING, Any
+
 from oracle_game.readback_contract import READBACK_ALLOWED_CHANNELS
 from oracle_game.types import COLLAPSE_BEHAVIOR_IDS, DebugView, Phase, ReactionType
 from oracle_game.world_constants import (
@@ -17,8 +17,8 @@ from oracle_game.world_constants import (
     TERRAIN_ANCHOR_FILTERS,
 )
 
-from ._http_read_endpoints import _build_http_read_endpoints
 from ._http_mutate_endpoints import _build_http_mutate_endpoints
+from ._http_read_endpoints import _build_http_read_endpoints
 
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
@@ -83,7 +83,10 @@ def _capabilities_meta_section(engine: "WorldEngine", ctx) -> dict[str, Any]:
         "readback_channels": list(READBACK_ALLOWED_CHANNELS),
         "readback": {
             "allowed_channels": list(READBACK_ALLOWED_CHANNELS),
-            "max_async_window_size": [int(MAX_ASYNC_READBACK_WIDTH), int(MAX_ASYNC_READBACK_HEIGHT)],
+            "max_async_window_size": [
+                int(MAX_ASYNC_READBACK_WIDTH),
+                int(MAX_ASYNC_READBACK_HEIGHT),
+            ],
             "request_fields": readback_request_fields,
             "result_fields": ["frame_id", "request", "payload"],
             "channel_payload_types": dict(readback_channel_payload_types),
@@ -93,15 +96,11 @@ def _capabilities_meta_section(engine: "WorldEngine", ctx) -> dict[str, Any]:
             "ignored_anchor_filters": sorted(IGNORED_ANCHOR_FILTERS),
             "directions": [*CARDINAL_DIRECTION_VECTORS.keys(), "forward", "backward"],
             "distance_hint_cells": {
-                hint: int(distance)
-                for hint, distance in TARGET_QUERY_DISTANCE_HINT_CELLS.items()
+                hint: int(distance) for hint, distance in TARGET_QUERY_DISTANCE_HINT_CELLS.items()
             },
             "cells_per_meter": float(TARGET_QUERY_CELLS_PER_METER),
         },
-        "phases": {
-            phase.name.lower(): int(phase)
-            for phase in Phase
-        },
+        "phases": {phase.name.lower(): int(phase) for phase in Phase},
         "reaction_types": [reaction_type.name.lower() for reaction_type in ReactionType],
         "collapse_behaviors": sorted(COLLAPSE_BEHAVIOR_IDS),
         "tag_bits": deepcopy(engine.tag_bits_by_name),

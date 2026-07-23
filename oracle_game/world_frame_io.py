@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
-
 from collections import deque
 from copy import deepcopy
 from dataclasses import replace
+from typing import Any
+
 from oracle_game.types import (
     EntityPlaceholder,
     ObservationTarget,
@@ -18,9 +18,6 @@ from oracle_game.types import (
     WorldFramePreview,
 )
 
-if TYPE_CHECKING:
-    from oracle_game.world import WorldEngine
-
 
 def preview_frame_input(
     engine,
@@ -32,10 +29,16 @@ def preview_frame_input(
     saved_paging = deepcopy(engine.paging)
     saved_preview_runtime = engine._snapshot_preview_runtime_state()
     saved_entity_states = dict(engine.entity_states)
-    saved_entity_placeholders = {entity_id: set(cells) for entity_id, cells in engine.entity_placeholders.items()}
+    saved_entity_placeholders = {
+        entity_id: set(cells) for entity_id, cells in engine.entity_placeholders.items()
+    }
     saved_controller_state = deepcopy(engine.controller_state_snapshot)
-    saved_blocked_cells = None if engine._resolver_blocked_cells is None else set(engine._resolver_blocked_cells)
-    saved_released_cells = None if engine._resolver_released_cells is None else set(engine._resolver_released_cells)
+    saved_blocked_cells = (
+        None if engine._resolver_blocked_cells is None else set(engine._resolver_blocked_cells)
+    )
+    saved_released_cells = (
+        None if engine._resolver_released_cells is None else set(engine._resolver_released_cells)
+    )
     try:
         preview_controller_state = deepcopy(engine.controller_state_snapshot)
         if frame_input.controller_state_provided:
@@ -49,7 +52,9 @@ def preview_frame_input(
             placeholder_count,
         ) = _prepare_preview_frame_context(engine, frame_input)
         resolved_targets = engine._resolve_target_queries(frame_input.target_queries)
-        resolved_change_intents, generated_commands = engine._resolve_change_intents(frame_input.change_intents, resolved_targets)
+        resolved_change_intents, generated_commands = engine._resolve_change_intents(
+            frame_input.change_intents, resolved_targets
+        )
         resolved_carrier_intents, generated_carrier_commands = engine._resolve_carrier_intents(
             frame_input.carrier_intents,
             resolved_targets,
@@ -98,7 +103,9 @@ def preview_frame_input(
                 intent_id: engine._public_resolved_carrier_intent(intent)
                 for intent_id, intent in resolved_carrier_intents.items()
             },
-            resolved_commands=[engine._public_world_command(command) for command in resolved_commands],
+            resolved_commands=[
+                engine._public_world_command(command) for command in resolved_commands
+            ],
             observation_requests=observation_requests,
             observation_plans=[
                 engine._serialize_observation_plan_for_target_request(target, request)
@@ -128,7 +135,9 @@ def submit_frame_input(engine, frame_input: WorldFrameInput | dict[str, Any]) ->
     frame_input = replace(
         frame_input,
         submission_id=submission_id,
-        readback_requests=[engine._assign_readback_request_id(request) for request in frame_input.readback_requests],
+        readback_requests=[
+            engine._assign_readback_request_id(request) for request in frame_input.readback_requests
+        ],
     )
     engine.next_frame_submission_id = max(engine.next_frame_submission_id, int(submission_id) + 1)
     engine.canceled_frame_submission_ids.discard(int(submission_id))
@@ -187,7 +196,11 @@ def request_frame_cycle(
 
 
 def pending_frame_submission_ids(engine) -> list[int]:
-    return [int(frame_input.submission_id) for frame_input in engine.pending_frame_inputs if frame_input.submission_id is not None]
+    return [
+        int(frame_input.submission_id)
+        for frame_input in engine.pending_frame_inputs
+        if frame_input.submission_id is not None
+    ]
 
 
 def cancel_frame_submission(engine, submission_id: int) -> bool:
@@ -195,7 +208,9 @@ def cancel_frame_submission(engine, submission_id: int) -> bool:
         if frame_input.submission_id == submission_id:
             del engine.pending_frame_inputs[index]
             engine.canceled_frame_submission_ids.add(int(submission_id))
-            engine.canceled_readback_request_ids.update(engine._frame_readback_request_ids(frame_input))
+            engine.canceled_readback_request_ids.update(
+                engine._frame_readback_request_ids(frame_input)
+            )
             return True
     return False
 
@@ -206,7 +221,10 @@ def cancel_readback_request(engine, request_id: int) -> bool:
 
     remaining_commands: deque[WorldCommand] = deque()
     for command in engine.command_queue:
-        if command.kind == "request_readback" and int(command.payload.get("request_id", -1)) == request_id:
+        if (
+            command.kind == "request_readback"
+            and int(command.payload.get("request_id", -1)) == request_id
+        ):
             canceled = True
             continue
         remaining_commands.append(command)
@@ -214,19 +232,25 @@ def cancel_readback_request(engine, request_id: int) -> bool:
 
     remaining_frames: deque[WorldFrameInput] = deque()
     for frame_input in engine.pending_frame_inputs:
-        remaining_readbacks = [request for request in frame_input.readback_requests if request.request_id != request_id]
+        remaining_readbacks = [
+            request for request in frame_input.readback_requests if request.request_id != request_id
+        ]
         if len(remaining_readbacks) != len(frame_input.readback_requests):
             frame_input = replace(frame_input, readback_requests=remaining_readbacks)
             canceled = True
         remaining_frames.append(frame_input)
     engine.pending_frame_inputs = remaining_frames
 
-    next_pending = [request for request in engine.pending_readbacks if request.request_id != request_id]
+    next_pending = [
+        request for request in engine.pending_readbacks if request.request_id != request_id
+    ]
     if len(next_pending) != len(engine.pending_readbacks):
         canceled = True
     engine.pending_readbacks = next_pending
 
-    next_inflight = [request for request in engine.inflight_readbacks if request.request_id != request_id]
+    next_inflight = [
+        request for request in engine.inflight_readbacks if request.request_id != request_id
+    ]
     if len(next_inflight) != len(engine.inflight_readbacks):
         canceled = True
     engine.inflight_readbacks = next_inflight
@@ -263,7 +287,9 @@ def poll_all_frame_outputs(engine) -> list[WorldFrameOutput]:
 
 
 def frame_submission_status(engine, submission_id: int) -> str:
-    if any(frame_input.submission_id == submission_id for frame_input in engine.pending_frame_inputs):
+    if any(
+        frame_input.submission_id == submission_id for frame_input in engine.pending_frame_inputs
+    ):
         return "pending"
     if any(output.submission_id == submission_id for output in engine.completed_frame_outputs):
         return "ready"
@@ -321,26 +347,35 @@ def _apply_frame_input(
         placeholder_count = len(placeholder_inputs)
     if frame_input.force_sources is not None:
         engine._sync_force_sources(
-            [engine._frame_force_source_input(force_source) for force_source in frame_input.force_sources]
+            [
+                engine._frame_force_source_input(force_source)
+                for force_source in frame_input.force_sources
+            ]
         )
     if frame_input.emitters is not None:
         engine._sync_persistent_emitters(
             [engine._frame_emitter_input(emitter) for emitter in frame_input.emitters]
         )
     resolved_targets = engine._resolve_target_queries(frame_input.target_queries)
-    resolved_change_intents, generated_commands = engine._resolve_change_intents(frame_input.change_intents, resolved_targets)
+    resolved_change_intents, generated_commands = engine._resolve_change_intents(
+        frame_input.change_intents, resolved_targets
+    )
     resolved_carrier_intents, generated_carrier_commands = engine._resolve_carrier_intents(
         frame_input.carrier_intents,
         resolved_targets,
     )
-    observation_pairs = engine._build_observation_request_pairs(frame_input.observation_targets, resolved_targets)
+    observation_pairs = engine._build_observation_request_pairs(
+        frame_input.observation_targets, resolved_targets
+    )
     observation_pairs = [
         (target, engine._assign_readback_request_id(request))
         for target, request in observation_pairs
     ]
     observation_requests = [request for _, request in observation_pairs]
     engine.pending_readbacks.extend(observation_requests)
-    engine.bridge_frame_readback_requests.extend(replace(request) for request in observation_requests)
+    engine.bridge_frame_readback_requests.extend(
+        replace(request) for request in observation_requests
+    )
     observation_plans = [
         engine._serialize_observation_plan_for_target_request(target, request)
         for target, request in observation_pairs
@@ -353,8 +388,12 @@ def _apply_frame_input(
     ):
         engine.queue_command(command.kind, **command.payload)
         queued_commands += 1
-    readback_requests = engine._resolve_readback_requests(frame_input.readback_requests, resolved_targets)
-    readback_requests = [engine._assign_readback_request_id(request) for request in readback_requests]
+    readback_requests = engine._resolve_readback_requests(
+        frame_input.readback_requests, resolved_targets
+    )
+    readback_requests = [
+        engine._assign_readback_request_id(request) for request in readback_requests
+    ]
     engine.pending_readbacks.extend(readback_requests)
     engine.bridge_frame_readback_requests.extend(replace(request) for request in readback_requests)
     readback_plans = engine._serialize_readback_plans_for_requests(readback_requests)
@@ -413,9 +452,13 @@ def _prepare_preview_frame_context(
             list(preview_entity_states.values())
         )
     else:
-        frame_entities = [engine._frame_entity_state_input(entity) for entity in frame_input.entities]
+        frame_entities = [
+            engine._frame_entity_state_input(entity) for entity in frame_input.entities
+        ]
         preview_entity_states = {entity.entity_id: entity for entity in frame_entities}
-        derived_placeholders, entity_observation_targets = engine._frame_entities_to_placeholders_and_observations(frame_entities)
+        derived_placeholders, entity_observation_targets = (
+            engine._frame_entities_to_placeholders_and_observations(frame_entities)
+        )
     engine.entity_states = preview_entity_states
 
     placeholder_inputs = [
@@ -426,7 +469,9 @@ def _prepare_preview_frame_context(
     if frame_input.entities is not None:
         placeholder_inputs = derived_placeholders + placeholder_inputs
     if frame_input.entities is not None or frame_input.entity_placeholders is not None:
-        preview_placeholders, blocked_cells, released_cells = engine._build_preview_entity_placeholders(placeholder_inputs)
+        preview_placeholders, blocked_cells, released_cells = (
+            engine._build_preview_entity_placeholders(placeholder_inputs)
+        )
         engine.entity_placeholders = preview_placeholders
         engine._resolver_blocked_cells = blocked_cells
         engine._resolver_released_cells = released_cells

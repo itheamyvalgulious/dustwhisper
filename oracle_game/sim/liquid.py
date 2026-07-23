@@ -4,50 +4,48 @@ import numpy as np
 
 from oracle_game.sim.gpu_liquid import GPULiquidPipeline
 
-
 LIQUID_ACTIVITY_EPSILON = 1e-6
 LIQUID_SOLVER_TILE_LEVEL = 1
 LIQUID_SOLVER_COLUMNAR = 2
 
 
-from oracle_game.sim.liquid_solve import (
-    prepare_motion_flow_intent,
-    _build_solve_tile_mask,
-    _world_cell_reachable_empty,
-    _world_cell_is_tile_level_liquid,
-    _solve_tile,
-    _seam_correction,
-    _apply_horizontal_seam_run,
-    _apply_vertical_seam_run,
-    _apply_buoyancy,
-    _apply_placeholder_displacement,
-    _placeholder_left_quota,
-    _placeholder_segment_top_exposed,
-    _placeholder_target_empty,
-    _placeholder_side_lane_reachable,
-    _placeholder_side_capacity,
-    _placeholder_side_candidates,
-    _mark_pending_placeholder_regions,
-    _refresh_active_tiles,
-    _vertical_seam_mask,
-    _horizontal_seam_mask,
-    _buoyancy_candidate_mask,
-)
 from oracle_game.sim.liquid_runtime import (
-    step,
     _finalize_runtime_state,
+    _material_base_integrity,
+    _material_density,
+    _material_is_placeholder,
+    _material_liquid_solver_kind,
+    _material_table_row,
+    _placeholder_mask,
+    _placeholder_material_id,
     release,
     reset_runtime_state,
     runtime_snapshot,
-    _material_table_row,
-    _material_density,
-    _material_base_integrity,
-    _material_liquid_solver_kind,
-    _placeholder_material_id,
-    _material_is_placeholder,
-    _placeholder_mask,
+    step,
 )
-
+from oracle_game.sim.liquid_solve import (
+    _apply_buoyancy,
+    _apply_horizontal_seam_run,
+    _apply_placeholder_displacement,
+    _apply_vertical_seam_run,
+    _build_solve_tile_mask,
+    _buoyancy_candidate_mask,
+    _horizontal_seam_mask,
+    _mark_pending_placeholder_regions,
+    _placeholder_left_quota,
+    _placeholder_segment_top_exposed,
+    _placeholder_side_candidates,
+    _placeholder_side_capacity,
+    _placeholder_side_lane_reachable,
+    _placeholder_target_empty,
+    _refresh_active_tiles,
+    _seam_correction,
+    _solve_tile,
+    _vertical_seam_mask,
+    _world_cell_is_tile_level_liquid,
+    _world_cell_reachable_empty,
+    prepare_motion_flow_intent,
+)
 
 
 class LiquidSolver:

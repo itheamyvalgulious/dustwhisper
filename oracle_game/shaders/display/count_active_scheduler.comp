@@ -1,0 +1,22 @@
+#version 430
+layout(local_size_x=256, local_size_y=1, local_size_z=1) in;
+uniform int tile_count;
+uniform int chunk_count;
+layout(std430, binding=0) readonly buffer ActiveTileTTLBuffer {
+    int active_tile_ttl[];
+};
+layout(std430, binding=1) readonly buffer ActiveChunkMaskBuffer {
+    int active_chunk_mask[];
+};
+layout(std430, binding=2) buffer ActiveMetaBuffer {
+    int active_meta[];
+};
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index < uint(tile_count) && active_tile_ttl[index] > 0) {
+        atomicAdd(active_meta[7], 1);
+    }
+    if (index < uint(chunk_count) && active_chunk_mask[index] > 0) {
+        atomicAdd(active_meta[8], 1);
+    }
+}

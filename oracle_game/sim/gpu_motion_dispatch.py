@@ -1,22 +1,21 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 if TYPE_CHECKING:
-    from oracle_game.world import WorldEngine
     from oracle_game.sim.gpu_motion import GPUMotionResources
-
-from oracle_game.types import Phase
+    from oracle_game.world import WorldEngine
 
 from oracle_game.sim.gpu_motion import (
-    LOCAL_SIZE,
     ACTIVE_TILE_WORKGROUP_AXIS,
     ACTIVE_TILE_WORKGROUPS_PER_TILE,
+    FALLING_ISLAND_RESERVATION_DTYPE,
+    LOCAL_SIZE,
     POWDER_RESERVATION_LOCAL_SIZE,
-    FALLING_ISLAND_RESERVATION_DTYPE
 )
+from oracle_game.types import Phase
 
 
 def _active_tile_workgroups_per_tile(pipeline, world: "WorldEngine") -> int:
@@ -51,8 +50,13 @@ def _compact_active_tiles(pipeline, world: "WorldEngine", resources: GPUMotionRe
         bridge._refresh_active_chunks_and_meta(world, read_meta=False)
         compact_program = pipeline.programs["compact_active_tiles_from_chunks"]
         if not hasattr(compact_program, "run_indirect"):
-            raise RuntimeError("GPU motion active chunk compaction requires ModernGL ComputeShader.run_indirect")
-        compact_program["tile_grid_size"].value = (world.active.tile_width, world.active.tile_height)
+            raise RuntimeError(
+                "GPU motion active chunk compaction requires ModernGL ComputeShader.run_indirect"
+            )
+        compact_program["tile_grid_size"].value = (
+            world.active.tile_width,
+            world.active.tile_height,
+        )
         compact_program["chunk_tiles"].value = int(world.active.chunk_tiles)
         compact_program["workgroups_per_tile"].value = workgroups_per_tile
         resources.active_tile_count.bind_to_storage_buffer(binding=0)
@@ -65,7 +69,10 @@ def _compact_active_tiles(pipeline, world: "WorldEngine", resources: GPUMotionRe
     else:
         tile_count = int(world.active.tile_width * world.active.tile_height)
         compact_program = pipeline.programs["compact_active_tiles"]
-        compact_program["tile_grid_size"].value = (world.active.tile_width, world.active.tile_height)
+        compact_program["tile_grid_size"].value = (
+            world.active.tile_width,
+            world.active.tile_height,
+        )
         compact_program["workgroups_per_tile"].value = workgroups_per_tile
         resources.active_tile_tex.use(location=0)
         resources.active_tile_count.bind_to_storage_buffer(binding=0)
@@ -75,7 +82,9 @@ def _compact_active_tiles(pipeline, world: "WorldEngine", resources: GPUMotionRe
     pipeline._sync_compute_writes(ctx)
 
 
-def _build_active_tile_count_dispatch_args(pipeline, world: "WorldEngine", resources: GPUMotionResources) -> None:
+def _build_active_tile_count_dispatch_args(
+    pipeline, world: "WorldEngine", resources: GPUMotionResources
+) -> None:
     ctx = world.bridge.ctx
     assert ctx is not None
     program = pipeline.programs["build_powder_reservation_dispatch"]
@@ -115,12 +124,16 @@ def _build_falling_island_materialization_candidate_dispatch(
     resources.island_materialization_candidate_tile_list.bind_to_storage_buffer(binding=3)
     resources.island_materialization_candidate_dispatch_args.bind_to_storage_buffer(binding=4)
     if not hasattr(program, "run_indirect"):
-        raise RuntimeError("GPU motion falling island materialization candidate dispatch requires indirect dispatch")
+        raise RuntimeError(
+            "GPU motion falling island materialization candidate dispatch requires indirect dispatch"
+        )
     program.run_indirect(resources.island_runtime_dispatch_args)
     pipeline._sync_compute_writes(ctx)
 
 
-def _copy_scalar_texture(pipeline, ctx: Any, source_tex: Any, dest_tex: Any, width: int, height: int) -> None:
+def _copy_scalar_texture(
+    pipeline, ctx: Any, source_tex: Any, dest_tex: Any, width: int, height: int
+) -> None:
     program = pipeline.programs["copy_scalar_texture"]
     program["grid_size"].value = (int(width), int(height))
     source_tex.use(location=0)
@@ -136,13 +149,28 @@ def _swap_powder_apply_textures(pipeline, resources: GPUMotionResources) -> None
         resources.cell_state_out_tex,
         resources.cell_state_tex,
     )
-    resources.velocity_tex, resources.velocity_out_tex = resources.velocity_out_tex, resources.velocity_tex
+    resources.velocity_tex, resources.velocity_out_tex = (
+        resources.velocity_out_tex,
+        resources.velocity_tex,
+    )
     resources.temp_tex, resources.temp_out_tex = resources.temp_out_tex, resources.temp_tex
     resources.timer_tex, resources.timer_out_tex = resources.timer_out_tex, resources.timer_tex
-    resources.integrity_tex, resources.integrity_out_tex = resources.integrity_out_tex, resources.integrity_tex
-    resources.island_id_tex, resources.island_id_out_tex = resources.island_id_out_tex, resources.island_id_tex
-    resources.entity_id_tex, resources.entity_id_out_tex = resources.entity_id_out_tex, resources.entity_id_tex
-    resources.displaced_tex, resources.displaced_out_tex = resources.displaced_out_tex, resources.displaced_tex
+    resources.integrity_tex, resources.integrity_out_tex = (
+        resources.integrity_out_tex,
+        resources.integrity_tex,
+    )
+    resources.island_id_tex, resources.island_id_out_tex = (
+        resources.island_id_out_tex,
+        resources.island_id_tex,
+    )
+    resources.entity_id_tex, resources.entity_id_out_tex = (
+        resources.entity_id_out_tex,
+        resources.entity_id_tex,
+    )
+    resources.displaced_tex, resources.displaced_out_tex = (
+        resources.displaced_out_tex,
+        resources.displaced_tex,
+    )
 
 
 def _barrier_bits(pipeline) -> tuple[str, ...]:
@@ -167,11 +195,18 @@ def _run_active_tile_indirect(
 ) -> None:
     if not hasattr(program, "run_indirect"):
         raise RuntimeError(f"GPU motion {pass_name} requires ModernGL ComputeShader.run_indirect")
-    program.run_indirect(resources.active_tile_dispatch_args if dispatch_args is None else dispatch_args)
+    program.run_indirect(
+        resources.active_tile_dispatch_args if dispatch_args is None else dispatch_args
+    )
 
 
-def _refresh_authoritative_active_scheduler_after_apply(pipeline, world: "WorldEngine", pass_name: str) -> None:
-    if not (pipeline._formal_gpu_frame(world) and "active_tile_ttl" in world.bridge.gpu_authoritative_resources):
+def _refresh_authoritative_active_scheduler_after_apply(
+    pipeline, world: "WorldEngine", pass_name: str
+) -> None:
+    if not (
+        pipeline._formal_gpu_frame(world)
+        and "active_tile_ttl" in world.bridge.gpu_authoritative_resources
+    ):
         return
     with pipeline._profile_pass(world, pass_name):
         world.bridge._ensure_active_scheduler_programs()
@@ -193,9 +228,7 @@ def _build_powder_reservation_dispatch_args(
     program["invocations_per_group"].value = int(invocations_per_group)
     program["max_reservation_count"].value = int(world.width * world.height)
     (
-        resources.powder_reservation_count
-        if count_buffer is None
-        else count_buffer
+        resources.powder_reservation_count if count_buffer is None else count_buffer
     ).bind_to_storage_buffer(binding=6)
     resources.powder_reservation_dispatch_args.bind_to_storage_buffer(binding=7)
     program.run(1, 1, 1)
@@ -329,7 +362,9 @@ def _build_powder_apply_dispatch(
     build_program["cell_grid_size"].value = (world.width, world.height)
     build_program["tile_grid_size"].value = (world.active.tile_width, world.active.tile_height)
     build_program["tile_size"].value = int(world.active.tile_size)
-    build_program["workgroups_per_tile"].value = int(pipeline._active_tile_workgroups_per_tile(world))
+    build_program["workgroups_per_tile"].value = int(
+        pipeline._active_tile_workgroups_per_tile(world)
+    )
     resources.powder_reservations.bind_to_storage_buffer(binding=0)
     resources.powder_reservation_count.bind_to_storage_buffer(binding=1)
     resources.powder_apply_tile_flags.bind_to_storage_buffer(binding=2)
@@ -371,7 +406,9 @@ def _build_falling_island_apply_dispatch(
     build_program["cell_grid_size"].value = (world.width, world.height)
     build_program["tile_grid_size"].value = (world.active.tile_width, world.active.tile_height)
     build_program["tile_size"].value = int(world.active.tile_size)
-    build_program["workgroups_per_tile"].value = int(pipeline._active_tile_workgroups_per_tile(world))
+    build_program["workgroups_per_tile"].value = int(
+        pipeline._active_tile_workgroups_per_tile(world)
+    )
     build_program["operation"].value = int(operation)
     resources.island_reservations.bind_to_storage_buffer(binding=0)
     resources.island_reservation_count.bind_to_storage_buffer(binding=1)
@@ -390,14 +427,20 @@ def _build_falling_island_apply_dispatch(
     ctx.memory_barrier(ctx.SHADER_STORAGE_BARRIER_BIT | getattr(ctx, "COMMAND_BARRIER_BIT", 0))
 
 
-def _ensure_falling_island_index_capacity(pipeline, world: "WorldEngine", resources: GPUMotionResources) -> None:
+def _ensure_falling_island_index_capacity(
+    pipeline, world: "WorldEngine", resources: GPUMotionResources
+) -> None:
     ctx = world.bridge.ctx
     assert ctx is not None
     cell_bytes = int(world.width * world.height * np.dtype(np.int32).itemsize)
     pipeline._ensure_dynamic_buffer_capacity(ctx, resources, "island_apply_incoming", cell_bytes)
     pipeline._ensure_dynamic_buffer_capacity(ctx, resources, "island_apply_outgoing", cell_bytes)
-    pipeline._ensure_dynamic_buffer_capacity(ctx, resources, "island_materialization_index", cell_bytes)
-    pipeline._ensure_dynamic_buffer_capacity(ctx, resources, "island_reservation_source_index", cell_bytes)
+    pipeline._ensure_dynamic_buffer_capacity(
+        ctx, resources, "island_materialization_index", cell_bytes
+    )
+    pipeline._ensure_dynamic_buffer_capacity(
+        ctx, resources, "island_reservation_source_index", cell_bytes
+    )
 
 
 def _clear_falling_island_index(
@@ -471,10 +514,18 @@ def _ensure_bridge_runtime_planning_capacity(
     runtime_capacity = max(0, int(runtime_capacity))
     int_itemsize = np.dtype(np.int32).itemsize
     float_itemsize = np.dtype(np.float32).itemsize
-    pipeline._ensure_dynamic_buffer_capacity(ctx, resources, "island_ids", runtime_capacity * int_itemsize)
-    pipeline._ensure_dynamic_buffer_capacity(ctx, resources, "island_bboxes", runtime_capacity * 4 * int_itemsize)
-    pipeline._ensure_dynamic_buffer_capacity(ctx, resources, "island_motion", runtime_capacity * 4 * float_itemsize)
-    pipeline._ensure_dynamic_buffer_capacity(ctx, resources, "island_shift_results", runtime_capacity * 4 * int_itemsize)
+    pipeline._ensure_dynamic_buffer_capacity(
+        ctx, resources, "island_ids", runtime_capacity * int_itemsize
+    )
+    pipeline._ensure_dynamic_buffer_capacity(
+        ctx, resources, "island_bboxes", runtime_capacity * 4 * int_itemsize
+    )
+    pipeline._ensure_dynamic_buffer_capacity(
+        ctx, resources, "island_motion", runtime_capacity * 4 * float_itemsize
+    )
+    pipeline._ensure_dynamic_buffer_capacity(
+        ctx, resources, "island_shift_results", runtime_capacity * 4 * int_itemsize
+    )
     pipeline._ensure_dynamic_buffer_capacity(
         ctx,
         resources,

@@ -35,9 +35,9 @@ def test_material_triplet_plan_cache_tracks_generations_flags_and_bridge_owner()
         plan = pipeline._compile_material_pair_plan_cached(world, include_material_light=True)
         assert plan is not None
         assert plan.material_light_rule_count > 0
-        assert pipeline._compile_material_pair_plan_cached(
-            world, include_material_light=True
-        ) is plan
+        assert (
+            pipeline._compile_material_pair_plan_cached(world, include_material_light=True) is plan
+        )
         assert all(
             not array.flags.writeable
             for array in (
@@ -49,21 +49,17 @@ def test_material_triplet_plan_cache_tracks_generations_flags_and_bridge_owner()
             )
         )
 
-        pair_plan = pipeline._compile_material_pair_plan_cached(
-            world, include_material_light=False
-        )
+        pair_plan = pipeline._compile_material_pair_plan_cached(world, include_material_light=False)
         assert pair_plan is not None
         assert pair_plan is not plan
         assert pair_plan.material_light_rule_count == 0
 
         for generation in ("reactions", "materials", "gases", "lights"):
             previous = plan
-            world.bridge.table_generations[generation] = int(
-                world.bridge.table_generations.get(generation, 0)
-            ) + 1
-            plan = pipeline._compile_material_pair_plan_cached(
-                world, include_material_light=True
+            world.bridge.table_generations[generation] = (
+                int(world.bridge.table_generations.get(generation, 0)) + 1
             )
+            plan = pipeline._compile_material_pair_plan_cached(world, include_material_light=True)
             assert plan is not None
             assert plan is not previous
 

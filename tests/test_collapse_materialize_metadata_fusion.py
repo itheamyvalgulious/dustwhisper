@@ -8,8 +8,8 @@ import numpy as np
 import pytest
 
 from oracle_game.gpu import ISLAND_RUNTIME_DTYPE
-from oracle_game.sim import gpu_collapse_labeling as labeling
 from oracle_game.sim import gpu_collapse_dirty as collapse_dirty
+from oracle_game.sim import gpu_collapse_labeling as labeling
 from oracle_game.sim.gpu_collapse import GPUCollapsePipeline
 from oracle_game.world import WorldEngine
 
@@ -226,8 +226,7 @@ def test_materialize_metadata_fusion_matches_full_four_frame_epoch_raw_bytes() -
             common_size,
         )
         different_bytes = sum(
-            lhs != rhs
-            for lhs, rhs in zip(control_raw, candidate_raw, strict=False)
+            lhs != rhs for lhs, rhs in zip(control_raw, candidate_raw, strict=False)
         ) + abs(len(control_raw) - len(candidate_raw))
         differences.append(
             f"{name}: first_offset={first_offset}, differing_bytes={different_bytes}, "

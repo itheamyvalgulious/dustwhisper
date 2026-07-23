@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 
-from oracle_game.sim.gpu_liquid import GPULiquidPipeline, _SHADER_SUBS
+from oracle_game.sim.gpu_liquid import _SHADER_SUBS, GPULiquidPipeline
 from oracle_game.sim.gpu_liquid_bridge import _load_authoritative_bridge_inputs
 from oracle_game.sim.shader_loader import shader_source
 

@@ -1,19 +1,12 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 if TYPE_CHECKING:
-    from oracle_game.world import WorldEngine
     from oracle_game.sim.gpu_collapse import GPUCollapseResources
-
-from oracle_game.sim.gpu_collapse_dirty import get_collapse_structure_dirty_tile_bounds
-# _formal_jfa_jumps is a @staticmethod moved to gpu_collapse_formal; call its
-# module function directly (the facade class isn't importable here — it's
-# defined after this bucket is imported).
-from oracle_game.sim.gpu_collapse_formal import _formal_jfa_jumps
-from oracle_game.types import Phase
+    from oracle_game.world import WorldEngine
 
 from oracle_game.sim.gpu_collapse import (
     FORMAL_CONNECTED_CELL_FRONTIER_TILE_COUNT_BUFFER,
@@ -34,9 +27,15 @@ from oracle_game.sim.gpu_collapse import (
     FORMAL_CONNECTED_TILE_REFINE_PASS_COUNT,
     FORMAL_DEFERRED_REGION_REQUEST_BUFFER,
     FORMAL_DEFERRED_REGION_REQUEST_COUNT_BUFFER,
-    LOCAL_SIZE
+    LOCAL_SIZE,
 )
+from oracle_game.sim.gpu_collapse_dirty import get_collapse_structure_dirty_tile_bounds
 
+# _formal_jfa_jumps is a @staticmethod moved to gpu_collapse_formal; call its
+# module function directly (the facade class isn't importable here — it's
+# defined after this bucket is imported).
+from oracle_game.sim.gpu_collapse_formal import _formal_jfa_jumps
+from oracle_game.types import Phase
 
 
 def solve_formal_connected_region_textures(
@@ -52,14 +51,18 @@ def _solve_formal_connected_dirty_tile_textures(
     world: "WorldEngine",
 ) -> tuple[GPUCollapseResources, int, int, int, int]:
     resource_region = (0, 0, int(world.width), int(world.height))
-    resources, x0, y0, width, height = pipeline._prepare_formal_connected_tile_resources_without_input_upload(
-        world,
-        resource_region,
+    resources, x0, y0, width, height = (
+        pipeline._prepare_formal_connected_tile_resources_without_input_upload(
+            world,
+            resource_region,
+        )
     )
     with pipeline._profile_pass(world, "tile_region_worklist"):
         tile_mask_name = pipeline._seed_formal_texture_region_tile_worklist(world, width, height)
         if tile_mask_name is None:
-            raise RuntimeError("formal dirty tile collapse requires a non-empty connected tile worklist")
+            raise RuntimeError(
+                "formal dirty tile collapse requires a non-empty connected tile worklist"
+            )
         pipeline._last_formal_connected_tile_mask_name = tile_mask_name
     with pipeline._profile_pass(world, "connected_bridge_input_load"):
         pipeline._load_authoritative_bridge_connected_tile_inputs(
@@ -72,7 +75,9 @@ def _solve_formal_connected_dirty_tile_textures(
             tile_mask_name,
         )
     with pipeline._profile_pass(world, "classify_filter"):
-        pipeline._classify_formal_connected_tile_textures(world, resources, tile_mask_name, x0, y0, width, height)
+        pipeline._classify_formal_connected_tile_textures(
+            world, resources, tile_mask_name, x0, y0, width, height
+        )
         if not pipeline._classification_mask_publish_fusion_enabled:
             pipeline._publish_bridge_region_mask(
                 world,
@@ -131,14 +136,20 @@ def _solve_formal_connected_tile_textures(
     *,
     resource_region: tuple[int, int, int, int] | None = None,
 ) -> tuple[GPUCollapseResources, int, int, int, int]:
-    resources, x0, y0, width, height = pipeline._prepare_formal_connected_tile_resources(world, resource_region)
+    resources, x0, y0, width, height = pipeline._prepare_formal_connected_tile_resources(
+        world, resource_region
+    )
     with pipeline._profile_pass(world, "tile_region_worklist"):
         tile_mask_name = pipeline._seed_formal_texture_region_tile_worklist(world, width, height)
         if tile_mask_name is None:
-            raise RuntimeError("formal connected collapse requires a non-empty connected tile worklist")
+            raise RuntimeError(
+                "formal connected collapse requires a non-empty connected tile worklist"
+            )
         pipeline._last_formal_connected_tile_mask_name = tile_mask_name
     with pipeline._profile_pass(world, "classify_filter"):
-        pipeline._classify_formal_connected_tile_textures(world, resources, tile_mask_name, x0, y0, width, height)
+        pipeline._classify_formal_connected_tile_textures(
+            world, resources, tile_mask_name, x0, y0, width, height
+        )
         if not pipeline._classification_mask_publish_fusion_enabled:
             pipeline._publish_bridge_region_mask(
                 world,
@@ -235,11 +246,15 @@ def _prepare_formal_connected_tile_resources_impl(
         with pipeline._profile_pass(world, "tile_resource_prepare.upload_region_state"):
             pipeline._upload_region_state(world, resources, x0, y0, width, height)
     with pipeline._profile_pass(world, "tile_resource_prepare.material_params"):
-        structural_params, support_params, behavior_params = pipeline._classification_material_params(world)
+        structural_params, support_params, behavior_params = (
+            pipeline._classification_material_params(world)
+        )
     with pipeline._profile_pass(world, "tile_resource_prepare.material_buffer_writes"):
         pipeline._write_dynamic_buffer(ctx, resources, "material_structural", structural_params)
         pipeline._write_dynamic_buffer(ctx, resources, "material_support_anchor", support_params)
-        pipeline._write_dynamic_buffer(ctx, resources, "material_collapse_behavior", behavior_params)
+        pipeline._write_dynamic_buffer(
+            ctx, resources, "material_collapse_behavior", behavior_params
+        )
     return resources, x0, y0, width, height
 
 
@@ -268,7 +283,6 @@ def _formal_connected_dirty_tile_queue_resource_region(
     dirty_tile_bounds = get_collapse_structure_dirty_tile_bounds(world)
     if dirty_tile_bounds is None:
         raise RuntimeError("formal dirty tile queue requires CPU-known dirty tile bounds")
-    tile_size = max(1, int(getattr(world.active, "tile_size", FORMAL_CONNECTED_TILE_LOCAL_SIZE)))
     tile_width = max(1, int(getattr(world.active, "tile_width", 1)))
     tile_height = max(1, int(getattr(world.active, "tile_height", 1)))
     tile_x0, tile_y0, tile_x1, tile_y1 = (int(value) for value in dirty_tile_bounds)
@@ -462,7 +476,9 @@ def _classify_formal_connected_tile_textures(
         program_suffix += "_publish"
     if snapshot_pending:
         if not direct_bridge_inputs or not fuse_publish:
-            raise RuntimeError("formal connected pending snapshot requires direct bridge classification publish")
+            raise RuntimeError(
+                "formal connected pending snapshot requires direct bridge classification publish"
+            )
         program_suffix += "_incremental"
         if packed_incremental_snapshot:
             program_suffix += "_packed"
@@ -476,11 +492,11 @@ def _classify_formal_connected_tile_textures(
         if support_seed_u8_texture is None:
             raise ValueError("formal connected fused support axis masks require an R8 seed texture")
         program_suffix += "_axis_u8"
-    program = pipeline.programs[
-        f"classify_formal_connected_tiles{program_suffix}"
-    ]
+    program = pipeline.programs[f"classify_formal_connected_tiles{program_suffix}"]
     if not hasattr(program, "run_indirect"):
-        raise RuntimeError("formal connected tile classification requires ComputeShader.run_indirect")
+        raise RuntimeError(
+            "formal connected tile classification requires ComputeShader.run_indirect"
+        )
     program["cell_grid_size"].value = (int(width), int(height))
     program["region_origin"].value = (int(x0), int(y0))
     program["world_grid_size"].value = (int(world.width), int(world.height))
@@ -561,7 +577,9 @@ def _solve_formal_connected_frontier_texture(
         FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_DISPATCH_ARGS_BUFFER,
     )
     with pipeline._profile_pass(world, "cell_frontier_seed_list_build"):
-        pipeline._seed_formal_connected_cell_frontier(world, resources, seed_rect, width, height, tile_mask_name)
+        pipeline._seed_formal_connected_cell_frontier(
+            world, resources, seed_rect, width, height, tile_mask_name
+        )
     cell_frontier = (
         FORMAL_CONNECTED_CELL_FRONTIER_TILE_FLAGS_BUFFER,
         FORMAL_CONNECTED_CELL_FRONTIER_TILE_LIST_BUFFER,
@@ -755,7 +773,9 @@ def _filter_formal_connected_eligibility(
         else "filter_formal_connected_eligibility"
     ]
     if connected_tiles and not hasattr(program, "run_indirect"):
-        raise RuntimeError("formal connected eligibility filter requires ComputeShader.run_indirect")
+        raise RuntimeError(
+            "formal connected eligibility filter requires ComputeShader.run_indirect"
+        )
     program["region_size"].value = (int(width), int(height))
     program["region_origin"].value = (int(x0), int(y0))
     program["cell_grid_size"].value = (int(world.width), int(world.height))
@@ -763,7 +783,9 @@ def _filter_formal_connected_eligibility(
         int(getattr(world.active, "tile_width", 1)),
         int(getattr(world.active, "tile_height", 1)),
     )
-    program["tile_size"].value = int(max(1, int(getattr(world.active, "tile_size", FORMAL_CONNECTED_TILE_LOCAL_SIZE))))
+    program["tile_size"].value = int(
+        max(1, int(getattr(world.active, "tile_size", FORMAL_CONNECTED_TILE_LOCAL_SIZE)))
+    )
     if not connected_tiles:
         program["use_tile_mask"].value = False
     resources.structural_tex.use(location=0)
@@ -803,8 +825,12 @@ def _filter_formal_connected_eligibility(
             tile_mask_name,
         )
     else:
-        pipeline.copy_mask_texture(world, resources, resources.integrity_out_tex, resources.structural_tex, width, height)
-        pipeline.copy_mask_texture(world, resources, resources.support_pong, resources.support_ping, width, height)
+        pipeline.copy_mask_texture(
+            world, resources, resources.integrity_out_tex, resources.structural_tex, width, height
+        )
+        pipeline.copy_mask_texture(
+            world, resources, resources.support_pong, resources.support_ping, width, height
+        )
 
 
 def connected_structural_frontier_texture(
@@ -848,11 +874,15 @@ def connected_structural_frontier_texture(
         y0=0,
         publish_masks=False,
     )
-    pipeline.copy_mask_texture(world, resources, connected_texture, resources.cell_flags_out_tex, width, height)
+    pipeline.copy_mask_texture(
+        world, resources, connected_texture, resources.cell_flags_out_tex, width, height
+    )
     return resources.cell_flags_out_tex
 
 
-def drain_formal_deferred_region_requests(pipeline, world: "WorldEngine") -> list[tuple[int, int, int, int]]:
+def drain_formal_deferred_region_requests(
+    pipeline, world: "WorldEngine"
+) -> list[tuple[int, int, int, int]]:
     """Legacy compatibility hook; formal connected expansion is GPU-frontier driven."""
     return []
 
@@ -883,7 +913,9 @@ def enqueue_connected_internal_boundary_deferred_regions(
         return
 
     pipeline._ensure_programs(ctx)
-    request_count, request_buffer, request_capacity = pipeline._ensure_formal_deferred_region_request_buffers(world)
+    request_count, request_buffer, request_capacity = (
+        pipeline._ensure_formal_deferred_region_request_buffers(world)
+    )
     resources.region_flags.write(np.zeros(1, dtype=np.uint32).tobytes())
     program = pipeline.programs["enqueue_connected_internal_boundary_deferred_regions"]
     program["region_size"].value = (int(width), int(height))
@@ -934,7 +966,9 @@ def exclude_internal_boundary_connected_texture_to_frontier(
     bridge.ensure_world_resources(world)
     if frontier_buffer_name not in bridge.buffers:
         raise RuntimeError("formal connected frontier buffer is not allocated")
-    pipeline.copy_mask_texture(world, resources, eligibility_texture, resources.structural_tex, width, height)
+    pipeline.copy_mask_texture(
+        world, resources, eligibility_texture, resources.structural_tex, width, height
+    )
     pipeline._ensure_programs(ctx)
     seed_program = pipeline.programs["seed_internal_boundary_region"]
     seed_program["region_size"].value = (int(width), int(height))
@@ -1001,7 +1035,9 @@ def exclude_internal_boundary_connected_texture(
     if not any(internal_edges):
         return eligibility_texture
 
-    pipeline.copy_mask_texture(world, resources, eligibility_texture, resources.structural_tex, width, height)
+    pipeline.copy_mask_texture(
+        world, resources, eligibility_texture, resources.structural_tex, width, height
+    )
     pipeline._ensure_programs(ctx)
     seed_program = pipeline.programs["seed_internal_boundary_region"]
     seed_program["region_size"].value = (int(width), int(height))

@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
-
 from copy import deepcopy
 from dataclasses import asdict, replace
+from typing import Any
 
 import numpy as np
 
@@ -19,14 +18,15 @@ from oracle_game.types import (
 )
 from oracle_game.world_constants import REACTION_RULE_SET_NAMES
 
-if TYPE_CHECKING:
-    from oracle_game.world import WorldEngine
 
-
-def update_material_table(engine, materials: list[MaterialDef | dict[str, Any]], *, immediate: bool = True) -> None:
+def update_material_table(
+    engine, materials: list[MaterialDef | dict[str, Any]], *, immediate: bool = True
+) -> None:
     materials = [engine._coerce_material_def(material) for material in materials]
     if not immediate:
-        engine.queue_command("update_material_table", materials=[asdict(material) for material in materials])
+        engine.queue_command(
+            "update_material_table", materials=[asdict(material) for material in materials]
+        )
         return
     merged_payload = engine._merged_material_table_payload(materials)
     engine._validate_material_table_payload(merged_payload)
@@ -53,7 +53,9 @@ def update_material_table(engine, materials: list[MaterialDef | dict[str, Any]],
     engine.bridge.ensure_world_resources(engine)
 
 
-def update_gas_species_table(engine, gases: list[GasSpeciesDef | dict[str, Any]], *, immediate: bool = True) -> None:
+def update_gas_species_table(
+    engine, gases: list[GasSpeciesDef | dict[str, Any]], *, immediate: bool = True
+) -> None:
     gases = [engine._coerce_gas_species_def(gas) for gas in gases]
     if not immediate:
         engine.queue_command("update_gas_species_table", gases=[asdict(gas) for gas in gases])
@@ -66,7 +68,9 @@ def update_gas_species_table(engine, gases: list[GasSpeciesDef | dict[str, Any]]
     engine._rebuild_gas_property_arrays()
     previous = engine.gas_concentration
     gas_count = engine._gas_field_count()
-    engine.gas_concentration = np.zeros((gas_count, engine.gas_height, engine.gas_width), dtype=np.float32)
+    engine.gas_concentration = np.zeros(
+        (gas_count, engine.gas_height, engine.gas_width), dtype=np.float32
+    )
     count = min(previous.shape[0], engine.gas_concentration.shape[0])
     engine.gas_concentration[:count] = previous[:count]
     if 0 <= engine.air_gas_species_id < engine.gas_concentration.shape[0]:
@@ -80,7 +84,9 @@ def update_gas_species_table(engine, gases: list[GasSpeciesDef | dict[str, Any]]
     engine.bridge.ensure_world_resources(engine)
 
 
-def update_light_type_table(engine, lights: list[LightTypeDef | dict[str, Any]], *, immediate: bool = True) -> None:
+def update_light_type_table(
+    engine, lights: list[LightTypeDef | dict[str, Any]], *, immediate: bool = True
+) -> None:
     lights = [engine._coerce_light_type_def(light) for light in lights]
     if not immediate:
         engine.queue_command("update_light_type_table", lights=[asdict(light) for light in lights])
@@ -102,8 +108,12 @@ def update_light_type_table(engine, lights: list[LightTypeDef | dict[str, Any]],
     previous_cell_dose = engine.cell_optical_dose
     previous_gas_dose = engine.gas_optical_dose
     light_count = engine._light_field_count()
-    engine.cell_optical_dose = np.zeros((light_count, engine.height, engine.width), dtype=np.float32)
-    engine.gas_optical_dose = np.zeros((light_count, engine.gas_height, engine.gas_width), dtype=np.float32)
+    engine.cell_optical_dose = np.zeros(
+        (light_count, engine.height, engine.width), dtype=np.float32
+    )
+    engine.gas_optical_dose = np.zeros(
+        (light_count, engine.gas_height, engine.gas_width), dtype=np.float32
+    )
     cell_count = min(previous_cell_dose.shape[0], engine.cell_optical_dose.shape[0])
     gas_count = min(previous_gas_dose.shape[0], engine.gas_optical_dose.shape[0])
     engine.cell_optical_dose[:cell_count] = previous_cell_dose[:cell_count]
@@ -118,15 +128,21 @@ def update_light_type_table(engine, lights: list[LightTypeDef | dict[str, Any]],
     engine.bridge.ensure_world_resources(engine)
 
 
-def update_material_optics_table(engine, optics: list[MaterialOpticsDef | dict[str, Any]], *, immediate: bool = True) -> None:
+def update_material_optics_table(
+    engine, optics: list[MaterialOpticsDef | dict[str, Any]], *, immediate: bool = True
+) -> None:
     optics = [engine._coerce_material_optics_def(entry) for entry in optics]
     if not immediate:
-        engine.queue_command("update_material_optics_table", optics=[asdict(entry) for entry in optics])
+        engine.queue_command(
+            "update_material_optics_table", optics=[asdict(entry) for entry in optics]
+        )
         return
     merged_payload = engine._merged_material_optics_table_payload(optics)
     engine._validate_material_optics_payload(merged_payload)
     engine.rulebook.optics.clear()
-    engine.rulebook.update_optics(engine._coerce_material_optics_def(item) for item in merged_payload)
+    engine.rulebook.update_optics(
+        engine._coerce_material_optics_def(item) for item in merged_payload
+    )
     engine._set_stable_shadow_payload("optics", merged_payload)
     engine.bridge.upload_table("optics", merged_payload)
     engine.bridge.sync_rule_tables(engine)
@@ -214,7 +230,9 @@ def replace_reaction_table(
     engine.rulebook.self_rules = list(rules["self_rules"])
     engine.rulebook.materials_by_name.clear()
     engine.rulebook.materials_by_id.clear()
-    engine.rulebook.update_materials(engine._coerce_material_def(item) for item in materials_payload)
+    engine.rulebook.update_materials(
+        engine._coerce_material_def(item) for item in materials_payload
+    )
     engine.tag_bits_by_name = deepcopy(engine.rulebook.tag_bits)
     engine._rebuild_material_property_arrays()
     reaction_payload = engine._reaction_table_snapshot_payload()
@@ -479,7 +497,9 @@ def delete_reaction_action(engine, index: int, *, immediate: bool = True) -> Non
         raise IndexError(index)
     materials_payload = engine._shadow_material_payload()
     del actions_payload[index - 1]
-    engine._remap_reaction_payload_result_actions(reactions_payload["rules"], deleted_action_index=index)
+    engine._remap_reaction_payload_result_actions(
+        reactions_payload["rules"], deleted_action_index=index
+    )
     engine._remap_material_payload_reaction_slots(materials_payload, deleted_action_index=index)
     engine.rulebook.reaction_actions = [engine.rulebook.reaction_actions[0]] + [
         engine._coerce_reaction_action(item) for item in actions_payload
@@ -487,7 +507,9 @@ def delete_reaction_action(engine, index: int, *, immediate: bool = True) -> Non
     engine._set_reaction_rules_payload(reactions_payload["rules"])
     engine.rulebook.materials_by_name.clear()
     engine.rulebook.materials_by_id.clear()
-    engine.rulebook.update_materials(engine._coerce_material_def(item) for item in materials_payload)
+    engine.rulebook.update_materials(
+        engine._coerce_material_def(item) for item in materials_payload
+    )
     engine.tag_bits_by_name = deepcopy(engine.rulebook.tag_bits)
     engine._rebuild_material_property_arrays()
     engine._set_stable_shadow_payload("materials", materials_payload)

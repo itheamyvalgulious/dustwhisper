@@ -1,21 +1,22 @@
 from __future__ import annotations
-from typing import Any, TYPE_CHECKING
+
+from typing import TYPE_CHECKING, Any
+
 import numpy as np
 
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
-from oracle_game.sim.shader_loader import build_compute_shader
-from oracle_game.sim.gpu_collapse_dirty import _active_scheduler_gpu_authoritative
 from oracle_game.sim.gpu_reactions import (
+    _SHADER_SUBS,
     DIRECT_CORE_OUTPUT_REACTION_GROUPS,
-    GPUReactionResources,
     LIGHT_DOSE_GUARD_BUFFER,
     LIGHT_DOSE_GUARD_DISPATCH_ARGS_BINDING,
     LIGHT_DOSE_GUARD_DISPATCH_GUARD_BINDING,
     LOCAL_SIZE,
-    _SHADER_SUBS,
+    GPUReactionResources,
 )
+from oracle_game.sim.shader_loader import build_compute_shader
 
 
 def _active_scheduler_gpu_authoritative(pipeline, world: "WorldEngine") -> bool:
@@ -25,7 +26,6 @@ def _active_scheduler_gpu_authoritative(pipeline, world: "WorldEngine") -> bool:
     )
 
 
-
 def _formal_light_dose_guard_buffer(pipeline, world: "WorldEngine") -> Any | None:
     if not pipeline._formal_gpu_frame(world):
         return None
@@ -33,7 +33,6 @@ def _formal_light_dose_guard_buffer(pipeline, world: "WorldEngine") -> Any | Non
     if LIGHT_DOSE_GUARD_BUFFER not in bridge.gpu_authoritative_resources:
         return None
     return bridge.buffers.get(LIGHT_DOSE_GUARD_BUFFER)
-
 
 
 def _build_light_dose_guarded_dispatch_args(
@@ -63,7 +62,6 @@ def _build_light_dose_guarded_dispatch_args(
     return resources.light_dose_guarded_dispatch_args
 
 
-
 def _run_light_dose_guarded_dispatch(
     pipeline,
     world: "WorldEngine",
@@ -75,7 +73,9 @@ def _run_light_dose_guarded_dispatch(
     group_z: int = 1,
 ) -> None:
     if not hasattr(program, "run_indirect"):
-        raise RuntimeError("formal light-dose guarded reactions require ModernGL ComputeShader.run_indirect")
+        raise RuntimeError(
+            "formal light-dose guarded reactions require ModernGL ComputeShader.run_indirect"
+        )
     dispatch_args = pipeline._build_light_dose_guarded_dispatch_args(
         world,
         resources,
@@ -87,7 +87,6 @@ def _run_light_dose_guarded_dispatch(
     program.run_indirect(dispatch_args)
 
 
-
 def _active_masks_for_cell_reaction_upload(
     pipeline,
     world: "WorldEngine",
@@ -95,25 +94,24 @@ def _active_masks_for_cell_reaction_upload(
     *,
     reaction_group: str | None = None,
 ) -> tuple[object | None, object | None]:
-    if (
-        pipeline._active_scheduler_gpu_authoritative(world)
-        and (
-            solve_cell_mask is None
-            or bool(getattr(solve_cell_mask, "full_gpu_authoritative", False))
-            or pipeline._reaction_state_segment(reaction_group) == "before_motion"
-        )
+    if pipeline._active_scheduler_gpu_authoritative(world) and (
+        solve_cell_mask is None
+        or bool(getattr(solve_cell_mask, "full_gpu_authoritative", False))
+        or pipeline._reaction_state_segment(reaction_group) == "before_motion"
     ):
         return None, None
     return (
-        solve_cell_mask if solve_cell_mask is not None else np.ones((world.height, world.width), dtype=np.bool_),
+        solve_cell_mask
+        if solve_cell_mask is not None
+        else np.ones((world.height, world.width), dtype=np.bool_),
         np.ones((world.gas_height, world.gas_width), dtype=np.bool_),
     )
 
 
-
 def _reaction_state_segment(pipeline, reaction_group: str | None) -> str | None:
     if (
-        reaction_group in {
+        reaction_group
+        in {
             "material_material",
             "material_gas",
             "material_pair_fused",
@@ -140,10 +138,8 @@ def _reaction_state_segment(pipeline, reaction_group: str | None) -> str | None:
     return None
 
 
-
 def _bridge_cell_core_read_role_only_load(pipeline, reaction_group: str | None) -> bool:
     return reaction_group in DIRECT_CORE_OUTPUT_REACTION_GROUPS
-
 
 
 def _formal_reaction_segment_base_key(
@@ -158,7 +154,6 @@ def _formal_reaction_segment_base_key(
         int(getattr(world, "frame_id", 0)),
         segment,
     )
-
 
 
 def _formal_reaction_segment_cache_key(
@@ -177,7 +172,6 @@ def _formal_reaction_segment_cache_key(
     )
 
 
-
 def _formal_reaction_state_cache_key(
     pipeline,
     world: "WorldEngine",
@@ -188,7 +182,6 @@ def _formal_reaction_state_cache_key(
         return None
     segment = pipeline._reaction_state_segment(reaction_group)
     return pipeline._formal_reaction_segment_cache_key(world, resources, segment)
-
 
 
 def _formal_reaction_active_mask_cache_key(
@@ -232,7 +225,6 @@ def _formal_reaction_state_cache_active(pipeline) -> bool:
     return pipeline._formal_state_cache_key is not None
 
 
-
 def _formal_segment_batch_active(pipeline) -> bool:
     return (
         pipeline._formal_segment_batch_key is not None
@@ -241,16 +233,13 @@ def _formal_segment_batch_active(pipeline) -> bool:
     )
 
 
-
 def _formal_terminal_gas_publish_fusion_pending(pipeline) -> bool:
     return bool(
         pipeline._terminal_gas_publish_fusion_enabled
         and pipeline._formal_segment_batch_active()
         and pipeline._formal_segment_batch_key[2] == "before_motion"
-        and pipeline._formal_pending_gas_delta_key
-        == pipeline._formal_segment_batch_key
+        and pipeline._formal_pending_gas_delta_key == pipeline._formal_segment_batch_key
     )
-
 
 
 def _formal_state_key_is_before_motion(pipeline) -> bool:
@@ -258,13 +247,11 @@ def _formal_state_key_is_before_motion(pipeline) -> bool:
     return key is not None and len(key) >= 3 and key[2] == "before_motion"
 
 
-
 def _formal_before_motion_cell_roles_active(pipeline) -> bool:
     return (
         pipeline._formal_state_key_is_before_motion()
         and pipeline._formal_cell_state_role_key == pipeline._formal_state_cache_key
     )
-
 
 
 def _formal_cell_read_role(pipeline) -> str:
@@ -275,10 +262,8 @@ def _formal_cell_read_role(pipeline) -> str:
     return pipeline._formal_cell_state_read_role
 
 
-
 def _formal_cell_write_role(pipeline) -> str:
     return "pong" if pipeline._formal_cell_read_role() == "ping" else "ping"
-
 
 
 def _set_formal_cell_read_role(pipeline, role: str) -> None:
@@ -290,10 +275,8 @@ def _set_formal_cell_read_role(pipeline, role: str) -> None:
     pipeline._formal_cell_state_read_role = role
 
 
-
 def _advance_formal_cell_read_role(pipeline) -> None:
     pipeline._set_formal_cell_read_role(pipeline._formal_cell_write_role())
-
 
 
 def _reset_formal_cell_read_role(pipeline) -> None:
@@ -343,8 +326,9 @@ def _clear_formal_external_cell_state(pipeline) -> None:
     pipeline._formal_external_cell_flags_texture = None
 
 
-
-def _cell_role_textures(pipeline, resources: GPUReactionResources, role: str) -> tuple[Any, Any, Any, Any, Any, Any]:
+def _cell_role_textures(
+    pipeline, resources: GPUReactionResources, role: str
+) -> tuple[Any, Any, Any, Any, Any, Any]:
     if role == "ping":
         if (
             pipeline._formal_external_cell_state_key == pipeline._formal_state_cache_key
@@ -371,25 +355,30 @@ def _cell_role_textures(pipeline, resources: GPUReactionResources, role: str) ->
     raise ValueError(f"unsupported cell state role {role!r}")
 
 
-
-def _current_cell_textures(pipeline, resources: GPUReactionResources) -> tuple[Any, Any, Any, Any, Any, Any]:
+def _current_cell_textures(
+    pipeline, resources: GPUReactionResources
+) -> tuple[Any, Any, Any, Any, Any, Any]:
     cell_role = pipeline._formal_cell_read_role()
     velocity_role = pipeline._formal_velocity_read_role()
-    material, phase, temp, integrity, _velocity, timer = pipeline._cell_role_textures(resources, cell_role)
+    material, phase, temp, integrity, _velocity, timer = pipeline._cell_role_textures(
+        resources, cell_role
+    )
     velocity = pipeline._cell_role_textures(resources, velocity_role)[4]
     return material, phase, temp, integrity, velocity, timer
 
 
-
-def _next_cell_textures(pipeline, resources: GPUReactionResources) -> tuple[Any, Any, Any, Any, Any, Any]:
+def _next_cell_textures(
+    pipeline, resources: GPUReactionResources
+) -> tuple[Any, Any, Any, Any, Any, Any]:
     if not pipeline._formal_before_motion_cell_roles_active():
         return pipeline._cell_role_textures(resources, "pong")
     cell_role = pipeline._formal_cell_write_role()
     velocity_role = pipeline._formal_velocity_write_role()
-    material, phase, temp, integrity, _velocity, timer = pipeline._cell_role_textures(resources, cell_role)
+    material, phase, temp, integrity, _velocity, timer = pipeline._cell_role_textures(
+        resources, cell_role
+    )
     velocity = pipeline._cell_role_textures(resources, velocity_role)[4]
     return material, phase, temp, integrity, velocity, timer
-
 
 
 def begin_formal_reaction_segment(pipeline, world: "WorldEngine", segment: str) -> bool:
@@ -417,7 +406,6 @@ def begin_formal_reaction_segment(pipeline, world: "WorldEngine", segment: str) 
     return True
 
 
-
 def end_formal_reaction_segment(pipeline, world: "WorldEngine", segment: str) -> None:
     base_key = pipeline._formal_reaction_segment_base_key(world, segment)
     if base_key is not None and pipeline._formal_segment_batch_base_key != base_key:
@@ -437,7 +425,6 @@ def end_formal_reaction_segment(pipeline, world: "WorldEngine", segment: str) ->
     pipeline._clear_formal_external_cell_state()
 
 
-
 def _mark_formal_bridge_publish_pending(
     pipeline,
     world: "WorldEngine",
@@ -453,12 +440,13 @@ def _mark_formal_bridge_publish_pending(
     pipeline._formal_pending_bridge_publish.update(str(name) for name in resource_names)
 
 
-
 def flush_formal_reaction_segment(pipeline, world: "WorldEngine", segment: str) -> bool:
     if not pipeline._formal_gpu_frame(world) or pipeline.resources is None:
         return False
     segment_key = pipeline._formal_reaction_segment_cache_key(world, pipeline.resources, segment)
-    gas_delta_flushed = pipeline._flush_formal_segment_gas_delta(world, pipeline.resources, segment_key)
+    gas_delta_flushed = pipeline._flush_formal_segment_gas_delta(
+        world, pipeline.resources, segment_key
+    )
     if (
         segment_key is None
         or pipeline._formal_segment_batch_key != segment_key
@@ -494,7 +482,11 @@ def flush_formal_reaction_segment(pipeline, world: "WorldEngine", segment: str) 
         )
         if defer_phase_c or defer_to_motion:
             if not terminal_handoff:
-                role = pipeline._formal_cell_read_role() if pipeline._formal_before_motion_cell_roles_active() else "pong"
+                role = (
+                    pipeline._formal_cell_read_role()
+                    if pipeline._formal_before_motion_cell_roles_active()
+                    else "pong"
+                )
                 mt, pt, tp, it, _vt, tm = pipeline._cell_role_textures(pipeline.resources, role)
                 vt = pipeline._cell_role_textures(
                     pipeline.resources,
@@ -504,8 +496,12 @@ def flush_formal_reaction_segment(pipeline, world: "WorldEngine", segment: str) 
                 )[4]
                 candidate = {
                     "cell_state": mt,
-                    "material": mt, "phase": pt, "temp": tp, "integrity": it,
-                    "velocity": vt, "timer": tm,
+                    "material": mt,
+                    "phase": pt,
+                    "temp": tp,
+                    "integrity": it,
+                    "velocity": vt,
+                    "timer": tm,
                     "base_flags": pipeline._formal_external_cell_flags_texture,
                     "meta": pipeline.resources.segment_cell_meta_tex,
                     "frame_id": int(getattr(world, "frame_id", 0)),
@@ -546,7 +542,6 @@ def flush_formal_reaction_segment(pipeline, world: "WorldEngine", segment: str) 
     return True
 
 
-
 def _clear_formal_segment_gas_delta(
     pipeline,
     world: "WorldEngine",
@@ -568,7 +563,6 @@ def _clear_formal_segment_gas_delta(
     pipeline._formal_pending_gas_delta_key = segment_key
 
 
-
 def _flush_formal_segment_gas_delta(
     pipeline,
     world: "WorldEngine",
@@ -581,9 +575,7 @@ def _flush_formal_segment_gas_delta(
     assert ctx is not None
     fused_bridge_publish = pipeline._formal_terminal_gas_publish_fusion_pending()
     apply_program = pipeline.programs[
-        "apply_cell_gas_delta_publish_bridge"
-        if fused_bridge_publish
-        else "apply_cell_gas_delta"
+        "apply_cell_gas_delta_publish_bridge" if fused_bridge_publish else "apply_cell_gas_delta"
     ]
     apply_program["gas_grid_size"].value = (world.gas_width, world.gas_height)
     apply_program["gas_count"].value = int(world.gas_concentration.shape[0])
@@ -625,12 +617,13 @@ def _flush_formal_segment_gas_delta(
     return True
 
 
-
 def _clear_reaction_latches_on_bridge(pipeline, world: "WorldEngine") -> None:
     bridge = world.bridge
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("GPU reaction latch clearing requires bridge GPU resources for authoritative state")
+        raise RuntimeError(
+            "GPU reaction latch clearing requires bridge GPU resources for authoritative state"
+        )
     if "cell_core" not in bridge.gpu_authoritative_resources:
         world._require_gpu_authoritative_resources("reaction latch clearing", "cell_core")
         bridge.sync_world(world)
@@ -645,7 +638,6 @@ def _clear_reaction_latches_on_bridge(pipeline, world: "WorldEngine") -> None:
     pipeline._clear_bridge_latches_program.run((cell_count + 255) // 256, 1, 1)
     pipeline._sync_compute_writes(ctx)
     bridge.mark_gpu_authoritative("cell_core", "material")
-
 
 
 def _upload_active_masks(
@@ -682,7 +674,11 @@ def _upload_active_masks(
             load_gas_mask=load_gas_mask,
         )
         existing_cache_key = pipeline._formal_active_mask_cache_key
-        if cache_key is not None and existing_cache_key is not None and existing_cache_key[:-3] == cache_key[:-3]:
+        if (
+            cache_key is not None
+            and existing_cache_key is not None
+            and existing_cache_key[:-3] == cache_key[:-3]
+        ):
             existing_load_cell = bool(existing_cache_key[-3])
             existing_load_expanded_tile = bool(existing_cache_key[-2])
             existing_load_gas = bool(existing_cache_key[-1])
@@ -727,7 +723,6 @@ def _upload_active_masks(
         resources.active_gas_tex.write(np.asarray(solve_gas_mask, dtype="f4").tobytes())
 
 
-
 def _load_authoritative_active_masks(
     pipeline,
     world: "WorldEngine",
@@ -745,7 +740,9 @@ def _load_authoritative_active_masks(
         raise RuntimeError("GPU reaction pipeline requires bridge active scheduler resources")
     active_mask_loads = []
     if load_cell_mask:
-        active_mask_loads.append(("load_active_cell", resources.active_cell_tex, world.width, world.height))
+        active_mask_loads.append(
+            ("load_active_cell", resources.active_cell_tex, world.width, world.height)
+        )
     if load_expanded_tile_mask:
         active_mask_loads.append(
             (
@@ -756,12 +753,18 @@ def _load_authoritative_active_masks(
             )
         )
     if load_gas_mask:
-        active_mask_loads.append(("load_active_gas", resources.active_gas_tex, world.gas_width, world.gas_height))
+        active_mask_loads.append(
+            ("load_active_gas", resources.active_gas_tex, world.gas_width, world.gas_height)
+        )
     for name, texture, width, height in active_mask_loads:
         program = pipeline.programs[name]
         pipeline._set_uniform_if_present(program, "cell_grid_size", (world.width, world.height))
-        pipeline._set_uniform_if_present(program, "gas_grid_size", (world.gas_width, world.gas_height))
-        pipeline._set_uniform_if_present(program, "tile_grid_size", (world.active.tile_width, world.active.tile_height))
+        pipeline._set_uniform_if_present(
+            program, "gas_grid_size", (world.gas_width, world.gas_height)
+        )
+        pipeline._set_uniform_if_present(
+            program, "tile_grid_size", (world.active.tile_width, world.active.tile_height)
+        )
         pipeline._set_uniform_if_present(program, "gas_cell_size", int(world.gas_cell_size))
         pipeline._set_uniform_if_present(program, "tile_size", int(world.active.tile_size))
         pipeline._set_uniform_if_present(program, "expansion_radius", int(expansion_radius))

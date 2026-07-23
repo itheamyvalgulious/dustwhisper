@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from oracle_game.world import WorldEngine
+from copy import (
+    deepcopy,
+)
+from typing import Any
 
 import numpy as np
 
@@ -11,28 +11,23 @@ from oracle_game.gpu._common import (
     CPU_READBACK_LATENCY_FRAMES,
     GPU_READBACK_LATENCY_FRAMES,
 )
-
 from oracle_game.gpu.readback import (
+    GLReadbackSlot,
+    GPUBufferReadbackSource,
+    GPUCellCoreWindowReadbackSource,
+    GPUGasWindowReadbackSource,
+    GPUSegmentedBufferReadbackSource,
+    GPUSegmentedCellCoreWindowReadbackSource,
     GPUSegmentedTextureReadbackSource,
     GPUTextureReadbackSource,
-    ReadbackPayloadPlan,
-    GLReadbackSlot,
-    ReadbackPayloadLayout,
-    GPUSegmentedCellCoreWindowReadbackSource,
-    GPUSegmentedBufferReadbackSource,
-    GPUGasWindowReadbackSource,
     ReadbackArrayLayout,
-    GPUCellCoreWindowReadbackSource,
-    GPUBufferReadbackSource,
+    ReadbackPayloadLayout,
+    ReadbackPayloadPlan,
 )
-
+from oracle_game.gpu.shader_loader import build_compute_shader
 from oracle_game.types import (
-    ReadbackResult,
     ReadbackRequest,
-)
-
-from copy import (
-    deepcopy,
+    ReadbackResult,
 )
 
 
@@ -63,7 +58,9 @@ def queue_readback(
             "CPU fallback is disabled"
         )
     if require_gpu_sources and plan.gpu_sources and (not bridge.enabled or bridge.ctx is None):
-        raise RuntimeError("GPU readback requires an enabled ModernGL context; CPU fallback is disabled")
+        raise RuntimeError(
+            "GPU readback requires an enabled ModernGL context; CPU fallback is disabled"
+        )
     if bridge.enabled and bridge.ctx is not None:
         if slot.buffer is None or slot.buffer.size < max(plan.nbytes, 4):
             if slot.buffer is not None:
@@ -133,6 +130,86 @@ def poll_readback(bridge, current_frame_id: int) -> ReadbackResult | None:
     slot.nbytes = 0
     slot.layout = None
     return result
+
+
+def _stash_inflight_readback_slots(bridge) -> None:
+    """Preserve in-flight readback slot state across readback ring rebuilds.
+
+    Rebuilding the ring (context attach, resource release) destroys the GL
+    storage backing occupied slots.  Stash the occupied slot descriptors so
+    ``requeue_detached_readbacks`` can re-queue them on the rebuilt ring with
+    their original frame/latency bookkeeping instead of silently dropping
+    them (which also leaks the engine's ``inflight_readbacks`` entries).
+    """
+    for slot in bridge.readback_slots:
+        if slot.frame_id < 0 or slot.request is None:
+            continue
+        bridge.detached_readback_slots.append(
+            GLReadbackSlot(
+                slot.slot_index,
+                frame_id=slot.frame_id,
+                ready_frame_id=slot.ready_frame_id,
+                min_poll_frame_id=slot.min_poll_frame_id,
+                latency_frames=slot.latency_frames,
+                gpu_backed=slot.gpu_backed,
+                request=slot.request,
+                nbytes=slot.nbytes,
+                layout=slot.layout,
+            )
+        )
+
+
+def requeue_detached_readbacks(bridge, world) -> None:
+    """Re-queue readbacks detached by a readback ring rebuild.
+
+    Each detached request's payload is re-materialized against the current
+    (already re-synced) resources and queued with its original frame id, so
+    the request keeps its contracted latency/ready timing and the engine's
+    ``inflight_readbacks`` bookkeeping drains through the normal poll path.
+    Requests that cannot be queued any more are failed explicitly: their
+    inflight bookkeeping is dropped so it cannot leak.  A full ring is
+    transient, so those descriptors stay stashed for the next drain.
+    """
+    if not bridge.detached_readback_slots:
+        return
+    detached = sorted(
+        bridge.detached_readback_slots,
+        key=lambda slot: (slot.frame_id, slot.slot_index),
+    )
+    bridge.detached_readback_slots.clear()
+    for slot in detached:
+        request = slot.request
+        if request is None:
+            continue
+        try:
+            payload = world._make_readback_payload(request)
+        except Exception:
+            payload = None
+        queued = False
+        if payload is not None:
+            try:
+                queued = bridge.queue_readback(
+                    slot.frame_id,
+                    request,
+                    payload,
+                    require_gpu_sources=getattr(world, "simulation_backend", "") == "gpu",
+                )
+            except Exception:
+                payload = None
+        if queued:
+            continue
+        if payload is not None:
+            # The ring was full; keep the descriptor stashed so a later drain
+            # retries once slots free up.
+            bridge.detached_readback_slots.append(slot)
+            continue
+        if request.request_id is not None:
+            request_id = int(request.request_id)
+            world.inflight_readbacks = [
+                existing
+                for existing in world.inflight_readbacks
+                if existing.request_id != request_id
+            ]
 
 
 def _plan_readback_payload(bridge, payload: dict[str, Any]) -> ReadbackPayloadPlan:
@@ -211,35 +288,56 @@ def _fill_readback_slot_from_gpu(
 ) -> None:
     assert bridge.ctx is not None
     if isinstance(source, GPUSegmentedCellCoreWindowReadbackSource):
-        bridge._pack_segmented_cell_core_window_into_buffer(slot_buffer, offset, source, require_gpu_source=require_gpu_source)
+        bridge._pack_segmented_cell_core_window_into_buffer(
+            slot_buffer, offset, source, require_gpu_source=require_gpu_source
+        )
         return
     if isinstance(source, GPUSegmentedBufferReadbackSource):
-        bridge._pack_segmented_buffer_window_into_buffer(slot_buffer, offset, source, require_gpu_source=require_gpu_source)
+        bridge._pack_segmented_buffer_window_into_buffer(
+            slot_buffer, offset, source, require_gpu_source=require_gpu_source
+        )
         return
     if isinstance(source, GPUSegmentedTextureReadbackSource):
-        bridge._pack_segmented_texture_window_into_buffer(slot_buffer, offset, source, require_gpu_source=require_gpu_source)
+        bridge._pack_segmented_texture_window_into_buffer(
+            slot_buffer, offset, source, require_gpu_source=require_gpu_source
+        )
         return
     if isinstance(source, GPUCellCoreWindowReadbackSource):
-        bridge._pack_cell_core_window_into_buffer(slot_buffer, offset, source, require_gpu_source=require_gpu_source)
+        bridge._pack_cell_core_window_into_buffer(
+            slot_buffer, offset, source, require_gpu_source=require_gpu_source
+        )
         return
     if isinstance(source, GPUGasWindowReadbackSource):
-        bridge._pack_gas_window_into_buffer(slot_buffer, offset, source, require_gpu_source=require_gpu_source)
+        bridge._pack_gas_window_into_buffer(
+            slot_buffer, offset, source, require_gpu_source=require_gpu_source
+        )
         return
     if isinstance(source, GPUBufferReadbackSource):
-        bridge._pack_buffer_window_into_buffer(slot_buffer, offset, source, require_gpu_source=require_gpu_source)
+        bridge._pack_buffer_window_into_buffer(
+            slot_buffer, offset, source, require_gpu_source=require_gpu_source
+        )
         return
     if isinstance(source, GPUTextureReadbackSource):
-        bridge._pack_texture_window_into_buffer(slot_buffer, offset, source, require_gpu_source=require_gpu_source)
+        bridge._pack_texture_window_into_buffer(
+            slot_buffer, offset, source, require_gpu_source=require_gpu_source
+        )
         return
     raise TypeError(f"Unsupported GPU readback source: {type(source)!r}")
 
 
-def _decode_readback_payload(bridge, raw: bytes, layout: ReadbackPayloadLayout | None) -> dict[str, Any]:
+def _decode_readback_payload(
+    bridge, raw: bytes, layout: ReadbackPayloadLayout | None
+) -> dict[str, Any]:
     if layout is None:
         return {}
     payload = deepcopy(layout.metadata)
     for spec in layout.arrays:
-        array = np.frombuffer(raw, dtype=np.dtype(spec.dtype), count=int(np.prod(spec.shape, dtype=np.int64)), offset=spec.offset)
+        array = np.frombuffer(
+            raw,
+            dtype=np.dtype(spec.dtype),
+            count=int(np.prod(spec.shape, dtype=np.int64)),
+            offset=spec.offset,
+        )
         array = array.reshape(spec.shape).copy()
         cursor = payload
         for key in spec.path[:-1]:
@@ -267,128 +365,13 @@ def _normalize_metadata(bridge, value: Any) -> Any:
 def _ensure_readback_programs(bridge) -> None:
     if bridge.ctx is None or bridge.readback_programs:
         return
-    local_size = 8
-    bridge.readback_programs["cell_core_window"] = bridge.ctx.compute_shader(
-        f"""
-        #version 430
-        layout(local_size_x={local_size}, local_size_y={local_size}, local_size_z=1) in;
-        uniform ivec2 window_origin;
-        uniform ivec2 window_size;
-        uniform int cell_grid_width;
-        uniform int dst_word_offset;
-        uniform int dst_cell_grid_width;
-        layout(std430, binding=0) readonly buffer CellCore {{
-            uint cell_core[];
-        }};
-        layout(std430, binding=1) writeonly buffer SlotWords {{
-            uint slot_words[];
-        }};
-        void main() {{
-            ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
-            if (gid.x >= window_size.x || gid.y >= window_size.y) {{
-                return;
-            }}
-            int src_cell = (window_origin.y + gid.y) * cell_grid_width + (window_origin.x + gid.x);
-            int dst_cell = gid.y * dst_cell_grid_width + gid.x;
-            int src_word = src_cell * 5;
-            int dst_word = dst_word_offset + dst_cell * 5;
-            for (int lane = 0; lane < 5; ++lane) {{
-                slot_words[dst_word + lane] = cell_core[src_word + lane];
-            }}
-        }}
-        """
-    )
-    bridge.readback_programs["gas_window"] = bridge.ctx.compute_shader(
-        f"""
-        #version 430
-        layout(local_size_x={local_size}, local_size_y={local_size}, local_size_z=1) in;
-        uniform ivec2 window_origin;
-        uniform ivec2 window_size;
-        uniform ivec2 gas_grid_size;
-        uniform int species_id;
-        uniform int dst_word_offset;
-        layout(std430, binding=0) readonly buffer GasValues {{
-            float gas_values[];
-        }};
-        layout(std430, binding=1) writeonly buffer SlotWords {{
-            uint slot_words[];
-        }};
-        void main() {{
-            ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
-            if (gid.x >= window_size.x || gid.y >= window_size.y) {{
-                return;
-            }}
-            int src_x = window_origin.x + gid.x;
-            int src_y = window_origin.y + gid.y;
-            int src_index = ((species_id * gas_grid_size.y + src_y) * gas_grid_size.x) + src_x;
-            int dst_index = dst_word_offset + gid.y * window_size.x + gid.x;
-            slot_words[dst_index] = floatBitsToUint(gas_values[src_index]);
-        }}
-        """
-    )
-    bridge.readback_programs["buffer_window"] = bridge.ctx.compute_shader(
-        f"""
-        #version 430
-        layout(local_size_x={local_size}, local_size_y={local_size}, local_size_z=1) in;
-        uniform int src_word_offset;
-        uniform int src_word_stride;
-        uniform int dst_word_offset;
-        uniform int dst_words_per_row;
-        uniform int dst_word_stride;
-        uniform int row_count;
-        layout(std430, binding=0) readonly buffer SrcWords {{
-            uint src_words[];
-        }};
-        layout(std430, binding=1) writeonly buffer SlotWords {{
-            uint slot_words[];
-        }};
-        void main() {{
-            int word_index = int(gl_GlobalInvocationID.x);
-            int row_index = int(gl_GlobalInvocationID.y);
-            if (word_index >= dst_words_per_row || row_index >= row_count) {{
-                return;
-            }}
-            int src_index = src_word_offset + row_index * src_word_stride + word_index;
-            int dst_index = dst_word_offset + row_index * dst_word_stride + word_index;
-            slot_words[dst_index] = src_words[src_index];
-        }}
-        """
-    )
-    bridge.readback_programs["texture_window"] = bridge.ctx.compute_shader(
-        f"""
-        #version 430
-        layout(local_size_x={local_size}, local_size_y={local_size}, local_size_z=1) in;
-        uniform ivec2 window_origin;
-        uniform ivec2 window_size;
-        uniform int component_count;
-        uniform int dst_float_offset;
-        uniform int dst_float_row_stride;
-        layout(binding=0) uniform sampler2D src_texture;
-        layout(std430, binding=1) writeonly buffer SlotFloats {{
-            float slot_floats[];
-        }};
-        void main() {{
-            ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
-            if (gid.x >= window_size.x || gid.y >= window_size.y) {{
-                return;
-            }}
-            vec4 sample_value = texelFetch(src_texture, window_origin + gid, 0);
-            int dst_index = dst_float_offset + gid.y * dst_float_row_stride + gid.x * component_count;
-            if (component_count > 0) {{
-                slot_floats[dst_index] = sample_value.x;
-            }}
-            if (component_count > 1) {{
-                slot_floats[dst_index + 1] = sample_value.y;
-            }}
-            if (component_count > 2) {{
-                slot_floats[dst_index + 2] = sample_value.z;
-            }}
-            if (component_count > 3) {{
-                slot_floats[dst_index + 3] = sample_value.w;
-            }}
-        }}
-        """
-    )
+    subs = {"LOCAL_SIZE": 8}
+    for name in ("cell_core_window", "gas_window", "buffer_window", "texture_window"):
+        bridge.readback_programs[name] = build_compute_shader(
+            bridge.ctx,
+            f"readback/{name}.comp",
+            subs,
+        )
 
 
 def _pack_cell_core_window_into_buffer(
@@ -479,7 +462,9 @@ def _pack_buffer_window_into_buffer(
         or source.chunk_size % 4 != 0
         or dtype.itemsize != 4
     ):
-        bridge._raise_gpu_readback_unavailable(source, "unsupported buffer copy alignment or element size")
+        bridge._raise_gpu_readback_unavailable(
+            source, "unsupported buffer copy alignment or element size"
+        )
         return
     if source.chunk_size <= 0 or source.count <= 0:
         return
@@ -523,7 +508,9 @@ def _pack_texture_window_into_buffer(
     bridge._ensure_readback_programs()
     program = bridge.readback_programs.get("texture_window")
     if program is None or source.components > 4:
-        bridge._raise_gpu_readback_unavailable(source, "missing texture readback shader or unsupported component count")
+        bridge._raise_gpu_readback_unavailable(
+            source, "missing texture readback shader or unsupported component count"
+        )
         return
     texture = bridge.textures.get(source.resource_name)
     if texture is None:
@@ -536,7 +523,9 @@ def _pack_texture_window_into_buffer(
     program["window_size"].value = (width, height)
     program["component_count"].value = source.components
     program["dst_float_offset"].value = offset // 4
-    program["dst_float_row_stride"].value = (source.dst_step or (width * source.components * 4)) // 4
+    program["dst_float_row_stride"].value = (
+        source.dst_step or (width * source.components * 4)
+    ) // 4
     group_x = (width + 7) // 8
     group_y = (height + 7) // 8
     program.run(group_x, group_y, 1)
@@ -587,7 +576,9 @@ def _pack_segmented_buffer_window_into_buffer(
         bridge._raise_gpu_readback_unavailable(source, "unsupported segmented buffer element size")
         return
     if len(source.shape) < 2:
-        bridge._raise_gpu_readback_unavailable(source, "segmented buffer source requires a 2D destination")
+        bridge._raise_gpu_readback_unavailable(
+            source, "segmented buffer source requires a 2D destination"
+        )
         return
     width = int(source.shape[1])
     height = int(source.shape[0])
@@ -597,7 +588,10 @@ def _pack_segmented_buffer_window_into_buffer(
     for segment in source.segments:
         if segment.width <= 0 or segment.height <= 0:
             continue
-        src_start = int(source.base_offset) + (int(segment.src_y) * int(source.grid_width) + int(segment.src_x)) * itemsize
+        src_start = (
+            int(source.base_offset)
+            + (int(segment.src_y) * int(source.grid_width) + int(segment.src_x)) * itemsize
+        )
         dst_offset = offset + (int(segment.dst_y) * width + int(segment.dst_x)) * itemsize
         bridge._pack_buffer_window_into_buffer(
             slot_buffer,
@@ -627,7 +621,9 @@ def _pack_segmented_texture_window_into_buffer(
     if source.components <= 0:
         return
     if len(source.shape) < 2:
-        bridge._raise_gpu_readback_unavailable(source, "segmented texture source requires a 2D destination")
+        bridge._raise_gpu_readback_unavailable(
+            source, "segmented texture source requires a 2D destination"
+        )
         return
     width = int(source.shape[1])
     height = int(source.shape[0])
@@ -637,7 +633,9 @@ def _pack_segmented_texture_window_into_buffer(
     for segment in source.segments:
         if segment.width <= 0 or segment.height <= 0:
             continue
-        dst_offset = offset + (int(segment.dst_y) * width + int(segment.dst_x)) * int(source.components) * 4
+        dst_offset = (
+            offset + (int(segment.dst_y) * width + int(segment.dst_x)) * int(source.components) * 4
+        )
         segment_shape: tuple[int, ...]
         if int(source.components) == 1 and len(source.shape) == 2:
             segment_shape = (int(segment.height), int(segment.width))
@@ -651,7 +649,12 @@ def _pack_segmented_texture_window_into_buffer(
                 dtype=source.dtype,
                 shape=segment_shape,
                 components=int(source.components),
-                viewport=(int(segment.src_x), int(segment.src_y), int(segment.width), int(segment.height)),
+                viewport=(
+                    int(segment.src_x),
+                    int(segment.src_y),
+                    int(segment.width),
+                    int(segment.height),
+                ),
                 dst_step=row_step,
             ),
             require_gpu_source=require_gpu_source,

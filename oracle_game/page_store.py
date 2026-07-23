@@ -85,7 +85,9 @@ class InMemoryPageStore(PageStore):
             axis=update.axis,
             world_start=update.world_start,
             world_end=update.world_end,
-            cross_world_start=0 if update.cross_world_start is None else int(update.cross_world_start),
+            cross_world_start=0
+            if update.cross_world_start is None
+            else int(update.cross_world_start),
             cross_world_end=0 if update.cross_world_end is None else int(update.cross_world_end),
         )
 

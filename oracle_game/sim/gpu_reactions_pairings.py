@@ -1,19 +1,19 @@
 from __future__ import annotations
-from typing import Any, TYPE_CHECKING
+
+from typing import TYPE_CHECKING, Any
+
 import numpy as np
 
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
-from oracle_game.sim.shader_loader import build_compute_shader
 from oracle_game.sim.gpu_reactions import (
+    _SHADER_SUBS,
     CONSUME_POLICY_BOTH,
     CONSUME_POLICY_NONE,
     CONSUME_POLICY_RHS,
-    FORMAL_GPU_EMPTY_DEFERRED_BATCH,
     FLOW_SOURCE_GENERATION_BINDING,
-    GPUDeferredActionBatch,
-    GPUReactionMaterialPairPlan,
+    FORMAL_GPU_EMPTY_DEFERRED_BATCH,
     LOCAL_SIZE,
     MATERIAL_LIGHT_PACKED_HEADER_OFFSET,
     MATERIAL_PAIR_PACKED_HEADER_OFFSET,
@@ -27,9 +27,11 @@ from oracle_game.sim.gpu_reactions import (
     TYPE_MODIFY_GAS,
     TYPE_MODIFY_TEMPERATURE,
     TYPE_NONE,
-    _SHADER_SUBS,
+    GPUDeferredActionBatch,
+    GPUReactionMaterialPairPlan,
 )
 from oracle_game.sim.gpu_timer_pack import unpack_u8x4
+from oracle_game.sim.shader_loader import build_compute_shader
 
 
 def run_timed_actions(
@@ -47,7 +49,9 @@ def run_timed_actions(
     action_table = world.bridge.shadow_typed_tables["reaction_action_table"]
     material_table = world.bridge.shadow_typed_tables["material_table"]
     with pipeline._profile_pass(world, "timed_compile_actions"):
-        used_indices = pipeline._cached_used_action_indices_for_material_slots(world, material_table, slot_count=4)
+        used_indices = pipeline._cached_used_action_indices_for_material_slots(
+            world, material_table, slot_count=4
+        )
         compiled = pipeline._compile_action_buffers_cached(world, action_table, used_indices)
     if compiled is None:
         return None
@@ -93,10 +97,7 @@ def run_timed_actions(
         pipeline._upload_state(world, resources, reaction_group="timed", compiled_actions=compiled)
     use_expanded_active_tile_mask = bool(
         pipeline._can_use_expanded_active_tile_mask(world)
-        and (
-            combined_candidate
-            or not getattr(pipeline, "_timed_sparse_inplace_enabled", False)
-        )
+        and (combined_candidate or not getattr(pipeline, "_timed_sparse_inplace_enabled", False))
     )
     upload_cell_mask, upload_gas_mask = pipeline._active_masks_for_cell_reaction_upload(
         world,
@@ -151,8 +152,7 @@ def run_timed_actions(
         with pipeline._profile_pass(world, "timed_self_publish_deferred"):
             return pipeline._download_deferred_batch(world, resources)
     sparse_inplace = bool(
-        formal_gpu_frame
-        and getattr(pipeline, "_timed_sparse_inplace_enabled", False)
+        formal_gpu_frame and getattr(pipeline, "_timed_sparse_inplace_enabled", False)
     )
     if sparse_inplace and pipeline._timed_sparse_positive_count_enabled:
         pipeline._prepare_timed_candidate_worklist(world, resources)
@@ -217,7 +217,6 @@ def run_timed_actions(
         return pipeline._download_deferred_batch(world, resources)
 
 
-
 def run_timed_triggers(
     pipeline,
     world: "WorldEngine",
@@ -227,14 +226,18 @@ def run_timed_triggers(
     if not pipeline.available(world):
         return None
     if pipeline._formal_gpu_frame(world):
-        raise RuntimeError("GPU reaction timed trigger readback is not allowed in formal GPU frames; CPU fallback is disabled")
+        raise RuntimeError(
+            "GPU reaction timed trigger readback is not allowed in formal GPU frames; CPU fallback is disabled"
+        )
     pipeline._ensure_programs(world.bridge.ctx)
     resources = pipeline._ensure_resources(world)
     pipeline._upload_state(world, resources)
     pipeline._upload_active_masks(
         world,
         resources,
-        solve_cell_mask if solve_cell_mask is not None else np.ones((world.height, world.width), dtype=np.bool_),
+        solve_cell_mask
+        if solve_cell_mask is not None
+        else np.ones((world.height, world.width), dtype=np.bool_),
         np.ones((world.gas_height, world.gas_width), dtype=np.bool_),
     )
     pipeline._upload_local_metadata(world, resources)
@@ -246,15 +249,20 @@ def run_timed_triggers(
     resources.material_slots_lo.bind_to_storage_buffer(binding=0)
     resources.trigger_lo_tex.bind_to_image(3, read=False, write=True)
     resources.timer_pong.bind_to_image(4, read=False, write=True)
-    program.run((world.width + LOCAL_SIZE - 1) // LOCAL_SIZE, (world.height + LOCAL_SIZE - 1) // LOCAL_SIZE, 1)
+    program.run(
+        (world.width + LOCAL_SIZE - 1) // LOCAL_SIZE,
+        (world.height + LOCAL_SIZE - 1) // LOCAL_SIZE,
+        1,
+    )
     world.bridge.ctx.finish()
     world.timer_pack[:] = unpack_u8x4(
         np.frombuffer(resources.timer_pong.read(), dtype="u4").reshape((world.height, world.width))
     )
     return np.rint(
-        np.frombuffer(resources.trigger_lo_tex.read(), dtype="f4").reshape((world.height, world.width, 4))
+        np.frombuffer(resources.trigger_lo_tex.read(), dtype="f4").reshape(
+            (world.height, world.width, 4)
+        )
     ).astype(np.int32)
-
 
 
 def run_self_triggers(
@@ -266,9 +274,13 @@ def run_self_triggers(
     if not pipeline.available(world):
         return None
     if pipeline._formal_gpu_frame(world):
-        raise RuntimeError("GPU reaction self trigger readback is not allowed in formal GPU frames; CPU fallback is disabled")
+        raise RuntimeError(
+            "GPU reaction self trigger readback is not allowed in formal GPU frames; CPU fallback is disabled"
+        )
     world.bridge.sync_rule_tables(world)
-    self_rule_count = min(MAX_SELF_RULES, int(world.bridge.shadow_typed_tables["self_rule_table"].shape[0]))
+    self_rule_count = min(
+        MAX_SELF_RULES, int(world.bridge.shadow_typed_tables["self_rule_table"].shape[0])
+    )
     if self_rule_count <= 0:
         return None
     pipeline._ensure_programs(world.bridge.ctx)
@@ -277,7 +289,9 @@ def run_self_triggers(
     pipeline._upload_active_masks(
         world,
         resources,
-        solve_cell_mask if solve_cell_mask is not None else np.ones((world.height, world.width), dtype=np.bool_),
+        solve_cell_mask
+        if solve_cell_mask is not None
+        else np.ones((world.height, world.width), dtype=np.bool_),
         np.ones((world.gas_height, world.gas_width), dtype=np.bool_),
     )
     pipeline._upload_local_metadata(world, resources, include_self_rules=True)
@@ -297,19 +311,26 @@ def run_self_triggers(
     resources.timer_pong.bind_to_image(0, read=False, write=True)
     resources.trigger_lo_tex.bind_to_image(1, read=False, write=True)
     resources.trigger_hi_tex.bind_to_image(2, read=False, write=True)
-    program.run((world.width + LOCAL_SIZE - 1) // LOCAL_SIZE, (world.height + LOCAL_SIZE - 1) // LOCAL_SIZE, 1)
+    program.run(
+        (world.width + LOCAL_SIZE - 1) // LOCAL_SIZE,
+        (world.height + LOCAL_SIZE - 1) // LOCAL_SIZE,
+        1,
+    )
     world.bridge.ctx.finish()
     world.timer_pack[:] = unpack_u8x4(
         np.frombuffer(resources.timer_pong.read(), dtype="u4").reshape((world.height, world.width))
     )
     trigger_lo = np.rint(
-        np.frombuffer(resources.trigger_lo_tex.read(), dtype="f4").reshape((world.height, world.width, 4))
+        np.frombuffer(resources.trigger_lo_tex.read(), dtype="f4").reshape(
+            (world.height, world.width, 4)
+        )
     ).astype(np.int32)
     trigger_hi = np.rint(
-        np.frombuffer(resources.trigger_hi_tex.read(), dtype="f4").reshape((world.height, world.width, 4))
+        np.frombuffer(resources.trigger_hi_tex.read(), dtype="f4").reshape(
+            (world.height, world.width, 4)
+        )
     ).astype(np.int32)
     return (trigger_lo, trigger_hi)
-
 
 
 def run_self_actions(
@@ -330,7 +351,9 @@ def run_self_actions(
     action_table = world.bridge.shadow_typed_tables["reaction_action_table"]
     material_table = world.bridge.shadow_typed_tables["material_table"]
     with pipeline._profile_pass(world, "self_compile_actions"):
-        used_indices = pipeline._cached_used_action_indices_for_self_rules(world, rule_table, material_table)
+        used_indices = pipeline._cached_used_action_indices_for_self_rules(
+            world, rule_table, material_table
+        )
         compiled = pipeline._compile_action_buffers_cached(world, action_table, used_indices)
     if compiled is None:
         return None
@@ -356,8 +379,7 @@ def run_self_actions(
         and pipeline._active_scheduler_gpu_authoritative(world)
     )
     use_expanded_active_tile_mask = bool(
-        pipeline._can_use_expanded_active_tile_mask(world)
-        and not sparse_inplace
+        pipeline._can_use_expanded_active_tile_mask(world) and not sparse_inplace
     )
     upload_cell_mask, upload_gas_mask = pipeline._active_masks_for_cell_reaction_upload(
         world,
@@ -414,7 +436,9 @@ def run_self_actions(
         self_rule_count=self_rule_count,
         apply_material_side_effects=emits_material,
         apply_gas_side_effects=pipeline._compiled_actions_include_modify_gas(compiled),
-        modify_gas_layer_mask=pipeline._compiled_modify_gas_layer_mask(compiled, world.gas_concentration.shape[0]),
+        modify_gas_layer_mask=pipeline._compiled_modify_gas_layer_mask(
+            compiled, world.gas_concentration.shape[0]
+        ),
         may_have_flow_sources=pipeline._compiled_actions_include_flow_sources(compiled),
         flow_source_layers=flow_source_layers,
         write_deferred_hi_outputs=write_deferred_hi_outputs,
@@ -434,7 +458,6 @@ def run_self_actions(
         )
     with pipeline._profile_pass(world, "self_publish_deferred"):
         return pipeline._download_deferred_batch(world, resources)
-
 
 
 def run_material_material(
@@ -483,7 +506,6 @@ def run_material_material(
     )
 
 
-
 def run_material_gas(
     pipeline,
     world: "WorldEngine",
@@ -530,7 +552,6 @@ def run_material_gas(
     )
 
 
-
 def _merge_material_pair_candidate_masks(
     material_material_masks: np.ndarray,
     material_gas_masks: np.ndarray,
@@ -545,7 +566,9 @@ def _merge_material_pair_candidate_masks(
     for rule_index in range(material_gas_rule_count):
         selected = (mg_words[:, rule_index // 32] & np.uint32(1 << (rule_index % 32))) != 0
         shifted_rule_index = material_gas_rule_offset + rule_index
-        merged_words[selected, shifted_rule_index // 32] |= np.uint32(1 << (shifted_rule_index % 32))
+        merged_words[selected, shifted_rule_index // 32] |= np.uint32(
+            1 << (shifted_rule_index % 32)
+        )
     return merged
 
 
@@ -638,16 +661,20 @@ def _compile_material_pair_plan(
 
     mm_i, mm_f, mm_tags = pipeline._compile_material_material_rules(mm_table)
     mg_i, mg_f, mg_tags = pipeline._compile_material_gas_rules(mg_table)
-    if pipeline._compiled_rules_include_rhs_consume(mm_tags) or pipeline._compiled_rules_include_rhs_consume(mg_tags):
+    if pipeline._compiled_rules_include_rhs_consume(
+        mm_tags
+    ) or pipeline._compiled_rules_include_rhs_consume(mg_tags):
         return None
     material_pair_packed_descriptors = None
     if pipeline._material_pair_packed_descriptors_enabled:
-        material_pair_packed_descriptors = pipeline._compile_material_pair_packed_descriptors_cached(
-            world,
-            mm_table,
-            mg_table,
-            material_table,
-            int(world.gas_concentration.shape[0]),
+        material_pair_packed_descriptors = (
+            pipeline._compile_material_pair_packed_descriptors_cached(
+                world,
+                mm_table,
+                mg_table,
+                material_table,
+                int(world.gas_concentration.shape[0]),
+            )
         )
 
     material_light_rule_count = 0
@@ -691,12 +718,14 @@ def _compile_material_pair_plan(
                     )
                 )
                 if can_fuse_material_light:
-                    material_light_lhs_candidate_masks = pipeline._compile_material_rule_candidate_masks(
-                        ml_table,
-                        material_table,
-                        selector_id_field="lhs_material_id",
-                        selector_tag_field="lhs_tag_mask",
-                        material_tag_field="light_tag_mask",
+                    material_light_lhs_candidate_masks = (
+                        pipeline._compile_material_rule_candidate_masks(
+                            ml_table,
+                            material_table,
+                            selector_id_field="lhs_material_id",
+                            selector_tag_field="lhs_tag_mask",
+                            material_tag_field="light_tag_mask",
+                        )
                     )
                     if pipeline._material_triplet_ml_packed_descriptors_enabled:
                         material_light_packed_descriptors = (
@@ -760,21 +789,27 @@ def _compile_material_pair_plan(
         if material_light_packed_descriptors is not None:
             descriptor_count = int(material_light_packed_descriptors.shape[0])
             packed_rule_i.view(np.uint32)[
-                MATERIAL_LIGHT_PACKED_HEADER_OFFSET :
-                MATERIAL_LIGHT_PACKED_HEADER_OFFSET + descriptor_count
+                MATERIAL_LIGHT_PACKED_HEADER_OFFSET : MATERIAL_LIGHT_PACKED_HEADER_OFFSET
+                + descriptor_count
             ] = material_light_packed_descriptors
     if material_pair_packed_descriptors is not None:
         descriptor_count = int(material_pair_packed_descriptors.shape[0])
         packed_rule_i.view(np.uint32)[
-            MATERIAL_PAIR_PACKED_HEADER_OFFSET :
-            MATERIAL_PAIR_PACKED_HEADER_OFFSET + descriptor_count
+            MATERIAL_PAIR_PACKED_HEADER_OFFSET : MATERIAL_PAIR_PACKED_HEADER_OFFSET
+            + descriptor_count
         ] = material_pair_packed_descriptors
 
     compiled_actions = (
         np.asarray(compiled[0], dtype=np.int32),
         np.asarray(compiled[1], dtype=np.float32),
     )
-    for array in (*compiled_actions, packed_rule_i, packed_rule_f, packed_rule_tags, packed_candidate_masks):
+    for array in (
+        *compiled_actions,
+        packed_rule_i,
+        packed_rule_f,
+        packed_rule_tags,
+        packed_candidate_masks,
+    ):
         array.flags.writeable = False
     if cache_key is None:
         cache_key = pipeline._material_pair_plan_cache_key(
@@ -870,7 +905,6 @@ def run_material_pair_fused(
     return deferred
 
 
-
 def run_material_light(
     pipeline,
     world: "WorldEngine",
@@ -932,7 +966,6 @@ def run_material_light(
     )
 
 
-
 def _run_formal_guarded_material_light(
     pipeline,
     world: "WorldEngine",
@@ -968,7 +1001,9 @@ def _run_formal_guarded_material_light(
             else solve_cell_mask
             if solve_cell_mask is not None
             else np.ones((world.height, world.width), dtype=np.bool_),
-            None if active_authoritative else np.ones((world.gas_height, world.gas_width), dtype=np.bool_),
+            None
+            if active_authoritative
+            else np.ones((world.gas_height, world.gas_width), dtype=np.bool_),
             reaction_group="material_light",
             light_dose_guard_buffer=light_dose_guard,
         )
@@ -989,11 +1024,15 @@ def _run_formal_guarded_material_light(
     program = pipeline.programs[program_key]
     pipeline._set_uniform_if_present(program, "cell_grid_size", (world.width, world.height))
     pipeline._set_uniform_if_present(program, "rule_count", rule_count)
-    pipeline._set_uniform_if_present(program, "rule_candidate_word_count", pipeline._rule_candidate_word_count(rule_count))
+    pipeline._set_uniform_if_present(
+        program, "rule_candidate_word_count", pipeline._rule_candidate_word_count(rule_count)
+    )
     pipeline._set_uniform_if_present(program, "gas_cell_size", world.gas_cell_size)
     pipeline._set_uniform_if_present(program, "gas_count", world.gas_concentration.shape[0])
     pipeline._set_uniform_if_present(program, "gas_grid_size", (world.gas_width, world.gas_height))
-    pipeline._set_uniform_if_present(program, "random_target_count", int(pipeline.random_target_count))
+    pipeline._set_uniform_if_present(
+        program, "random_target_count", int(pipeline.random_target_count)
+    )
     pipeline._set_uniform_if_present(program, "direct_gas_delta_enabled", False)
     pipeline._set_uniform_if_present(program, "direct_modify_gas_layer_mask", 0)
     pipeline._set_uniform_if_present(program, "use_bridge_cell_dose", direct_bridge_cell_dose)
@@ -1003,7 +1042,9 @@ def _run_formal_guarded_material_light(
         pipeline._compiled_actions_require_deferred_outputs(compiled_actions),
     )
     pipeline._set_uniform_if_present(program, "accumulate_segment_cell_meta", False)
-    cell_state_in, _phase_in, temp_in, integrity_in, velocity_in, timer_in = pipeline._current_cell_textures(resources)
+    cell_state_in, _phase_in, temp_in, integrity_in, velocity_in, timer_in = (
+        pipeline._current_cell_textures(resources)
+    )
     cell_state_in.use(location=0)
     temp_in.use(location=2)
     integrity_in.use(location=3)
@@ -1044,7 +1085,9 @@ def _run_formal_guarded_material_light(
         )
         resources.rule_lhs_candidate_masks.bind_to_storage_buffer(binding=12)
         if not hasattr(program, "run_indirect"):
-            raise RuntimeError("formal light-dose guarded reactions require ModernGL ComputeShader.run_indirect")
+            raise RuntimeError(
+                "formal light-dose guarded reactions require ModernGL ComputeShader.run_indirect"
+            )
         program.run_indirect(dispatch_args)
         pipeline._sync_compute_writes(world.bridge.ctx)
     with pipeline._profile_pass(world, "material_light_velocity_copy"):
@@ -1099,7 +1142,6 @@ def _run_formal_guarded_material_light(
         return pipeline._download_deferred_batch(world, resources)
 
 
-
 def run_gas_gas(
     pipeline,
     world: "WorldEngine",
@@ -1128,7 +1170,9 @@ def run_gas_gas(
         world,
         resources,
         np.ones((world.height, world.width), dtype=np.bool_),
-        solve_gas_mask if solve_gas_mask is not None else np.ones((world.gas_height, world.gas_width), dtype=np.bool_),
+        solve_gas_mask
+        if solve_gas_mask is not None
+        else np.ones((world.gas_height, world.gas_width), dtype=np.bool_),
         reaction_group="gas_gas",
         load_cell_mask=False,
     )
@@ -1167,7 +1211,9 @@ def run_gas_gas(
     resources.local_cell_meta_out.bind_to_image(6, read=False, write=True)
     ping_is_primary = True
     for rule_index in range(rule_count):
-        rule_compiled = pipeline._compile_single_gas_gas_rule(rule_table[rule_index : rule_index + 1])
+        rule_compiled = pipeline._compile_single_gas_gas_rule(
+            rule_table[rule_index : rule_index + 1]
+        )
         resources.gg_rule_i.write(rule_compiled[0].tobytes())
         resources.gg_rule_f.write(rule_compiled[1].tobytes())
         resources.gg_rule_tags.write(rule_compiled[2].tobytes())
@@ -1196,7 +1242,9 @@ def run_gas_gas(
             pipeline._promote_gas_result(world, resources, final_gas, final_ambient)
             pipeline._mark_formal_bridge_publish_pending(world, resources, "gas")
         else:
-            pipeline._publish_bridge_gas_state(world, resources, gas_texture=final_gas, ambient_texture=final_ambient)
+            pipeline._publish_bridge_gas_state(
+                world, resources, gas_texture=final_gas, ambient_texture=final_ambient
+            )
             pipeline._promote_gas_result(world, resources, final_gas, final_ambient)
     else:
         pipeline.last_cpu_mirror_downloaded = True
@@ -1204,7 +1252,9 @@ def run_gas_gas(
             np.frombuffer(final_gas.read(), dtype="f4").reshape(world.gas_concentration.shape),
             0.0,
         )
-        world.ambient_temperature[:] = np.frombuffer(final_ambient.read(), dtype="f4").reshape(world.ambient_temperature.shape)
+        world.ambient_temperature[:] = np.frombuffer(final_ambient.read(), dtype="f4").reshape(
+            world.ambient_temperature.shape
+        )
     pipeline._append_flow_sources_from_gpu(
         world,
         resources,
@@ -1221,7 +1271,6 @@ def run_gas_gas(
     return pipeline._download_deferred_batch(world, resources)
 
 
-
 def run_gas_light(
     pipeline,
     world: "WorldEngine",
@@ -1235,7 +1284,9 @@ def run_gas_light(
     rule_count = int(rule_table.shape[0])
     if rule_count <= 0 or rule_count > MAX_RULES:
         return None
-    if pipeline._has_unsupported_consume_policies(rule_table, {CONSUME_POLICY_NONE, CONSUME_POLICY_RHS, CONSUME_POLICY_BOTH}):
+    if pipeline._has_unsupported_consume_policies(
+        rule_table, {CONSUME_POLICY_NONE, CONSUME_POLICY_RHS, CONSUME_POLICY_BOTH}
+    ):
         return None
     used_indices = {int(value) for value in rule_table["result_action"].tolist() if int(value) >= 0}
     action_table = world.bridge.shadow_typed_tables["reaction_action_table"]
@@ -1270,7 +1321,9 @@ def run_gas_light(
         world,
         resources,
         np.ones((world.height, world.width), dtype=np.bool_),
-        solve_gas_mask if solve_gas_mask is not None else np.ones((world.gas_height, world.gas_width), dtype=np.bool_),
+        solve_gas_mask
+        if solve_gas_mask is not None
+        else np.ones((world.gas_height, world.gas_width), dtype=np.bool_),
         reaction_group="gas_light",
         load_cell_mask=False,
     )
@@ -1314,7 +1367,9 @@ def run_gas_light(
     group_y = (world.gas_height + LOCAL_SIZE - 1) // LOCAL_SIZE
     ping_is_primary = True
     for rule_index in range(rule_count):
-        rule_compiled = pipeline._compile_single_gas_light_rule(rule_table[rule_index : rule_index + 1], light_table)
+        rule_compiled = pipeline._compile_single_gas_light_rule(
+            rule_table[rule_index : rule_index + 1], light_table
+        )
         resources.gl_rule_i.write(rule_compiled[0].tobytes())
         resources.gl_rule_f.write(rule_compiled[1].tobytes())
         resources.gl_rule_tags.write(rule_compiled[2].tobytes())
@@ -1343,7 +1398,9 @@ def run_gas_light(
             pipeline._promote_gas_result(world, resources, final_gas, final_ambient)
             pipeline._mark_formal_bridge_publish_pending(world, resources, "gas")
         else:
-            pipeline._publish_bridge_gas_state(world, resources, gas_texture=final_gas, ambient_texture=final_ambient)
+            pipeline._publish_bridge_gas_state(
+                world, resources, gas_texture=final_gas, ambient_texture=final_ambient
+            )
             pipeline._promote_gas_result(world, resources, final_gas, final_ambient)
     else:
         pipeline.last_cpu_mirror_downloaded = True
@@ -1351,7 +1408,9 @@ def run_gas_light(
             np.frombuffer(final_gas.read(), dtype="f4").reshape(world.gas_concentration.shape),
             0.0,
         )
-        world.ambient_temperature[:] = np.frombuffer(final_ambient.read(), dtype="f4").reshape(world.ambient_temperature.shape)
+        world.ambient_temperature[:] = np.frombuffer(final_ambient.read(), dtype="f4").reshape(
+            world.ambient_temperature.shape
+        )
     pipeline._append_flow_sources_from_gpu(
         world,
         resources,
@@ -1366,7 +1425,6 @@ def run_gas_light(
             advance_velocity_role=pipeline._formal_before_motion_cell_roles_active(),
         )
     return pipeline._download_deferred_batch(world, resources)
-
 
 
 def _run_formal_guarded_gas_light(
@@ -1445,7 +1503,9 @@ def _run_formal_guarded_gas_light(
     group_z = int(world.gas_concentration.shape[0])
     ping_is_primary = True
     for rule_index in range(rule_count):
-        rule_compiled = pipeline._compile_single_gas_light_rule(rule_table[rule_index : rule_index + 1], light_table)
+        rule_compiled = pipeline._compile_single_gas_light_rule(
+            rule_table[rule_index : rule_index + 1], light_table
+        )
         resources.gl_rule_i.write(rule_compiled[0].tobytes())
         resources.gl_rule_f.write(rule_compiled[1].tobytes())
         resources.gl_rule_tags.write(rule_compiled[2].tobytes())
@@ -1527,7 +1587,6 @@ def _run_formal_guarded_gas_light(
     return pipeline._download_deferred_batch(world, resources)
 
 
-
 def clear_reaction_latches(pipeline, world: "WorldEngine") -> bool:
     if not pipeline.available(world):
         return False
@@ -1549,10 +1608,15 @@ def clear_reaction_latches(pipeline, world: "WorldEngine") -> bool:
         flag_buffer.bind_to_storage_buffer(binding=0)
         pipeline._clear_latches_program.run((int(flat_flags.size) + 255) // 256, 1, 1)
         pipeline._sync_compute_writes(ctx)
-        world.cell_flags[:] = np.frombuffer(flag_buffer.read(), dtype=np.uint32).reshape(world.cell_flags.shape).astype(np.uint8)
+        world.cell_flags[:] = (
+            np.frombuffer(flag_buffer.read(), dtype=np.uint32)
+            .reshape(world.cell_flags.shape)
+            .astype(np.uint8)
+        )
     finally:
         flag_buffer.release()
     pipeline.last_cpu_mirror_downloaded = True
     return True
+
 
 # ``_formal_gpu_frame`` is inherited from GPUPipelineBase.

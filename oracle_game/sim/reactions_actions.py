@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
+    from oracle_game.sim.gpu_reactions import GPUDeferredActionBatch
     from oracle_game.world import WorldEngine
 
 from oracle_game.gpu import (
@@ -32,7 +33,9 @@ def _rule_value(rule: object, field: str, default: object | None = None) -> obje
     return getattr(rule, field, default)
 
 
-def _execute_pair_rule(solver, world: "WorldEngine", rule: object, x: int, y: int, scale: float) -> None:
+def _execute_pair_rule(
+    solver, world: "WorldEngine", rule: object, x: int, y: int, scale: float
+) -> None:
     trigger_slot_index = solver._rule_value(rule, "trigger_slot_index", None)
     if trigger_slot_index is not None and int(trigger_slot_index) >= 0:
         solver._trigger_material_slot(world, x, y, int(trigger_slot_index), scale=scale)
@@ -156,7 +159,9 @@ def _consume_material_cell(solver, world: "WorldEngine", x: int, y: int, amount:
         world.clear_cell(x, y)
 
 
-def _consume_gas_species(solver, world: "WorldEngine", species_id: int, gy: int, gx: int, amount: float) -> None:
+def _consume_gas_species(
+    solver, world: "WorldEngine", species_id: int, gy: int, gx: int, amount: float
+) -> None:
     if amount <= 0.0 or species_id < 0:
         return
     world.gas_concentration[species_id, gy, gx] = max(
@@ -165,7 +170,9 @@ def _consume_gas_species(solver, world: "WorldEngine", species_id: int, gy: int,
     )
 
 
-def _consume_light_dose(solver, world: "WorldEngine", dose_channel: int, x: int, y: int, amount: float) -> None:
+def _consume_light_dose(
+    solver, world: "WorldEngine", dose_channel: int, x: int, y: int, amount: float
+) -> None:
     if amount <= 0.0:
         return
     world.cell_optical_dose[dose_channel, y, x] = max(
@@ -185,7 +192,9 @@ def _mask_matches(value: int, required_mask: int) -> bool:
     return (int(value) & int(required_mask)) == int(required_mask)
 
 
-def _trigger_material_slot(solver, world: "WorldEngine", x: int, y: int, slot_index: int, *, scale: float = 1.0) -> None:
+def _trigger_material_slot(
+    solver, world: "WorldEngine", x: int, y: int, slot_index: int, *, scale: float = 1.0
+) -> None:
     material_id = int(world.material_id[y, x])
     if material_id <= 0:
         return
@@ -203,7 +212,9 @@ def _trigger_material_slot(solver, world: "WorldEngine", x: int, y: int, slot_in
         solver._execute_action(world, action_index, x, y, scale)
 
 
-def _execute_action(solver, world: "WorldEngine", action_index: int, x: int, y: int, scale: float) -> None:
+def _execute_action(
+    solver, world: "WorldEngine", action_index: int, x: int, y: int, scale: float
+) -> None:
     action = solver._action_row(world, action_index)
     if action is None:
         return
@@ -273,7 +284,9 @@ def _execute_action(solver, world: "WorldEngine", action_index: int, x: int, y: 
         if world.integrity[y, x] <= float(action["integrity_threshold"]):
             material_id = int(world.material_id[y, x])
             if int(action["flags"]) & REACTION_ACTION_FLAG_RANDOM_TARGET:
-                target_material_id = solver._select_random_convert_material(world, material_id, x, y)
+                target_material_id = solver._select_random_convert_material(
+                    world, material_id, x, y
+                )
                 if target_material_id > 0:
                     world.set_cell_by_id(x, y, target_material_id)
                 else:
@@ -300,7 +313,9 @@ def _execute_action(solver, world: "WorldEngine", action_index: int, x: int, y: 
                 world.clear_cell(x, y)
 
 
-def _execute_gas_action(solver, world: "WorldEngine", action_index: int, gx: int, gy: int, scale: float) -> None:
+def _execute_gas_action(
+    solver, world: "WorldEngine", action_index: int, gx: int, gy: int, scale: float
+) -> None:
     action = solver._action_row(world, action_index)
     if action is None:
         return
@@ -358,7 +373,9 @@ def _execute_gas_action(solver, world: "WorldEngine", action_index: int, gx: int
             {
                 "light_type": light_name,
                 "origin": (cell_x, cell_y),
-                "direction": solver._gas_direction_vector_id(world, int(action["direction_id"]), gx, gy),
+                "direction": solver._gas_direction_vector_id(
+                    world, int(action["direction_id"]), gx, gy
+                ),
                 "spread": max(0.0, float(action["beam_width"])),
                 "strength": max(0.1, float(action["strength"]) * scale),
                 "range_cells": range_cells,
@@ -401,13 +418,13 @@ def _apply_deferred_batch(solver, world: "WorldEngine", batch: "GPUDeferredActio
             or np.any(batch.emitted_material_mask)
         )
         if has_cpu_deferred_payload:
-            raise RuntimeError("GPU reaction formal frame returned CPU deferred actions; CPU fallback is disabled")
+            raise RuntimeError(
+                "GPU reaction formal frame returned CPU deferred actions; CPU fallback is disabled"
+            )
         return
     solver._append_gpu_emitted_lights(world, batch.emitted_lights)
     solver._record_gpu_emitted_materials(world, batch.emitted_material_mask)
-    ys, xs = np.nonzero(
-        np.any(batch.action_lo > 0, axis=-1) | np.any(batch.action_hi > 0, axis=-1)
-    )
+    ys, xs = np.nonzero(np.any(batch.action_lo > 0, axis=-1) | np.any(batch.action_hi > 0, axis=-1))
     used_cpu = False
     for y, x in zip(ys.tolist(), xs.tolist()):
         action_indices = batch.action_lo[y, x].tolist() + batch.action_hi[y, x].tolist()
@@ -475,7 +492,9 @@ def _append_gpu_emitted_lights(solver, world: "WorldEngine", emitted_lights: np.
         solver.last_emitted_light_mask[y, x] = True
 
 
-def _record_gpu_emitted_materials(solver, world: "WorldEngine", emitted_material_mask: np.ndarray) -> None:
+def _record_gpu_emitted_materials(
+    solver, world: "WorldEngine", emitted_material_mask: np.ndarray
+) -> None:
     if emitted_material_mask.size == 0:
         return
     mask = np.asarray(emitted_material_mask, dtype=np.bool_)
@@ -516,7 +535,9 @@ def _deferred_action_handled_by_gpu(solver, world: "WorldEngine", action_index: 
     return False
 
 
-def _select_random_convert_material(solver, world: "WorldEngine", current_material_id: int, x: int, y: int) -> int:
+def _select_random_convert_material(
+    solver, world: "WorldEngine", current_material_id: int, x: int, y: int
+) -> int:
     candidate_ids = solver._random_convert_candidates(world)
     if not candidate_ids:
         return 0

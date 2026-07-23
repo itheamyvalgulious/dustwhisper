@@ -5,15 +5,15 @@ import inspect
 import numpy as np
 import pytest
 
+from oracle_game.sim import gpu_collapse_frontier
 from oracle_game.sim.gpu_collapse import (
+    _SHADER_SUBS,
     FORMAL_CONNECTED_TILE_COUNT_BUFFER,
     FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER,
     FORMAL_CONNECTED_TILE_FRONTIER_BUFFER,
     FORMAL_CONNECTED_TILE_LIST_BUFFER,
     GPUCollapsePipeline,
-    _SHADER_SUBS,
 )
-from oracle_game.sim import gpu_collapse_frontier
 from oracle_game.sim.shader_loader import shader_source
 from oracle_game.world import WorldEngine
 
@@ -107,8 +107,13 @@ def test_u8_propagated_source_mask_elision_is_default_on_and_isolated() -> None:
     )
     assert "#if 0\n    // U8 support seeds" in canonical
     assert "#if 1\n    // U8 support seeds" in candidate
-    assert "return cell_connected(cell) && texelFetch(support_in_tex, cell, 0).x != 0u;" in candidate
-    assert "return structural_connected(cell) && texelFetch(support_in_tex, cell, 0).x > 0.5;" in candidate
+    assert (
+        "return cell_connected(cell) && texelFetch(support_in_tex, cell, 0).x != 0u;" in candidate
+    )
+    assert (
+        "return structural_connected(cell) && texelFetch(support_in_tex, cell, 0).x > 0.5;"
+        in candidate
+    )
 
     dispatch_source = inspect.getsource(
         gpu_collapse_frontier._run_formal_connected_tile_support_pass
@@ -163,9 +168,9 @@ def test_incremental_support_jfa_u8_matches_f32_raw_outputs(
                 use_u8=False,
             )
             f32_support_raw = f32_supported.read(alignment=1)
-            f32_support_mask = np.frombuffer(f32_support_raw, dtype=np.float32).reshape(
-                (height, width)
-            ) > 0.5
+            f32_support_mask = (
+                np.frombuffer(f32_support_raw, dtype=np.float32).reshape((height, width)) > 0.5
+            )
             f32_support_bytes = f32_support_mask.astype(np.uint8).tobytes()
 
             resources.support_ping.write(seeds.astype("f4", copy=False).tobytes())
@@ -183,9 +188,7 @@ def test_incremental_support_jfa_u8_matches_f32_raw_outputs(
             u8_support_raw = u8_supported.read(alignment=1)
             assert u8_support_raw == f32_support_bytes
             if (width, height) == (67, 45):
-                u8_support = np.frombuffer(u8_support_raw, dtype=np.uint8).reshape(
-                    (height, width)
-                )
+                u8_support = np.frombuffer(u8_support_raw, dtype=np.uint8).reshape((height, width))
                 assert np.all(u8_support[height - 1, 24:32] == 1)
                 assert np.all(u8_support[height - 1, 56:64] == 1)
 

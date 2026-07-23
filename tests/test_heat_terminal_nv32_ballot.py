@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 
-from oracle_game.sim.gpu_heat import GPUHeatPipeline, _SHADER_SUBS
+from oracle_game.sim.gpu_heat import _SHADER_SUBS, GPUHeatPipeline
 from oracle_game.sim.shader_loader import shader_source
 
 
@@ -18,17 +18,13 @@ def test_heat_terminal_nv32_ballot_is_default_on_and_strictly_gated() -> None:
     assert '"GL_NV_shader_thread_group"' in ensure_source
     assert "terminal_warp_size == 32" in ensure_source
     assert "if self._terminal_nv32_ballot_supported:" in ensure_source
-    assert (
-        '"apply_terminal4x6_sparse_resident_packed_lazy_nv32_ballot"'
-        in ensure_source
-    )
+    assert '"apply_terminal4x6_sparse_resident_packed_lazy_nv32_ballot"' in ensure_source
     assert "hierarchical_row_summary" in run_source
     assert "and pipeline._terminal_nv32_ballot_gas_reduction_enabled" in run_source
     assert "and pipeline._terminal_nv32_ballot_supported" in run_source
     assert "elif hierarchical_row_summary:" in run_source
     assert (
-        'program_name = "apply_terminal4x6_sparse_resident_packed_lazy_row_summary"'
-        in run_source
+        'program_name = "apply_terminal4x6_sparse_resident_packed_lazy_row_summary"' in run_source
     )
 
 

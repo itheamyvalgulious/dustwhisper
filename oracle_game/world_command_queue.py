@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from oracle_game.world_internal_helpers import _public_resolved_change_intent
 from oracle_game.types import (
     CarrierIntent,
     ChangeIntent,
@@ -24,6 +23,7 @@ from oracle_game.world_constants import (
     PUBLIC_WORLD_COMMAND_KINDS,
     TARGETED_COMMAND_COORD_FIELDS,
 )
+from oracle_game.world_internal_helpers import _public_resolved_change_intent
 
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
@@ -50,7 +50,9 @@ def _resolve_direct_targeted_coords(
     x_field, y_field = fields
     if target_queries is None:
         if x is None or y is None:
-            raise ValueError(f"{x_field} and {y_field} are required unless target_queries resolve target_query_id")
+            raise ValueError(
+                f"{x_field} and {y_field} are required unless target_queries resolve target_query_id"
+            )
         return int(x), int(y), None
     if target_query_id is None:
         raise ValueError("target_query_id is required when target_queries are provided")
@@ -73,7 +75,11 @@ def _resolve_direct_targeted_coords(
     if not resolved_commands:
         raise ValueError(f"unable to resolve {kind} target query")
     payload = resolved_commands[0].payload
-    return int(payload[x_field]), int(payload[y_field]), str(payload.get("resolved_target_query_id", target_query_id))
+    return (
+        int(payload[x_field]),
+        int(payload[y_field]),
+        str(payload.get("resolved_target_query_id", target_query_id)),
+    )
 
 
 def inject_material(
@@ -101,7 +107,12 @@ def inject_material(
     )
     if immediate:
         engine._apply_grid_world_commands(
-            [WorldCommand(kind="inject_material", payload={"x": int(x), "y": int(y), "material": material, "radius": radius})]
+            [
+                WorldCommand(
+                    kind="inject_material",
+                    payload={"x": int(x), "y": int(y), "material": material, "radius": radius},
+                )
+            ]
         )
     else:
         payload: dict[str, Any] = {"x": x, "y": y, "material": material, "radius": radius}
@@ -139,7 +150,13 @@ def write_material_region(
             [
                 WorldCommand(
                     kind="write_material_region",
-                    payload={"x": int(x), "y": int(y), "width": width, "height": height, "material": material},
+                    payload={
+                        "x": int(x),
+                        "y": int(y),
+                        "width": width,
+                        "height": height,
+                        "material": material,
+                    },
                 )
             ]
         )
@@ -181,7 +198,12 @@ def inject_temperature(
     )
     if immediate:
         engine._apply_grid_world_commands(
-            [WorldCommand(kind="inject_temperature", payload={"x": int(x), "y": int(y), "delta": delta, "radius": radius})]
+            [
+                WorldCommand(
+                    kind="inject_temperature",
+                    payload={"x": int(x), "y": int(y), "delta": delta, "radius": radius},
+                )
+            ]
         )
     else:
         payload: dict[str, Any] = {"x": x, "y": y, "delta": delta, "radius": radius}
@@ -329,12 +351,24 @@ def inject_gas(
             [
                 WorldCommand(
                     kind="inject_gas",
-                    payload={"x": int(x), "y": int(y), "species": species, "amount": amount, "radius": radius},
+                    payload={
+                        "x": int(x),
+                        "y": int(y),
+                        "species": species,
+                        "amount": amount,
+                        "radius": radius,
+                    },
                 )
             ]
         )
     else:
-        payload: dict[str, Any] = {"x": x, "y": y, "species": species, "amount": amount, "radius": radius}
+        payload: dict[str, Any] = {
+            "x": x,
+            "y": y,
+            "species": species,
+            "amount": amount,
+            "radius": radius,
+        }
         if resolved_target_query_id is not None:
             payload["resolved_target_query_id"] = resolved_target_query_id
         queue_command(engine, "inject_gas", **payload)
@@ -379,7 +413,9 @@ def request_readback(
         request = resolved_request
     request = engine._normalize_readback_request(request)
     if request.center_x is None or request.center_y is None:
-        raise ValueError("center_x and center_y are required unless target_queries resolve target_query_id")
+        raise ValueError(
+            "center_x and center_y are required unless target_queries resolve target_query_id"
+        )
     request = engine._assign_readback_request_id(request)
     queue_command(
         engine,
@@ -439,7 +475,9 @@ def preview_readback(
         request = resolved_request
     request = engine._normalize_readback_request(request)
     if request.center_x is None or request.center_y is None:
-        raise ValueError("center_x and center_y are required unless target_queries resolve target_query_id")
+        raise ValueError(
+            "center_x and center_y are required unless target_queries resolve target_query_id"
+        )
     return request
 
 
@@ -527,11 +565,15 @@ def _resolve_public_world_command(
             if resolved_request is None:
                 raise ValueError("unable to resolve world command target query")
             request = resolved_request
-        elif request.target_query_id is not None and (request.center_x is None or request.center_y is None):
+        elif request.target_query_id is not None and (
+            request.center_x is None or request.center_y is None
+        ):
             raise ValueError("target_queries are required to resolve world command target_query_id")
         request = engine._normalize_readback_request(request)
         if request.center_x is None or request.center_y is None:
-            raise ValueError("center_x and center_y are required unless target_queries resolve target_query_id")
+            raise ValueError(
+                "center_x and center_y are required unless target_queries resolve target_query_id"
+            )
         if assign_readback_request_id:
             request = engine._assign_readback_request_id(request)
         return WorldCommand(
@@ -571,7 +613,9 @@ def _public_world_command(engine: "WorldEngine", command: WorldCommand) -> World
         if isinstance(entities, list):
             payload["entities"] = [
                 engine.serialize_entity_state_input(
-                    entity if isinstance(entity, EntityState) else engine._coerce_entity_state(entity)
+                    entity
+                    if isinstance(entity, EntityState)
+                    else engine._coerce_entity_state(entity)
                 )
                 for entity in entities
             ]
@@ -580,7 +624,9 @@ def _public_world_command(engine: "WorldEngine", command: WorldCommand) -> World
         if isinstance(patches, list):
             payload["patches"] = [
                 engine.serialize_entity_state_patch(
-                    patch if isinstance(patch, EntityStatePatch) else engine._coerce_entity_state_patch(patch)
+                    patch
+                    if isinstance(patch, EntityStatePatch)
+                    else engine._coerce_entity_state_patch(patch)
                 )
                 for patch in patches
             ]
@@ -654,7 +700,9 @@ def preview_change_intent(
         resolved_targets = engine._resolve_target_queries(
             [engine._coerce_target_query(query) for query in target_queries]
         )
-    return _public_resolved_change_intent(engine, engine._resolve_change_intent(intent, resolved_targets))
+    return _public_resolved_change_intent(
+        engine, engine._resolve_change_intent(intent, resolved_targets)
+    )
 
 
 def request_change_intent(
@@ -687,7 +735,9 @@ def preview_carrier_intent(
         resolved_targets = engine._resolve_target_queries(
             [engine._coerce_target_query(query) for query in target_queries]
         )
-    return _public_resolved_carrier_intent(engine, engine._resolve_carrier_intent(intent, resolved_targets))
+    return _public_resolved_carrier_intent(
+        engine, engine._resolve_carrier_intent(intent, resolved_targets)
+    )
 
 
 def request_carrier_intent(
@@ -781,7 +831,11 @@ def _public_resolved_carrier_intent(
     intent: ResolvedCarrierIntent,
 ) -> ResolvedCarrierIntent:
     effect_cells: list[tuple[int, int]]
-    if intent.effect_shape == "beam" and intent.source_world_position is not None and intent.impact_world_position is not None:
+    if (
+        intent.effect_shape == "beam"
+        and intent.source_world_position is not None
+        and intent.impact_world_position is not None
+    ):
         effect_cells = engine._capsule_world_cells_raw(
             tuple(int(value) for value in intent.source_world_position),
             tuple(int(value) for value in intent.impact_world_position),
@@ -795,7 +849,9 @@ def _public_resolved_carrier_intent(
     else:
         effect_cells = [engine._buffer_to_world_position(cell) for cell in intent.effect_cells]
     effect_bounds = engine._buffer_cell_bounds(effect_cells)
-    generated_commands = [_public_world_command(engine, command) for command in intent.generated_commands]
+    generated_commands = [
+        _public_world_command(engine, command) for command in intent.generated_commands
+    ]
     if intent.kind == "light":
         origin_world_position = (
             tuple(int(value) for value in intent.source_world_position)

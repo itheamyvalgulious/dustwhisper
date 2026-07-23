@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+if TYPE_CHECKING:
+    from oracle_game.world import WorldEngine
+
 from oracle_game.gpu import PLACEHOLDER_DTYPE, RENDER_GROUP_IDS, typed_material_id
-from oracle_game.sim.gpu_base import GPUPipelineBase
+from oracle_game.sim.gpu_base import GPUPipelineBase, release_resource_fields
 from oracle_game.sim.shader_loader import build_compute_shader
 from oracle_game.types import EntityPlaceholder, Phase
-
 
 PASS_LOCAL_SIZE = 8
 MAX_MATERIALS = 256
@@ -92,25 +94,7 @@ class GPUPlaceholderPipeline(GPUPipelineBase):
     def release(self) -> None:
         if self.resources is None:
             return
-        for resource in (
-            self.resources.material,
-            self.resources.phase,
-            self.resources.flags,
-            self.resources.timer,
-            self.resources.temp,
-            self.resources.integrity,
-            self.resources.velocity,
-            self.resources.island,
-            self.resources.entity,
-            self.resources.displaced,
-            self.resources.ambient,
-            self.resources.placeholders,
-            self.resources.material_params,
-        ):
-            try:
-                resource.release()
-            except Exception:
-                pass
+        release_resource_fields(self.resources)
         self.resources = None
 
     def _ensure_resources(self, world: "WorldEngine") -> GPUPlaceholderResources:
@@ -133,7 +117,9 @@ class GPUPlaceholderPipeline(GPUPipelineBase):
             island=ctx.buffer(reserve=max(4, cell_count * 4), dynamic=True),
             entity=ctx.buffer(reserve=max(4, cell_count * 4), dynamic=True),
             displaced=ctx.buffer(reserve=max(4, cell_count * 4), dynamic=True),
-            ambient=ctx.buffer(reserve=max(4, world.gas_width * world.gas_height * 4), dynamic=True),
+            ambient=ctx.buffer(
+                reserve=max(4, world.gas_width * world.gas_height * 4), dynamic=True
+            ),
             placeholders=ctx.buffer(reserve=max(4, PLACEHOLDER_DTYPE.itemsize), dynamic=True),
             material_params=ctx.buffer(reserve=MAX_MATERIALS * 4 * 4, dynamic=True),
         )
@@ -142,10 +128,42 @@ class GPUPlaceholderPipeline(GPUPipelineBase):
     def _ensure_programs(self, ctx: Any) -> None:
         if self.programs:
             return
-        self.programs["apply_placeholders"] = build_compute_shader(ctx, "placeholders/pass_00.comp", {"PASS_LOCAL_SIZE": PASS_LOCAL_SIZE, "MAX_MATERIALS": MAX_MATERIALS, "MAX_MATERIALS_MINUS_1": MAX_MATERIALS - 1})
-        self.programs["load_bridge_cell"] = build_compute_shader(ctx, "placeholders/pass_01.comp", {"PASS_LOCAL_SIZE": PASS_LOCAL_SIZE, "MAX_MATERIALS": MAX_MATERIALS, "MAX_MATERIALS_MINUS_1": MAX_MATERIALS - 1})
-        self.programs["load_bridge_ambient"] = build_compute_shader(ctx, "placeholders/pass_02.comp", {"PASS_LOCAL_SIZE": PASS_LOCAL_SIZE, "MAX_MATERIALS": MAX_MATERIALS, "MAX_MATERIALS_MINUS_1": MAX_MATERIALS - 1})
-        self.programs["publish_bridge_cell"] = build_compute_shader(ctx, "placeholders/pass_03.comp", {"PASS_LOCAL_SIZE": PASS_LOCAL_SIZE, "MAX_MATERIALS": MAX_MATERIALS, "MAX_MATERIALS_MINUS_1": MAX_MATERIALS - 1})
+        self.programs["apply_placeholders"] = build_compute_shader(
+            ctx,
+            "placeholders/pass_00.comp",
+            {
+                "PASS_LOCAL_SIZE": PASS_LOCAL_SIZE,
+                "MAX_MATERIALS": MAX_MATERIALS,
+                "MAX_MATERIALS_MINUS_1": MAX_MATERIALS - 1,
+            },
+        )
+        self.programs["load_bridge_cell"] = build_compute_shader(
+            ctx,
+            "placeholders/pass_01.comp",
+            {
+                "PASS_LOCAL_SIZE": PASS_LOCAL_SIZE,
+                "MAX_MATERIALS": MAX_MATERIALS,
+                "MAX_MATERIALS_MINUS_1": MAX_MATERIALS - 1,
+            },
+        )
+        self.programs["load_bridge_ambient"] = build_compute_shader(
+            ctx,
+            "placeholders/pass_02.comp",
+            {
+                "PASS_LOCAL_SIZE": PASS_LOCAL_SIZE,
+                "MAX_MATERIALS": MAX_MATERIALS,
+                "MAX_MATERIALS_MINUS_1": MAX_MATERIALS - 1,
+            },
+        )
+        self.programs["publish_bridge_cell"] = build_compute_shader(
+            ctx,
+            "placeholders/pass_03.comp",
+            {
+                "PASS_LOCAL_SIZE": PASS_LOCAL_SIZE,
+                "MAX_MATERIALS": MAX_MATERIALS,
+                "MAX_MATERIALS_MINUS_1": MAX_MATERIALS - 1,
+            },
+        )
 
     def _pack_placeholder_upload(
         self,
@@ -159,7 +177,9 @@ class GPUPlaceholderPipeline(GPUPipelineBase):
                 world_x = int(placeholder.world_x)
                 world_y = int(placeholder.world_y)
             else:
-                world_x, world_y = world.paging.buffer_to_world(int(placeholder.x), int(placeholder.y))
+                world_x, world_y = world.paging.buffer_to_world(
+                    int(placeholder.x), int(placeholder.y)
+                )
             packed[index]["entity_id"] = int(placeholder.entity_id)
             packed[index]["buffer_x"] = int(placeholder.x)
             packed[index]["buffer_y"] = int(placeholder.y)
@@ -167,7 +187,9 @@ class GPUPlaceholderPipeline(GPUPipelineBase):
             packed[index]["world_y"] = int(world_y)
             packed[index]["width"] = int(placeholder.width)
             packed[index]["height"] = int(placeholder.height)
-            packed[index]["material_id"] = int(typed_material_id(material_table, placeholder.material))
+            packed[index]["material_id"] = int(
+                typed_material_id(material_table, placeholder.material)
+            )
         return packed
 
     def _upload_inputs(
@@ -187,17 +209,37 @@ class GPUPlaceholderPipeline(GPUPipelineBase):
             "ambient_temperature",
         )
         if not formal_gpu_frame:
-            resources.material.write(np.ascontiguousarray(world.material_id.astype(np.int32)).tobytes())
+            resources.material.write(
+                np.ascontiguousarray(world.material_id.astype(np.int32)).tobytes()
+            )
             resources.phase.write(np.ascontiguousarray(world.phase.astype(np.int32)).tobytes())
             resources.flags.write(np.ascontiguousarray(world.cell_flags.astype(np.int32)).tobytes())
-            resources.timer.write(np.ascontiguousarray(world.timer_pack.astype(np.int32).reshape(cell_count, 4)).tobytes())
-            resources.temp.write(np.ascontiguousarray(world.cell_temperature.astype(np.float32)).tobytes())
-            resources.integrity.write(np.ascontiguousarray(world.integrity.astype(np.float32)).tobytes())
-            resources.velocity.write(np.ascontiguousarray(world.velocity.astype(np.float32).reshape(cell_count, 2)).tobytes())
+            resources.timer.write(
+                np.ascontiguousarray(
+                    world.timer_pack.astype(np.int32).reshape(cell_count, 4)
+                ).tobytes()
+            )
+            resources.temp.write(
+                np.ascontiguousarray(world.cell_temperature.astype(np.float32)).tobytes()
+            )
+            resources.integrity.write(
+                np.ascontiguousarray(world.integrity.astype(np.float32)).tobytes()
+            )
+            resources.velocity.write(
+                np.ascontiguousarray(
+                    world.velocity.astype(np.float32).reshape(cell_count, 2)
+                ).tobytes()
+            )
             resources.island.write(np.ascontiguousarray(world.island_id.astype(np.int32)).tobytes())
             resources.entity.write(np.ascontiguousarray(world.entity_id.astype(np.int32)).tobytes())
-            resources.displaced.write(np.ascontiguousarray(world.placeholder_displaced_material.astype(np.int32)).tobytes())
-            resources.ambient.write(np.ascontiguousarray(world.ambient_temperature.astype(np.float32)).tobytes())
+            resources.displaced.write(
+                np.ascontiguousarray(
+                    world.placeholder_displaced_material.astype(np.int32)
+                ).tobytes()
+            )
+            resources.ambient.write(
+                np.ascontiguousarray(world.ambient_temperature.astype(np.float32)).tobytes()
+            )
         self._write_placeholder_buffer(world, resources, placeholder_upload)
         self._write_material_params(world, resources)
 
@@ -219,23 +261,38 @@ class GPUPlaceholderPipeline(GPUPipelineBase):
         if placeholder_upload.nbytes > 0:
             resources.placeholders.write(np.ascontiguousarray(placeholder_upload).tobytes())
 
-    def _write_material_params(self, world: "WorldEngine", resources: GPUPlaceholderResources) -> None:
+    def _write_material_params(
+        self, world: "WorldEngine", resources: GPUPlaceholderResources
+    ) -> None:
         material_table = world.bridge.shadow_typed_tables["material_table"]
-        signature = (world.bridge.table_generations.get("materials", 0), int(material_table.shape[0]))
+        signature = (
+            world.bridge.table_generations.get("materials", 0),
+            int(material_table.shape[0]),
+        )
         params = np.zeros((MAX_MATERIALS, 4), dtype=np.float32)
         params[:, 3] = np.nan
         count = min(MAX_MATERIALS, int(material_table.shape[0]))
         valid_indices = np.nonzero(material_table[:count]["name_hash"] != 0)[0]
-        params[valid_indices, 0] = material_table[:count]["default_phase"][valid_indices].astype(np.float32)
-        params[valid_indices, 1] = material_table[:count]["base_integrity"][valid_indices].astype(np.float32)
-        params[valid_indices, 2] = material_table[:count]["render_group_id"][valid_indices].astype(np.float32)
-        params[valid_indices, 3] = material_table[:count]["spawn_temperature"][valid_indices].astype(np.float32)
+        params[valid_indices, 0] = material_table[:count]["default_phase"][valid_indices].astype(
+            np.float32
+        )
+        params[valid_indices, 1] = material_table[:count]["base_integrity"][valid_indices].astype(
+            np.float32
+        )
+        params[valid_indices, 2] = material_table[:count]["render_group_id"][valid_indices].astype(
+            np.float32
+        )
+        params[valid_indices, 3] = material_table[:count]["spawn_temperature"][
+            valid_indices
+        ].astype(np.float32)
         resources.material_params.write(params.tobytes())
         resources.material_params_signature = signature
 
     # ``_formal_gpu_frame`` is inherited from :class:`GPUPipelineBase`.
 
-    def _load_authoritative_bridge_inputs(self, world: "WorldEngine", resources: GPUPlaceholderResources) -> None:
+    def _load_authoritative_bridge_inputs(
+        self, world: "WorldEngine", resources: GPUPlaceholderResources
+    ) -> None:
         if not self._formal_gpu_frame(world):
             return
         bridge = world.bridge
@@ -245,11 +302,15 @@ class GPUPlaceholderPipeline(GPUPipelineBase):
         copy_entity_id = "entity_id" in authoritative
         copy_displaced = "placeholder_displaced_material" in authoritative
         copy_ambient = "ambient_temperature" in authoritative
-        if not (copy_cell_core or copy_island_id or copy_entity_id or copy_displaced or copy_ambient):
+        if not (
+            copy_cell_core or copy_island_id or copy_entity_id or copy_displaced or copy_ambient
+        ):
             return
         bridge.ensure_world_resources(world)
         if not bridge.enabled or bridge.ctx is None:
-            raise RuntimeError("GPU placeholder pipeline requires bridge GPU resources for authoritative input state")
+            raise RuntimeError(
+                "GPU placeholder pipeline requires bridge GPU resources for authoritative input state"
+            )
         if copy_cell_core or copy_island_id or copy_entity_id or copy_displaced:
             program = self.programs["load_bridge_cell"]
             program["cell_grid_size"].value = (world.width, world.height)
@@ -288,12 +349,16 @@ class GPUPlaceholderPipeline(GPUPipelineBase):
             )
         self._sync_compute_writes(bridge.ctx)
 
-    def _publish_bridge_outputs(self, world: "WorldEngine", resources: GPUPlaceholderResources) -> None:
+    def _publish_bridge_outputs(
+        self, world: "WorldEngine", resources: GPUPlaceholderResources
+    ) -> None:
         bridge = world.bridge
         bridge.ensure_world_resources(world)
         if not bridge.enabled or bridge.ctx is None:
             if self._formal_gpu_frame(world):
-                raise RuntimeError("GPU placeholder pipeline requires bridge GPU resources for authoritative output state")
+                raise RuntimeError(
+                    "GPU placeholder pipeline requires bridge GPU resources for authoritative output state"
+                )
             return
         program = self.programs["publish_bridge_cell"]
         program["cell_grid_size"].value = (world.width, world.height)
@@ -331,16 +396,38 @@ class GPUPlaceholderPipeline(GPUPipelineBase):
     # SHADER_IMAGE_ACCESS / TEXTURE_FETCH / SHADER_STORAGE).
 
     def _download_outputs(self, world: "WorldEngine", resources: GPUPlaceholderResources) -> None:
-        world.material_id[:] = np.frombuffer(resources.material.read(), dtype=np.int32).reshape((world.height, world.width))
-        world.phase[:] = np.frombuffer(resources.phase.read(), dtype=np.int32).reshape((world.height, world.width)).astype(np.uint8)
-        world.cell_flags[:] = np.frombuffer(resources.flags.read(), dtype=np.int32).reshape((world.height, world.width)).astype(np.uint8)
-        timer = np.frombuffer(resources.timer.read(), dtype=np.int32).reshape((world.height, world.width, 4))
-        world.timer_pack[:] = np.clip(timer, 0, 255).astype(np.uint8)
-        world.cell_temperature[:] = np.frombuffer(resources.temp.read(), dtype=np.float32).reshape((world.height, world.width))
-        world.integrity[:] = np.frombuffer(resources.integrity.read(), dtype=np.float32).reshape((world.height, world.width))
-        world.velocity[:] = np.frombuffer(resources.velocity.read(), dtype=np.float32).reshape((world.height, world.width, 2))
-        world.island_id[:] = np.frombuffer(resources.island.read(), dtype=np.int32).reshape((world.height, world.width))
-        world.entity_id[:] = np.frombuffer(resources.entity.read(), dtype=np.int32).reshape((world.height, world.width))
-        world.placeholder_displaced_material[:] = np.frombuffer(resources.displaced.read(), dtype=np.int32).reshape(
+        world.material_id[:] = np.frombuffer(resources.material.read(), dtype=np.int32).reshape(
             (world.height, world.width)
         )
+        world.phase[:] = (
+            np.frombuffer(resources.phase.read(), dtype=np.int32)
+            .reshape((world.height, world.width))
+            .astype(np.uint8)
+        )
+        world.cell_flags[:] = (
+            np.frombuffer(resources.flags.read(), dtype=np.int32)
+            .reshape((world.height, world.width))
+            .astype(np.uint8)
+        )
+        timer = np.frombuffer(resources.timer.read(), dtype=np.int32).reshape(
+            (world.height, world.width, 4)
+        )
+        world.timer_pack[:] = np.clip(timer, 0, 255).astype(np.uint8)
+        world.cell_temperature[:] = np.frombuffer(resources.temp.read(), dtype=np.float32).reshape(
+            (world.height, world.width)
+        )
+        world.integrity[:] = np.frombuffer(resources.integrity.read(), dtype=np.float32).reshape(
+            (world.height, world.width)
+        )
+        world.velocity[:] = np.frombuffer(resources.velocity.read(), dtype=np.float32).reshape(
+            (world.height, world.width, 2)
+        )
+        world.island_id[:] = np.frombuffer(resources.island.read(), dtype=np.int32).reshape(
+            (world.height, world.width)
+        )
+        world.entity_id[:] = np.frombuffer(resources.entity.read(), dtype=np.int32).reshape(
+            (world.height, world.width)
+        )
+        world.placeholder_displaced_material[:] = np.frombuffer(
+            resources.displaced.read(), dtype=np.int32
+        ).reshape((world.height, world.width))

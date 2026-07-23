@@ -1,23 +1,22 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 if TYPE_CHECKING:
-    from oracle_game.world import WorldEngine
     from oracle_game.sim.gpu_collapse import GPUCollapseResources
+    from oracle_game.world import WorldEngine
 
-from oracle_game.types import CollapseBehavior, Phase
-
+from oracle_game.sim.gpu_base import release_resource_fields
 from oracle_game.sim.gpu_collapse import (
     FORMAL_CONNECTED_TILE_COUNT_BUFFER,
     FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER,
     FORMAL_CONNECTED_TILE_LIST_BUFFER,
     FORMAL_CONNECTED_TILE_LOCAL_SIZE,
-    LOCAL_SIZE
+    LOCAL_SIZE,
 )
-
+from oracle_game.types import CollapseBehavior, Phase
 
 
 def solve_region(
@@ -77,7 +76,9 @@ def solve_region_textures(
     scratch = resources.support_pong
     jumps = pipeline._formal_jfa_jumps(width, height)
     for jump in jumps:
-        current, scratch, _ = pipeline._run_pass(ctx, resources, current, scratch, width, height, jump, read_changed=False)
+        current, scratch, _ = pipeline._run_pass(
+            ctx, resources, current, scratch, width, height, jump, read_changed=False
+        )
     if pipeline._formal_gpu_frame(world):
         current, scratch = pipeline._run_formal_support_refine_passes(
             ctx,
@@ -89,7 +90,9 @@ def solve_region_textures(
             jumps,
         )
         if publish_masks:
-            pipeline._publish_bridge_region_mask(world, resources, current, "collapse_supported_mask", x0, y0, width, height)
+            pipeline._publish_bridge_region_mask(
+                world, resources, current, "collapse_supported_mask", x0, y0, width, height
+            )
             pipeline._publish_bridge_region_mask(
                 world,
                 resources,
@@ -103,7 +106,9 @@ def solve_region_textures(
             )
     else:
         while True:
-            current, scratch, changed = pipeline._run_pass(ctx, resources, current, scratch, width, height, 1)
+            current, scratch, changed = pipeline._run_pass(
+                ctx, resources, current, scratch, width, height, 1
+            )
             if not changed:
                 break
     return current
@@ -138,8 +143,12 @@ def expand_region_to_component_bbox(
         world.height,
         publish_masks=False,
     )
-    pipeline.seed_structural_region_texture(world, resources, width, height, seed_x0, seed_y0, seed_x1, seed_y1)
-    connected_texture = pipeline.solve_region_textures(world, resources, width, height, x0=0, y0=0, publish_masks=False)
+    pipeline.seed_structural_region_texture(
+        world, resources, width, height, seed_x0, seed_y0, seed_x1, seed_y1
+    )
+    connected_texture = pipeline.solve_region_textures(
+        world, resources, width, height, x0=0, y0=0, publish_masks=False
+    )
     metadata = pipeline.summarize_labeled_component_texture(
         world,
         connected_texture,
@@ -216,9 +225,15 @@ def classify_region(
         return empty_bool, empty_bool.copy(), empty_int
     resources, width, height = pipeline.classify_region_textures(world, x0, y0, x1, y1)
     ctx.finish()
-    structural = np.frombuffer(resources.structural_tex.read(), dtype="f4").reshape((height, width)) > 0.5
-    support_seed = np.frombuffer(resources.support_ping.read(), dtype="f4").reshape((height, width)) > 0.5
-    behavior = np.rint(np.frombuffer(resources.material_out_tex.read(), dtype="f4").reshape((height, width))).astype(np.int32)
+    structural = (
+        np.frombuffer(resources.structural_tex.read(), dtype="f4").reshape((height, width)) > 0.5
+    )
+    support_seed = (
+        np.frombuffer(resources.support_ping.read(), dtype="f4").reshape((height, width)) > 0.5
+    )
+    behavior = np.rint(
+        np.frombuffer(resources.material_out_tex.read(), dtype="f4").reshape((height, width))
+    ).astype(np.int32)
     return structural, support_seed, behavior
 
 
@@ -243,7 +258,9 @@ def classify_region_textures(
     pipeline._ensure_programs(ctx)
     resources = pipeline._ensure_resources(ctx, width, height)
     pipeline._upload_region_state(world, resources, x0, y0, width, height)
-    structural_params, support_params, behavior_params = pipeline._classification_material_params(world)
+    structural_params, support_params, behavior_params = pipeline._classification_material_params(
+        world
+    )
     pipeline._write_dynamic_buffer(ctx, resources, "material_structural", structural_params)
     pipeline._write_dynamic_buffer(ctx, resources, "material_support_anchor", support_params)
     pipeline._write_dynamic_buffer(ctx, resources, "material_collapse_behavior", behavior_params)
@@ -314,9 +331,15 @@ def resolve_unsupported_outcomes(
         x0,
         y0,
     )
-    delayed_pending = np.frombuffer(resources.support_pong.read(), dtype="f4").reshape((height, width)) > 0.5
-    immune_unsupported = np.frombuffer(resources.material_out_tex.read(), dtype="f4").reshape((height, width)) > 0.5
-    collapse_now = np.frombuffer(resources.phase_out_tex.read(), dtype="f4").reshape((height, width)) > 0.5
+    delayed_pending = (
+        np.frombuffer(resources.support_pong.read(), dtype="f4").reshape((height, width)) > 0.5
+    )
+    immune_unsupported = (
+        np.frombuffer(resources.material_out_tex.read(), dtype="f4").reshape((height, width)) > 0.5
+    )
+    collapse_now = (
+        np.frombuffer(resources.phase_out_tex.read(), dtype="f4").reshape((height, width)) > 0.5
+    )
     if not pipeline._formal_gpu_frame(world):
         pending_region = world.collapse_delay_pending[y0 : y0 + height, x0 : x0 + width]
         pending_region[:] = delayed_pending
@@ -521,7 +544,9 @@ def resolve_supported_outcome_textures(
     supported_texture.use(location=1)
     resources.material_out_tex.use(location=2)
     resources.pending_tex.use(location=3)
-    (eligibility_texture if eligibility_texture is not None else resources.structural_tex).use(location=7)
+    (eligibility_texture if eligibility_texture is not None else resources.structural_tex).use(
+        location=7
+    )
     if direct_behavior_inputs and not packed_material_snapshot:
         resources.material_tex.use(location=8)
     resources.temp_out_tex.bind_to_image(4, read=False, write=True)
@@ -538,7 +563,9 @@ def resolve_supported_outcome_textures(
         if direct_behavior_inputs:
             resources.material_collapse_behavior.bind_to_storage_buffer(binding=5)
         if publish_immune_direct:
-            world.bridge.buffers["collapse_immune_unsupported_mask"].bind_to_storage_buffer(binding=6)
+            world.bridge.buffers["collapse_immune_unsupported_mask"].bind_to_storage_buffer(
+                binding=6
+            )
         if publish_delayed_direct:
             world.bridge.buffers["collapse_delay_pending"].bind_to_storage_buffer(binding=7)
             world.bridge.buffers["collapse_delayed_pending_mask"].bind_to_storage_buffer(binding=8)
@@ -564,7 +591,9 @@ def resolve_supported_outcome_textures(
     if publish_immune_direct:
         world.bridge.mark_gpu_authoritative("collapse_immune_unsupported_mask")
     if publish_delayed_direct:
-        world.bridge.mark_gpu_authoritative("collapse_delay_pending", "collapse_delayed_pending_mask")
+        world.bridge.mark_gpu_authoritative(
+            "collapse_delay_pending", "collapse_delayed_pending_mask"
+        )
     ctx.memory_barrier(barrier_bits)
     if pipeline._formal_gpu_frame(world) and publish_outputs:
         pipeline._publish_bridge_pending_region_outputs_from_texture(
@@ -658,58 +687,5 @@ def release(pipeline) -> None:
     pipeline._invalidate_persistent_dense_tile_worklist()
     if pipeline.resources is None:
         return
-    for resource in (
-        pipeline.resources.structural_tex,
-        pipeline.resources.support_ping,
-        pipeline.resources.support_pong,
-        pipeline.resources.support_u8_ping,
-        pipeline.resources.support_u8_pong,
-        pipeline.resources.material_tex,
-        pipeline.resources.material_out_tex,
-        pipeline.resources.phase_tex,
-        pipeline.resources.phase_out_tex,
-        pipeline.resources.pending_tex,
-        pipeline.resources.cell_flags_tex,
-        pipeline.resources.cell_flags_out_tex,
-        pipeline.resources.timer_tex,
-        pipeline.resources.timer_out_tex,
-        pipeline.resources.integrity_tex,
-        pipeline.resources.integrity_out_tex,
-        pipeline.resources.temp_tex,
-        pipeline.resources.temp_out_tex,
-        pipeline.resources.island_id_tex,
-        pipeline.resources.island_id_out_tex,
-        pipeline.resources.entity_id_tex,
-        pipeline.resources.entity_id_out_tex,
-        pipeline.resources.displaced_tex,
-        pipeline.resources.displaced_out_tex,
-        pipeline.resources.change_flag,
-        pipeline.resources.component_labels,
-        pipeline.resources.component_island_ids,
-        pipeline.resources.component_metadata,
-        pipeline.resources.component_flags,
-        pipeline.resources.component_invalid,
-        pipeline.resources.component_count,
-        pipeline.resources.component_dispatch_args,
-        pipeline.resources.region_flags,
-        pipeline.resources.support_tile_union_roots,
-        pipeline.resources.support_tile_union_parent,
-        pipeline.resources.support_tile_union_seeded,
-        pipeline.resources.support_tile_union_edges,
-        pipeline.resources.support_tile_union_edge_count,
-        pipeline.resources.connected_tile_row_masks,
-        pipeline.resources.connected_tile_column_masks,
-        pipeline.resources.material_structural,
-        pipeline.resources.material_support_anchor,
-        pipeline.resources.material_collapse_behavior,
-        pipeline.resources.material_collapse_generation,
-        pipeline.resources.material_base_integrity,
-        pipeline.resources.material_spawn_temperature,
-    ):
-        if resource is None:
-            continue
-        try:
-            resource.release()
-        except Exception:
-            pass
+    release_resource_fields(pipeline.resources)
     pipeline.resources = None

@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
-
 from copy import deepcopy
 from dataclasses import asdict, replace
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -11,8 +10,8 @@ from oracle_game.sim.gpu_world_commands import COMMAND_KIND_IDS as GPU_WORLD_COM
 from oracle_game.types import (
     EntityObservationSpec,
     EntityPlaceholder,
-    EntityStatePatch,
     EntityState,
+    EntityStatePatch,
     ForceSource,
     PageStripeUpdate,
     ReadbackRequest,
@@ -90,6 +89,20 @@ def _subtract_page_stripe_range_from_region(
     return remaining
 
 
+# Resources the GPU world command pipeline requires to be GPU-authoritative
+# before applying commands in a formal GPU frame; must match the strict gate
+# in gpu_world_commands.GPUWorldCommandPipeline._upload_inputs.
+_GPU_WORLD_COMMAND_INPUT_RESOURCES = (
+    "cell_core",
+    "island_id",
+    "entity_id",
+    "placeholder_displaced_material",
+    "ambient_temperature",
+    "flow_velocity",
+    "gas_concentration",
+)
+
+
 def _apply_grid_world_commands(engine: "WorldEngine", commands: list[WorldCommand]) -> None:
     if not commands:
         engine.grid_command_pipeline.last_backend = "idle"
@@ -99,6 +112,21 @@ def _apply_grid_world_commands(engine: "WorldEngine", commands: list[WorldComman
         "world command",
         require=engine.simulation_backend == "gpu",
     ):
+        if engine.simulation_backend == "gpu" and engine._world_simulation_frame_active:
+            missing_inputs = [
+                name
+                for name in _GPU_WORLD_COMMAND_INPUT_RESOURCES
+                if name not in engine.bridge.gpu_authoritative_resources
+            ]
+            if missing_inputs:
+                # Commands apply before the pre-simulation bridge sync in the
+                # frame pipeline, so a fresh engine (or one with CPU-dirty
+                # world state) reaches the command pass without
+                # GPU-authoritative inputs. Upload the pending CPU-side state
+                # first, mirroring the on-demand pre-sync in
+                # _sync_entity_placeholders.
+                engine._sync_pre_simulation_bridge_without_debug_upload()
+                engine._gpu_cpu_dirty_resources.clear()
         engine.grid_command_pipeline.apply(engine, commands)
         if engine.simulation_backend == "gpu" and engine._world_simulation_frame_active:
             active_rects: list[tuple[int, int, int, int, int]] = []
@@ -137,7 +165,9 @@ def _apply_grid_world_command_cpu(engine: "WorldEngine", command: WorldCommand) 
         )
     elif command.kind == "inject_temperature":
         x, y = engine._queued_command_xy(command)
-        engine._inject_temperature_immediate(x, y, command.payload["delta"], command.payload["radius"])
+        engine._inject_temperature_immediate(
+            x, y, command.payload["delta"], command.payload["radius"]
+        )
     elif command.kind == "inject_velocity":
         x, y = engine._queued_command_xy(command)
         engine._inject_velocity_immediate(
@@ -150,7 +180,9 @@ def _apply_grid_world_command_cpu(engine: "WorldEngine", command: WorldCommand) 
         )
     elif command.kind == "inject_gas":
         x, y = engine._queued_command_xy(command)
-        engine._inject_gas_immediate(x, y, command.payload["species"], command.payload["amount"], command.payload["radius"])
+        engine._inject_gas_immediate(
+            x, y, command.payload["species"], command.payload["amount"], command.payload["radius"]
+        )
 
 
 def _grid_world_command_runtime_regions(
@@ -197,6 +229,7 @@ def _grid_world_command_runtime_regions(
 
 def _apply_commands(engine: "WorldEngine") -> None:
     pending_grid_commands: list[WorldCommand] = []
+
     def flush_pending_grid_commands() -> None:
         if not pending_grid_commands:
             return
@@ -207,11 +240,15 @@ def _apply_commands(engine: "WorldEngine") -> None:
 
     while engine.command_queue:
         command = engine.command_queue.popleft()
-        engine.bridge_frame_commands.append(WorldCommand(kind=command.kind, payload=deepcopy(command.payload)))
+        engine.bridge_frame_commands.append(
+            WorldCommand(kind=command.kind, payload=deepcopy(command.payload))
+        )
         if command.kind in GPU_WORLD_COMMAND_KIND_IDS:
             if engine.simulation_backend == "gpu":
                 engine._gpu_pipeline_available(engine.grid_command_pipeline, "world command")
-            pending_grid_commands.append(WorldCommand(kind=command.kind, payload=deepcopy(command.payload)))
+            pending_grid_commands.append(
+                WorldCommand(kind=command.kind, payload=deepcopy(command.payload))
+            )
             continue
         flush_pending_grid_commands()
         if command.kind == "inject_material":
@@ -228,7 +265,9 @@ def _apply_commands(engine: "WorldEngine") -> None:
             )
         elif command.kind == "inject_temperature":
             x, y = engine._queued_command_xy(command)
-            engine._inject_temperature_immediate(x, y, command.payload["delta"], command.payload["radius"])
+            engine._inject_temperature_immediate(
+                x, y, command.payload["delta"], command.payload["radius"]
+            )
         elif command.kind == "inject_velocity":
             x, y = engine._queued_command_xy(command)
             engine._inject_velocity_immediate(
@@ -255,7 +294,13 @@ def _apply_commands(engine: "WorldEngine") -> None:
             )
         elif command.kind == "inject_gas":
             x, y = engine._queued_command_xy(command)
-            engine._inject_gas_immediate(x, y, command.payload["species"], command.payload["amount"], command.payload["radius"])
+            engine._inject_gas_immediate(
+                x,
+                y,
+                command.payload["species"],
+                command.payload["amount"],
+                command.payload["radius"],
+            )
         elif command.kind == "inject_light":
             light_type = command.payload["light_type"]
             light_id = engine._resolve_sanctioned_light_id(str(light_type))
@@ -309,7 +354,9 @@ def _apply_commands(engine: "WorldEngine") -> None:
                 [
                     engine._frame_entity_state_patch_input(patch)
                     if isinstance(patch, EntityStatePatch)
-                    else engine._frame_entity_state_patch_input(engine._coerce_entity_state_patch(patch))
+                    else engine._frame_entity_state_patch_input(
+                        engine._coerce_entity_state_patch(patch)
+                    )
                     for patch in payload
                 ]
             )
@@ -326,10 +373,7 @@ def _apply_commands(engine: "WorldEngine") -> None:
         elif command.kind == "set_force_sources":
             payload = command.payload.get("force_sources", [])
             engine._sync_force_sources(
-                [
-                    engine._public_force_source_input(force_source)
-                    for force_source in payload
-                ]
+                [engine._public_force_source_input(force_source) for force_source in payload]
             )
         elif command.kind == "set_emitters":
             payload = command.payload.get("emitters", [])
@@ -350,14 +394,20 @@ def _apply_commands(engine: "WorldEngine") -> None:
             engine._advance_paging(command.payload["center_x"], command.payload["center_y"])
         elif command.kind == "apply_page_stripe":
             update_payload = command.payload["update"]
-            update = update_payload if isinstance(update_payload, PageStripeUpdate) else PageStripeUpdate(**update_payload)
+            update = (
+                update_payload
+                if isinstance(update_payload, PageStripeUpdate)
+                else PageStripeUpdate(**update_payload)
+            )
             engine.bridge_frame_paging_updates.append(PageStripeUpdate(**asdict(update)))
             engine._apply_page_stripe(update, command.payload["payload"])
             engine._record_bridge_page_stripe(update, command.payload["payload"])
         elif command.kind == "reset_world":
             engine._reset_world_state(reset_bridge_frame_inputs=True, keep_command_log=True)
         elif command.kind == "request_readback":
-            request = engine._assign_readback_request_id(engine._normalize_readback_request(ReadbackRequest(**command.payload)))
+            request = engine._assign_readback_request_id(
+                engine._normalize_readback_request(ReadbackRequest(**command.payload))
+            )
             engine.pending_readbacks.append(request)
             engine.bridge_frame_readback_requests.append(replace(request))
         elif command.kind == "update_material_table":
@@ -369,11 +419,17 @@ def _apply_commands(engine: "WorldEngine") -> None:
         elif command.kind == "update_material_optics_table":
             engine.update_material_optics_table(command.payload["optics"], immediate=True)
         elif command.kind == "update_reaction_table":
-            engine.update_reaction_table(command.payload["actions"], command.payload["rules"], immediate=True)
+            engine.update_reaction_table(
+                command.payload["actions"], command.payload["rules"], immediate=True
+            )
         elif command.kind == "replace_reaction_table":
-            engine.replace_reaction_table(command.payload["actions"], command.payload["rules"], immediate=True)
+            engine.replace_reaction_table(
+                command.payload["actions"], command.payload["rules"], immediate=True
+            )
         elif command.kind == "patch_material":
-            engine.patch_material(command.payload["name"], immediate=True, **command.payload["fields"])
+            engine.patch_material(
+                command.payload["name"], immediate=True, **command.payload["fields"]
+            )
         elif command.kind == "patch_light":
             engine.patch_light(command.payload["name"], immediate=True, **command.payload["fields"])
         elif command.kind == "patch_gas":
@@ -386,7 +442,9 @@ def _apply_commands(engine: "WorldEngine") -> None:
                 **command.payload["fields"],
             )
         elif command.kind == "patch_reaction_action":
-            engine.patch_reaction_action(command.payload["index"], immediate=True, **command.payload["fields"])
+            engine.patch_reaction_action(
+                command.payload["index"], immediate=True, **command.payload["fields"]
+            )
         elif command.kind == "delete_reaction_action":
             engine.delete_reaction_action(command.payload["index"], immediate=True)
         elif command.kind == "patch_reaction_rule":
@@ -403,6 +461,10 @@ def _apply_commands(engine: "WorldEngine") -> None:
                 immediate=True,
             )
     flush_pending_grid_commands()
+    if engine.bridge_frame_commands:
+        # Publish the applied commands so shadow buffers / upload snapshots
+        # reflect them without forcing a full pre-simulation sync_world.
+        engine.bridge.sync_world_commands(engine)
 
 
 def _queue_loaded_collapse_pending_regions_from_payload(
@@ -461,7 +523,12 @@ def _resolve_targeted_commands(
             continue
         target = resolved_targets.get(str(target_query_id))
         fields = TARGETED_COMMAND_COORD_FIELDS.get(command.kind)
-        if target is None or target.status != "resolved" or target.resolved_world_position is None or fields is None:
+        if (
+            target is None
+            or target.status != "resolved"
+            or target.resolved_world_position is None
+            or fields is None
+        ):
             continue
         world_x = int(target.resolved_world_position[0]) + target_dx
         world_y = int(target.resolved_world_position[1]) + target_dy

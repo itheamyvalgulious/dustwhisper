@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from oracle_game.gpu import (FALLING_ISLAND_BREAK_KIND_IDS, LIQUID_SOLVER_KIND_IDS, POWDER_SOLVER_KIND_IDS)
+from oracle_game.gpu import (
+    FALLING_ISLAND_BREAK_KIND_IDS,
+    LIQUID_SOLVER_KIND_IDS,
+    POWDER_SOLVER_KIND_IDS,
+)
 from oracle_game.types import COLLAPSE_BEHAVIOR_IDS, Direction, Phase, ReactionType
-
 
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
@@ -117,7 +120,9 @@ def _capabilities_tables_section(engine: "WorldEngine", ctx) -> dict[str, Any]:
         },
         "material_patch": {
             "fields": material_patch_fields,
-            "patchable_fields": [field for field in material_fields if field not in {"material_id"}],
+            "patchable_fields": [
+                field for field in material_fields if field not in {"material_id"}
+            ],
         },
         "gas_patch": {
             "fields": gas_patch_fields,

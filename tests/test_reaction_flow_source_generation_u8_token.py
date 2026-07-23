@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import inspect
 
-from oracle_game.sim.gpu_reactions import GPUReactionPipeline, _SHADER_SUBS
+from oracle_game.sim.gpu_reactions import _SHADER_SUBS, GPUReactionPipeline
 from oracle_game.sim.gpu_reactions_bridge import _apply_flow_sources_to_bridge_velocity
 from oracle_game.sim.gpu_reactions_resources import _ensure_resources
 from oracle_game.sim.gpu_reactions_transient import _advance_flow_source_generation
 from oracle_game.sim.shader_loader import shader_source
-
 
 FLOW_SOURCE_WRITERS = (
     "reactions/scatter_cell_gas_action_delta.comp",

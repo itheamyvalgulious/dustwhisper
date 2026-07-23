@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from oracle_game.gpu import typed_light_id
-from oracle_game.sim.gpu_base import GPUPipelineBase
-from oracle_game.sim.shader_loader import build_compute_shader, shader_source
-from oracle_game.types import CellFlag
+if TYPE_CHECKING:
+    from oracle_game.world import WorldEngine
 
+from oracle_game.gpu import typed_light_id
+from oracle_game.sim.gpu_base import GPUPipelineBase, release_resource_fields
+from oracle_game.sim.shader_loader import build_compute_shader
+from oracle_game.types import CellFlag
 
 LOCAL_SIZE = 8
 RAY_LOCAL_SIZE = 64
@@ -175,7 +177,10 @@ class GPUOpticsPipeline(GPUPipelineBase):
                 force_all_active=force_all_active,
                 tile_seeded_build=use_tile_seeded_build,
             )
-        if self._formal_gpu_frame(world) and "reaction_light_emitter_count" in world.bridge.gpu_authoritative_resources:
+        if (
+            self._formal_gpu_frame(world)
+            and "reaction_light_emitter_count" in world.bridge.gpu_authoritative_resources
+        ):
             with self._profile_pass(world, "optics_trace_reaction_emitters"):
                 self._run_emitter_buffer_rays(
                     world,
@@ -214,10 +219,7 @@ class GPUOpticsPipeline(GPUPipelineBase):
                     allow_direct_visual_accumulators=True,
                 )
         resources.sparse_initialized = use_sparse_worklists
-        if not (
-            self._formal_gpu_frame(world)
-            and self._direct_bridge_visible_publish_enabled
-        ):
+        if not (self._formal_gpu_frame(world) and self._direct_bridge_visible_publish_enabled):
             with self._profile_pass(world, "optics_publish_bridge"):
                 self._publish_bridge_outputs(world, resources)
         self.last_cpu_mirror_downloaded = not self._formal_gpu_frame(world)
@@ -228,35 +230,7 @@ class GPUOpticsPipeline(GPUPipelineBase):
     def release(self) -> None:
         if self.resources is None:
             return
-        for resource in (
-            self.resources.material_tex,
-            self.resources.active_cell_tex,
-            self.resources.active_gas_tex,
-            self.resources.cell_dose,
-            self.resources.gas_dose,
-            self.resources.illum_layers,
-            self.resources.cell_dose_accum,
-            self.resources.gas_dose_accum,
-            self.resources.illum_accum,
-            self.resources.visible_tex,
-            self.resources.emitter_buffer,
-            self.resources.emitter_count_buffer,
-            self.resources.light_buffer,
-            self.resources.optics_buffer,
-            self.resources.sparse_visible_marks,
-            self.resources.sparse_cell_list,
-            self.resources.sparse_gas_list,
-            self.resources.sparse_visible_list,
-            self.resources.sparse_cell_tile_marks,
-            self.resources.sparse_gas_tile_marks,
-            self.resources.sparse_cell_tile_list,
-            self.resources.sparse_gas_tile_list,
-            self.resources.sparse_runtime,
-        ):
-            try:
-                resource.release()
-            except Exception:
-                pass
+        release_resource_fields(self.resources)
         self.resources = None
 
     def invalidate_sparse_runtime(self) -> None:
@@ -266,7 +240,13 @@ class GPUOpticsPipeline(GPUPipelineBase):
     def _ensure_resources(self, world: "WorldEngine") -> GPUOpticsResources:
         ctx = world.bridge.ctx
         assert ctx is not None
-        signature = (world.width, world.height, world.gas_width, world.gas_height, world.cell_optical_dose.shape[0])
+        signature = (
+            world.width,
+            world.height,
+            world.gas_width,
+            world.gas_height,
+            world.cell_optical_dose.shape[0],
+        )
         if self.resources is not None and self.resources.signature == signature:
             return self.resources
         self.release()
@@ -275,10 +255,20 @@ class GPUOpticsPipeline(GPUPipelineBase):
         active_cell_tex = ctx.texture((world.width, world.height), 1, dtype="f4")
         active_gas_tex = ctx.texture((world.gas_width, world.gas_height), 1, dtype="f4")
         cell_dose = ctx.texture_array((world.width, world.height, light_count), 1, dtype="f4")
-        gas_dose = ctx.texture_array((world.gas_width, world.gas_height, light_count), 1, dtype="f4")
+        gas_dose = ctx.texture_array(
+            (world.gas_width, world.gas_height, light_count), 1, dtype="f4"
+        )
         illum_layers = ctx.texture_array((world.width, world.height, light_count), 1, dtype="f4")
         visible_tex = ctx.texture((world.width, world.height), 4, dtype="f4")
-        for texture in (material_tex, active_cell_tex, active_gas_tex, cell_dose, gas_dose, illum_layers, visible_tex):
+        for texture in (
+            material_tex,
+            active_cell_tex,
+            active_gas_tex,
+            cell_dose,
+            gas_dose,
+            illum_layers,
+            visible_tex,
+        ):
             texture.filter = (ctx.NEAREST, ctx.NEAREST)
         emitter_buffer = ctx.buffer(reserve=MAX_EMITTERS * 8 * 4, dynamic=True)
         emitter_count_buffer = ctx.buffer(reserve=16 * 4, dynamic=True)
@@ -299,7 +289,9 @@ class GPUOpticsPipeline(GPUPipelineBase):
         sparse_gas_tile_count = ((world.gas_width + LOCAL_SIZE - 1) // LOCAL_SIZE) * (
             (world.gas_height + LOCAL_SIZE - 1) // LOCAL_SIZE
         )
-        sparse_cell_tile_marks = ctx.buffer(reserve=max(4, sparse_cell_tile_count * 4), dynamic=True)
+        sparse_cell_tile_marks = ctx.buffer(
+            reserve=max(4, sparse_cell_tile_count * 4), dynamic=True
+        )
         sparse_gas_tile_marks = ctx.buffer(reserve=max(4, sparse_gas_tile_count * 4), dynamic=True)
         sparse_cell_tile_list = ctx.buffer(reserve=max(4, sparse_cell_tile_count * 4), dynamic=True)
         sparse_gas_tile_list = ctx.buffer(reserve=max(4, sparse_gas_tile_count * 4), dynamic=True)
@@ -395,7 +387,10 @@ class GPUOpticsPipeline(GPUPipelineBase):
         if self.programs:
             return
         self.programs["load_active_cell"] = build_compute_shader(
-            ctx, "optics/load_active_cell.comp", _SHADER_SUBS, includes=["optics/_active_common.comp"]
+            ctx,
+            "optics/load_active_cell.comp",
+            _SHADER_SUBS,
+            includes=["optics/_active_common.comp"],
         )
         self.programs["load_active_cell_snapshot"] = build_compute_shader(
             ctx,
@@ -405,7 +400,10 @@ class GPUOpticsPipeline(GPUPipelineBase):
         )
         tile_seed_subs = {**_SHADER_SUBS, "TILE_SEEDED_BUILD": 1}
         self.programs["load_active_gas"] = build_compute_shader(
-            ctx, "optics/load_active_gas.comp", _SHADER_SUBS, includes=["optics/_active_common.comp"]
+            ctx,
+            "optics/load_active_gas.comp",
+            _SHADER_SUBS,
+            includes=["optics/_active_common.comp"],
         )
         self.programs["load_active_gas_snapshot"] = build_compute_shader(
             ctx,
@@ -417,7 +415,10 @@ class GPUOpticsPipeline(GPUPipelineBase):
             ctx, "optics/trace_body.comp", _SHADER_SUBS, includes=["optics/_trace_common.comp"]
         )
         self.programs["trace_emitters_full_active"] = build_compute_shader(
-            ctx, "optics/trace_body.comp", _SHADER_SUBS, includes=["optics/_trace_common_full_active.comp"]
+            ctx,
+            "optics/trace_body.comp",
+            _SHADER_SUBS,
+            includes=["optics/_trace_common_full_active.comp"],
         )
         # Shift variant: power-of-two gas_cell_size enables a bitwise >> mapping
         # with a ``gas_cell_shift`` uniform. Both the preamble and the gas-cell
@@ -427,7 +428,10 @@ class GPUOpticsPipeline(GPUPipelineBase):
             "GAS_CELL_COMPUTE": "ivec2(cell.x >> gas_cell_shift, cell.y >> gas_cell_shift)",
         }
         self.programs["trace_emitters_full_active_shift"] = build_compute_shader(
-            ctx, "optics/trace_body.comp", shift_subs, includes=["optics/_trace_common_full_active_shift.comp"]
+            ctx,
+            "optics/trace_body.comp",
+            shift_subs,
+            includes=["optics/_trace_common_full_active_shift.comp"],
         )
         self.programs["trace_emitters_tile_seeded"] = build_compute_shader(
             ctx, "optics/trace_body.comp", tile_seed_subs, includes=["optics/_trace_common.comp"]
@@ -505,7 +509,7 @@ class GPUOpticsPipeline(GPUPipelineBase):
         ):
             warp_size_program = build_compute_shader(
                 ctx,
-                "optics/query_nv_warp_size.comp",
+                "_shared/query_nv_warp_size.comp",
             )
             warp_size_buffer = ctx.buffer(reserve=np.dtype(np.uint32).itemsize)
             try:
@@ -562,22 +566,27 @@ class GPUOpticsPipeline(GPUPipelineBase):
         with self._profile_pass(world, "optics_upload_inputs.tables"):
             world.bridge.sync_rule_tables(world)
             light_table = world.bridge.shadow_typed_tables["light_table"]
-            light_signature = (world.bridge.table_generations.get("lights", 0), int(light_table.shape[0]))
+            light_signature = (
+                world.bridge.table_generations.get("lights", 0),
+                int(light_table.shape[0]),
+            )
             count = min(MAX_LIGHTS, int(light_table.shape[0]))
             if resources.light_buffer_signature != light_signature:
                 light_colors = np.zeros((MAX_LIGHTS * 2, 4), dtype="f4")
                 light_colors[:count, :3] = light_table[:count]["color"]
                 light_colors[:count, 3] = light_table[:count]["dose_channel_id"].astype(np.float32)
-                light_colors[MAX_LIGHTS : MAX_LIGHTS + count, 0] = light_table[:count]["visual_channel"].astype(
-                    np.float32
-                )
-                light_colors[MAX_LIGHTS : MAX_LIGHTS + count, 1] = light_table[:count]["render_style_id"].astype(
-                    np.float32
-                )
-                light_colors[MAX_LIGHTS : MAX_LIGHTS + count, 2] = light_table[:count]["max_bounce"].astype(np.float32)
-                light_colors[MAX_LIGHTS : MAX_LIGHTS + count, 3] = light_table[:count]["default_range"].astype(
-                    np.float32
-                )
+                light_colors[MAX_LIGHTS : MAX_LIGHTS + count, 0] = light_table[:count][
+                    "visual_channel"
+                ].astype(np.float32)
+                light_colors[MAX_LIGHTS : MAX_LIGHTS + count, 1] = light_table[:count][
+                    "render_style_id"
+                ].astype(np.float32)
+                light_colors[MAX_LIGHTS : MAX_LIGHTS + count, 2] = light_table[:count][
+                    "max_bounce"
+                ].astype(np.float32)
+                light_colors[MAX_LIGHTS : MAX_LIGHTS + count, 3] = light_table[:count][
+                    "default_range"
+                ].astype(np.float32)
                 resources.light_buffer.write(light_colors.tobytes())
                 resources.light_buffer_signature = light_signature
 
@@ -595,7 +604,12 @@ class GPUOpticsPipeline(GPUPipelineBase):
                 for row in optics_table:
                     material_id = int(row["material_id"])
                     light_id = int(row["light_type_id"])
-                    if material_id < 0 or material_id >= MAX_MATERIALS or light_id < 0 or light_id >= MAX_LIGHTS:
+                    if (
+                        material_id < 0
+                        or material_id >= MAX_MATERIALS
+                        or light_id < 0
+                        or light_id >= MAX_LIGHTS
+                    ):
                         continue
                     optics[material_id * MAX_LIGHTS + light_id] = (
                         float(row["absorption"]),
@@ -606,16 +620,16 @@ class GPUOpticsPipeline(GPUPipelineBase):
                 resources.optics_buffer.write(optics.tobytes())
                 resources.optics_buffer_signature = optics_signature
 
-        active_authoritative = formal_gpu_frame and "active_tile_ttl" in world.bridge.gpu_authoritative_resources
+        active_authoritative = (
+            formal_gpu_frame and "active_tile_ttl" in world.bridge.gpu_authoritative_resources
+        )
         self.last_cpu_active_upload_skipped = bool(active_authoritative)
         skip_active_mask_hydration = bool(
             self._full_active_mask_hydration_elision_enabled
             and active_authoritative
             and force_all_active
         )
-        self.last_full_active_mask_hydration_elision_used = (
-            skip_active_mask_hydration
-        )
+        self.last_full_active_mask_hydration_elision_used = skip_active_mask_hydration
 
         with self._profile_pass(world, "optics_upload_inputs.material"):
             if not self._bridge_material_authoritative(world):
@@ -756,12 +770,8 @@ class GPUOpticsPipeline(GPUPipelineBase):
         program = self.programs["sparse_expand_visible"]
         program["cell_grid_size"].value = (world.width, world.height)
         program["gas_grid_size"].value = (world.gas_width, world.gas_height)
-        self._set_uniform_if_present(
-            program, "gas_cell_size", int(world.gas_cell_size)
-        )
-        self._set_uniform_if_present(
-            program, "sparse_generation", int(resources.sparse_generation)
-        )
+        self._set_uniform_if_present(program, "gas_cell_size", int(world.gas_cell_size))
+        self._set_uniform_if_present(program, "sparse_generation", int(resources.sparse_generation))
         resources.sparse_gas_list.bind_to_storage_buffer(binding=0)
         resources.sparse_visible_marks.bind_to_storage_buffer(binding=1)
         resources.sparse_visible_list.bind_to_storage_buffer(binding=2)
@@ -797,9 +807,7 @@ class GPUOpticsPipeline(GPUPipelineBase):
             "expand_gas_visible",
             bool(self._sparse_gas_visible_scan_fusion_enabled),
         )
-        self._set_uniform_if_present(
-            program, "sparse_generation", int(resources.sparse_generation)
-        )
+        self._set_uniform_if_present(program, "sparse_generation", int(resources.sparse_generation))
         program["clear_reaction_latches"].value = clear_latches
         program["reaction_latched_flag_shifted"].value = int(CellFlag.REACTION_LATCHED) << 24
         resources.cell_dose_accum.bind_to_storage_buffer(binding=0)
@@ -858,9 +866,7 @@ class GPUOpticsPipeline(GPUPipelineBase):
             program["gas_grid_size"].value = (world.gas_width, world.gas_height)
             program["cell_sparse_tile_grid_size"].value = cell_tile_grid
             program["gas_sparse_tile_grid_size"].value = gas_tile_grid
-            self._set_uniform_if_present(
-                program, "gas_cell_size", int(world.gas_cell_size)
-            )
+            self._set_uniform_if_present(program, "gas_cell_size", int(world.gas_cell_size))
             program["dose_channel_count"].value = int(world.cell_optical_dose.shape[0])
             self._set_uniform_if_present(
                 program,
@@ -899,13 +905,12 @@ class GPUOpticsPipeline(GPUPipelineBase):
             getattr(world, "_reaction_latches_handoff_cleared_frame_id", None)
             == int(getattr(world, "frame_id", 0))
         )
-        if (
-            "cell_core" in world.bridge.gpu_authoritative_resources
-            and not handoff_cleared_latches
-        ):
+        if "cell_core" in world.bridge.gpu_authoritative_resources and not handoff_cleared_latches:
             clear_program = self.programs["sparse_clear_reaction_latches"]
             clear_program["cell_count"].value = int(world.width * world.height)
-            clear_program["reaction_latched_flag_shifted"].value = int(CellFlag.REACTION_LATCHED) << 24
+            clear_program["reaction_latched_flag_shifted"].value = (
+                int(CellFlag.REACTION_LATCHED) << 24
+            )
             world.bridge.buffers["cell_core"].bind_to_storage_buffer(binding=0)
             clear_program.run((world.width * world.height + 255) // 256, 1, 1)
             self._sync_compute_writes(ctx)
@@ -968,7 +973,9 @@ class GPUOpticsPipeline(GPUPipelineBase):
         bridge = world.bridge
         bridge.ensure_world_resources(world)
         if not bridge.enabled or bridge.ctx is None:
-            raise RuntimeError("GPU optics pipeline requires bridge GPU resources for light dose guard")
+            raise RuntimeError(
+                "GPU optics pipeline requires bridge GPU resources for light dose guard"
+            )
         guard = bridge.buffers.get(LIGHT_DOSE_GUARD_BUFFER)
         if guard is None:
             guard = bridge.ctx.buffer(np.zeros((4,), dtype=np.uint32).tobytes(), dynamic=True)
@@ -1017,8 +1024,12 @@ class GPUOpticsPipeline(GPUPipelineBase):
                 f"{name}_snapshot" if active_tile_snapshot is not None else name
             ]
             self._set_uniform_if_present(program, "cell_grid_size", (world.width, world.height))
-            self._set_uniform_if_present(program, "gas_grid_size", (world.gas_width, world.gas_height))
-            self._set_uniform_if_present(program, "tile_grid_size", (world.active.tile_width, world.active.tile_height))
+            self._set_uniform_if_present(
+                program, "gas_grid_size", (world.gas_width, world.gas_height)
+            )
+            self._set_uniform_if_present(
+                program, "tile_grid_size", (world.active.tile_width, world.active.tile_height)
+            )
             self._set_uniform_if_present(program, "gas_cell_size", int(world.gas_cell_size))
             self._set_uniform_if_present(program, "tile_size", int(world.active.tile_size))
             self._set_uniform_if_present(program, "expansion_radius", 1)
@@ -1047,7 +1058,9 @@ class GPUOpticsPipeline(GPUPipelineBase):
             and "material" in world.bridge.textures
         )
 
-    def _bind_material_input(self, world: "WorldEngine", resources: GPUOpticsResources, *, location: int = 0) -> None:
+    def _bind_material_input(
+        self, world: "WorldEngine", resources: GPUOpticsResources, *, location: int = 0
+    ) -> None:
         if self._bridge_material_authoritative(world):
             world.bridge.textures["material"].use(location=location)
             return
@@ -1175,8 +1188,7 @@ class GPUOpticsPipeline(GPUPipelineBase):
         ctx = world.bridge.ctx
         assert ctx is not None
         direct_bridge_outputs = bool(
-            self._formal_gpu_frame(world)
-            and self._direct_bridge_visible_publish_enabled
+            self._formal_gpu_frame(world) and self._direct_bridge_visible_publish_enabled
         )
         use_accumulator_inputs = self._use_direct_visual_accumulators(
             world,
@@ -1188,12 +1200,16 @@ class GPUOpticsPipeline(GPUPipelineBase):
         if direct_bridge_outputs:
             bridge.ensure_world_resources(world)
             if not bridge.enabled or bridge.ctx is None:
-                raise RuntimeError("GPU optics pipeline requires bridge GPU resources for authoritative visible output")
+                raise RuntimeError(
+                    "GPU optics pipeline requires bridge GPU resources for authoritative visible output"
+                )
             fuse_latch_clear = "cell_core" in bridge.gpu_authoritative_resources
         program["cell_grid_size"].value = (world.width, world.height)
         program["gas_grid_size"].value = (world.gas_width, world.gas_height)
         program["gas_cell_size"].value = world.gas_cell_size
-        program["light_count"].value = min(MAX_LIGHTS, int(world.bridge.shadow_typed_tables["light_table"].shape[0]))
+        program["light_count"].value = min(
+            MAX_LIGHTS, int(world.bridge.shadow_typed_tables["light_table"].shape[0])
+        )
         program["dose_channel_count"].value = int(world.cell_optical_dose.shape[0])
         program["publish_bridge_outputs"].value = direct_bridge_outputs
         program["use_accumulator_inputs"].value = use_accumulator_inputs
@@ -1227,9 +1243,15 @@ class GPUOpticsPipeline(GPUPipelineBase):
 
     def _download_outputs(self, world: "WorldEngine", resources: GPUOpticsResources) -> None:
         light_count = world.cell_optical_dose.shape[0]
-        cell = np.frombuffer(resources.cell_dose.read(), dtype="f4").reshape((light_count, world.height, world.width))
-        gas = np.frombuffer(resources.gas_dose.read(), dtype="f4").reshape((light_count, world.gas_height, world.gas_width))
-        visible = np.frombuffer(resources.visible_tex.read(), dtype="f4").reshape((world.height, world.width, 4))
+        cell = np.frombuffer(resources.cell_dose.read(), dtype="f4").reshape(
+            (light_count, world.height, world.width)
+        )
+        gas = np.frombuffer(resources.gas_dose.read(), dtype="f4").reshape(
+            (light_count, world.gas_height, world.gas_width)
+        )
+        visible = np.frombuffer(resources.visible_tex.read(), dtype="f4").reshape(
+            (world.height, world.width, 4)
+        )
         world.cell_optical_dose[:] = cell
         world.gas_optical_dose[:] = gas
         world.visible_illumination[:] = visible[..., :3]
@@ -1238,10 +1260,14 @@ class GPUOpticsPipeline(GPUPipelineBase):
         bridge = world.bridge
         bridge.ensure_world_resources(world)
         if not bridge.enabled or bridge.ctx is None:
-            raise RuntimeError("GPU optics pipeline requires bridge GPU resources for authoritative optics state")
+            raise RuntimeError(
+                "GPU optics pipeline requires bridge GPU resources for authoritative optics state"
+            )
         dose_channel_count = int(world.cell_optical_dose.shape[0])
         direct_bridge_dose = self._formal_gpu_frame(world)
-        fuse_latch_clear = bool(direct_bridge_dose and "cell_core" in bridge.gpu_authoritative_resources)
+        fuse_latch_clear = bool(
+            direct_bridge_dose and "cell_core" in bridge.gpu_authoritative_resources
+        )
         cell_program = self.programs["publish_bridge_cell"]
         cell_program["cell_grid_size"].value = (world.width, world.height)
         cell_program["dose_channel_count"].value = dose_channel_count
@@ -1258,7 +1284,9 @@ class GPUOpticsPipeline(GPUPipelineBase):
         bridge.buffers["cell_core"].bind_to_storage_buffer(binding=5)
         cell_group_x = (world.width + LOCAL_SIZE - 1) // LOCAL_SIZE
         cell_group_y = (world.height + LOCAL_SIZE - 1) // LOCAL_SIZE
-        cell_program.run(cell_group_x, cell_group_y, 1 if direct_bridge_dose else dose_channel_count)
+        cell_program.run(
+            cell_group_x, cell_group_y, 1 if direct_bridge_dose else dose_channel_count
+        )
 
         if not direct_bridge_dose:
             gas_program = self.programs["publish_bridge_gas"]
@@ -1291,7 +1319,9 @@ class GPUOpticsPipeline(GPUPipelineBase):
         bridge = world.bridge
         bridge.ensure_world_resources(world)
         if not bridge.enabled or bridge.ctx is None:
-            raise RuntimeError("GPU optics pipeline requires bridge GPU resources for clearing optics state")
+            raise RuntimeError(
+                "GPU optics pipeline requires bridge GPU resources for clearing optics state"
+            )
         dose_channel_count = int(world.cell_optical_dose.shape[0])
         fuse_latch_clear = bool(
             self._formal_gpu_frame(world) and "cell_core" in bridge.gpu_authoritative_resources

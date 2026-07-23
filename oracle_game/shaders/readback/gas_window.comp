@@ -1,0 +1,24 @@
+#version 430
+layout(local_size_x={{LOCAL_SIZE}}, local_size_y={{LOCAL_SIZE}}, local_size_z=1) in;
+uniform ivec2 window_origin;
+uniform ivec2 window_size;
+uniform ivec2 gas_grid_size;
+uniform int species_id;
+uniform int dst_word_offset;
+layout(std430, binding=0) readonly buffer GasValues {
+    float gas_values[];
+};
+layout(std430, binding=1) writeonly buffer SlotWords {
+    uint slot_words[];
+};
+void main() {
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    if (gid.x >= window_size.x || gid.y >= window_size.y) {
+        return;
+    }
+    int src_x = window_origin.x + gid.x;
+    int src_y = window_origin.y + gid.y;
+    int src_index = ((species_id * gas_grid_size.y + src_y) * gas_grid_size.x) + src_x;
+    int dst_index = dst_word_offset + gid.y * window_size.x + gid.x;
+    slot_words[dst_index] = floatBitsToUint(gas_values[src_index]);
+}

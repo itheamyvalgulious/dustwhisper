@@ -1,9 +1,20 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 
+if TYPE_CHECKING:
+    from oracle_game.world import WorldEngine
+
 from oracle_game.sim.gpu_heat import GPUHeatPipeline, GPUHeatStageTargets
-from oracle_game.sim.utils import cross_average, expand_bool_mask, laplace, tile_mask_to_cell_mask, tile_mask_to_gas_mask
+from oracle_game.sim.utils import (
+    cross_average,
+    expand_bool_mask,
+    laplace,
+    tile_mask_to_cell_mask,
+    tile_mask_to_gas_mask,
+)
 from oracle_game.types import Phase
 
 THERMAL_ACTIVITY_EPSILON = 1e-3
@@ -51,7 +62,9 @@ class HeatSolver:
             if formal_gpu_frame and not active_scheduler_gpu_authoritative:
                 world._require_gpu_stage("active scheduler heat solve masks")
             if active_scheduler_gpu_authoritative:
-                solve_tile_mask = np.ones((world.active.tile_height, world.active.tile_width), dtype=np.bool_)
+                solve_tile_mask = np.ones(
+                    (world.active.tile_height, world.active.tile_width), dtype=np.bool_
+                )
             else:
                 solve_tile_mask = self._solve_tile_mask(world)
             if not np.any(solve_tile_mask) and not active_scheduler_gpu_authoritative:
@@ -156,8 +169,12 @@ class HeatSolver:
                         solve_tile_mask,
                     )
         else:
-            self._apply_phase_targets(world, stage_targets.phase_targets, solve_cell_mask=solve_cell_mask)
-            self._apply_boil_targets(world, stage_targets.boil_targets, solve_cell_mask=solve_cell_mask, dt=dt)
+            self._apply_phase_targets(
+                world, stage_targets.phase_targets, solve_cell_mask=solve_cell_mask
+            )
+            self._apply_boil_targets(
+                world, stage_targets.boil_targets, solve_cell_mask=solve_cell_mask, dt=dt
+            )
             self._apply_condense_targets(
                 world,
                 stage_targets.condense_targets,
@@ -199,7 +216,9 @@ class HeatSolver:
         with self.gpu_pipeline._profile_pass(world, "active_refresh"):
             self._refresh_active_regions(world, solve_tile_mask, *change_flags)
 
-    def _step_cpu_active(self, world: "WorldEngine", dt: float, solve_tile_mask: np.ndarray) -> None:
+    def _step_cpu_active(
+        self, world: "WorldEngine", dt: float, solve_tile_mask: np.ndarray
+    ) -> None:
         cell_mask = tile_mask_to_cell_mask(
             solve_tile_mask,
             tile_size=world.active.tile_size,
@@ -215,9 +234,13 @@ class HeatSolver:
             gas_width=world.gas_width,
             gas_height=world.gas_height,
         )
-        conductivity = self._material_scalar_field(world, world.material_id, "conductivity", world.material_conductivity)
+        conductivity = self._material_scalar_field(
+            world, world.material_id, "conductivity", world.material_conductivity
+        )
         heat_capacity = np.maximum(
-            self._material_scalar_field(world, world.material_id, "heat_capacity", world.material_heat_capacity),
+            self._material_scalar_field(
+                world, world.material_id, "heat_capacity", world.material_heat_capacity
+            ),
             1.0e-4,
         )
         avg_neighbors = cross_average(world.cell_temperature)
@@ -257,7 +280,9 @@ class HeatSolver:
         active_tiles = np.asarray(world.active.active_tile_ttl, dtype=np.int32) > 0
         return expand_bool_mask(active_tiles, radius=1)
 
-    def _plan_phase_targets(self, world: "WorldEngine", *, solve_cell_mask: np.ndarray) -> np.ndarray:
+    def _plan_phase_targets(
+        self, world: "WorldEngine", *, solve_cell_mask: np.ndarray
+    ) -> np.ndarray:
         phase_targets = np.zeros((world.height, world.width), dtype=np.int32)
         material_table = world.bridge.shadow_typed_tables["material_table"]
         for material_id in range(1, int(material_table.shape[0])):
@@ -295,7 +320,9 @@ class HeatSolver:
             + padded[1:-1, 2:]
         )
 
-    def _plan_boil_targets(self, world: "WorldEngine", *, solve_cell_mask: np.ndarray) -> np.ndarray:
+    def _plan_boil_targets(
+        self, world: "WorldEngine", *, solve_cell_mask: np.ndarray
+    ) -> np.ndarray:
         boil_targets = np.zeros((world.height, world.width), dtype=np.int32)
         material_table = world.bridge.shadow_typed_tables["material_table"]
         for material_id in range(1, int(material_table.shape[0])):
@@ -314,7 +341,9 @@ class HeatSolver:
                 boil_targets[boil_mask] = target_species_id + 1
         return boil_targets
 
-    def _plan_condense_targets(self, world: "WorldEngine", *, solve_gas_mask: np.ndarray) -> np.ndarray:
+    def _plan_condense_targets(
+        self, world: "WorldEngine", *, solve_gas_mask: np.ndarray
+    ) -> np.ndarray:
         condense_targets = np.zeros(world.gas_concentration.shape, dtype=np.bool_)
         gas_table = world.bridge.shadow_typed_tables["gas_table"]
         species_count = min(int(condense_targets.shape[0]), int(gas_table.shape[0]))
@@ -324,8 +353,10 @@ class HeatSolver:
             target_material_id = int(species["condense_to_material_id"])
             if np.isnan(condense_point) or target_material_id <= 0:
                 continue
-            condense_targets[species_id] = solve_gas_mask & (world.ambient_temperature < condense_point) & (
-                world.gas_concentration[species_id] > 0.7
+            condense_targets[species_id] = (
+                solve_gas_mask
+                & (world.ambient_temperature < condense_point)
+                & (world.gas_concentration[species_id] > 0.7)
             )
         return condense_targets
 
@@ -342,19 +373,29 @@ class HeatSolver:
         previous_gas_concentration: np.ndarray,
     ) -> tuple[bool, bool, bool, bool, bool, bool]:
         cell_changed = bool(
-            np.any(np.abs(world.cell_temperature[solve_cell_mask] - previous_cell_temperature) > THERMAL_ACTIVITY_EPSILON)
+            np.any(
+                np.abs(world.cell_temperature[solve_cell_mask] - previous_cell_temperature)
+                > THERMAL_ACTIVITY_EPSILON
+            )
         )
         ambient_changed = bool(
-            np.any(np.abs(world.ambient_temperature[solve_gas_mask] - previous_ambient_temperature) > THERMAL_ACTIVITY_EPSILON)
+            np.any(
+                np.abs(world.ambient_temperature[solve_gas_mask] - previous_ambient_temperature)
+                > THERMAL_ACTIVITY_EPSILON
+            )
         )
         material_changed = bool(np.any(world.material_id[solve_cell_mask] != previous_material_id))
         phase_changed = bool(np.any(world.phase[solve_cell_mask] != previous_phase))
         integrity_changed = bool(
-            np.any(np.abs(world.integrity[solve_cell_mask] - previous_integrity) > THERMAL_ACTIVITY_EPSILON)
+            np.any(
+                np.abs(world.integrity[solve_cell_mask] - previous_integrity)
+                > THERMAL_ACTIVITY_EPSILON
+            )
         )
         gas_changed = bool(
             np.any(
-                np.abs(world.gas_concentration[:, solve_gas_mask] - previous_gas_concentration) > THERMAL_ACTIVITY_EPSILON
+                np.abs(world.gas_concentration[:, solve_gas_mask] - previous_gas_concentration)
+                > THERMAL_ACTIVITY_EPSILON
             )
         )
         self.last_cell_changed = cell_changed
@@ -363,8 +404,12 @@ class HeatSolver:
         self.last_phase_changed = phase_changed
         self.last_integrity_changed = integrity_changed
         self.last_gas_changed = gas_changed
-        self.last_cell_temperature_range = self._masked_range(world.cell_temperature, solve_cell_mask)
-        self.last_ambient_temperature_range = self._masked_range(world.ambient_temperature, solve_gas_mask)
+        self.last_cell_temperature_range = self._masked_range(
+            world.cell_temperature, solve_cell_mask
+        )
+        self.last_ambient_temperature_range = self._masked_range(
+            world.ambient_temperature, solve_gas_mask
+        )
         self.last_integrity_range = self._masked_range(world.integrity, solve_cell_mask)
         return (
             cell_changed,
@@ -388,14 +433,23 @@ class HeatSolver:
     ) -> None:
         if not np.any(solve_tile_mask):
             return
-        if not (cell_changed or ambient_changed or material_changed or phase_changed or integrity_changed or gas_changed):
+        if not (
+            cell_changed
+            or ambient_changed
+            or material_changed
+            or phase_changed
+            or integrity_changed
+            or gas_changed
+        ):
             return
         tile_size = world.active.tile_size
         rects: list[tuple[int, int, int, int]] = []
         for tile_y, tile_x in np.argwhere(solve_tile_mask):
             x0 = int(tile_x) * tile_size
             y0 = int(tile_y) * tile_size
-            rects.append((x0, y0, min(world.width, x0 + tile_size), min(world.height, y0 + tile_size)))
+            rects.append(
+                (x0, y0, min(world.width, x0 + tile_size), min(world.height, y0 + tile_size))
+            )
         world._mark_active_rects_runtime(rects)
 
     def _apply_phase_targets(
@@ -494,7 +548,9 @@ class HeatSolver:
                     continue
                 target_y, target_x = np.argwhere(empty)[0]
                 world.set_cell_by_id(xs.start + target_x, ys.start + target_y, target_material_id)
-                world.gas_concentration[species_id, gy, gx] = max(0.0, world.gas_concentration[species_id, gy, gx] - 0.6)
+                world.gas_concentration[species_id, gy, gx] = max(
+                    0.0, world.gas_concentration[species_id, gy, gx] - 0.6
+                )
 
     def _apply_condensation(
         self,
@@ -511,8 +567,10 @@ class HeatSolver:
             target_material_id = int(species["condense_to_material_id"])
             if np.isnan(condense_point) or target_material_id <= 0:
                 continue
-            cool_mask = solve_gas_mask & (world.ambient_temperature < condense_point) & (
-                world.gas_concentration[species_id] > 0.7
+            cool_mask = (
+                solve_gas_mask
+                & (world.ambient_temperature < condense_point)
+                & (world.gas_concentration[species_id] > 0.7)
             )
             if skip_targets is not None and species_id < skip_targets.shape[0]:
                 cool_mask &= ~skip_targets[species_id]
@@ -529,13 +587,17 @@ class HeatSolver:
                     continue
                 target_y, target_x = np.argwhere(empty)[0]
                 world.set_cell_by_id(xs.start + target_x, ys.start + target_y, target_material_id)
-                world.gas_concentration[species_id, gy, gx] = max(0.0, world.gas_concentration[species_id, gy, gx] - 0.6)
+                world.gas_concentration[species_id, gy, gx] = max(
+                    0.0, world.gas_concentration[species_id, gy, gx] - 0.6
+                )
 
     def release(self) -> None:
         self.gpu_pipeline.release()
         self.reset_runtime_state()
 
-    def reset_runtime_state(self, world: "WorldEngine" | None = None, *, empty_heat_targets: bool = False) -> None:
+    def reset_runtime_state(
+        self, world: "WorldEngine" | None = None, *, empty_heat_targets: bool = False
+    ) -> None:
         if world is None:
             self.last_solve_tile_mask = np.zeros((0, 0), dtype=np.bool_)
             self.last_solve_cell_mask = np.zeros((0, 0), dtype=np.bool_)
@@ -544,7 +606,9 @@ class HeatSolver:
             self.last_boil_targets = np.zeros((0, 0), dtype=np.int32)
             self.last_condense_targets = np.zeros((0, 0, 0), dtype=np.bool_)
         else:
-            self.last_solve_tile_mask = np.zeros((world.active.tile_height, world.active.tile_width), dtype=np.bool_)
+            self.last_solve_tile_mask = np.zeros(
+                (world.active.tile_height, world.active.tile_width), dtype=np.bool_
+            )
             if empty_heat_targets:
                 self.last_solve_cell_mask = np.zeros((0, 0), dtype=np.bool_)
                 self.last_solve_gas_mask = np.zeros((0, 0), dtype=np.bool_)
@@ -553,7 +617,9 @@ class HeatSolver:
                 self.last_condense_targets = np.zeros((0, 0, 0), dtype=np.bool_)
             else:
                 self.last_solve_cell_mask = np.zeros((world.height, world.width), dtype=np.bool_)
-                self.last_solve_gas_mask = np.zeros((world.gas_height, world.gas_width), dtype=np.bool_)
+                self.last_solve_gas_mask = np.zeros(
+                    (world.gas_height, world.gas_width), dtype=np.bool_
+                )
                 self.last_phase_targets = np.zeros((world.height, world.width), dtype=np.int32)
                 self.last_boil_targets = np.zeros((world.height, world.width), dtype=np.int32)
                 self.last_condense_targets = np.zeros(world.gas_concentration.shape, dtype=np.bool_)
@@ -581,7 +647,9 @@ class HeatSolver:
             "condense_targets": self.last_condense_targets.copy(),
             "public_phase_targets": [dict(target) for target in self.last_public_phase_targets],
             "public_boil_targets": [dict(target) for target in self.last_public_boil_targets],
-            "public_condense_targets": [dict(target) for target in self.last_public_condense_targets],
+            "public_condense_targets": [
+                dict(target) for target in self.last_public_condense_targets
+            ],
             "ambient_iterations": int(self.last_ambient_iterations),
             "cell_changed": bool(self.last_cell_changed),
             "ambient_changed": bool(self.last_ambient_changed),
@@ -651,7 +719,9 @@ class HeatSolver:
         if field.size == 0 or mask.size == 0 or not np.any(mask):
             return np.zeros((2,), dtype=np.float32)
         masked = np.asarray(field[mask], dtype=np.float32)
-        return np.array([float(masked.min(initial=0.0)), float(masked.max(initial=0.0))], dtype=np.float32)
+        return np.array(
+            [float(masked.min(initial=0.0)), float(masked.max(initial=0.0))], dtype=np.float32
+        )
 
     def _material_scalar_field(
         self,
@@ -667,8 +737,15 @@ class HeatSolver:
         valid_mask = (
             (material_ids >= 0)
             & (material_ids < int(material_table.shape[0]))
-            & (material_table["name_hash"][np.clip(material_ids, 0, max(0, int(material_table.shape[0]) - 1))] != 0)
+            & (
+                material_table["name_hash"][
+                    np.clip(material_ids, 0, max(0, int(material_table.shape[0]) - 1))
+                ]
+                != 0
+            )
         )
         if np.any(valid_mask):
-            values[valid_mask] = material_table[field][material_ids[valid_mask]].astype(np.float32, copy=False)
+            values[valid_mask] = material_table[field][material_ids[valid_mask]].astype(
+                np.float32, copy=False
+            )
         return values

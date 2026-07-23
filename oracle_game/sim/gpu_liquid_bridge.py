@@ -1,20 +1,19 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 if TYPE_CHECKING:
-    from oracle_game.world import WorldEngine
     from oracle_game.sim.gpu_liquid import GPULiquidResources
-
-from oracle_game.types import Phase
+    from oracle_game.world import WorldEngine
 
 from oracle_game.sim.gpu_liquid import (
     MAX_MATERIALS,
     PASS_LOCAL_SIZE,
     TILE_SIZE,
 )
+from oracle_game.types import Phase
 
 
 def _pack_timer_texture(timer_pack: np.ndarray) -> np.ndarray:
@@ -88,8 +87,7 @@ def step(
         }.issubset(world.bridge.gpu_authoritative_resources)
     )
     pipeline._provenance_init_fusion_frame_enabled = bool(
-        pipeline._provenance_init_fusion_enabled
-        and pipeline._provenance_terminal_frame_enabled
+        pipeline._provenance_init_fusion_enabled and pipeline._provenance_terminal_frame_enabled
     )
     pipeline.last_buoyancy_cleanup_split_fusion_used = False
     pipeline._buoyancy_cleanup_split_fusion_frame_enabled = bool(
@@ -440,23 +438,14 @@ def step(
                 (
                     "buoyancy_fused_provenance_cleanup_snapshot_pre"
                     if pipeline._buoyancy_snapshot_pre_state_frame_enabled
-                    else
-                    "buoyancy_fused_provenance_cleanup"
+                    else "buoyancy_fused_provenance_cleanup"
                     if pipeline._buoyancy_cleanup_split_fusion_frame_enabled
                     else "buoyancy_fused_provenance"
                     if pipeline._provenance_terminal_frame_enabled
                     else "buoyancy_fused"
                 )
-                + (
-                    "_state_elided"
-                    if pipeline._tile_snapshot_state_elision_frame_enabled
-                    else ""
-                )
-                + (
-                    "_shared_sink"
-                    if pipeline._buoyancy_shared_sink_cache_frame_enabled
-                    else ""
-                ),
+                + ("_state_elided" if pipeline._tile_snapshot_state_elision_frame_enabled else "")
+                + ("_shared_sink" if pipeline._buoyancy_shared_sink_cache_frame_enabled else ""),
                 world,
                 resources,
                 buoyancy_read_resources,
@@ -482,11 +471,20 @@ def step(
         # The fused pass produces the same final role as float without writing
         # an intermediate texture set. Keep all downstream role assumptions.
         if not seam_y_shared_snapshot:
-            resources.cell_state_in, resources.cell_state_out = resources.cell_state_out, resources.cell_state_in
+            resources.cell_state_in, resources.cell_state_out = (
+                resources.cell_state_out,
+                resources.cell_state_in,
+            )
             resources.timer_in, resources.timer_out = resources.timer_out, resources.timer_in
             resources.temp_in, resources.temp_out = resources.temp_out, resources.temp_in
-            resources.integrity_in, resources.integrity_out = resources.integrity_out, resources.integrity_in
-            resources.velocity_in, resources.velocity_out = resources.velocity_out, resources.velocity_in
+            resources.integrity_in, resources.integrity_out = (
+                resources.integrity_out,
+                resources.integrity_in,
+            )
+            resources.velocity_in, resources.velocity_out = (
+                resources.velocity_out,
+                resources.velocity_in,
+            )
     else:
         with pipeline._profile_pass(world, "liquid_buoyancy_sink"):
             pipeline._run_buoyancy_pass(
@@ -528,9 +526,7 @@ def step(
                     resources.velocity_out,
                 ),
             )
-    lazy_placeholder_roles = bool(
-        formal_gpu_frame and pipeline._placeholder_lazy_roles_enabled
-    )
+    lazy_placeholder_roles = bool(formal_gpu_frame and pipeline._placeholder_lazy_roles_enabled)
     if lazy_placeholder_roles:
         with pipeline._profile_pass(world, "liquid_build_placeholder_affected_tiles"):
             pipeline._build_placeholder_dirty_affected_tile_dispatch(
@@ -623,7 +619,6 @@ def step(
         pipeline._download_outputs(world, resources, use_in=True)
 
 
-
 def prepare_motion_flow_intent(
     pipeline,
     world: "WorldEngine",
@@ -651,7 +646,6 @@ def prepare_motion_flow_intent(
     pipeline.last_cpu_mirror_downloaded = False
 
 
-
 def _upload_inputs(
     pipeline,
     world: "WorldEngine",
@@ -673,7 +667,9 @@ def _upload_inputs(
     upload_cell_state_from_cpu = not (formal_gpu_frame and "cell_core" in authoritative)
     upload_island_id_from_cpu = not (formal_gpu_frame and "island_id" in authoritative)
     upload_entity_id_from_cpu = not (formal_gpu_frame and "entity_id" in authoritative)
-    upload_displaced_from_cpu = not (formal_gpu_frame and "placeholder_displaced_material" in authoritative)
+    upload_displaced_from_cpu = not (
+        formal_gpu_frame and "placeholder_displaced_material" in authoritative
+    )
     upload_active_from_cpu = not pipeline._active_scheduler_gpu_authoritative(world)
     pipeline.last_cpu_cell_state_upload_skipped = not upload_cell_state_from_cpu
     pipeline.last_cpu_island_id_upload_skipped = not upload_island_id_from_cpu
@@ -712,7 +708,10 @@ def _upload_inputs(
         resources.displaced_in.write(world.placeholder_displaced_material.astype("f4").tobytes())
         resources.displaced_out.write(world.placeholder_displaced_material.astype("f4").tobytes())
     material_table = world.bridge.shadow_typed_tables["material_table"]
-    table_signature = (world.bridge.table_generations.get("materials", 0), int(material_table.shape[0]))
+    table_signature = (
+        world.bridge.table_generations.get("materials", 0),
+        int(material_table.shape[0]),
+    )
     if resources.material_params_signature != table_signature:
         params = np.zeros((MAX_MATERIALS, 4), dtype="f4")
         count = min(MAX_MATERIALS, int(material_table.shape[0]))
@@ -722,7 +721,6 @@ def _upload_inputs(
         params[:count, 3] = material_table[:count]["render_group_id"].astype("f4")
         resources.material_params.write(params.tobytes())
         resources.material_params_signature = table_signature
-
 
 
 def _load_authoritative_bridge_inputs(
@@ -737,23 +735,21 @@ def _load_authoritative_bridge_inputs(
     bridge = world.bridge
     authoritative = bridge.gpu_authoritative_resources
     copy_cell_core = "cell_core" in authoritative
-    direct_bridge_cell_core = bool(copy_cell_core and pipeline._tile_solve_bridge_hydration_fusion_enabled)
+    direct_bridge_cell_core = bool(
+        copy_cell_core and pipeline._tile_solve_bridge_hydration_fusion_enabled
+    )
     hydrate_cell_core = bool(copy_cell_core and not direct_bridge_cell_core)
     copy_island_id = "island_id" in authoritative
     copy_entity_id = "entity_id" in authoritative
     copy_displaced = "placeholder_displaced_material" in authoritative
     blocker_mask_inputs = bool(
-        pipeline._blocker_displaced_hydration_frame_enabled
-        and copy_entity_id
-        and copy_displaced
+        pipeline._blocker_displaced_hydration_frame_enabled and copy_entity_id and copy_displaced
     )
     direct_bridge_aux_inputs = bool(
         copy_cell_core
         and pipeline._tile_solve_bridge_hydration_fusion_enabled
         and pipeline._bridge_aux_residency_enabled
-        and {"island_id", "entity_id", "placeholder_displaced_material"}.issubset(
-            authoritative
-        )
+        and {"island_id", "entity_id", "placeholder_displaced_material"}.issubset(authoritative)
     )
     skip_island_hydration = bool(
         copy_cell_core
@@ -763,21 +759,17 @@ def _load_authoritative_bridge_inputs(
         and not direct_bridge_aux_inputs
         and "island_id" in authoritative
     )
-    copy_island_id = bool(
-        copy_island_id and not (skip_island_hydration or blocker_mask_inputs)
-    )
+    copy_island_id = bool(copy_island_id and not (skip_island_hydration or blocker_mask_inputs))
     hydrate_island_id = bool(copy_island_id and not direct_bridge_aux_inputs)
-    copy_entity_id = bool(
-        copy_entity_id and not (direct_bridge_aux_inputs or blocker_mask_inputs)
-    )
-    copy_displaced = bool(
-        copy_displaced and not (direct_bridge_aux_inputs or blocker_mask_inputs)
-    )
+    copy_entity_id = bool(copy_entity_id and not (direct_bridge_aux_inputs or blocker_mask_inputs))
+    copy_displaced = bool(copy_displaced and not (direct_bridge_aux_inputs or blocker_mask_inputs))
     if not (copy_cell_core or copy_island_id or copy_entity_id or copy_displaced):
         return False
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("GPU liquid pipeline requires bridge GPU resources for authoritative input state")
+        raise RuntimeError(
+            "GPU liquid pipeline requires bridge GPU resources for authoritative input state"
+        )
     active_tile_indirect = pipeline._formal_gpu_frame(world)
     group_x = (world.width + PASS_LOCAL_SIZE - 1) // PASS_LOCAL_SIZE
     group_y = (world.height + PASS_LOCAL_SIZE - 1) // PASS_LOCAL_SIZE
@@ -885,7 +877,6 @@ def _load_authoritative_bridge_inputs(
     return active_tiles_ready_for_next
 
 
-
 def _load_authoritative_bridge_flow_intent_inputs(
     pipeline,
     world: "WorldEngine",
@@ -921,7 +912,9 @@ def _load_authoritative_bridge_flow_intent_inputs(
         return
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("GPU liquid pipeline requires bridge GPU resources for flow-intent input state")
+        raise RuntimeError(
+            "GPU liquid pipeline requires bridge GPU resources for flow-intent input state"
+        )
     pipeline._compact_active_tiles(
         world,
         resources,
@@ -947,7 +940,6 @@ def _load_authoritative_bridge_flow_intent_inputs(
     pipeline._sync_compute_writes(bridge.ctx)
 
 
-
 def _publish_bridge_outputs(
     pipeline,
     world: "WorldEngine",
@@ -960,7 +952,9 @@ def _publish_bridge_outputs(
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
         if pipeline._formal_gpu_frame(world):
-            raise RuntimeError("GPU liquid pipeline requires bridge GPU resources for authoritative output state")
+            raise RuntimeError(
+                "GPU liquid pipeline requires bridge GPU resources for authoritative output state"
+            )
         return
     program = pipeline.programs["publish_bridge_cell"]
     active_tile_indirect = pipeline._formal_gpu_frame(world)
@@ -968,9 +962,7 @@ def _publish_bridge_outputs(
     program["tile_grid_size"].value = (world.active.tile_width, world.active.tile_height)
     program["tile_size"].value = int(world.active.tile_size)
     program["use_active_tile_dispatch"].value = bool(active_tile_indirect)
-    program["write_cell_core"].value = not bool(
-        getattr(world, "phase_c_defer_cell_publish", False)
-    )
+    program["write_cell_core"].value = not bool(getattr(world, "phase_c_defer_cell_publish", False))
     cell_state_tex = resources.cell_state_out if use_out else resources.cell_state_in
     timer_tex = resources.timer_out if use_out else resources.timer_in
     temp_tex = resources.temp_out if use_out else resources.temp_in
@@ -1009,7 +1001,6 @@ def _publish_bridge_outputs(
     )
 
 
-
 def _run_liquid_intent_pass(
     pipeline,
     world: "WorldEngine",
@@ -1023,8 +1014,7 @@ def _run_liquid_intent_pass(
         and not bool(getattr(world, "phase_c_defer_cell_publish", False))
     )
     provenance_cleanup_terminal = bool(
-        provenance_terminal
-        and pipeline._provenance_cleanup_terminal_fusion_frame_enabled
+        provenance_terminal and pipeline._provenance_cleanup_terminal_fusion_frame_enabled
     )
     cleanup_flow_fusion = bool(
         publish_bridge_outputs and pipeline._cleanup_flow_fusion_frame_enabled
@@ -1093,7 +1083,9 @@ def _run_liquid_intent_pass(
         bridge = world.bridge
         bridge.ensure_world_resources(world)
         if not bridge.enabled or bridge.ctx is None:
-            raise RuntimeError("GPU liquid pipeline requires bridge GPU resources for liquid flow intent")
+            raise RuntimeError(
+                "GPU liquid pipeline requires bridge GPU resources for liquid flow intent"
+            )
         target_texture = bridge.textures["liquid_flow_intent"]
     program["cell_grid_size"].value = (world.width, world.height)
     program["tile_grid_size"].value = (world.active.tile_width, world.active.tile_height)
@@ -1103,10 +1095,7 @@ def _run_liquid_intent_pass(
     program["publish_bridge_outputs"].value = bool(publish_bridge_outputs)
     program["publish_bridge_aux_outputs"].value = bool(
         publish_bridge_outputs
-        and not (
-            pipeline._formal_gpu_frame(world)
-            and pipeline._bridge_aux_cleanup_fusion_enabled
-        )
+        and not (pipeline._formal_gpu_frame(world) and pipeline._bridge_aux_cleanup_fusion_enabled)
     )
     program["write_cell_core"].value = not bool(getattr(world, "phase_c_defer_cell_publish", False))
     program["resident_hydrate_inputs"].value = bool(direct_flow_inputs)
@@ -1122,10 +1111,7 @@ def _run_liquid_intent_pass(
     pipeline._set_uniform_if_present(
         program,
         "buoyancy_fused_roles",
-        bool(
-            pipeline._buoyancy_pass_fusion_enabled
-            and not seam_y_shared_snapshot_roles
-        ),
+        bool(pipeline._buoyancy_pass_fusion_enabled and not seam_y_shared_snapshot_roles),
     )
     if provenance_terminal:
         program["provenance_full_grid"].value = True
@@ -1207,7 +1193,9 @@ def _run_liquid_intent_pass(
             live = bridge.buffers.get("cell_core")
             spare = bridge.cell_core_spare
             if live is None or spare is None or live is spare:
-                raise RuntimeError("liquid provenance terminal did not produce a distinct core spare")
+                raise RuntimeError(
+                    "liquid provenance terminal did not produce a distinct core spare"
+                )
             bridge.buffers["cell_core"], bridge.cell_core_spare = spare, live
             pipeline.last_provenance_terminal_used = True
         if provenance_cleanup_terminal:
@@ -1217,10 +1205,7 @@ def _run_liquid_intent_pass(
         if active_decay_fusion:
             world.bridge.mark_gpu_authoritative("active_tile_ttl")
             pipeline.last_flow_active_decay_fusion_used = True
-            pipeline._flow_active_decay_fusion_frame_id = int(
-                getattr(world, "frame_id", 0)
-            )
-
+            pipeline._flow_active_decay_fusion_frame_id = int(getattr(world, "frame_id", 0))
 
 
 def _download_outputs(
@@ -1235,7 +1220,11 @@ def _download_outputs(
     timer = resources.timer_in if use_in else resources.timer_out
     temp = resources.temp_in if use_in else resources.temp_out
     integrity = resources.integrity_in if use_in else resources.integrity_out
-    velocity = resources.velocity_out if velocity_use_out else (resources.velocity_in if use_in else resources.velocity_out)
+    velocity = (
+        resources.velocity_out
+        if velocity_use_out
+        else (resources.velocity_in if use_in else resources.velocity_out)
+    )
     displaced = resources.displaced_in if use_in else resources.displaced_out
     packed_cell_state = np.frombuffer(cell_state.read(), dtype=np.uint32).reshape(
         (world.height, world.width)
@@ -1246,9 +1235,15 @@ def _download_outputs(
     world.timer_pack[:] = _unpack_timer_texture(
         np.frombuffer(timer.read(), dtype=np.uint32).reshape((world.height, world.width))
     )
-    world.cell_temperature[:] = np.frombuffer(temp.read(), dtype="f4").reshape((world.height, world.width))
-    world.integrity[:] = np.frombuffer(integrity.read(), dtype="f4").reshape((world.height, world.width))
-    world.velocity[:] = np.frombuffer(velocity.read(), dtype="f4").reshape((world.height, world.width, 2))
+    world.cell_temperature[:] = np.frombuffer(temp.read(), dtype="f4").reshape(
+        (world.height, world.width)
+    )
+    world.integrity[:] = np.frombuffer(integrity.read(), dtype="f4").reshape(
+        (world.height, world.width)
+    )
+    world.velocity[:] = np.frombuffer(velocity.read(), dtype="f4").reshape(
+        (world.height, world.width, 2)
+    )
     world.placeholder_displaced_material[:] = np.rint(
         np.frombuffer(displaced.read(), dtype="f4").reshape((world.height, world.width))
     ).astype(np.int32)
@@ -1258,7 +1253,6 @@ def _download_outputs(
     world.entity_id[:] = np.rint(
         np.frombuffer(resources.entity_out.read(), dtype="f4").reshape((world.height, world.width))
     ).astype(np.int32)
-
 
 
 def _barrier_bits(pipeline) -> tuple[str, ...]:

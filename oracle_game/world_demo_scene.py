@@ -9,8 +9,8 @@ if TYPE_CHECKING:
 
 
 def _paint_material(engine: "WorldEngine", x: int, y: int, material: str, radius: int) -> None:
-    yy, xx = np.mgrid[0:engine.height, 0:engine.width]
-    mask = (xx - x) ** 2 + (yy - y) ** 2 <= radius ** 2
+    yy, xx = np.mgrid[0 : engine.height, 0 : engine.width]
+    mask = (xx - x) ** 2 + (yy - y) ** 2 <= radius**2
     engine.set_material_by_mask(mask, material)
 
 
@@ -49,7 +49,9 @@ def _build_demo_scene(engine: "WorldEngine") -> None:
     _fill_rect(engine, 700, floor_y - 188, 12, 48, "root_solid")
 
 
-def _fill_rect(engine: "WorldEngine", x: int, y: int, width: int, height: int, material: str) -> None:
+def _fill_rect(
+    engine: "WorldEngine", x: int, y: int, width: int, height: int, material: str
+) -> None:
     x0 = max(0, x)
     y0 = max(0, y)
     x1 = min(engine.width, x + width)
@@ -59,7 +61,11 @@ def _fill_rect(engine: "WorldEngine", x: int, y: int, width: int, height: int, m
     material_id = engine._resolve_sanctioned_material_id(material)
     if material_id <= 0:
         raise KeyError(material)
-    phase = int(engine.material_default_phase[material_id]) if material_id < engine.material_default_phase.shape[0] else 0
+    phase = (
+        int(engine.material_default_phase[material_id])
+        if material_id < engine.material_default_phase.shape[0]
+        else 0
+    )
     integrity = (
         float(engine.material_base_integrity[material_id])
         if material_id < engine.material_base_integrity.shape[0]

@@ -1,22 +1,24 @@
 from __future__ import annotations
-from typing import Any, TYPE_CHECKING
-import numpy as np
+
 import time
 from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any
+
+import numpy as np
 
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
 from oracle_game.sim.gpu_reactions import (
     FLOW_SOURCE_LAYERS,
-    GPUReactionResources,
+    MATERIAL_PAIR_RULE_I_ENTRY_COUNT,
     MAX_ACTIONS,
     MAX_EMITTED_LIGHTS,
     MAX_MATERIALS,
-    MATERIAL_PAIR_RULE_I_ENTRY_COUNT,
     MAX_RULES,
     MAX_SELF_RULES,
     RULE_CANDIDATE_VECS,
+    GPUReactionResources,
 )
 
 
@@ -40,10 +42,10 @@ def _record_profile_pass(
     if gpu_timed:
         summary["gpu_ms"] = float(summary["gpu_ms"] or 0.0) + elapsed_ms
 
+
 # ``_profile_pass`` is inherited from GPUPipelineBase (it records identical
 # entries inline; ``_record_profile_pass`` is retained for
 # ``_profile_scoped_pass`` below).
-
 
 
 def _upload_state_profile_scope(pipeline, reaction_group: str | None) -> str | None:
@@ -52,10 +54,13 @@ def _upload_state_profile_scope(pipeline, reaction_group: str | None) -> str | N
     return f"{reaction_group}_upload_state"
 
 
-
 @contextmanager
 def _profile_scoped_pass(pipeline, world: "WorldEngine", scope: str | None, name: str):
-    profile = pipeline.last_pass_profile if bool(getattr(world, "profile_passes_enabled", False)) else None
+    profile = (
+        pipeline.last_pass_profile
+        if bool(getattr(world, "profile_passes_enabled", False))
+        else None
+    )
     ctx = world.bridge.ctx if bool(getattr(world, "profile_passes_sync", False)) else None
     if profile is not None and ctx is not None:
         ctx.finish()
@@ -69,8 +74,9 @@ def _profile_scoped_pass(pipeline, world: "WorldEngine", scope: str | None, name
             elapsed_ms = (time.perf_counter() - start) * 1000.0
             pipeline._record_profile_pass(profile, name, elapsed_ms, gpu_timed=ctx is not None)
             if scope is not None:
-                pipeline._record_profile_pass(profile, f"{scope}.{name}", elapsed_ms, gpu_timed=ctx is not None)
-
+                pipeline._record_profile_pass(
+                    profile, f"{scope}.{name}", elapsed_ms, gpu_timed=ctx is not None
+                )
 
 
 def _ensure_resources(pipeline, world: "WorldEngine") -> GPUReactionResources:
@@ -92,25 +98,24 @@ def _ensure_resources(pipeline, world: "WorldEngine") -> GPUReactionResources:
     light_count = signature[5]
     gas_count = signature[4]
     cell_count = max(1, int(world.width * world.height))
-    flow_generation_dtype = (
-        "u1" if pipeline._flow_source_generation_u8_programs_enabled else "u4"
-    )
+    flow_generation_dtype = "u1" if pipeline._flow_source_generation_u8_programs_enabled else "u4"
     flow_generation_numpy_dtype = (
-        np.uint8
-        if pipeline._flow_source_generation_u8_programs_enabled
-        else np.uint32
+        np.uint8 if pipeline._flow_source_generation_u8_programs_enabled else np.uint32
     )
     timed_candidate_zero = np.zeros((4,), dtype=np.uint32).tobytes()
     timed_dispatch_zero = np.zeros((3,), dtype=np.uint32).tobytes()
     timed_cell_marks_zero = np.zeros((cell_count,), dtype=np.uint32).tobytes()
+
     def tex(size, comps=1):
         texture = ctx.texture(size, comps, dtype="f4")
         texture.filter = (ctx.NEAREST, ctx.NEAREST)
         return texture
+
     def uint_tex(size):
         texture = ctx.texture(size, 1, dtype="u4")
         texture.filter = (ctx.NEAREST, ctx.NEAREST)
         return texture
+
     resources = GPUReactionResources(
         signature=signature,
         cell_state_ping=uint_tex((world.width, world.height)),
@@ -137,24 +142,36 @@ def _ensure_resources(pipeline, world: "WorldEngine") -> GPUReactionResources:
         active_gas_tex=tex((world.gas_width, world.gas_height)),
         cell_dose_tex=ctx.texture_array((world.width, world.height, light_count), 1, dtype="f4"),
         cell_dose_pong=ctx.texture_array((world.width, world.height, light_count), 1, dtype="f4"),
-        gas_dose_tex=ctx.texture_array((world.gas_width, world.gas_height, light_count), 1, dtype="f4"),
-        gas_dose_pong=ctx.texture_array((world.gas_width, world.gas_height, light_count), 1, dtype="f4"),
-        flow_source_tex=ctx.texture_array((world.gas_width, world.gas_height, FLOW_SOURCE_LAYERS), 4, dtype="f4"),
+        gas_dose_tex=ctx.texture_array(
+            (world.gas_width, world.gas_height, light_count), 1, dtype="f4"
+        ),
+        gas_dose_pong=ctx.texture_array(
+            (world.gas_width, world.gas_height, light_count), 1, dtype="f4"
+        ),
+        flow_source_tex=ctx.texture_array(
+            (world.gas_width, world.gas_height, FLOW_SOURCE_LAYERS), 4, dtype="f4"
+        ),
         flow_source_generation_tex=ctx.texture_array(
             (world.gas_width, world.gas_height, FLOW_SOURCE_LAYERS),
             1,
             dtype=flow_generation_dtype,
         ),
         gas_delta_buffer=ctx.buffer(
-            reserve=max(4, world.gas_width * world.gas_height * gas_count * np.dtype(np.int32).itemsize),
+            reserve=max(
+                4, world.gas_width * world.gas_height * gas_count * np.dtype(np.int32).itemsize
+            ),
             dynamic=True,
         ),
         timed_candidate_count=ctx.buffer(timed_candidate_zero, dynamic=True),
-        timed_candidate_list=ctx.buffer(reserve=cell_count * np.dtype(np.uint32).itemsize, dynamic=True),
+        timed_candidate_list=ctx.buffer(
+            reserve=cell_count * np.dtype(np.uint32).itemsize, dynamic=True
+        ),
         timed_candidate_dispatch_args=ctx.buffer(timed_dispatch_zero, dynamic=True),
         light_dose_guarded_dispatch_args=ctx.buffer(timed_dispatch_zero, dynamic=True),
         timed_candidate_marks=ctx.buffer(timed_cell_marks_zero, dynamic=True),
-        timed_material_target_list=ctx.buffer(reserve=2 * cell_count * np.dtype(np.uint32).itemsize, dynamic=True),
+        timed_material_target_list=ctx.buffer(
+            reserve=2 * cell_count * np.dtype(np.uint32).itemsize, dynamic=True
+        ),
         timed_material_target_dispatch_args=ctx.buffer(timed_dispatch_zero, dynamic=True),
         timed_material_target_marks=ctx.buffer(timed_cell_marks_zero, dynamic=True),
         trigger_lo_tex=tex((world.width, world.height), 4),
@@ -208,7 +225,8 @@ def _ensure_resources(pipeline, world: "WorldEngine") -> GPUReactionResources:
             dynamic=True,
         ),
         material_pair_terminal_material_tables=ctx.buffer(
-            reserve=MAX_MATERIALS * (6 * 4 * np.dtype(np.uint32).itemsize + np.dtype(np.uint32).itemsize),
+            reserve=MAX_MATERIALS
+            * (6 * 4 * np.dtype(np.uint32).itemsize + np.dtype(np.uint32).itemsize),
             dynamic=True,
         ),
         material_pair_terminal_action_tables=ctx.buffer(

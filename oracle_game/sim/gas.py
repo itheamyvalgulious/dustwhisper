@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
+
+if TYPE_CHECKING:
+    from oracle_game.types import ForceSource
+    from oracle_game.world import WorldEngine
 
 from oracle_game.gpu import typed_gas_id
 from oracle_game.sim.gpu_gas import GPUGasPipeline
@@ -14,7 +20,6 @@ from oracle_game.sim.utils import (
     laplace,
     tile_mask_to_gas_mask,
 )
-
 
 GAS_ACTIVITY_EPSILON = 1e-4
 
@@ -53,7 +58,9 @@ class GasSolver:
         if formal_gpu_frame and not active_scheduler_gpu_authoritative:
             world._require_gpu_stage("active scheduler gas solve masks")
         if active_scheduler_gpu_authoritative:
-            solve_tile_mask = np.ones((world.active.tile_height, world.active.tile_width), dtype=np.bool_)
+            solve_tile_mask = np.ones(
+                (world.active.tile_height, world.active.tile_width), dtype=np.bool_
+            )
         else:
             solve_tile_mask = self._solve_tile_mask(world)
         if not np.any(solve_tile_mask) and not active_scheduler_gpu_authoritative:
@@ -118,8 +125,12 @@ class GasSolver:
 
         thermo_pressure, thermo_density = self._pressure_and_density_fields(world)
         mean_density = float(np.mean(thermo_density))
-        thermo_pressure = np.where(solve_gas_mask, thermo_pressure, 0.0).astype(np.float32, copy=False)
-        thermo_density = np.where(solve_gas_mask, thermo_density, 0.0).astype(np.float32, copy=False)
+        thermo_pressure = np.where(solve_gas_mask, thermo_pressure, 0.0).astype(
+            np.float32, copy=False
+        )
+        thermo_density = np.where(solve_gas_mask, thermo_density, 0.0).astype(
+            np.float32, copy=False
+        )
         self._apply_pressure_density_forces(
             velocity,
             thermo_pressure,
@@ -159,7 +170,11 @@ class GasSolver:
         ambient = advect_scalar(world.ambient_temperature, velocity, dt)
         ambient += 0.08 * (cross_neighbor_sum(world.ambient_temperature) - 4.0 * ambient)
         for species_id in range(species_count):
-            ambient += world.gas_concentration[species_id] * float(gas_table[species_id]["temperature_coupling"]) * 0.01
+            ambient += (
+                world.gas_concentration[species_id]
+                * float(gas_table[species_id]["temperature_coupling"])
+                * 0.01
+            )
         world.ambient_temperature[solve_gas_mask] = ambient[solve_gas_mask]
 
     def _solve_tile_mask(self, world: "WorldEngine") -> np.ndarray:
@@ -203,17 +218,26 @@ class GasSolver:
         previous_gas_concentration: np.ndarray,
     ) -> tuple[bool, bool, bool]:
         velocity_changed = bool(
-            np.any(np.abs(world.flow_velocity[solve_gas_mask] - previous_flow_velocity[solve_gas_mask]) > GAS_ACTIVITY_EPSILON)
+            np.any(
+                np.abs(world.flow_velocity[solve_gas_mask] - previous_flow_velocity[solve_gas_mask])
+                > GAS_ACTIVITY_EPSILON
+            )
         )
         ambient_changed = bool(
             np.any(
-                np.abs(world.ambient_temperature[solve_gas_mask] - previous_ambient_temperature[solve_gas_mask])
+                np.abs(
+                    world.ambient_temperature[solve_gas_mask]
+                    - previous_ambient_temperature[solve_gas_mask]
+                )
                 > GAS_ACTIVITY_EPSILON
             )
         )
         gas_changed = bool(
             np.any(
-                np.abs(world.gas_concentration[:, solve_gas_mask] - previous_gas_concentration[:, solve_gas_mask])
+                np.abs(
+                    world.gas_concentration[:, solve_gas_mask]
+                    - previous_gas_concentration[:, solve_gas_mask]
+                )
                 > GAS_ACTIVITY_EPSILON
             )
         )
@@ -222,11 +246,21 @@ class GasSolver:
         self.last_gas_changed = gas_changed
         self.last_pressure_range = self._masked_range(world.pressure_ping, solve_gas_mask)
         self.last_ambient_range = self._masked_range(world.ambient_temperature, solve_gas_mask)
-        self.last_flow_speed_range = self._masked_range(np.linalg.norm(world.flow_velocity, axis=-1), solve_gas_mask)
+        self.last_flow_speed_range = self._masked_range(
+            np.linalg.norm(world.flow_velocity, axis=-1), solve_gas_mask
+        )
         species_count = int(world.gas_concentration.shape[0])
-        self.last_species_total_concentration = world.gas_concentration.reshape((species_count, -1)).sum(axis=1, dtype=np.float64).astype(np.float32)
+        self.last_species_total_concentration = (
+            world.gas_concentration.reshape((species_count, -1))
+            .sum(axis=1, dtype=np.float64)
+            .astype(np.float32)
+        )
         if np.any(solve_gas_mask):
-            self.last_species_active_concentration = world.gas_concentration[:, solve_gas_mask].sum(axis=1, dtype=np.float64).astype(np.float32)
+            self.last_species_active_concentration = (
+                world.gas_concentration[:, solve_gas_mask]
+                .sum(axis=1, dtype=np.float64)
+                .astype(np.float32)
+            )
         else:
             self.last_species_active_concentration = np.zeros((species_count,), dtype=np.float32)
         return velocity_changed, ambient_changed, gas_changed
@@ -247,7 +281,9 @@ class GasSolver:
         for tile_y, tile_x in np.argwhere(solve_tile_mask):
             x0 = int(tile_x) * tile_size
             y0 = int(tile_y) * tile_size
-            rects.append((x0, y0, min(world.width, x0 + tile_size), min(world.height, y0 + tile_size)))
+            rects.append(
+                (x0, y0, min(world.width, x0 + tile_size), min(world.height, y0 + tile_size))
+            )
         world._mark_active_rects_runtime(rects)
 
     def _pressure_and_density_fields(self, world: "WorldEngine") -> tuple[np.ndarray, np.ndarray]:
@@ -276,8 +312,12 @@ class GasSolver:
         grad_x = centered_gradient_x(pressure)
         grad_y = centered_gradient_y(pressure)
         inv_density = 1.0 / np.maximum(density, 0.25)
-        velocity[..., 0][solve_gas_mask] -= grad_x[solve_gas_mask] * inv_density[solve_gas_mask] * dt * 0.2
-        velocity[..., 1][solve_gas_mask] -= grad_y[solve_gas_mask] * inv_density[solve_gas_mask] * dt * 0.2
+        velocity[..., 0][solve_gas_mask] -= (
+            grad_x[solve_gas_mask] * inv_density[solve_gas_mask] * dt * 0.2
+        )
+        velocity[..., 1][solve_gas_mask] -= (
+            grad_y[solve_gas_mask] * inv_density[solve_gas_mask] * dt * 0.2
+        )
         velocity[..., 1][solve_gas_mask] += (density[solve_gas_mask] - mean_density) * dt * 0.08
 
     def _divergence(self, velocity: np.ndarray, *, solve_gas_mask: np.ndarray) -> np.ndarray:
@@ -319,7 +359,9 @@ class GasSolver:
             self.last_solve_gas_mask = np.zeros((0, 0), dtype=np.bool_)
             species_count = 0
         else:
-            self.last_solve_tile_mask = np.zeros((world.active.tile_height, world.active.tile_width), dtype=np.bool_)
+            self.last_solve_tile_mask = np.zeros(
+                (world.active.tile_height, world.active.tile_width), dtype=np.bool_
+            )
             self.last_solve_gas_mask = np.zeros((world.gas_height, world.gas_width), dtype=np.bool_)
             species_count = int(world.gas_concentration.shape[0])
         self.last_pressure_iterations = 0
@@ -355,4 +397,6 @@ class GasSolver:
         if field.size == 0 or mask.size == 0 or not np.any(mask):
             return np.zeros((2,), dtype=np.float32)
         masked = np.asarray(field[mask], dtype=np.float32)
-        return np.array([float(masked.min(initial=0.0)), float(masked.max(initial=0.0))], dtype=np.float32)
+        return np.array(
+            [float(masked.min(initial=0.0)), float(masked.max(initial=0.0))], dtype=np.float32
+        )

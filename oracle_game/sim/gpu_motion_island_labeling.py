@@ -1,19 +1,15 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
-    from oracle_game.sim.gpu_motion import GPUMotionResources
 
-from oracle_game.types import Phase
-
-from oracle_game.sim.gpu_motion import (
-    LOCAL_SIZE
-)
+from oracle_game.sim.gpu_motion import LOCAL_SIZE
 from oracle_game.sim.gpu_motion_bridge import _pack_cell_state_texture
+from oracle_game.types import Phase
 
 
 def label_falling_island_components(
@@ -32,12 +28,16 @@ def label_falling_island_component_metadata(
     island_id: int,
     bbox: tuple[int, int, int, int],
 ) -> tuple[np.ndarray, np.ndarray]:
-    label_texture, metadata = pipeline.label_falling_island_component_metadata_texture(world, island_id, bbox)
+    label_texture, metadata = pipeline.label_falling_island_component_metadata_texture(
+        world, island_id, bbox
+    )
     x0, y0, x1, y1 = bbox
     labels = np.rint(
         np.frombuffer(label_texture.read(), dtype="f4").reshape((world.height, world.width))
     ).astype(np.int32)
-    return labels[max(0, y0):min(world.height, y1), max(0, x0):min(world.width, x1)].copy(), metadata
+    return labels[
+        max(0, y0) : min(world.height, y1), max(0, x0) : min(world.width, x1)
+    ].copy(), metadata
 
 
 def label_falling_island_component_metadata_texture(
@@ -97,7 +97,11 @@ def label_falling_island_component_metadata_texture(
             resources.component_change_flag.bind_to_storage_buffer(binding=0)
             propagate.run(group_x, group_y, 1)
             ctx.finish()
-            changed = bool(np.frombuffer(resources.component_change_flag.read(size=4), dtype=np.uint32, count=1)[0])
+            changed = bool(
+                np.frombuffer(
+                    resources.component_change_flag.read(size=4), dtype=np.uint32, count=1
+                )[0]
+            )
             current, scratch = scratch, current
             if not changed:
                 break
@@ -106,7 +110,9 @@ def label_falling_island_component_metadata_texture(
     return current, metadata
 
 
-def _summarize_falling_island_label_texture(pipeline, world: "WorldEngine", label_texture: Any) -> np.ndarray:
+def _summarize_falling_island_label_texture(
+    pipeline, world: "WorldEngine", label_texture: Any
+) -> np.ndarray:
     ctx = world.bridge.ctx
     if ctx is None:
         raise RuntimeError("GPU motion pipeline requires a valid ModernGL context")
@@ -162,7 +168,9 @@ def relabel_falling_island_components(
         return False
     label_height = clipped_y1 - clipped_y0
     label_width = clipped_x1 - clipped_x0
-    full_labels[clipped_y0:clipped_y1, clipped_x0:clipped_x1] = labels[:label_height, :label_width].astype(
+    full_labels[clipped_y0:clipped_y1, clipped_x0:clipped_x1] = labels[
+        :label_height, :label_width
+    ].astype(
         np.float32,
         copy=False,
     )
@@ -174,7 +182,9 @@ def relabel_falling_island_components(
         resources.island_id_tex.write(world.island_id.astype("f4").tobytes())
     pipeline._load_authoritative_bridge_inputs(world, resources, group_x, group_y)
     resources.component_label_ping.write(full_labels.tobytes())
-    pipeline._write_dynamic_buffer(ctx, resources, "component_labels", component_labels.astype(np.int32, copy=False))
+    pipeline._write_dynamic_buffer(
+        ctx, resources, "component_labels", component_labels.astype(np.int32, copy=False)
+    )
     pipeline._write_dynamic_buffer(
         ctx,
         resources,
@@ -197,7 +207,9 @@ def relabel_falling_island_components(
         return True
     ctx.finish()
     world.island_id[:] = np.rint(
-        np.frombuffer(resources.island_id_out_tex.read(), dtype="f4").reshape((world.height, world.width))
+        np.frombuffer(resources.island_id_out_tex.read(), dtype="f4").reshape(
+            (world.height, world.width)
+        )
     ).astype(np.int32)
     return True
 
@@ -221,7 +233,9 @@ def relabel_falling_island_component_texture(
     if upload_plan["island_id"]:
         resources.island_id_tex.write(world.island_id.astype("f4").tobytes())
     pipeline._load_authoritative_bridge_inputs(world, resources, group_x, group_y)
-    pipeline._write_dynamic_buffer(ctx, resources, "component_labels", component_labels.astype(np.int32, copy=False))
+    pipeline._write_dynamic_buffer(
+        ctx, resources, "component_labels", component_labels.astype(np.int32, copy=False)
+    )
     pipeline._write_dynamic_buffer(
         ctx,
         resources,
@@ -244,6 +258,8 @@ def relabel_falling_island_component_texture(
         return True
     ctx.finish()
     world.island_id[:] = np.rint(
-        np.frombuffer(resources.island_id_out_tex.read(), dtype="f4").reshape((world.height, world.width))
+        np.frombuffer(resources.island_id_out_tex.read(), dtype="f4").reshape(
+            (world.height, world.width)
+        )
     ).astype(np.int32)
     return True

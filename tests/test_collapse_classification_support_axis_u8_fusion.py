@@ -8,7 +8,6 @@ from oracle_game.sim import gpu_collapse_frontier as frontier
 from oracle_game.sim import gpu_collapse_incremental as incremental
 from oracle_game.sim.gpu_collapse import GPUCollapsePipeline
 
-
 ROOT = Path(__file__).parents[1]
 
 
@@ -33,8 +32,7 @@ def test_classification_support_axis_u8_fusion_has_independent_programs() -> Non
 
 def test_fused_shader_clears_connected_masks_before_bounds_and_preserves_inactive_stale() -> None:
     source = (
-        ROOT
-        / "oracle_game/shaders/collapse/classify_formal_connected_tiles_support_axis_u8.comp"
+        ROOT / "oracle_game/shaders/collapse/classify_formal_connected_tiles_support_axis_u8.comp"
     ).read_text(encoding="ascii")
 
     row_clear = "if (tile_connected && local_cell.x == 0)"
@@ -53,8 +51,7 @@ def test_fused_shader_clears_connected_masks_before_bounds_and_preserves_inactiv
 
 def test_fused_shader_keeps_r32_outputs_and_builds_masks_from_same_classification() -> None:
     source = (
-        ROOT
-        / "oracle_game/shaders/collapse/classify_formal_connected_tiles_support_axis_u8.comp"
+        ROOT / "oracle_game/shaders/collapse/classify_formal_connected_tiles_support_axis_u8.comp"
     ).read_text(encoding="ascii")
 
     structural = "bool structural = material_id > 0"

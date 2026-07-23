@@ -1,22 +1,34 @@
 from __future__ import annotations
-from typing import Any, TYPE_CHECKING
+
+from typing import TYPE_CHECKING, Any
+
 import numpy as np
 
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
-from oracle_game.types import CellFlag, ForceSource, Phase, ReactionType
-from oracle_game.sim.gpu_collapse_dirty import COLLAPSE_STRUCTURE_DIRTY_TILE_COUNT_BUFFER, COLLAPSE_STRUCTURE_DIRTY_TILE_DISPATCH_ARGS_BUFFER, COLLAPSE_STRUCTURE_DIRTY_TILE_LIST_BUFFER, COLLAPSE_STRUCTURE_DIRTY_TILE_MASK_BUFFER, _active_scheduler_gpu_authoritative, _ensure_material_flags_buffer, ensure_collapse_structure_dirty_tile_mask, ensure_collapse_structure_dirty_tile_queue, mark_collapse_structure_dirty_tiles_from_bridge_cell_core
+from oracle_game.sim.gpu_collapse_dirty import (
+    COLLAPSE_STRUCTURE_DIRTY_TILE_COUNT_BUFFER,
+    COLLAPSE_STRUCTURE_DIRTY_TILE_DISPATCH_ARGS_BUFFER,
+    COLLAPSE_STRUCTURE_DIRTY_TILE_LIST_BUFFER,
+    COLLAPSE_STRUCTURE_DIRTY_TILE_MASK_BUFFER,
+    _active_scheduler_gpu_authoritative,
+    _ensure_material_flags_buffer,
+    ensure_collapse_structure_dirty_tile_mask,
+    ensure_collapse_structure_dirty_tile_queue,
+    mark_collapse_structure_dirty_tiles_from_bridge_cell_core,
+)
 from oracle_game.sim.gpu_reactions import (
     FLOW_SOURCE_LAYERS,
     FORMAL_GPU_EMPTY_DEFERRED_BATCH,
+    LOCAL_SIZE,
+    MAX_EMITTED_LIGHTS,
     GPUDeferredActionBatch,
     GPUReactionBridgeInputLoads,
     GPUReactionResources,
-    LOCAL_SIZE,
-    MAX_EMITTED_LIGHTS,
 )
 from oracle_game.sim.gpu_timer_pack import unpack_cell_state, unpack_u8x4
+from oracle_game.types import CellFlag, ForceSource, Phase, ReactionType
 
 
 def _load_authoritative_bridge_inputs(
@@ -52,7 +64,9 @@ def _load_authoritative_bridge_inputs(
         return
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("GPU reaction pipeline requires bridge GPU resources for authoritative input state")
+        raise RuntimeError(
+            "GPU reaction pipeline requires bridge GPU resources for authoritative input state"
+        )
     ran_copy = False
     ran_cell_copy = False
     if copy_cell_core:
@@ -67,9 +81,14 @@ def _load_authoritative_bridge_inputs(
                 program["cell_grid_size"].value = (world.width, world.height)
                 bridge.buffers["cell_core"].bind_to_storage_buffer(binding=0)
                 if read_role_only_cell_core:
-                    cell_state_tex, _phase_tex, temp_tex, integrity_tex, _velocity_tex, _timer_tex = (
-                        pipeline._current_cell_textures(resources)
-                    )
+                    (
+                        cell_state_tex,
+                        _phase_tex,
+                        temp_tex,
+                        integrity_tex,
+                        _velocity_tex,
+                        _timer_tex,
+                    ) = pipeline._current_cell_textures(resources)
                     cell_state_tex.bind_to_image(0, read=False, write=True)
                     temp_tex.bind_to_image(1, read=False, write=True)
                     integrity_tex.bind_to_image(2, read=False, write=True)
@@ -94,14 +113,21 @@ def _load_authoritative_bridge_inputs(
                     program.run(group_x, group_y, 1)
             with pipeline._profile_scoped_pass(world, profile_scope, "load_bridge_cell_aux"):
                 program = pipeline.programs[
-                    "load_bridge_cell_aux_role" if read_role_only_cell_core else "load_bridge_cell_aux"
+                    "load_bridge_cell_aux_role"
+                    if read_role_only_cell_core
+                    else "load_bridge_cell_aux"
                 ]
                 program["cell_grid_size"].value = (world.width, world.height)
                 bridge.buffers["cell_core"].bind_to_storage_buffer(binding=0)
                 if read_role_only_cell_core:
-                    _material_tex, _phase_tex, _temp_tex, _integrity_tex, velocity_tex, timer_tex = (
-                        pipeline._current_cell_textures(resources)
-                    )
+                    (
+                        _material_tex,
+                        _phase_tex,
+                        _temp_tex,
+                        _integrity_tex,
+                        velocity_tex,
+                        timer_tex,
+                    ) = pipeline._current_cell_textures(resources)
                     velocity_tex.bind_to_image(0, read=False, write=True)
                     timer_tex.bind_to_image(1, read=False, write=True)
                 else:
@@ -193,7 +219,6 @@ def _load_authoritative_bridge_inputs(
             pipeline._sync_compute_writes(bridge.ctx)
 
 
-
 def _publish_bridge_cell_state(
     pipeline,
     world: "WorldEngine",
@@ -211,13 +236,17 @@ def _publish_bridge_cell_state(
     bridge = world.bridge
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("GPU reaction pipeline requires bridge GPU resources for authoritative cell state")
+        raise RuntimeError(
+            "GPU reaction pipeline requires bridge GPU resources for authoritative cell state"
+        )
     if "cell_core" not in bridge.gpu_authoritative_resources:
         world._require_gpu_authoritative_resources("reaction output", "cell_core")
         bridge.sync_world(world)
-    cell_state_tex, _phase_tex, temp_tex, integrity_tex, velocity_tex, timer_tex = pipeline._cell_role_textures(
-        resources,
-        source_role or "pong",
+    cell_state_tex, _phase_tex, temp_tex, integrity_tex, velocity_tex, timer_tex = (
+        pipeline._cell_role_textures(
+            resources,
+            source_role or "pong",
+        )
     )
     if source_velocity_role is not None:
         velocity_tex = pipeline._cell_role_textures(resources, source_velocity_role)[4]
@@ -228,7 +257,11 @@ def _publish_bridge_cell_state(
     dirty_dispatch_args = None
     material_flags_buffer = None
     material_count = 0
-    if mark_structure_dirty and pipeline._formal_gpu_frame(world) and _active_scheduler_gpu_authoritative(world):
+    if (
+        mark_structure_dirty
+        and pipeline._formal_gpu_frame(world)
+        and _active_scheduler_gpu_authoritative(world)
+    ):
         dirty_buffer = ensure_collapse_structure_dirty_tile_mask(world)
         dirty_queue = ensure_collapse_structure_dirty_tile_queue(world)
         if dirty_buffer is not None and dirty_queue is not None:
@@ -301,7 +334,6 @@ def _publish_bridge_cell_state(
     bridge.mark_gpu_authoritative("cell_core", "material")
 
 
-
 def _publish_bridge_gas_state(
     pipeline,
     world: "WorldEngine",
@@ -314,7 +346,9 @@ def _publish_bridge_gas_state(
     bridge = world.bridge
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("GPU reaction pipeline requires bridge GPU resources for authoritative gas state")
+        raise RuntimeError(
+            "GPU reaction pipeline requires bridge GPU resources for authoritative gas state"
+        )
     program = pipeline.programs["publish_bridge_gas"]
     gas_texture = resources.gas_pong if gas_texture is None else gas_texture
     ambient_texture = resources.ambient_pong if ambient_texture is None else ambient_texture
@@ -343,7 +377,6 @@ def _publish_bridge_gas_state(
     bridge.mark_gpu_authoritative("gas_concentration", "ambient_temperature")
 
 
-
 def _publish_bridge_dose_state(
     pipeline,
     world: "WorldEngine",
@@ -354,7 +387,9 @@ def _publish_bridge_dose_state(
     bridge = world.bridge
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("GPU reaction pipeline requires bridge GPU resources for authoritative optical dose state")
+        raise RuntimeError(
+            "GPU reaction pipeline requires bridge GPU resources for authoritative optical dose state"
+        )
     light_count = int(world.cell_optical_dose.shape[0])
     cell_program = pipeline.programs["publish_bridge_cell_dose"]
     cell_program["cell_grid_size"].value = (world.width, world.height)
@@ -398,7 +433,6 @@ def _publish_bridge_dose_state(
     bridge.mark_gpu_authoritative("cell_optical_dose", "gas_optical_dose")
 
 
-
 def _apply_flow_sources_to_bridge_velocity(
     pipeline,
     world: "WorldEngine",
@@ -410,7 +444,9 @@ def _apply_flow_sources_to_bridge_velocity(
     bridge = world.bridge
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("GPU reaction pipeline requires bridge GPU resources for authoritative flow state")
+        raise RuntimeError(
+            "GPU reaction pipeline requires bridge GPU resources for authoritative flow state"
+        )
     program = pipeline.programs["apply_bridge_flow_sources"]
     program["gas_grid_size"].value = (world.gas_width, world.gas_height)
     program["tile_grid_size"].value = (world.active.tile_width, world.active.tile_height)
@@ -447,17 +483,22 @@ def _apply_flow_sources_to_bridge_velocity(
     pipeline._sync_compute_writes(bridge.ctx)
     bridge._ensure_active_scheduler_programs()
     bridge._refresh_active_chunks_and_meta(world, read_meta=False)
-    bridge.mark_gpu_authoritative("flow_velocity", "active_meta", "active_tile_ttl", "active_chunk_mask")
+    bridge.mark_gpu_authoritative(
+        "flow_velocity", "active_meta", "active_tile_ttl", "active_chunk_mask"
+    )
     pipeline._formal_active_mask_cache_key = None
     pipeline._copy_bridge_flow_velocity_to_reaction(world, resources)
 
 
-
-def _publish_bridge_light_emitters(pipeline, world: "WorldEngine", resources: GPUReactionResources) -> None:
+def _publish_bridge_light_emitters(
+    pipeline, world: "WorldEngine", resources: GPUReactionResources
+) -> None:
     bridge = world.bridge
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("GPU reaction pipeline requires bridge GPU resources for authoritative emitted light state")
+        raise RuntimeError(
+            "GPU reaction pipeline requires bridge GPU resources for authoritative emitted light state"
+        )
     program = pipeline.programs["publish_bridge_light_emitters"]
     program["emitter_vec4_count"].value = int(MAX_EMITTED_LIGHTS * 2)
     program["counter_count"].value = 16
@@ -468,7 +509,6 @@ def _publish_bridge_light_emitters(pipeline, world: "WorldEngine", resources: GP
     program.run((max(MAX_EMITTED_LIGHTS * 2, 16) + 255) // 256, 1, 1)
     pipeline._sync_compute_writes(bridge.ctx)
     bridge.mark_gpu_authoritative("reaction_light_emitter", "reaction_light_emitter_count")
-
 
 
 def _download_cell_state(
@@ -511,8 +551,12 @@ def _download_cell_state(
                     resources,
                     source_role=source_role,
                     source_velocity_role=source_velocity_role,
-                    cell_meta_texture=resources.local_cell_meta_out if direct_core_outputs else None,
-                    packed_cell_meta_texture=resources.local_deferred_packed_out if packed_local_cell_meta else None,
+                    cell_meta_texture=resources.local_cell_meta_out
+                    if direct_core_outputs
+                    else None,
+                    packed_cell_meta_texture=resources.local_deferred_packed_out
+                    if packed_local_cell_meta
+                    else None,
                 )
                 pipeline._set_formal_cell_read_role(source_role)
                 pipeline._set_formal_velocity_read_role(source_velocity_role)
@@ -520,8 +564,12 @@ def _download_cell_state(
                 pipeline._publish_bridge_cell_state(
                     world,
                     resources,
-                    cell_meta_texture=resources.local_cell_meta_out if direct_core_outputs else None,
-                    packed_cell_meta_texture=resources.local_deferred_packed_out if packed_local_cell_meta else None,
+                    cell_meta_texture=resources.local_cell_meta_out
+                    if direct_core_outputs
+                    else None,
+                    packed_cell_meta_texture=resources.local_deferred_packed_out
+                    if packed_local_cell_meta
+                    else None,
                 )
                 pipeline._promote_cell_pong_to_ping(world, resources)
         pipeline.last_cpu_mirror_downloaded = False
@@ -530,21 +578,37 @@ def _download_cell_state(
     previous_material = world.material_id.copy()
     previous_phase = world.phase.copy()
     previous_island_id = world.island_id.copy()
-    cell_state = np.frombuffer(resources.cell_state_pong.read(), dtype="u4").reshape((world.height, world.width))
+    cell_state = np.frombuffer(resources.cell_state_pong.read(), dtype="u4").reshape(
+        (world.height, world.width)
+    )
     material, phase, packed_flags = unpack_cell_state(cell_state)
     world.material_id[:] = material
     world.phase[:] = phase
     world.cell_flags[:] = packed_flags
-    world.cell_temperature[:] = np.frombuffer(resources.temp_pong.read(), dtype="f4").reshape((world.height, world.width))
-    world.integrity[:] = np.frombuffer(resources.integrity_pong.read(), dtype="f4").reshape((world.height, world.width))
+    world.cell_temperature[:] = np.frombuffer(resources.temp_pong.read(), dtype="f4").reshape(
+        (world.height, world.width)
+    )
+    world.integrity[:] = np.frombuffer(resources.integrity_pong.read(), dtype="f4").reshape(
+        (world.height, world.width)
+    )
     world.timer_pack[:] = unpack_u8x4(
         np.frombuffer(resources.timer_pong.read(), dtype="u4").reshape((world.height, world.width))
     )
     if hasattr(resources, "velocity_pong"):
-        world.velocity[:] = np.frombuffer(resources.velocity_pong.read(), dtype="f4").reshape((world.height, world.width, 2))
-    cell_reset_mask = np.frombuffer(resources.cell_reset_tex.read(), dtype="f4").reshape((world.height, world.width)) > 0.5
+        world.velocity[:] = np.frombuffer(resources.velocity_pong.read(), dtype="f4").reshape(
+            (world.height, world.width, 2)
+        )
+    cell_reset_mask = (
+        np.frombuffer(resources.cell_reset_tex.read(), dtype="f4").reshape(
+            (world.height, world.width)
+        )
+        > 0.5
+    )
     reaction_latched_mask = (
-        np.frombuffer(resources.reaction_latched_tex.read(), dtype="f4").reshape((world.height, world.width)) > 0.5
+        np.frombuffer(resources.reaction_latched_tex.read(), dtype="f4").reshape(
+            (world.height, world.width)
+        )
+        > 0.5
     )
     world.cell_flags[cell_reset_mask] = 0
     world.cell_flags[reaction_latched_mask] |= np.uint8(int(CellFlag.REACTION_LATCHED))
@@ -553,9 +617,9 @@ def _download_cell_state(
         world.velocity[emptied_mask] = 0.0
         ambient_cells = world.sample_ambient_to_cells()
         world.cell_temperature[emptied_mask] = ambient_cells[emptied_mask]
-    non_placeholder_mask = (world.material_id <= 0) | ~np.vectorize(world._shadow_material_is_placeholder, otypes=[np.bool_])(
-        world.material_id
-    )
+    non_placeholder_mask = (world.material_id <= 0) | ~np.vectorize(
+        world._shadow_material_is_placeholder, otypes=[np.bool_]
+    )(world.material_id)
     world.entity_id[non_placeholder_mask] = 0
     world.placeholder_displaced_material[non_placeholder_mask] = 0
     invalid_island_mask = (world.island_id > 0) & (
@@ -579,7 +643,6 @@ def _download_cell_state(
     world._refresh_island_records_for_ids(touched_island_ids.tolist())
 
 
-
 def _download_gas_state(pipeline, world: "WorldEngine", resources: GPUReactionResources) -> None:
     if pipeline._formal_gpu_frame(world):
         if pipeline._formal_segment_batch_active():
@@ -597,7 +660,6 @@ def _download_gas_state(pipeline, world: "WorldEngine", resources: GPUReactionRe
     )
 
 
-
 def _download_dose_state(pipeline, world: "WorldEngine", resources: GPUReactionResources) -> None:
     if pipeline._formal_gpu_frame(world):
         if pipeline._formal_segment_batch_active():
@@ -610,17 +672,22 @@ def _download_dose_state(pipeline, world: "WorldEngine", resources: GPUReactionR
         return
     pipeline.last_cpu_mirror_downloaded = True
     world.cell_optical_dose[:] = np.maximum(
-        np.frombuffer(resources.cell_dose_pong.read(), dtype="f4").reshape(world.cell_optical_dose.shape),
+        np.frombuffer(resources.cell_dose_pong.read(), dtype="f4").reshape(
+            world.cell_optical_dose.shape
+        ),
         0.0,
     )
     world.gas_optical_dose[:] = np.maximum(
-        np.frombuffer(resources.gas_dose_pong.read(), dtype="f4").reshape(world.gas_optical_dose.shape),
+        np.frombuffer(resources.gas_dose_pong.read(), dtype="f4").reshape(
+            world.gas_optical_dose.shape
+        ),
         0.0,
     )
 
 
-
-def _download_deferred_batch(pipeline, world: "WorldEngine", resources: GPUReactionResources) -> GPUDeferredActionBatch:
+def _download_deferred_batch(
+    pipeline, world: "WorldEngine", resources: GPUReactionResources
+) -> GPUDeferredActionBatch:
     shape = (world.height, world.width, 4)
     if pipeline._formal_gpu_frame(world):
         unsupported = pipeline._unsupported_deferred_action_indices(world)
@@ -634,7 +701,9 @@ def _download_deferred_batch(pipeline, world: "WorldEngine", resources: GPUReact
         else:
             pipeline._publish_bridge_light_emitters(world, resources)
         return FORMAL_GPU_EMPTY_DEFERRED_BATCH
-    reaction_counts = np.frombuffer(resources.light_emitter_count.read(), dtype=np.uint32, count=16).copy()
+    reaction_counts = np.frombuffer(
+        resources.light_emitter_count.read(), dtype=np.uint32, count=16
+    ).copy()
     emitted_light_count = int(reaction_counts[0])
     emitted_light_count = max(0, min(emitted_light_count, MAX_EMITTED_LIGHTS))
     gpu_local_action_counts = reaction_counts[1:9].copy()
@@ -648,17 +717,27 @@ def _download_deferred_batch(pipeline, world: "WorldEngine", resources: GPUReact
     else:
         emitted_lights = np.zeros((0, 8), dtype=np.float32)
     return GPUDeferredActionBatch(
-        action_lo=np.rint(np.frombuffer(resources.trigger_lo_tex.read(), dtype="f4").reshape(shape)).astype(np.int32),
-        action_hi=np.rint(np.frombuffer(resources.trigger_hi_tex.read(), dtype="f4").reshape(shape)).astype(np.int32),
-        scale_lo=np.frombuffer(resources.deferred_scale_lo_tex.read(), dtype="f4").reshape(shape).copy(),
-        scale_hi=np.frombuffer(resources.deferred_scale_hi_tex.read(), dtype="f4").reshape(shape).copy(),
+        action_lo=np.rint(
+            np.frombuffer(resources.trigger_lo_tex.read(), dtype="f4").reshape(shape)
+        ).astype(np.int32),
+        action_hi=np.rint(
+            np.frombuffer(resources.trigger_hi_tex.read(), dtype="f4").reshape(shape)
+        ).astype(np.int32),
+        scale_lo=np.frombuffer(resources.deferred_scale_lo_tex.read(), dtype="f4")
+        .reshape(shape)
+        .copy(),
+        scale_hi=np.frombuffer(resources.deferred_scale_hi_tex.read(), dtype="f4")
+        .reshape(shape)
+        .copy(),
         emitted_lights=emitted_lights,
         emitted_material_mask=(
-            np.frombuffer(resources.emitted_material_mask_tex.read(), dtype="f4").reshape((world.height, world.width)) > 0.5
+            np.frombuffer(resources.emitted_material_mask_tex.read(), dtype="f4").reshape(
+                (world.height, world.width)
+            )
+            > 0.5
         ),
         gpu_local_action_counts=gpu_local_action_counts,
     )
-
 
 
 def _unsupported_deferred_action_indices(pipeline, world: "WorldEngine") -> list[int]:
@@ -674,15 +753,23 @@ def _unsupported_deferred_action_indices(pipeline, world: "WorldEngine") -> list
             int(ReactionType.CONVERT_MATERIAL.value),
         }:
             continue
-        if reaction_type_id == int(ReactionType.MODIFY_GAS.value) and int(row["gas_species_id"]) >= 0:
+        if (
+            reaction_type_id == int(ReactionType.MODIFY_GAS.value)
+            and int(row["gas_species_id"]) >= 0
+        ):
             continue
-        if reaction_type_id == int(ReactionType.EMIT_LIGHT.value) and int(row["light_type_id"]) >= 0:
+        if (
+            reaction_type_id == int(ReactionType.EMIT_LIGHT.value)
+            and int(row["light_type_id"]) >= 0
+        ):
             continue
-        if reaction_type_id == int(ReactionType.EMIT_MATERIAL.value) and int(row["emit_material_id"]) > 0:
+        if (
+            reaction_type_id == int(ReactionType.EMIT_MATERIAL.value)
+            and int(row["emit_material_id"]) > 0
+        ):
             continue
         unsupported.append(int(index))
     return unsupported
-
 
 
 def _append_flow_sources_from_gpu(

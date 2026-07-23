@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from oracle_game.sim.gpu_reactions import GPUReactionPipeline, MAX_MATERIALS, MAX_RULES
+from oracle_game.sim.gpu_reactions import MAX_MATERIALS, MAX_RULES, GPUReactionPipeline
 from oracle_game.world import WorldEngine
 
 
@@ -50,8 +50,12 @@ def test_material_pair_packed_descriptors_are_dense_and_source_ordered() -> None
             for descriptor, rule in zip(mm_descriptors, expected_mm, strict=True):
                 operation = int(descriptor[0])
                 assert (operation >> 9) & 0xFF == int(rule["rhs_material_id"])
-                assert int(descriptor[1]) == int(np.float32(rule["min_temperature"]).view(np.uint32))
-                assert int(descriptor[2]) == int(np.float32(rule["max_temperature"]).view(np.uint32))
+                assert int(descriptor[1]) == int(
+                    np.float32(rule["min_temperature"]).view(np.uint32)
+                )
+                assert int(descriptor[2]) == int(
+                    np.float32(rule["max_temperature"]).view(np.uint32)
+                )
 
             mg_descriptors = packed[
                 MAX_MATERIALS + mg_offset : MAX_MATERIALS + mg_offset + mg_count
@@ -70,6 +74,7 @@ def test_material_pair_packed_descriptors_are_dense_and_source_ordered() -> None
     finally:
         world.close()
 
+
 def test_material_pair_packed_descriptors_keep_strict_fallback() -> None:
     world, mm_rules, mg_rules, materials = _default_tables()
     try:
@@ -85,18 +90,25 @@ def test_material_pair_packed_descriptors_keep_strict_fallback() -> None:
         ):
             candidate = mm_rules.copy()
             candidate[0][field] = value
-            assert pipeline._compile_material_pair_packed_descriptors(
-                candidate, mg_rules, materials, gas_count
-            ) is None, field
+            assert (
+                pipeline._compile_material_pair_packed_descriptors(
+                    candidate, mg_rules, materials, gas_count
+                )
+                is None
+            ), field
 
         candidate = mg_rules.copy()
         candidate[0]["rhs_gas_id"] = -1
-        assert pipeline._compile_material_pair_packed_descriptors(
-            mm_rules, candidate, materials, gas_count
-        ) is None
-        assert pipeline._compile_material_pair_packed_descriptors(
-            mm_rules, mg_rules, materials, 9
-        ) is None
+        assert (
+            pipeline._compile_material_pair_packed_descriptors(
+                mm_rules, candidate, materials, gas_count
+            )
+            is None
+        )
+        assert (
+            pipeline._compile_material_pair_packed_descriptors(mm_rules, mg_rules, materials, 9)
+            is None
+        )
     finally:
         world.close()
 
@@ -115,9 +127,7 @@ def test_material_pair_packed_descriptor_cache_tracks_table_generations() -> Non
         assert first is second
         assert first is not None
 
-        world.bridge.table_generations["gases"] = (
-            world.bridge.table_generations.get("gases", 0) + 1
-        )
+        world.bridge.table_generations["gases"] = world.bridge.table_generations.get("gases", 0) + 1
         third = pipeline._compile_material_pair_packed_descriptors_cached(
             world, mm_rules, mg_rules, materials, gas_count
         )

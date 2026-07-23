@@ -1,55 +1,56 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
 import json
+import threading
+
 import numpy as np
 
 from oracle_game.gpu._common import (
     _json_bytes,
 )
-
 from oracle_game.gpu.dtypes import (
-    GAS_RUNTIME_META_DTYPE,
-    REACTION_RUNTIME_META_DTYPE,
-    HEAT_RUNTIME_META_DTYPE,
-    GAS_SPECIES_RUNTIME_DTYPE,
-    LIQUID_RUNTIME_META_DTYPE,
     COLLAPSE_COMPONENT_DTYPE,
-    ISLAND_RUNTIME_DTYPE,
-    RULE_TABLE_META_DTYPE,
-    OPTICS_RUNTIME_META_DTYPE,
     COLLAPSE_RUNTIME_META_DTYPE,
+    GAS_RUNTIME_META_DTYPE,
+    GAS_SPECIES_RUNTIME_DTYPE,
+    HEAT_RUNTIME_META_DTYPE,
+    ISLAND_RUNTIME_DTYPE,
+    LIQUID_RUNTIME_META_DTYPE,
+    OPTICS_RUNTIME_META_DTYPE,
+    REACTION_RUNTIME_META_DTYPE,
+    RULE_TABLE_META_DTYPE,
 )
-
 from oracle_game.gpu.packers import (
-    pack_self_reaction_rule_table,
-    pack_reaction_action_table,
-    pack_gas_table,
-    pack_entity_state_upload,
-    pack_cell_core,
-    pack_liquid_runtime_upload,
-    pack_world_command_upload,
-    pack_force_source_upload,
-    pack_light_table,
-    pack_heat_runtime_upload,
-    pack_reaction_runtime_upload,
-    pack_optics_table,
-    pack_island_runtime_upload,
-    pack_gas_runtime_upload,
     _pack_pair_reaction_rules,
-    pack_readback_request_upload,
-    pack_optics_runtime_upload,
-    pack_frame_meta_upload,
-    pack_placeholder_dirty_rect_upload,
-    pack_collapse_runtime_upload,
-    pack_material_table,
-    pack_page_stripe_upload,
     pack_active_meta_upload,
+    pack_cell_core,
+    pack_collapse_runtime_upload,
+    pack_entity_state_upload,
+    pack_force_source_upload,
+    pack_frame_meta_upload,
+    pack_gas_runtime_upload,
+    pack_gas_table,
+    pack_heat_runtime_upload,
+    pack_island_runtime_upload,
+    pack_light_table,
+    pack_liquid_runtime_upload,
+    pack_material_table,
+    pack_optics_runtime_upload,
+    pack_optics_table,
+    pack_page_stripe_upload,
+    pack_placeholder_dirty_rect_upload,
     pack_placeholder_upload,
+    pack_reaction_action_table,
+    pack_reaction_runtime_upload,
+    pack_readback_request_upload,
+    pack_self_reaction_rule_table,
+    pack_world_command_upload,
+    unpack_cell_core,
 )
 
 
@@ -96,7 +97,11 @@ def sync_rule_tables(bridge, world: "WorldEngine") -> None:
             "self_rule_table",
         )
     )
-    if signature == bridge.rule_table_signature and bridge.shadow_typed_tables and ((not bridge.enabled or bridge.ctx is None) or buffers_ready):
+    if (
+        signature == bridge.rule_table_signature
+        and bridge.shadow_typed_tables
+        and ((not bridge.enabled or bridge.ctx is None) or buffers_ready)
+    ):
         return
 
     material_table = pack_material_table(world)
@@ -104,9 +109,13 @@ def sync_rule_tables(bridge, world: "WorldEngine") -> None:
     light_table = pack_light_table(world)
     optics_table = pack_optics_table(world)
     reaction_action_table = pack_reaction_action_table(world)
-    material_material_rule_table = _pack_pair_reaction_rules(world, world.rulebook.material_material_rules)
+    material_material_rule_table = _pack_pair_reaction_rules(
+        world, world.rulebook.material_material_rules
+    )
     material_gas_rule_table = _pack_pair_reaction_rules(world, world.rulebook.material_gas_rules)
-    material_light_rule_table = _pack_pair_reaction_rules(world, world.rulebook.material_light_rules)
+    material_light_rule_table = _pack_pair_reaction_rules(
+        world, world.rulebook.material_light_rules
+    )
     gas_gas_rule_table = _pack_pair_reaction_rules(world, world.rulebook.gas_gas_rules)
     gas_light_rule_table = _pack_pair_reaction_rules(world, world.rulebook.gas_light_rules)
     self_rule_table = pack_self_reaction_rule_table(world)
@@ -148,7 +157,9 @@ def sync_rule_tables(bridge, world: "WorldEngine") -> None:
         bridge._write_typed_table_buffer("light_table", light_table)
         bridge._write_typed_table_buffer("optics_table", optics_table)
         bridge._write_typed_table_buffer("reaction_action_table", reaction_action_table)
-        bridge._write_typed_table_buffer("material_material_rule_table", material_material_rule_table)
+        bridge._write_typed_table_buffer(
+            "material_material_rule_table", material_material_rule_table
+        )
         bridge._write_typed_table_buffer("material_gas_rule_table", material_gas_rule_table)
         bridge._write_typed_table_buffer("material_light_rule_table", material_light_rule_table)
         bridge._write_typed_table_buffer("gas_gas_rule_table", gas_gas_rule_table)
@@ -169,7 +180,9 @@ def sync_world(
     previous_force_cpu_resource_upload = bridge._force_cpu_resource_upload
     bridge._force_cpu_resource_upload = bool(force_cpu_resource_upload)
     try:
-        bridge._sync_world_impl(world, debug_frame=debug_frame, upload_debug_texture=upload_debug_texture)
+        bridge._sync_world_impl(
+            world, debug_frame=debug_frame, upload_debug_texture=upload_debug_texture
+        )
     finally:
         bridge._force_cpu_resource_upload = previous_force_cpu_resource_upload
 
@@ -186,10 +199,12 @@ def _sync_world_impl(
     upload_solver_runtime_from_cpu = bridge._should_upload_cpu_solver_runtime(world)
     upload_island_runtime_from_cpu = bridge._should_upload_cpu_resource(world, "island_runtime")
     upload_powder_reservation_from_cpu = (
-        upload_solver_runtime_from_cpu and bridge._should_upload_cpu_resource(world, "powder_reservation")
+        upload_solver_runtime_from_cpu
+        and bridge._should_upload_cpu_resource(world, "powder_reservation")
     )
     upload_island_reservation_from_cpu = (
-        upload_solver_runtime_from_cpu and bridge._should_upload_cpu_resource(world, "island_reservation")
+        upload_solver_runtime_from_cpu
+        and bridge._should_upload_cpu_resource(world, "island_reservation")
     )
     if upload_powder_reservation_from_cpu:
         world.motion_solver.gpu_pipeline.materialize_compact_powder_reservations(
@@ -246,10 +261,16 @@ def _sync_world_impl(
     placeholder_upload = pack_placeholder_upload(world)
     placeholder_dirty_rect_upload = pack_placeholder_dirty_rect_upload(world)
     upload_active_tile_ttl_from_cpu = bridge._should_upload_cpu_resource(world, "active_tile_ttl")
-    upload_active_chunk_mask_from_cpu = bridge._should_upload_cpu_resource(world, "active_chunk_mask")
+    upload_active_chunk_mask_from_cpu = bridge._should_upload_cpu_resource(
+        world, "active_chunk_mask"
+    )
     upload_active_meta_from_cpu = bridge._should_upload_cpu_resource(world, "active_meta")
-    active_tile_ttl_default = np.zeros((world.active.tile_height, world.active.tile_width), dtype=np.int32)
-    active_chunk_mask_default = np.zeros((world.active.chunk_height, world.active.chunk_width), dtype=np.uint8)
+    active_tile_ttl_default = np.zeros(
+        (world.active.tile_height, world.active.tile_width), dtype=np.int32
+    )
+    active_chunk_mask_default = np.zeros(
+        (world.active.chunk_height, world.active.chunk_width), dtype=np.uint8
+    )
     active_tile_ttl_upload = (
         np.asarray(world.active.active_tile_ttl or [], dtype=np.int32)
         if upload_active_tile_ttl_from_cpu
@@ -275,7 +296,12 @@ def _sync_world_impl(
         else bridge._shadow_or_default("active_meta", active_meta_default)
     )
     if upload_solver_runtime_from_cpu:
-        gas_runtime_meta_upload, gas_solve_tile_mask_upload, gas_solve_gas_mask_upload, gas_species_runtime_upload = pack_gas_runtime_upload(world)
+        (
+            gas_runtime_meta_upload,
+            gas_solve_tile_mask_upload,
+            gas_solve_gas_mask_upload,
+            gas_species_runtime_upload,
+        ) = pack_gas_runtime_upload(world)
         (
             heat_runtime_meta_upload,
             heat_solve_tile_mask_upload,
@@ -314,7 +340,9 @@ def _sync_world_impl(
             reaction_emitted_material_mask_upload,
         ) = pack_reaction_runtime_upload(world)
     else:
-        gas_runtime_meta_upload = bridge._shadow_or_default("gas_runtime_meta", np.zeros((1,), dtype=GAS_RUNTIME_META_DTYPE))
+        gas_runtime_meta_upload = bridge._shadow_or_default(
+            "gas_runtime_meta", np.zeros((1,), dtype=GAS_RUNTIME_META_DTYPE)
+        )
         gas_solve_tile_mask_upload = bridge._shadow_or_default(
             "gas_solve_tile_mask",
             np.zeros((world.active.tile_height, world.active.tile_width), dtype=np.uint8),
@@ -327,7 +355,9 @@ def _sync_world_impl(
             "gas_species_runtime",
             np.zeros((world.gas_concentration.shape[0],), dtype=GAS_SPECIES_RUNTIME_DTYPE),
         )
-        heat_runtime_meta_upload = bridge._shadow_or_default("heat_runtime_meta", np.zeros((1,), dtype=HEAT_RUNTIME_META_DTYPE))
+        heat_runtime_meta_upload = bridge._shadow_or_default(
+            "heat_runtime_meta", np.zeros((1,), dtype=HEAT_RUNTIME_META_DTYPE)
+        )
         heat_solve_tile_mask_upload = bridge._shadow_or_default(
             "heat_solve_tile_mask",
             np.zeros((world.active.tile_height, world.active.tile_width), dtype=np.uint8),
@@ -352,7 +382,9 @@ def _sync_world_impl(
             "heat_condense_target",
             np.zeros(world.gas_concentration.shape, dtype=np.uint8),
         )
-        liquid_runtime_meta_upload = bridge._shadow_or_default("liquid_runtime_meta", np.zeros((1,), dtype=LIQUID_RUNTIME_META_DTYPE))
+        liquid_runtime_meta_upload = bridge._shadow_or_default(
+            "liquid_runtime_meta", np.zeros((1,), dtype=LIQUID_RUNTIME_META_DTYPE)
+        )
         liquid_solve_tile_mask_upload = bridge._shadow_or_default(
             "liquid_solve_tile_mask",
             np.zeros((world.active.tile_height, world.active.tile_width), dtype=np.uint8),
@@ -381,7 +413,9 @@ def _sync_world_impl(
             "liquid_changed_cell_mask",
             np.zeros((world.height, world.width), dtype=np.uint8),
         )
-        reaction_runtime_meta_upload = bridge._shadow_or_default("reaction_runtime_meta", np.zeros((1,), dtype=REACTION_RUNTIME_META_DTYPE))
+        reaction_runtime_meta_upload = bridge._shadow_or_default(
+            "reaction_runtime_meta", np.zeros((1,), dtype=REACTION_RUNTIME_META_DTYPE)
+        )
         reaction_timed_solve_tile_mask_upload = bridge._shadow_or_default(
             "reaction_timed_solve_tile_mask",
             np.zeros((world.active.tile_height, world.active.tile_width), dtype=np.uint8),
@@ -473,14 +507,30 @@ def _sync_world_impl(
             "collapse_runtime_meta",
             np.zeros((1,), dtype=COLLAPSE_RUNTIME_META_DTYPE),
         )
-        collapse_solve_region_mask_upload = bridge.shadow_buffers.get("collapse_solve_region_mask", cell_zero)
-        collapse_structural_mask_upload = bridge.shadow_buffers.get("collapse_structural_mask", cell_zero)
-        collapse_support_seed_mask_upload = bridge.shadow_buffers.get("collapse_support_seed_mask", cell_zero)
-        collapse_supported_mask_upload = bridge.shadow_buffers.get("collapse_supported_mask", cell_zero)
-        collapse_unsupported_mask_upload = bridge.shadow_buffers.get("collapse_unsupported_mask", cell_zero)
-        collapse_delayed_pending_mask_upload = bridge.shadow_buffers.get("collapse_delayed_pending_mask", cell_zero)
-        collapse_immune_unsupported_mask_upload = bridge.shadow_buffers.get("collapse_immune_unsupported_mask", cell_zero)
-        collapse_collapsed_cell_mask_upload = bridge.shadow_buffers.get("collapse_collapsed_cell_mask", cell_zero)
+        collapse_solve_region_mask_upload = bridge.shadow_buffers.get(
+            "collapse_solve_region_mask", cell_zero
+        )
+        collapse_structural_mask_upload = bridge.shadow_buffers.get(
+            "collapse_structural_mask", cell_zero
+        )
+        collapse_support_seed_mask_upload = bridge.shadow_buffers.get(
+            "collapse_support_seed_mask", cell_zero
+        )
+        collapse_supported_mask_upload = bridge.shadow_buffers.get(
+            "collapse_supported_mask", cell_zero
+        )
+        collapse_unsupported_mask_upload = bridge.shadow_buffers.get(
+            "collapse_unsupported_mask", cell_zero
+        )
+        collapse_delayed_pending_mask_upload = bridge.shadow_buffers.get(
+            "collapse_delayed_pending_mask", cell_zero
+        )
+        collapse_immune_unsupported_mask_upload = bridge.shadow_buffers.get(
+            "collapse_immune_unsupported_mask", cell_zero
+        )
+        collapse_collapsed_cell_mask_upload = bridge.shadow_buffers.get(
+            "collapse_collapsed_cell_mask", cell_zero
+        )
         collapse_component_upload = bridge.shadow_buffers.get(
             "collapse_component",
             np.zeros((0,), dtype=COLLAPSE_COMPONENT_DTYPE),
@@ -497,7 +547,9 @@ def _sync_world_impl(
             optics_emitter_origin_mask_upload,
         ) = pack_optics_runtime_upload(world)
     else:
-        optics_runtime_meta_upload = bridge._shadow_or_default("optics_runtime_meta", np.zeros((1,), dtype=OPTICS_RUNTIME_META_DTYPE))
+        optics_runtime_meta_upload = bridge._shadow_or_default(
+            "optics_runtime_meta", np.zeros((1,), dtype=OPTICS_RUNTIME_META_DTYPE)
+        )
         optics_solve_tile_mask_upload = bridge._shadow_or_default(
             "optics_solve_tile_mask",
             np.zeros((world.active.tile_height, world.active.tile_width), dtype=np.uint8),
@@ -526,7 +578,9 @@ def _sync_world_impl(
             "optics_emitter_origin_mask",
             np.zeros((world.height, world.width), dtype=np.uint8),
         )
-    page_stripe_meta_upload, page_stripe_section_upload, page_stripe_payload_upload = pack_page_stripe_upload(world)
+    page_stripe_meta_upload, page_stripe_section_upload, page_stripe_payload_upload = (
+        pack_page_stripe_upload(world)
+    )
     frame_meta_upload = pack_frame_meta_upload(
         world,
         entity_count=len(entity_state_upload),
@@ -561,8 +615,12 @@ def _sync_world_impl(
     bridge.shadow_buffers["placeholder_dirty_rect"] = placeholder_dirty_rect_upload.copy()
     bridge.shadow_buffers["island_id"] = world.island_id.astype(np.int32).copy()
     bridge.shadow_buffers["entity_id"] = world.entity_id.astype(np.int32).copy()
-    bridge.shadow_buffers["placeholder_displaced_material"] = world.placeholder_displaced_material.astype(np.int32).copy()
-    bridge.shadow_buffers["collapse_delay_pending"] = world.collapse_delay_pending.astype(np.int32).copy()
+    bridge.shadow_buffers["placeholder_displaced_material"] = (
+        world.placeholder_displaced_material.astype(np.int32).copy()
+    )
+    bridge.shadow_buffers["collapse_delay_pending"] = world.collapse_delay_pending.astype(
+        np.int32
+    ).copy()
     bridge.shadow_buffers["cell_optical_dose"] = world.cell_optical_dose.astype(np.float32).copy()
     bridge.shadow_buffers["gas_optical_dose"] = world.gas_optical_dose.astype(np.float32).copy()
     bridge.shadow_buffers["active_meta"] = active_meta_upload.copy()
@@ -588,38 +646,66 @@ def _sync_world_impl(
     bridge.shadow_buffers["liquid_buoyancy_mask"] = liquid_buoyancy_mask_upload.copy()
     bridge.shadow_buffers["liquid_changed_cell_mask"] = liquid_changed_cell_mask_upload.copy()
     bridge.shadow_buffers["reaction_runtime_meta"] = reaction_runtime_meta_upload.copy()
-    bridge.shadow_buffers["reaction_timed_solve_tile_mask"] = reaction_timed_solve_tile_mask_upload.copy()
-    bridge.shadow_buffers["reaction_self_solve_tile_mask"] = reaction_self_solve_tile_mask_upload.copy()
-    bridge.shadow_buffers["reaction_material_material_solve_tile_mask"] = reaction_material_material_solve_tile_mask_upload.copy()
-    bridge.shadow_buffers["reaction_material_gas_solve_tile_mask"] = reaction_material_gas_solve_tile_mask_upload.copy()
-    bridge.shadow_buffers["reaction_material_light_solve_tile_mask"] = reaction_material_light_solve_tile_mask_upload.copy()
-    bridge.shadow_buffers["reaction_gas_gas_solve_tile_mask"] = reaction_gas_gas_solve_tile_mask_upload.copy()
-    bridge.shadow_buffers["reaction_gas_light_solve_tile_mask"] = reaction_gas_light_solve_tile_mask_upload.copy()
+    bridge.shadow_buffers["reaction_timed_solve_tile_mask"] = (
+        reaction_timed_solve_tile_mask_upload.copy()
+    )
+    bridge.shadow_buffers["reaction_self_solve_tile_mask"] = (
+        reaction_self_solve_tile_mask_upload.copy()
+    )
+    bridge.shadow_buffers["reaction_material_material_solve_tile_mask"] = (
+        reaction_material_material_solve_tile_mask_upload.copy()
+    )
+    bridge.shadow_buffers["reaction_material_gas_solve_tile_mask"] = (
+        reaction_material_gas_solve_tile_mask_upload.copy()
+    )
+    bridge.shadow_buffers["reaction_material_light_solve_tile_mask"] = (
+        reaction_material_light_solve_tile_mask_upload.copy()
+    )
+    bridge.shadow_buffers["reaction_gas_gas_solve_tile_mask"] = (
+        reaction_gas_gas_solve_tile_mask_upload.copy()
+    )
+    bridge.shadow_buffers["reaction_gas_light_solve_tile_mask"] = (
+        reaction_gas_light_solve_tile_mask_upload.copy()
+    )
     bridge.shadow_buffers["reaction_solve_cell_mask"] = reaction_solve_cell_mask_upload.copy()
     bridge.shadow_buffers["reaction_solve_gas_mask"] = reaction_solve_gas_mask_upload.copy()
     bridge.shadow_buffers["reaction_changed_cell_mask"] = reaction_changed_cell_mask_upload.copy()
     bridge.shadow_buffers["reaction_changed_gas_mask"] = reaction_changed_gas_mask_upload.copy()
-    bridge.shadow_buffers["reaction_ambient_changed_mask"] = reaction_ambient_changed_mask_upload.copy()
+    bridge.shadow_buffers["reaction_ambient_changed_mask"] = (
+        reaction_ambient_changed_mask_upload.copy()
+    )
     bridge.shadow_buffers["reaction_timer_changed_mask"] = reaction_timer_changed_mask_upload.copy()
     bridge.shadow_buffers["reaction_emitted_light_mask"] = reaction_emitted_light_mask_upload.copy()
-    bridge.shadow_buffers["reaction_emitted_material_mask"] = reaction_emitted_material_mask_upload.copy()
+    bridge.shadow_buffers["reaction_emitted_material_mask"] = (
+        reaction_emitted_material_mask_upload.copy()
+    )
     bridge.shadow_buffers["collapse_runtime_meta"] = collapse_runtime_meta_upload.copy()
     bridge.shadow_buffers["collapse_solve_region_mask"] = collapse_solve_region_mask_upload.copy()
     bridge.shadow_buffers["collapse_structural_mask"] = collapse_structural_mask_upload.copy()
     bridge.shadow_buffers["collapse_support_seed_mask"] = collapse_support_seed_mask_upload.copy()
     bridge.shadow_buffers["collapse_supported_mask"] = collapse_supported_mask_upload.copy()
     bridge.shadow_buffers["collapse_unsupported_mask"] = collapse_unsupported_mask_upload.copy()
-    bridge.shadow_buffers["collapse_delayed_pending_mask"] = collapse_delayed_pending_mask_upload.copy()
-    bridge.shadow_buffers["collapse_immune_unsupported_mask"] = collapse_immune_unsupported_mask_upload.copy()
-    bridge.shadow_buffers["collapse_collapsed_cell_mask"] = collapse_collapsed_cell_mask_upload.copy()
+    bridge.shadow_buffers["collapse_delayed_pending_mask"] = (
+        collapse_delayed_pending_mask_upload.copy()
+    )
+    bridge.shadow_buffers["collapse_immune_unsupported_mask"] = (
+        collapse_immune_unsupported_mask_upload.copy()
+    )
+    bridge.shadow_buffers["collapse_collapsed_cell_mask"] = (
+        collapse_collapsed_cell_mask_upload.copy()
+    )
     bridge.shadow_buffers["collapse_component"] = collapse_component_upload.copy()
     bridge.shadow_buffers["optics_runtime_meta"] = optics_runtime_meta_upload.copy()
     bridge.shadow_buffers["optics_solve_tile_mask"] = optics_solve_tile_mask_upload.copy()
     bridge.shadow_buffers["optics_solve_cell_mask"] = optics_solve_cell_mask_upload.copy()
     bridge.shadow_buffers["optics_solve_gas_mask"] = optics_solve_gas_mask_upload.copy()
     bridge.shadow_buffers["optics_visible_changed_mask"] = optics_visible_changed_mask_upload.copy()
-    bridge.shadow_buffers["optics_cell_dose_changed_mask"] = optics_cell_dose_changed_mask_upload.copy()
-    bridge.shadow_buffers["optics_gas_dose_changed_mask"] = optics_gas_dose_changed_mask_upload.copy()
+    bridge.shadow_buffers["optics_cell_dose_changed_mask"] = (
+        optics_cell_dose_changed_mask_upload.copy()
+    )
+    bridge.shadow_buffers["optics_gas_dose_changed_mask"] = (
+        optics_gas_dose_changed_mask_upload.copy()
+    )
     bridge.shadow_buffers["optics_emitter_origin_mask"] = optics_emitter_origin_mask_upload.copy()
     bridge.shadow_buffers["page_stripe_meta"] = page_stripe_meta_upload.copy()
     bridge.shadow_buffers["page_stripe_section"] = page_stripe_section_upload.copy()
@@ -632,7 +718,12 @@ def _sync_world_impl(
     upload_gas_dose_from_cpu = bridge._should_upload_cpu_resource(world, "gas_optical_dose")
     upload_light_from_cpu = bridge._should_upload_cpu_resource(world, "light")
     upload_visible_from_cpu = bridge._should_upload_cpu_resource(world, "visible_illumination")
-    if upload_cell_dose_from_cpu or upload_gas_dose_from_cpu or upload_light_from_cpu or upload_visible_from_cpu:
+    if (
+        upload_cell_dose_from_cpu
+        or upload_gas_dose_from_cpu
+        or upload_light_from_cpu
+        or upload_visible_from_cpu
+    ):
         world._gpu_optics_outputs_clear = False
         optics_pipeline = getattr(getattr(world, "optics_solver", None), "gpu_pipeline", None)
         invalidate_sparse = getattr(optics_pipeline, "invalidate_sparse_runtime", None)
@@ -642,9 +733,13 @@ def _sync_world_impl(
         packed = pack_cell_core(world)
         bridge.buffers["cell_core"].write(packed.tobytes())
     if bridge._should_upload_cpu_resource(world, "island_id"):
-        bridge.buffers["island_id"].write(np.ascontiguousarray(world.island_id.astype(np.int32)).tobytes())
+        bridge.buffers["island_id"].write(
+            np.ascontiguousarray(world.island_id.astype(np.int32)).tobytes()
+        )
     if bridge._should_upload_cpu_resource(world, "entity_id"):
-        bridge.buffers["entity_id"].write(np.ascontiguousarray(world.entity_id.astype(np.int32)).tobytes())
+        bridge.buffers["entity_id"].write(
+            np.ascontiguousarray(world.entity_id.astype(np.int32)).tobytes()
+        )
     if bridge._should_upload_cpu_resource(world, "placeholder_displaced_material"):
         bridge.buffers["placeholder_displaced_material"].write(
             np.ascontiguousarray(world.placeholder_displaced_material.astype(np.int32)).tobytes()
@@ -656,9 +751,13 @@ def _sync_world_impl(
     if bridge._should_upload_cpu_resource(world, "gas_concentration"):
         bridge.buffers["gas_concentration"].write(world.gas_concentration.astype("f4").tobytes())
     if upload_cell_dose_from_cpu:
-        bridge.buffers["cell_optical_dose"].write(np.ascontiguousarray(world.cell_optical_dose.astype(np.float32)).tobytes())
+        bridge.buffers["cell_optical_dose"].write(
+            np.ascontiguousarray(world.cell_optical_dose.astype(np.float32)).tobytes()
+        )
     if upload_gas_dose_from_cpu:
-        bridge.buffers["gas_optical_dose"].write(np.ascontiguousarray(world.gas_optical_dose.astype(np.float32)).tobytes())
+        bridge.buffers["gas_optical_dose"].write(
+            np.ascontiguousarray(world.gas_optical_dose.astype(np.float32)).tobytes()
+        )
     bridge._write_dynamic_buffer("entity_state", entity_state_upload)
     bridge.buffers["entity_state_count"].write(entity_count_upload.tobytes())
     bridge._write_dynamic_buffer("force_source", force_source_upload)
@@ -689,14 +788,13 @@ def _sync_world_impl(
     if bridge._should_upload_cpu_resource(world, "active_tile_ttl"):
         bridge._write_dynamic_buffer("active_tile_ttl", active_tile_ttl_upload)
     if bridge._should_upload_cpu_resource(world, "active_chunk_mask"):
-        bridge._write_dynamic_buffer("active_chunk_mask", active_chunk_mask_upload.astype(np.int32, copy=False))
-    if (
-        getattr(world, "simulation_backend", "") == "gpu"
-        and (
-            upload_active_meta_from_cpu
-            or upload_active_tile_ttl_from_cpu
-            or upload_active_chunk_mask_from_cpu
+        bridge._write_dynamic_buffer(
+            "active_chunk_mask", active_chunk_mask_upload.astype(np.int32, copy=False)
         )
+    if getattr(world, "simulation_backend", "") == "gpu" and (
+        upload_active_meta_from_cpu
+        or upload_active_tile_ttl_from_cpu
+        or upload_active_chunk_mask_from_cpu
     ):
         bridge._ensure_active_scheduler_programs()
         bridge._refresh_active_chunks_and_meta(world, read_meta=False)
@@ -720,45 +818,76 @@ def _sync_world_impl(
     bridge._write_dynamic_buffer("liquid_buoyancy_mask", liquid_buoyancy_mask_upload)
     bridge._write_dynamic_buffer("liquid_changed_cell_mask", liquid_changed_cell_mask_upload)
     bridge._write_dynamic_buffer("reaction_runtime_meta", reaction_runtime_meta_upload)
-    bridge._write_dynamic_buffer("reaction_timed_solve_tile_mask", reaction_timed_solve_tile_mask_upload)
-    bridge._write_dynamic_buffer("reaction_self_solve_tile_mask", reaction_self_solve_tile_mask_upload)
-    bridge._write_dynamic_buffer("reaction_material_material_solve_tile_mask", reaction_material_material_solve_tile_mask_upload)
-    bridge._write_dynamic_buffer("reaction_material_gas_solve_tile_mask", reaction_material_gas_solve_tile_mask_upload)
-    bridge._write_dynamic_buffer("reaction_material_light_solve_tile_mask", reaction_material_light_solve_tile_mask_upload)
-    bridge._write_dynamic_buffer("reaction_gas_gas_solve_tile_mask", reaction_gas_gas_solve_tile_mask_upload)
-    bridge._write_dynamic_buffer("reaction_gas_light_solve_tile_mask", reaction_gas_light_solve_tile_mask_upload)
+    bridge._write_dynamic_buffer(
+        "reaction_timed_solve_tile_mask", reaction_timed_solve_tile_mask_upload
+    )
+    bridge._write_dynamic_buffer(
+        "reaction_self_solve_tile_mask", reaction_self_solve_tile_mask_upload
+    )
+    bridge._write_dynamic_buffer(
+        "reaction_material_material_solve_tile_mask",
+        reaction_material_material_solve_tile_mask_upload,
+    )
+    bridge._write_dynamic_buffer(
+        "reaction_material_gas_solve_tile_mask", reaction_material_gas_solve_tile_mask_upload
+    )
+    bridge._write_dynamic_buffer(
+        "reaction_material_light_solve_tile_mask", reaction_material_light_solve_tile_mask_upload
+    )
+    bridge._write_dynamic_buffer(
+        "reaction_gas_gas_solve_tile_mask", reaction_gas_gas_solve_tile_mask_upload
+    )
+    bridge._write_dynamic_buffer(
+        "reaction_gas_light_solve_tile_mask", reaction_gas_light_solve_tile_mask_upload
+    )
     bridge._write_dynamic_buffer("reaction_solve_cell_mask", reaction_solve_cell_mask_upload)
     bridge._write_dynamic_buffer("reaction_solve_gas_mask", reaction_solve_gas_mask_upload)
     bridge._write_dynamic_buffer("reaction_changed_cell_mask", reaction_changed_cell_mask_upload)
     bridge._write_dynamic_buffer("reaction_changed_gas_mask", reaction_changed_gas_mask_upload)
-    bridge._write_dynamic_buffer("reaction_ambient_changed_mask", reaction_ambient_changed_mask_upload)
+    bridge._write_dynamic_buffer(
+        "reaction_ambient_changed_mask", reaction_ambient_changed_mask_upload
+    )
     bridge._write_dynamic_buffer("reaction_timer_changed_mask", reaction_timer_changed_mask_upload)
     bridge._write_dynamic_buffer("reaction_emitted_light_mask", reaction_emitted_light_mask_upload)
-    bridge._write_dynamic_buffer("reaction_emitted_material_mask", reaction_emitted_material_mask_upload)
+    bridge._write_dynamic_buffer(
+        "reaction_emitted_material_mask", reaction_emitted_material_mask_upload
+    )
     bridge._write_dynamic_buffer("collapse_runtime_meta", collapse_runtime_meta_upload)
     bridge._write_dynamic_buffer("collapse_solve_region_mask", collapse_solve_region_mask_upload)
     if bridge._should_upload_cpu_resource(world, "collapse_structural_mask"):
         bridge._write_dynamic_buffer("collapse_structural_mask", collapse_structural_mask_upload)
     if bridge._should_upload_cpu_resource(world, "collapse_support_seed_mask"):
-        bridge._write_dynamic_buffer("collapse_support_seed_mask", collapse_support_seed_mask_upload)
+        bridge._write_dynamic_buffer(
+            "collapse_support_seed_mask", collapse_support_seed_mask_upload
+        )
     if bridge._should_upload_cpu_resource(world, "collapse_supported_mask"):
         bridge._write_dynamic_buffer("collapse_supported_mask", collapse_supported_mask_upload)
     if bridge._should_upload_cpu_resource(world, "collapse_unsupported_mask"):
         bridge._write_dynamic_buffer("collapse_unsupported_mask", collapse_unsupported_mask_upload)
     if bridge._should_upload_cpu_resource(world, "collapse_delayed_pending_mask"):
-        bridge._write_dynamic_buffer("collapse_delayed_pending_mask", collapse_delayed_pending_mask_upload)
+        bridge._write_dynamic_buffer(
+            "collapse_delayed_pending_mask", collapse_delayed_pending_mask_upload
+        )
     if bridge._should_upload_cpu_resource(world, "collapse_immune_unsupported_mask"):
-        bridge._write_dynamic_buffer("collapse_immune_unsupported_mask", collapse_immune_unsupported_mask_upload)
+        bridge._write_dynamic_buffer(
+            "collapse_immune_unsupported_mask", collapse_immune_unsupported_mask_upload
+        )
     if bridge._should_upload_cpu_resource(world, "collapse_collapsed_cell_mask"):
-        bridge._write_dynamic_buffer("collapse_collapsed_cell_mask", collapse_collapsed_cell_mask_upload)
+        bridge._write_dynamic_buffer(
+            "collapse_collapsed_cell_mask", collapse_collapsed_cell_mask_upload
+        )
     bridge._write_dynamic_buffer("collapse_component", collapse_component_upload)
     bridge._write_dynamic_buffer("optics_runtime_meta", optics_runtime_meta_upload)
     bridge._write_dynamic_buffer("optics_solve_tile_mask", optics_solve_tile_mask_upload)
     bridge._write_dynamic_buffer("optics_solve_cell_mask", optics_solve_cell_mask_upload)
     bridge._write_dynamic_buffer("optics_solve_gas_mask", optics_solve_gas_mask_upload)
     bridge._write_dynamic_buffer("optics_visible_changed_mask", optics_visible_changed_mask_upload)
-    bridge._write_dynamic_buffer("optics_cell_dose_changed_mask", optics_cell_dose_changed_mask_upload)
-    bridge._write_dynamic_buffer("optics_gas_dose_changed_mask", optics_gas_dose_changed_mask_upload)
+    bridge._write_dynamic_buffer(
+        "optics_cell_dose_changed_mask", optics_cell_dose_changed_mask_upload
+    )
+    bridge._write_dynamic_buffer(
+        "optics_gas_dose_changed_mask", optics_gas_dose_changed_mask_upload
+    )
     bridge._write_dynamic_buffer("optics_emitter_origin_mask", optics_emitter_origin_mask_upload)
     bridge._write_dynamic_buffer("page_stripe_meta", page_stripe_meta_upload)
     bridge._write_dynamic_buffer("page_stripe_section", page_stripe_section_upload)
@@ -784,7 +913,9 @@ def _sync_world_impl(
         debug_rgba[..., 3] = 1.0
         bridge.textures["debug"].write(debug_rgba.tobytes())
     if bridge._should_upload_cpu_resource(world, "ambient_temperature"):
-        bridge.textures["ambient_temperature"].write(world.ambient_temperature.astype("f4").tobytes())
+        bridge.textures["ambient_temperature"].write(
+            world.ambient_temperature.astype("f4").tobytes()
+        )
     if bridge._should_upload_cpu_resource(world, "pressure_ping"):
         bridge.textures["pressure_ping"].write(world.pressure_ping.astype("f4").tobytes())
     if bridge._should_upload_cpu_resource(world, "flow_velocity"):
@@ -810,6 +941,122 @@ def _sync_world_impl(
         )
 
 
+def download_gpu_authoritative_resources(bridge, world: "WorldEngine") -> None:
+    """Refresh the CPU mirror from GPU-authoritative resources.
+
+    Formal GPU frames keep the world state on the GPU and do not maintain the
+    CPU mirror, so a plain ``sync_world(force_cpu_resource_upload=True)`` after
+    GPU-resident writes (console ticks, immediate mutations) would overwrite
+    the newer GPU state with the stale mirror.  Call this before tearing down
+    a context whose GPU state must survive a re-attach; the re-attach sync
+    then re-uploads an accurate mirror.
+
+    ``material`` and ``active_meta`` need no download: the material texture is
+    re-derived from ``material_id`` (covered by ``cell_core``) and the active
+    scheduler meta is rebuilt from the tile TTL / chunk mask on re-sync.
+    """
+    if not bridge.enabled or bridge.ctx is None:
+        return
+    authoritative = bridge.gpu_authoritative_resources
+    if not authoritative:
+        return
+    # Flush the driver's command queue before mapping buffers: without an
+    # explicit finish the reads below can observe pre-write (uninitialised)
+    # buffer contents on some EGL/driver combinations.
+    bridge.ctx.finish()
+    buffers = bridge.buffers
+    textures = bridge.textures
+    width = int(world.width)
+    height = int(world.height)
+
+    if "cell_core" in authoritative:
+        buffer = buffers.get("cell_core")
+        if buffer is not None:
+            packed = np.frombuffer(
+                buffer.read(size=width * height * 5 * np.dtype(np.uint32).itemsize),
+                dtype=np.uint32,
+            ).reshape((height, width, 5))
+            unpacked = unpack_cell_core(packed)
+            # A genuine core snapshot can never reference a material outside
+            # the rulebook (``debug_frame`` indexes ``material_base_color``
+            # with it).  If any cell does, the buffer content is corrupt
+            # (e.g. an uninitialised ping-pong buffer published by a
+            # provenance swap); keep the CPU mirror instead of importing it.
+            if not bool((unpacked["material_id"] >= len(world.material_base_color)).any()):
+                world.material_id[:] = unpacked["material_id"]
+                world.phase[:] = unpacked["phase"]
+                world.cell_flags[:] = unpacked["cell_flags"]
+                world.velocity[:] = unpacked["velocity"]
+                world.cell_temperature[:] = unpacked["cell_temperature"]
+                world.timer_pack[:] = unpacked["timer_pack"]
+                world.integrity[:] = unpacked["integrity"]
+    for name in ("island_id", "entity_id", "placeholder_displaced_material"):
+        if name not in authoritative:
+            continue
+        buffer = buffers.get(name)
+        if buffer is None:
+            continue
+        mirror = getattr(world, name)
+        mirror[:] = np.frombuffer(buffer.read(size=mirror.nbytes), dtype=np.int32).reshape(
+            mirror.shape
+        )
+    if "collapse_delay_pending" in authoritative:
+        buffer = buffers.get("collapse_delay_pending")
+        if buffer is not None:
+            mirror = world.collapse_delay_pending
+            mirror[:] = (
+                np.frombuffer(
+                    buffer.read(size=mirror.size * np.dtype(np.int32).itemsize), dtype=np.int32
+                ).reshape(mirror.shape)
+                != 0
+            )
+    for name in ("gas_concentration", "cell_optical_dose", "gas_optical_dose"):
+        if name not in authoritative:
+            continue
+        buffer = buffers.get(name)
+        if buffer is None:
+            continue
+        mirror = getattr(world, name)
+        mirror[:] = np.frombuffer(buffer.read(size=mirror.nbytes), dtype=np.float32).reshape(
+            mirror.shape
+        )
+    for name in ("ambient_temperature", "pressure_ping", "flow_velocity"):
+        if name not in authoritative:
+            continue
+        texture = textures.get(name)
+        if texture is None:
+            continue
+        mirror = getattr(world, name)
+        mirror[:] = np.frombuffer(texture.read(), dtype="f4").reshape(mirror.shape)
+    if "visible_illumination" in authoritative:
+        texture = textures.get("visible_illumination")
+        if texture is not None:
+            rgba = np.frombuffer(texture.read(), dtype="f4").reshape((height, width, 4))
+            world.visible_illumination[:] = rgba[..., :3]
+    if "active_tile_ttl" in authoritative:
+        buffer = buffers.get("active_tile_ttl")
+        active = world.active
+        if buffer is not None and active.tile_width > 0 and active.tile_height > 0:
+            ttl = np.frombuffer(
+                buffer.read(
+                    size=active.tile_width * active.tile_height * np.dtype(np.int32).itemsize
+                ),
+                dtype=np.int32,
+            ).reshape((active.tile_height, active.tile_width))
+            active.active_tile_ttl = ttl.tolist()
+    if "active_chunk_mask" in authoritative:
+        buffer = buffers.get("active_chunk_mask")
+        active = world.active
+        if buffer is not None and active.chunk_width > 0 and active.chunk_height > 0:
+            mask = np.frombuffer(
+                buffer.read(
+                    size=active.chunk_width * active.chunk_height * np.dtype(np.int32).itemsize
+                ),
+                dtype=np.int32,
+            ).reshape((active.chunk_height, active.chunk_width))
+            active.active_chunk_mask = (mask != 0).tolist()
+
+
 def sync_readback_requests(bridge, world: "WorldEngine") -> None:
     readback_request_upload, readback_request_label_upload = pack_readback_request_upload(world)
     bridge.shadow_buffers["readback_request"] = readback_request_upload.copy()
@@ -818,14 +1065,30 @@ def sync_readback_requests(bridge, world: "WorldEngine") -> None:
     bridge._write_dynamic_buffer("readback_request_label", readback_request_label_upload)
 
 
+def sync_world_commands(bridge, world: "WorldEngine") -> None:
+    world_command_upload, world_command_payload_upload = pack_world_command_upload(world)
+    bridge.shadow_buffers["world_command"] = world_command_upload.copy()
+    bridge.shadow_buffers["world_command_payload"] = world_command_payload_upload.copy()
+    # GL writes are only valid on the thread that owns the context (a
+    # moderngl standalone context is pinned to the thread that created it);
+    # shadow buffers above remain the cross-thread publication channel.
+    if bridge.owner_thread_id is not None and bridge.owner_thread_id != threading.get_ident():
+        return
+    bridge._write_dynamic_buffer("world_command", world_command_upload)
+    bridge._write_dynamic_buffer("world_command_payload", world_command_payload_upload)
+
+
 def sync_force_sources(bridge, world: "WorldEngine") -> None:
     force_source_upload = pack_force_source_upload(world)
     force_source_count_upload = np.array([len(force_source_upload)], dtype=np.int32)
     bridge.shadow_buffers["force_source"] = force_source_upload.copy()
     bridge.shadow_buffers["force_source_count"] = force_source_count_upload.copy()
+    # GL writes are only valid on the thread that owns the context; shadow
+    # buffers above remain the cross-thread publication channel.
+    if bridge.owner_thread_id is not None and bridge.owner_thread_id != threading.get_ident():
+        return
     bridge._write_dynamic_buffer("force_source", force_source_upload)
-    if bridge.enabled and bridge.ctx is not None:
-        bridge.buffers["force_source_count"].write(force_source_count_upload.tobytes())
+    bridge._write_dynamic_buffer("force_source_count", force_source_count_upload)
 
 
 def _write_typed_table_buffer(bridge, name: str, data: np.ndarray) -> None:
@@ -864,6 +1127,10 @@ def _write_dynamic_buffer(bridge, name: str, data: np.ndarray) -> None:
 
 def _shadow_or_default(bridge, name: str, default: np.ndarray) -> np.ndarray:
     existing = bridge.shadow_buffers.get(name)
-    if isinstance(existing, np.ndarray) and existing.shape == default.shape and existing.dtype == default.dtype:
+    if (
+        isinstance(existing, np.ndarray)
+        and existing.shape == default.shape
+        and existing.dtype == default.dtype
+    ):
         return existing
     return default

@@ -5,7 +5,6 @@ from typing import Any
 from oracle_game.types import DebugView
 from oracle_game.world import WorldEngine
 
-
 DEMO_PATTERN_SCALE = 8.0
 DEMO_AMBIENT_TOP_LIGHT = (0.48, 0.50, 0.46)
 DEMO_AMBIENT_BOTTOM_LIGHT = (0.24, 0.26, 0.28)

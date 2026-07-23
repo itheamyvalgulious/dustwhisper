@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import fields
 import inspect
+from dataclasses import fields
 
 import numpy as np
 import pytest
 
-from oracle_game.sim.gpu_optics import GPUOpticsPipeline, _SHADER_SUBS
+from oracle_game.sim.gpu_optics import _SHADER_SUBS, GPUOpticsPipeline
 from oracle_game.sim.shader_loader import shader_source
 from oracle_game.types import CellFlag, Phase
 from oracle_game.world import WorldEngine

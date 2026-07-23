@@ -8,13 +8,14 @@ For each migrated GPU pipeline module, load every ``shaders/<stage>/*.comp``
 This is an independent check that the f-string -> .glsl extraction is complete.
 Run: ``.venv/bin/python scripts/verify_shaders.py``
 """
+
 from __future__ import annotations
 
 import importlib
 import pathlib
 import re
-
 import sys
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 SHADER_ROOT = pathlib.Path(__file__).resolve().parent.parent / "oracle_game" / "shaders"
@@ -31,8 +32,17 @@ STAGES = {
     "collapse": ("oracle_game.sim.gpu_collapse", "_SHADER_SUBS"),
     "reactions": ("oracle_game.sim.gpu_reactions", "_SHADER_SUBS"),
     "world_commands": ("oracle_game.sim.gpu_world_commands", "_SHADER_SUBS"),
-    "placeholders": ("oracle_game.sim.gpu_placeholders", {"PASS_LOCAL_SIZE": 8, "MAX_MATERIALS": 256, "MAX_MATERIALS_MINUS_1": 255}),
+    "placeholders": (
+        "oracle_game.sim.gpu_placeholders",
+        {"PASS_LOCAL_SIZE": 8, "MAX_MATERIALS": 256, "MAX_MATERIALS_MINUS_1": 255},
+    ),
     "page_stripes": ("oracle_game.sim.gpu_page_stripes", {"LOCAL_SIZE": 8, "scalar_type": "float"}),
+    # gpu/-side stages loaded through oracle_game.gpu.shader_loader (the sim ->
+    # gpu layering rule keeps these modules from importing the sim loader);
+    # display/_shared shaders are fully static (no markers).
+    "display": ("oracle_game.gpu.bridge_display", {}),
+    "readback": ("oracle_game.gpu.bridge_readback", {"LOCAL_SIZE": 8}),
+    "_shared": ("oracle_game.gpu.shader_loader", {}),
 }
 
 MARKER_RE = re.compile(r"\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}")
@@ -58,13 +68,13 @@ def main() -> int:
             raw = comp.read_text()
             # markers present in the raw file
             markers = set(MARKER_RE.findall(raw))
-            missing = {m for m in markers if subs is None or m not in (subs or {})}
+            {m for m in markers if subs is None or m not in (subs or {})}
             # render (only if no missing markers, else shader_source raises)
             try:
                 rendered = shader_source(rel, subs)
                 unsubstituted = set(MARKER_RE.findall(rendered))
                 remnants = REMANT_RE.findall(rendered)
-            except KeyError as ex:
+            except KeyError:
                 rendered = None
                 unsubstituted = markers
                 remnants = []

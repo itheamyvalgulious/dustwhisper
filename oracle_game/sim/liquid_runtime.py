@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 
-from oracle_game.sim.utils import expand_bool_mask, tile_mask_to_cell_mask
-from oracle_game.types import Phase
-from oracle_game.sim.cpu_base import material_table_row
+if TYPE_CHECKING:
+    from oracle_game.world import WorldEngine
 
+from oracle_game.sim.cpu_base import material_table_row
 from oracle_game.sim.liquid import (
     LIQUID_ACTIVITY_EPSILON,
-    LIQUID_SOLVER_TILE_LEVEL,
     LIQUID_SOLVER_COLUMNAR,
+    LIQUID_SOLVER_TILE_LEVEL,
 )
+from oracle_game.sim.utils import expand_bool_mask, tile_mask_to_cell_mask
+from oracle_game.types import Phase
 
 
 def step(solver, world: "WorldEngine") -> None:
@@ -28,7 +32,9 @@ def step(solver, world: "WorldEngine") -> None:
         world._require_gpu_stage("active scheduler liquid solve masks")
     if active_scheduler_gpu_authoritative:
         active_tiles = []
-        solve_tile_mask = np.zeros((world.active.tile_height, world.active.tile_width), dtype=np.bool_)
+        solve_tile_mask = np.zeros(
+            (world.active.tile_height, world.active.tile_width), dtype=np.bool_
+        )
     else:
         active_tiles = list(world.active.iter_active_tiles())
         solve_tile_mask = solver._build_solve_tile_mask(world, active_tiles)
@@ -71,7 +77,9 @@ def step(solver, world: "WorldEngine") -> None:
     else:
         assert pre_material_id is not None
         assert pre_phase is not None
-        solver.last_buoyancy_mask = solver._buoyancy_candidate_mask(world, post_cell_mask, pre_material_id, pre_phase)
+        solver.last_buoyancy_mask = solver._buoyancy_candidate_mask(
+            world, post_cell_mask, pre_material_id, pre_phase
+        )
 
     if gpu_available:
         solver.gpu_pipeline.step(
@@ -128,6 +136,7 @@ def step(solver, world: "WorldEngine") -> None:
         repair_runtime_state=not gpu_available,
     )
 
+
 def _finalize_runtime_state(
     solver,
     world: "WorldEngine",
@@ -146,16 +155,24 @@ def _finalize_runtime_state(
     runtime_changed_mask = material_changed_mask | phase_changed_mask
     touched_island_ids = np.unique(pre_island_id[runtime_changed_mask])
     if repair_runtime_state:
-        non_placeholder_mask = runtime_changed_mask & ~solver._placeholder_mask(world, world.material_id)
+        non_placeholder_mask = runtime_changed_mask & ~solver._placeholder_mask(
+            world, world.material_id
+        )
         world.entity_id[non_placeholder_mask] = 0
         world.placeholder_displaced_material[non_placeholder_mask] = 0
-        invalid_island_mask = runtime_changed_mask & (world.island_id > 0) & (
-            (world.phase != int(Phase.FALLING_ISLAND)) | (world.material_id <= 0)
+        invalid_island_mask = (
+            runtime_changed_mask
+            & (world.island_id > 0)
+            & ((world.phase != int(Phase.FALLING_ISLAND)) | (world.material_id <= 0))
         )
         world.island_id[invalid_island_mask] = 0
     world._refresh_island_records_for_ids(touched_island_ids.tolist())
-    velocity_changed_mask = np.any(np.abs(world.velocity - pre_velocity) > LIQUID_ACTIVITY_EPSILON, axis=-1)
-    temperature_changed_mask = np.abs(world.cell_temperature - pre_temperature) > LIQUID_ACTIVITY_EPSILON
+    velocity_changed_mask = np.any(
+        np.abs(world.velocity - pre_velocity) > LIQUID_ACTIVITY_EPSILON, axis=-1
+    )
+    temperature_changed_mask = (
+        np.abs(world.cell_temperature - pre_temperature) > LIQUID_ACTIVITY_EPSILON
+    )
     integrity_changed_mask = np.abs(world.integrity - pre_integrity) > LIQUID_ACTIVITY_EPSILON
     placeholder_changed_mask = world.placeholder_displaced_material != pre_placeholder
     solver.last_changed_cell_mask = (
@@ -172,12 +189,16 @@ def _finalize_runtime_state(
     solver.last_temperature_changed = bool(np.any(temperature_changed_mask))
     solver.last_integrity_changed = bool(np.any(integrity_changed_mask))
     solver.last_placeholder_changed = bool(np.any(placeholder_changed_mask))
-    solver.last_pending_placeholder_count_after = int(np.count_nonzero(world.placeholder_displaced_material > 0))
+    solver.last_pending_placeholder_count_after = int(
+        np.count_nonzero(world.placeholder_displaced_material > 0)
+    )
     solver.last_liquid_cell_count_after = int(np.count_nonzero(world.phase == int(Phase.LIQUID)))
+
 
 def release(solver) -> None:
     solver.gpu_pipeline.release()
     solver.reset_runtime_state()
+
 
 def reset_runtime_state(solver, world: "WorldEngine" | None = None) -> None:
     if world is None:
@@ -189,8 +210,12 @@ def reset_runtime_state(solver, world: "WorldEngine" | None = None) -> None:
         solver.last_buoyancy_mask = np.zeros((0, 0), dtype=np.bool_)
         solver.last_changed_cell_mask = np.zeros((0, 0), dtype=np.bool_)
     else:
-        solver.last_solve_tile_mask = np.zeros((world.active.tile_height, world.active.tile_width), dtype=np.bool_)
-        solver.last_post_tile_mask = np.zeros((world.active.tile_height, world.active.tile_width), dtype=np.bool_)
+        solver.last_solve_tile_mask = np.zeros(
+            (world.active.tile_height, world.active.tile_width), dtype=np.bool_
+        )
+        solver.last_post_tile_mask = np.zeros(
+            (world.active.tile_height, world.active.tile_width), dtype=np.bool_
+        )
         solver.last_post_cell_mask = np.zeros((world.height, world.width), dtype=np.bool_)
         solver.last_vertical_seam_mask = np.zeros((world.height, world.width), dtype=np.bool_)
         solver.last_horizontal_seam_mask = np.zeros((world.height, world.width), dtype=np.bool_)
@@ -206,6 +231,7 @@ def reset_runtime_state(solver, world: "WorldEngine" | None = None) -> None:
     solver.last_pending_placeholder_count_after = 0
     solver.last_liquid_cell_count_before = 0
     solver.last_liquid_cell_count_after = 0
+
 
 def runtime_snapshot(solver) -> dict[str, np.ndarray | int | bool]:
     return {
@@ -228,9 +254,11 @@ def runtime_snapshot(solver) -> dict[str, np.ndarray | int | bool]:
         "liquid_cell_count_after": int(solver.last_liquid_cell_count_after),
     }
 
+
 def _material_table_row(solver, world: "WorldEngine", material_id: int) -> np.void | None:
     # Delegated to the shared helper (formerly duplicated verbatim here).
     return material_table_row(world, material_id)
+
 
 def _material_density(solver, world: "WorldEngine", material_id: int) -> float:
     row = solver._material_table_row(world, material_id)
@@ -245,6 +273,7 @@ def _material_density(solver, world: "WorldEngine", material_id: int) -> float:
         return float(world.material_density[material_id])
     return 0.0
 
+
 def _material_base_integrity(solver, world: "WorldEngine", material_id: int) -> float:
     row = solver._material_table_row(world, material_id)
     if row is not None:
@@ -258,27 +287,38 @@ def _material_base_integrity(solver, world: "WorldEngine", material_id: int) -> 
         return float(world.material_base_integrity[material_id])
     return 0.0
 
+
 def _material_liquid_solver_kind(solver, world: "WorldEngine", material_id: int) -> int:
     row = solver._material_table_row(world, material_id)
     if row is not None:
         return int(row["liquid_solver_kind_id"])
     shadow_material = world._shadow_material_def(material_id)
     if shadow_material is not None:
-        return LIQUID_SOLVER_COLUMNAR if shadow_material.liquid_solver_kind == "columnar" else LIQUID_SOLVER_TILE_LEVEL
+        return (
+            LIQUID_SOLVER_COLUMNAR
+            if shadow_material.liquid_solver_kind == "columnar"
+            else LIQUID_SOLVER_TILE_LEVEL
+        )
     if world._shadow_has_table_payload("materials"):
         return 0
     if 0 <= material_id < world.material_liquid_solver_kind.shape[0]:
         return int(world.material_liquid_solver_kind[material_id])
     return 0
 
+
 def _placeholder_material_id(solver, world: "WorldEngine") -> int:
     material_table = world.bridge.shadow_typed_tables.get("material_table")
     if material_table is not None:
         for row in material_table:
-            if int(row["material_id"]) > 0 and int(row["name_hash"]) != 0 and int(row["render_group_id"]) == 7:
+            if (
+                int(row["material_id"]) > 0
+                and int(row["name_hash"]) != 0
+                and int(row["render_group_id"]) == 7
+            ):
                 return int(row["material_id"])
         return 0
     return int(world.placeholder_material_id)
+
 
 def _material_is_placeholder(solver, world: "WorldEngine", material_id: int) -> bool:
     row = solver._material_table_row(world, material_id)
@@ -286,12 +326,15 @@ def _material_is_placeholder(solver, world: "WorldEngine", material_id: int) -> 
         return int(row["render_group_id"]) == 7
     shadow_material = world._shadow_material_def(material_id)
     if shadow_material is not None:
-        return shadow_material.render_group == "placeholder" or "placeholder" in shadow_material.tags
+        return (
+            shadow_material.render_group == "placeholder" or "placeholder" in shadow_material.tags
+        )
     if world._shadow_has_table_payload("materials"):
         return False
     if 0 <= material_id < world.material_is_placeholder.shape[0]:
         return bool(world.material_is_placeholder[material_id])
     return False
+
 
 def _placeholder_mask(solver, world: "WorldEngine", material_ids: np.ndarray) -> np.ndarray:
     result = np.zeros(material_ids.shape, dtype=np.bool_)
@@ -308,5 +351,7 @@ def _placeholder_mask(solver, world: "WorldEngine", material_ids: np.ndarray) ->
         fallback_mask = positive_mask
     if np.any(fallback_mask):
         for material_id in np.unique(material_ids[fallback_mask]).tolist():
-            result[fallback_mask & (material_ids == int(material_id))] = solver._material_is_placeholder(world, int(material_id))
+            result[fallback_mask & (material_ids == int(material_id))] = (
+                solver._material_is_placeholder(world, int(material_id))
+            )
     return result

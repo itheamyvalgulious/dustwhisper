@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 
-from oracle_game.sim.gpu_heat import GPUHeatPipeline, _SHADER_SUBS
+from oracle_game.sim.gpu_heat import _SHADER_SUBS, GPUHeatPipeline
 from oracle_game.sim.shader_loader import shader_source
 
 
@@ -26,5 +26,7 @@ def test_terminal_hierarchical_row_summary_is_default_on_and_isolated() -> None:
     run_source = inspect.getsource(GPUHeatPipeline._run_apply_terminal4x6)
     assert '"apply_terminal4x6_sparse_resident_packed_lazy_row_summary"' in ensure_source
     assert "and pipeline._terminal_hierarchical_row_summary_enabled" in run_source
-    assert 'program_name = "apply_terminal4x6_sparse_resident_packed_lazy_row_summary"' in run_source
-    assert 'elif packed_phase_boil_targets:' in run_source
+    assert (
+        'program_name = "apply_terminal4x6_sparse_resident_packed_lazy_row_summary"' in run_source
+    )
+    assert "elif packed_phase_boil_targets:" in run_source

@@ -1,11 +1,12 @@
 from __future__ import annotations
+
 from typing import TYPE_CHECKING
+
 import numpy as np
 
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
-from oracle_game.types import ReactionType
 from oracle_game.sim.gpu_reactions import (
     ACTION_FLAG_ALLOW_SUBUNIT_SCALE,
     ACTION_FLAG_RANDOM_TARGET,
@@ -30,6 +31,7 @@ from oracle_game.sim.gpu_reactions import (
     TYPE_MODIFY_TEMPERATURE,
     TYPE_NONE,
 )
+from oracle_game.types import ReactionType
 
 
 def _compile_action_buffers(
@@ -66,7 +68,10 @@ def _compile_action_buffers(
             action_i[index, 2] = flags
             action_f[index, 2] = float(row["harm_per_frame"])
             action_f[index, 3] = float(row["integrity_threshold"])
-        elif reaction_type_id == int(ReactionType.MODIFY_GAS.value) and int(row["gas_species_id"]) >= 0:
+        elif (
+            reaction_type_id == int(ReactionType.MODIFY_GAS.value)
+            and int(row["gas_species_id"]) >= 0
+        ):
             action_i[index, 0] = TYPE_MODIFY_GAS
             action_i[index, 1] = int(row["gas_species_id"])
             action_i[index, 2] = int(row["direction_id"])
@@ -85,7 +90,10 @@ def _compile_action_buffers(
             action_f[index, 0] = float(row["strength"])
             action_f[index, 1] = float(row["range_cells"])
             action_f[index, 2] = float(row["beam_width"])
-        elif reaction_type_id == int(ReactionType.EMIT_MATERIAL.value) and int(row["emit_material_id"]) > 0:
+        elif (
+            reaction_type_id == int(ReactionType.EMIT_MATERIAL.value)
+            and int(row["emit_material_id"]) > 0
+        ):
             action_i[index, 0] = TYPE_EMIT_MATERIAL
             action_i[index, 1] = int(row["emit_material_id"])
             action_i[index, 2] = int(row["direction_id"])
@@ -97,7 +105,6 @@ def _compile_action_buffers(
         else:
             action_i[index, 0] = TYPE_DEFERRED
     return action_i, action_f
-
 
 
 def _compile_action_buffers_cached(
@@ -116,20 +123,23 @@ def _compile_action_buffers_cached(
     if key not in pipeline._compiled_action_cache:
         if len(pipeline._compiled_action_cache) > 64:
             pipeline._compiled_action_cache.clear()
-        pipeline._compiled_action_cache[key] = pipeline._compile_action_buffers(action_table, used_indices)
+        pipeline._compiled_action_cache[key] = pipeline._compile_action_buffers(
+            action_table, used_indices
+        )
     return pipeline._compiled_action_cache[key]
 
 
-
-def _compiled_actions_include_modify_gas(pipeline, compiled_actions: tuple[np.ndarray, np.ndarray]) -> bool:
+def _compiled_actions_include_modify_gas(
+    pipeline, compiled_actions: tuple[np.ndarray, np.ndarray]
+) -> bool:
     return bool(np.any(compiled_actions[0][:, 0] == TYPE_MODIFY_GAS))
 
 
-
-def _compiled_actions_include_flow_sources(pipeline, compiled_actions: tuple[np.ndarray, np.ndarray]) -> bool:
+def _compiled_actions_include_flow_sources(
+    pipeline, compiled_actions: tuple[np.ndarray, np.ndarray]
+) -> bool:
     action_i = np.asarray(compiled_actions[0], dtype=np.int32)
     return bool(np.any((action_i[:, 0] == TYPE_MODIFY_GAS) & (action_i[:, 3] != 0)))
-
 
 
 def _compiled_self_rule_flow_source_layers(
@@ -140,7 +150,10 @@ def _compiled_self_rule_flow_source_layers(
     action_i = np.asarray(compiled_actions[0], dtype=np.int32)
     if not bool(np.any((action_i[:, 0] == TYPE_MODIFY_GAS) & (action_i[:, 3] != 0))):
         return FLOW_SOURCE_LAYERS
-    if "trigger_slot_index" not in rule_table.dtype.names or "reaction_slots" not in material_table.dtype.names:
+    if (
+        "trigger_slot_index" not in rule_table.dtype.names
+        or "reaction_slots" not in material_table.dtype.names
+    ):
         return FLOW_SOURCE_LAYERS
     if "material_id" not in rule_table.dtype.names:
         return FLOW_SOURCE_LAYERS
@@ -180,7 +193,9 @@ def _compiled_self_rule_flow_source_layers(
     return max(1, min(FLOW_SOURCE_LAYERS, (max_flow_position + 1) * 4))
 
 
-def _compiled_modify_gas_layer_mask(compiled_actions: tuple[np.ndarray, np.ndarray], gas_count: int) -> int:
+def _compiled_modify_gas_layer_mask(
+    compiled_actions: tuple[np.ndarray, np.ndarray], gas_count: int
+) -> int:
     action_i = np.asarray(compiled_actions[0], dtype=np.int32)
     mask = 0
     for raw_layer in action_i[action_i[:, 0] == TYPE_MODIFY_GAS, 1].tolist():
@@ -195,12 +210,15 @@ def _compiled_modify_gas_layer_mask(compiled_actions: tuple[np.ndarray, np.ndarr
     return mask
 
 
-
-def _compiled_actions_include_emit_material(pipeline, compiled_actions: tuple[np.ndarray, np.ndarray]) -> bool:
+def _compiled_actions_include_emit_material(
+    pipeline, compiled_actions: tuple[np.ndarray, np.ndarray]
+) -> bool:
     return bool(np.any(compiled_actions[0][:, 0] == TYPE_EMIT_MATERIAL))
 
 
-def _compiled_actions_include_emit_light(pipeline, compiled_actions: tuple[np.ndarray, np.ndarray]) -> bool:
+def _compiled_actions_include_emit_light(
+    pipeline, compiled_actions: tuple[np.ndarray, np.ndarray]
+) -> bool:
     return bool(np.any(compiled_actions[0][:, 0] == TYPE_EMIT_LIGHT))
 
 
@@ -228,7 +246,10 @@ def _self_rules_require_deferred_hi_outputs(
     compiled_actions: tuple[np.ndarray, np.ndarray],
 ) -> bool:
     """Return whether any material can enqueue more than four self actions."""
-    if "material_id" not in rule_table.dtype.names or "trigger_slot_index" not in rule_table.dtype.names:
+    if (
+        "material_id" not in rule_table.dtype.names
+        or "trigger_slot_index" not in rule_table.dtype.names
+    ):
         return True
     if "reaction_slots" not in material_table.dtype.names:
         return True
@@ -238,7 +259,12 @@ def _self_rules_require_deferred_hi_outputs(
     for rule in rule_table[:MAX_SELF_RULES]:
         material_id = int(rule["material_id"])
         slot_index = int(rule["trigger_slot_index"])
-        if material_id <= 0 or material_id >= int(material_table.shape[0]) or slot_index < 0 or slot_index >= 8:
+        if (
+            material_id <= 0
+            or material_id >= int(material_table.shape[0])
+            or slot_index < 0
+            or slot_index >= 8
+        ):
             return True
         slots_by_material.setdefault(material_id, set()).add(slot_index)
     for material_id, slot_indices in slots_by_material.items():
@@ -256,8 +282,9 @@ def _self_rules_require_deferred_hi_outputs(
     return False
 
 
-
-def _compiled_actions_may_change_structure(pipeline, compiled_actions: tuple[np.ndarray, np.ndarray]) -> bool:
+def _compiled_actions_may_change_structure(
+    pipeline, compiled_actions: tuple[np.ndarray, np.ndarray]
+) -> bool:
     action_types = np.asarray(compiled_actions[0][:, 0], dtype=np.int32)
     return bool(
         np.any(
@@ -268,11 +295,11 @@ def _compiled_actions_may_change_structure(pipeline, compiled_actions: tuple[np.
     )
 
 
-
 def _compiled_rules_include_rhs_consume(pipeline, rule_tags: np.ndarray) -> bool:
     consume_policies = np.asarray(rule_tags[:, 3], dtype=np.uint32)
-    return bool(np.any((consume_policies == CONSUME_POLICY_RHS) | (consume_policies == CONSUME_POLICY_BOTH)))
-
+    return bool(
+        np.any((consume_policies == CONSUME_POLICY_RHS) | (consume_policies == CONSUME_POLICY_BOTH))
+    )
 
 
 def _compile_gas_action_buffers(
@@ -293,7 +320,10 @@ def _compile_gas_action_buffers(
         reaction_type_id = int(row["reaction_type_id"])
         if reaction_type_id == int(ReactionType.NONE.value):
             action_i[index, 0] = TYPE_NONE
-        elif reaction_type_id == int(ReactionType.MODIFY_GAS.value) and int(row["gas_species_id"]) >= 0:
+        elif (
+            reaction_type_id == int(ReactionType.MODIFY_GAS.value)
+            and int(row["gas_species_id"]) >= 0
+        ):
             action_i[index, 0] = TYPE_MODIFY_GAS
             action_i[index, 1] = int(row["gas_species_id"])
             action_i[index, 2] = int(row["direction_id"])
@@ -305,14 +335,20 @@ def _compile_gas_action_buffers(
         elif reaction_type_id == int(ReactionType.MODIFY_TEMPERATURE.value):
             action_i[index, 0] = TYPE_MODIFY_TEMPERATURE
             action_f[index, 0] = float(row["delta"])
-        elif reaction_type_id == int(ReactionType.EMIT_LIGHT.value) and int(row["light_type_id"]) >= 0:
+        elif (
+            reaction_type_id == int(ReactionType.EMIT_LIGHT.value)
+            and int(row["light_type_id"]) >= 0
+        ):
             action_i[index, 0] = TYPE_EMIT_LIGHT
             action_i[index, 1] = int(row["light_type_id"])
             action_i[index, 2] = int(row["direction_id"])
             action_f[index, 0] = float(row["strength"])
             action_f[index, 1] = float(row["range_cells"])
             action_f[index, 2] = float(row["beam_width"])
-        elif reaction_type_id == int(ReactionType.EMIT_MATERIAL.value) and int(row["emit_material_id"]) > 0:
+        elif (
+            reaction_type_id == int(ReactionType.EMIT_MATERIAL.value)
+            and int(row["emit_material_id"]) > 0
+        ):
             action_i[index, 0] = TYPE_EMIT_MATERIAL
             action_i[index, 1] = int(row["emit_material_id"])
             action_i[index, 2] = int(row["direction_id"])
@@ -322,7 +358,6 @@ def _compile_gas_action_buffers(
         else:
             return None
     return action_i, action_f
-
 
 
 def _compile_gas_light_action_buffers(
@@ -343,7 +378,10 @@ def _compile_gas_light_action_buffers(
         reaction_type_id = int(row["reaction_type_id"])
         if reaction_type_id == int(ReactionType.NONE.value):
             action_i[index, 0] = TYPE_NONE
-        elif reaction_type_id == int(ReactionType.MODIFY_GAS.value) and int(row["gas_species_id"]) >= 0:
+        elif (
+            reaction_type_id == int(ReactionType.MODIFY_GAS.value)
+            and int(row["gas_species_id"]) >= 0
+        ):
             action_i[index, 0] = TYPE_MODIFY_GAS
             action_i[index, 1] = int(row["gas_species_id"])
             action_i[index, 2] = int(row["direction_id"])
@@ -355,14 +393,20 @@ def _compile_gas_light_action_buffers(
         elif reaction_type_id == int(ReactionType.MODIFY_TEMPERATURE.value):
             action_i[index, 0] = TYPE_MODIFY_TEMPERATURE
             action_f[index, 0] = float(row["delta"])
-        elif reaction_type_id == int(ReactionType.EMIT_LIGHT.value) and int(row["light_type_id"]) >= 0:
+        elif (
+            reaction_type_id == int(ReactionType.EMIT_LIGHT.value)
+            and int(row["light_type_id"]) >= 0
+        ):
             action_i[index, 0] = TYPE_EMIT_LIGHT
             action_i[index, 1] = int(row["light_type_id"])
             action_i[index, 2] = int(row["direction_id"])
             action_f[index, 0] = float(row["strength"])
             action_f[index, 1] = float(row["range_cells"])
             action_f[index, 2] = float(row["beam_width"])
-        elif reaction_type_id == int(ReactionType.EMIT_MATERIAL.value) and int(row["emit_material_id"]) > 0:
+        elif (
+            reaction_type_id == int(ReactionType.EMIT_MATERIAL.value)
+            and int(row["emit_material_id"]) > 0
+        ):
             action_i[index, 0] = TYPE_EMIT_MATERIAL
             action_i[index, 1] = int(row["emit_material_id"])
             action_i[index, 2] = int(row["direction_id"])
@@ -372,7 +416,6 @@ def _compile_gas_light_action_buffers(
         else:
             return None
     return action_i, action_f
-
 
 
 def _modify_gas_action_requires_cpu_flow_side_effect(row: np.void) -> bool:
@@ -389,23 +432,24 @@ def _modify_gas_action_requires_cpu_flow_side_effect(row: np.void) -> bool:
     return abs(float(row["speed"])) > 1.0e-6
 
 
-
 def _rule_candidate_word_count(rule_count: int) -> int:
     return min(RULE_CANDIDATE_WORDS, max(0, (int(rule_count) + 31) // 32))
-
 
 
 def _empty_rule_candidate_masks() -> np.ndarray:
     return np.zeros((MAX_MATERIALS, RULE_CANDIDATE_VECS, 4), dtype=np.uint32)
 
 
-
 def _set_rule_candidate(mask_table: np.ndarray, material_id: int, rule_index: int) -> None:
-    if material_id <= 0 or material_id >= MAX_MATERIALS or rule_index < 0 or rule_index >= MAX_RULES:
+    if (
+        material_id <= 0
+        or material_id >= MAX_MATERIALS
+        or rule_index < 0
+        or rule_index >= MAX_RULES
+    ):
         return
     word_index = rule_index // 32
     mask_table[material_id, word_index // 4, word_index % 4] |= np.uint32(1 << (rule_index % 32))
-
 
 
 def _compile_material_rule_candidate_masks(
@@ -430,7 +474,9 @@ def _compile_material_rule_candidate_masks(
     )
     for rule_index, rule in enumerate(rule_table[:count]):
         selector_id = int(rule[selector_id_field]) if selector_id_field in rule_field_names else -1
-        selector_tag_mask = int(rule[selector_tag_field]) if selector_tag_field in rule_field_names else 0
+        selector_tag_mask = (
+            int(rule[selector_tag_field]) if selector_tag_field in rule_field_names else 0
+        )
         if selector_id > 0:
             if authoritative and selector_tag_mask != 0:
                 if selector_id >= material_count or material_tags is None:
@@ -453,8 +499,9 @@ def _compile_material_rule_candidate_masks(
     return masks
 
 
-
-def _compile_material_material_rules(pipeline, rule_table: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _compile_material_material_rules(
+    pipeline, rule_table: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     rule_i = np.zeros((MAX_RULES, 4), dtype=np.int32)
     rule_i[:, 3] = -1
     rule_f = np.zeros((MAX_RULES, 4), dtype=np.float32)
@@ -477,8 +524,9 @@ def _compile_material_material_rules(pipeline, rule_table: np.ndarray) -> tuple[
     return rule_i, rule_f, rule_tags
 
 
-
-def _compile_material_gas_rules(pipeline, rule_table: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _compile_material_gas_rules(
+    pipeline, rule_table: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     rule_i = np.zeros((MAX_RULES, 4), dtype=np.int32)
     rule_i[:, 3] = -1
     rule_f = np.zeros((MAX_RULES, 4), dtype=np.float32)
@@ -498,7 +546,6 @@ def _compile_material_gas_rules(pipeline, rule_table: np.ndarray) -> tuple[np.nd
     rule_f[:count, 2] = rule_table[:count]["threshold"]
     rule_f[:count, 3] = np.maximum(rule_table[:count]["rate"], 0.0)
     return rule_i, rule_f, rule_tags
-
 
 
 def _compile_material_light_rules(
@@ -559,9 +606,7 @@ def _compile_material_light_packed_descriptors(
     if rule_count <= 0 or rule_count > MAX_RULES or material_count <= 1:
         return None
 
-    per_material: list[list[tuple[int, int, int, int]]] = [
-        [] for _ in range(MAX_MATERIALS)
-    ]
+    per_material: list[list[tuple[int, int, int, int]]] = [[] for _ in range(MAX_MATERIALS)]
     channel_masks = np.zeros((MAX_MATERIALS,), dtype=np.uint32)
     for rule in rule_table[:rule_count]:
         material_id = int(rule["lhs_material_id"])
@@ -617,9 +662,9 @@ def _compile_material_light_packed_descriptors(
         packed[material_id, 0] = np.uint32(count)
         packed[material_id, 1] = channel_masks[material_id]
         packed[material_id, 2] = np.uint32(descriptor_cursor)
-        packed[
-            MAX_MATERIALS + descriptor_cursor : MAX_MATERIALS + descriptor_cursor + count
-        ] = np.asarray(material_descriptors, dtype=np.uint32)
+        packed[MAX_MATERIALS + descriptor_cursor : MAX_MATERIALS + descriptor_cursor + count] = (
+            np.asarray(material_descriptors, dtype=np.uint32)
+        )
         descriptor_cursor += count
     return packed
 
@@ -687,12 +732,8 @@ def _compile_material_pair_packed_descriptors(
     ):
         return None
 
-    per_material_mm: list[list[tuple[int, int, int, int]]] = [
-        [] for _ in range(MAX_MATERIALS)
-    ]
-    per_material_mg: list[list[tuple[int, int, int, int]]] = [
-        [] for _ in range(MAX_MATERIALS)
-    ]
+    per_material_mm: list[list[tuple[int, int, int, int]]] = [[] for _ in range(MAX_MATERIALS)]
+    per_material_mg: list[list[tuple[int, int, int, int]]] = [[] for _ in range(MAX_MATERIALS)]
     per_material_gases: list[list[int]] = [[] for _ in range(MAX_MATERIALS)]
 
     def validate_common(rule: np.void) -> tuple[int, int, bool] | None:
@@ -748,10 +789,7 @@ def _compile_material_pair_packed_descriptors(
             gas_ids.append(rhs_id)
         gas_slot = gas_ids.index(rhs_id)
         packed_operation = (
-            operation_index
-            | (int(direct_action) << 8)
-            | (rhs_id << 9)
-            | (gas_slot << 17)
+            operation_index | (int(direct_action) << 8) | (rhs_id << 9) | (gas_slot << 17)
         )
         per_material_mg[material_id].append(
             (
@@ -829,7 +867,9 @@ def _compile_material_pair_packed_descriptors_cached(
     return pipeline._material_pair_packed_descriptor_cache
 
 
-def _compile_gas_gas_rules(pipeline, rule_table: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _compile_gas_gas_rules(
+    pipeline, rule_table: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     rule_i = np.zeros((MAX_RULES, 4), dtype=np.int32)
     rule_f = np.zeros((MAX_RULES, 4), dtype=np.float32)
     rule_tags = np.zeros((MAX_RULES, 4), dtype=np.uint32)
@@ -847,10 +887,10 @@ def _compile_gas_gas_rules(pipeline, rule_table: np.ndarray) -> tuple[np.ndarray
     return rule_i, rule_f, rule_tags
 
 
-
-def _compile_single_gas_gas_rule(pipeline, rule_table: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _compile_single_gas_gas_rule(
+    pipeline, rule_table: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return pipeline._compile_gas_gas_rules(rule_table[:1])
-
 
 
 def _compile_gas_light_rules(
@@ -879,14 +919,12 @@ def _compile_gas_light_rules(
     return rule_i, rule_f, rule_tags
 
 
-
 def _compile_single_gas_light_rule(
     pipeline,
     rule_table: np.ndarray,
     light_table: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return pipeline._compile_gas_light_rules(rule_table[:1], light_table)
-
 
 
 def _used_action_indices(pipeline, rule_table: np.ndarray) -> set[int] | None:
@@ -899,7 +937,6 @@ def _used_action_indices(pipeline, rule_table: np.ndarray) -> set[int] | None:
             return None
         used_indices.add(action_index)
     return used_indices
-
 
 
 def _used_action_indices_for_material_slots(
@@ -922,7 +959,6 @@ def _used_action_indices_for_material_slots(
             return None
         used_indices.add(action_index)
     return used_indices
-
 
 
 def _cached_used_action_indices_for_material_slots(
@@ -949,13 +985,15 @@ def _cached_used_action_indices_for_material_slots(
     return pipeline._used_action_indices_cache[key]
 
 
-
 def _used_action_indices_for_self_rules(
     pipeline,
     rule_table: np.ndarray,
     material_table: np.ndarray,
 ) -> set[int] | None:
-    if "trigger_slot_index" not in rule_table.dtype.names or "reaction_slots" not in material_table.dtype.names:
+    if (
+        "trigger_slot_index" not in rule_table.dtype.names
+        or "reaction_slots" not in material_table.dtype.names
+    ):
         return None
     used_indices: set[int] = set()
     material_count = int(material_table.shape[0])
@@ -969,7 +1007,9 @@ def _used_action_indices_for_self_rules(
         if material_id > 0:
             if material_id >= material_count:
                 return None
-            raw_actions = np.asarray(material_table["reaction_slots"][material_id : material_id + 1, slot_index])
+            raw_actions = np.asarray(
+                material_table["reaction_slots"][material_id : material_id + 1, slot_index]
+            )
         else:
             raw_actions = np.asarray(material_table["reaction_slots"][:, slot_index])
         for raw_action in np.asarray(raw_actions, dtype=np.int32).reshape(-1):
@@ -980,7 +1020,6 @@ def _used_action_indices_for_self_rules(
                 return None
             used_indices.add(action_index)
     return used_indices
-
 
 
 def _cached_used_action_indices_for_self_rules(
@@ -1000,9 +1039,10 @@ def _cached_used_action_indices_for_self_rules(
     if key not in pipeline._used_action_indices_cache:
         if len(pipeline._used_action_indices_cache) > 64:
             pipeline._used_action_indices_cache.clear()
-        pipeline._used_action_indices_cache[key] = pipeline._used_action_indices_for_self_rules(rule_table, material_table)
+        pipeline._used_action_indices_cache[key] = pipeline._used_action_indices_for_self_rules(
+            rule_table, material_table
+        )
     return pipeline._used_action_indices_cache[key]
-
 
 
 def _used_action_indices_for_pair_rules(
@@ -1015,7 +1055,10 @@ def _used_action_indices_for_pair_rules(
     used_indices = pipeline._used_action_indices(rule_table)
     if used_indices is None:
         return None
-    if "trigger_slot_index" not in rule_table.dtype.names or "reaction_slots" not in material_table.dtype.names:
+    if (
+        "trigger_slot_index" not in rule_table.dtype.names
+        or "reaction_slots" not in material_table.dtype.names
+    ):
         return used_indices
     material_count = int(material_table.shape[0])
     for rule in rule_table:
@@ -1024,7 +1067,9 @@ def _used_action_indices_for_pair_rules(
             continue
         if slot_index >= 8:
             return None
-        lhs_material_id = int(rule["lhs_material_id"]) if "lhs_material_id" in rule_table.dtype.names else -1
+        lhs_material_id = (
+            int(rule["lhs_material_id"]) if "lhs_material_id" in rule_table.dtype.names else -1
+        )
         lhs_tag_mask = int(rule["lhs_tag_mask"]) if "lhs_tag_mask" in rule_table.dtype.names else 0
         if lhs_material_id > 0:
             if lhs_material_id >= material_count:
@@ -1034,10 +1079,14 @@ def _used_action_indices_for_pair_rules(
             if lhs_tag_field not in material_table.dtype.names:
                 return None
             masks = np.asarray(material_table[lhs_tag_field], dtype=np.uint32)
-            candidates = material_table[(masks & np.uint32(lhs_tag_mask)) == np.uint32(lhs_tag_mask)]
+            candidates = material_table[
+                (masks & np.uint32(lhs_tag_mask)) == np.uint32(lhs_tag_mask)
+            ]
         else:
             candidates = material_table
-        for raw_action in np.asarray(candidates["reaction_slots"][:, slot_index], dtype=np.int32).reshape(-1):
+        for raw_action in np.asarray(
+            candidates["reaction_slots"][:, slot_index], dtype=np.int32
+        ).reshape(-1):
             action_index = int(raw_action)
             if action_index < 0:
                 continue
@@ -1045,7 +1094,6 @@ def _used_action_indices_for_pair_rules(
                 return None
             used_indices.add(action_index)
     return used_indices
-
 
 
 def _cached_used_action_indices_for_pair_rules(
@@ -1078,7 +1126,6 @@ def _cached_used_action_indices_for_pair_rules(
     return pipeline._used_action_indices_cache[key]
 
 
-
 def _has_unsupported_consume_policies(rule_table: np.ndarray, supported_ids: set[int]) -> bool:
     if "consume_policy_id" not in rule_table.dtype.names:
         return False
@@ -1086,6 +1133,7 @@ def _has_unsupported_consume_policies(rule_table: np.ndarray, supported_ids: set
         if int(raw_value) not in supported_ids:
             return True
     return False
+
 
 # ``_set_uniform_if_present`` is inherited from GPUPipelineBase.
 # ``_sync_compute_writes`` / ``_sync_storage_and_indirect_writes`` are kept

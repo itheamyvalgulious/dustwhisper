@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, replace
-from typing import Any, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Iterable
 
 import numpy as np
 
@@ -39,13 +39,16 @@ if TYPE_CHECKING:
 
 def _light_field_count(engine: "WorldEngine") -> int:
     max_light_id = max(engine.rulebook.lights_by_id, default=-1)
-    max_dose_channel = max((int(light.dose_channel_id) for light in engine.rulebook.lights_by_id.values()), default=-1)
+    max_dose_channel = max(
+        (int(light.dose_channel_id) for light in engine.rulebook.lights_by_id.values()), default=-1
+    )
     return max(max_light_id, max_dose_channel) + 1
 
 
 def readback_request_status(engine: "WorldEngine", request_id: int) -> str:
     if any(
-        command.kind == "request_readback" and int(command.payload.get("request_id", -1)) == int(request_id)
+        command.kind == "request_readback"
+        and int(command.payload.get("request_id", -1)) == int(request_id)
         for command in engine.command_queue
     ):
         return "queued"
@@ -139,7 +142,11 @@ def _refresh_island_records_for_ids(engine: "WorldEngine", island_ids: Iterable[
         max_y, max_x = coords.max(axis=0).tolist()
         previous = engine.islands.get(island_id)
         if previous is None:
-            velocity_xy = tuple(np.mean(engine.velocity[coords[:, 0], coords[:, 1]], axis=0).astype(np.float32).tolist())
+            velocity_xy = tuple(
+                np.mean(engine.velocity[coords[:, 0], coords[:, 1]], axis=0)
+                .astype(np.float32)
+                .tolist()
+            )
             subcell_offset = (0.0, 0.0)
         else:
             velocity_xy = (float(previous.velocity_xy[0]), float(previous.velocity_xy[1]))
@@ -159,7 +166,10 @@ def downsample_cells_to_gas(engine: "WorldEngine", field: np.ndarray) -> np.ndar
         for gx in range(engine.gas_width):
             x0 = gx * engine.gas_cell_size
             y0 = gy * engine.gas_cell_size
-            block = field[y0 : min(engine.height, y0 + engine.gas_cell_size), x0 : min(engine.width, x0 + engine.gas_cell_size)]
+            block = field[
+                y0 : min(engine.height, y0 + engine.gas_cell_size),
+                x0 : min(engine.width, x0 + engine.gas_cell_size),
+            ]
             result[gy, gx] = float(block.mean()) if block.size else 0.0
     return result
 
@@ -177,7 +187,11 @@ def _set_nested_payload_value(payload: dict[str, Any], path: tuple[str, ...], va
 
 def _advance_paging(engine: "WorldEngine", center_x: int, center_y: int) -> list[PageStripeUpdate]:
     force_sources = [
-        replace(force_source, world_x=engine._force_source_world_position(force_source)[0], world_y=engine._force_source_world_position(force_source)[1])
+        replace(
+            force_source,
+            world_x=engine._force_source_world_position(force_source)[0],
+            world_y=engine._force_source_world_position(force_source)[1],
+        )
         for force_source in engine.force_sources
     ]
     updates = engine.focus_paging(center_x, center_y)
@@ -197,13 +211,16 @@ def _advance_paging(engine: "WorldEngine", center_x: int, center_y: int) -> list
         if payload is None:
             payload = engine._default_page_stripe_payload(update)
         engine._apply_page_stripe(update, payload)
+        engine._sync_loaded_page_stripe_cpu_mirror(update, payload)
         engine._record_bridge_page_stripe(update, payload)
     if force_sources:
         engine._sync_force_sources(force_sources)
     return updates
 
 
-def _mirror_release_entity_placeholder_cell(engine: "WorldEngine", x: int, y: int, entity_id: int) -> None:
+def _mirror_release_entity_placeholder_cell(
+    engine: "WorldEngine", x: int, y: int, entity_id: int
+) -> None:
     if not engine.in_bounds(x, y):
         return
     if int(engine.entity_id[y, x]) != entity_id:
@@ -222,12 +239,16 @@ def _mirror_release_entity_placeholder_cell(engine: "WorldEngine", x: int, y: in
         shadow_integrity = engine._shadow_material_base_integrity(displaced_material)
         engine.integrity[y, x] = float(shadow_integrity) if shadow_integrity is not None else 0.0
         engine.placeholder_displaced_material[y, x] = 0
-        engine._mark_active_rect_runtime(max(0, x - 1), max(0, y - 1), min(engine.width, x + 2), min(engine.height, y + 2))
+        engine._mark_active_rect_runtime(
+            max(0, x - 1), max(0, y - 1), min(engine.width, x + 2), min(engine.height, y + 2)
+        )
         return
     engine.clear_cell(x, y, mark_dirty=False)
 
 
-def _public_resolved_change_intent(engine: "WorldEngine", intent: ResolvedChangeIntent) -> ResolvedChangeIntent:
+def _public_resolved_change_intent(
+    engine: "WorldEngine", intent: ResolvedChangeIntent
+) -> ResolvedChangeIntent:
     effect_cells = (
         []
         if intent.center_world_position is None
@@ -237,13 +258,20 @@ def _public_resolved_change_intent(engine: "WorldEngine", intent: ResolvedChange
         )
     )
     effect_bounds = engine._buffer_cell_bounds(effect_cells)
-    generated_commands = [engine._public_world_command(command) for command in intent.generated_commands]
+    generated_commands = [
+        engine._public_world_command(command) for command in intent.generated_commands
+    ]
     if intent.center_world_position is not None:
         center_world_x = int(intent.center_world_position[0])
         center_world_y = int(intent.center_world_position[1])
         for command in generated_commands:
             x_field, y_field = TARGETED_COMMAND_COORD_FIELDS.get(command.kind, (None, None))
-            if x_field is not None and y_field is not None and x_field in command.payload and y_field in command.payload:
+            if (
+                x_field is not None
+                and y_field is not None
+                and x_field in command.payload
+                and y_field in command.payload
+            ):
                 command.payload[x_field] = center_world_x
                 command.payload[y_field] = center_world_y
     return replace(
@@ -264,7 +292,11 @@ def _resolve_anchor_target(
     query: TargetQuery,
     source_world_position: tuple[int, int],
 ) -> dict[str, Any] | None:
-    directional_filters = [item for item in query.anchor_filters if item in CARDINAL_DIRECTION_VECTORS or item in {"forward", "backward"}]
+    directional_filters = [
+        item
+        for item in query.anchor_filters
+        if item in CARDINAL_DIRECTION_VECTORS or item in {"forward", "backward"}
+    ]
     terrain_filters = [item for item in query.anchor_filters if item in TERRAIN_ANCHOR_FILTERS]
     entity_filters = [
         item
@@ -276,7 +308,11 @@ def _resolve_anchor_target(
     ]
     entity_anchor = None
     terrain_anchor = None
-    if query.anchor_entity_id is not None or entity_filters or (directional_filters and not terrain_filters):
+    if (
+        query.anchor_entity_id is not None
+        or entity_filters
+        or (directional_filters and not terrain_filters)
+    ):
         entity_anchor = engine._resolve_entity_anchor(
             query,
             source_world_position,
@@ -417,7 +453,11 @@ def _queued_command_xy(engine: "WorldEngine", command: WorldCommand) -> tuple[in
     y = int(command.payload["y"])
     if any(
         key in command.payload
-        for key in ("resolved_target_query_id", "resolved_change_intent_id", "resolved_carrier_intent_id")
+        for key in (
+            "resolved_target_query_id",
+            "resolved_change_intent_id",
+            "resolved_carrier_intent_id",
+        )
     ):
         return engine._world_to_buffer_clamped(x, y)
     return engine._world_to_buffer_clamped(x, y)

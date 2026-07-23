@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -28,7 +28,9 @@ def prewarm_formal_connected_collapse(engine: "WorldEngine") -> bool:
 
 def _gpu_context_available(engine: "WorldEngine") -> bool:
     ctx = engine.bridge.ctx
-    return bool(engine.bridge.enabled and ctx is not None and getattr(ctx, "version_code", 0) >= 430)
+    return bool(
+        engine.bridge.enabled and ctx is not None and getattr(ctx, "version_code", 0) >= 430
+    )
 
 
 def _gpu_world_simulation_required(engine: "WorldEngine") -> bool:
@@ -41,7 +43,9 @@ def _gpu_realtime_budget_active(engine: "WorldEngine") -> bool:
     active_tile_count = _gpu_active_tile_count(engine)
     if active_tile_count <= 0:
         return False
-    estimated_active_cells = active_tile_count * int(engine.active.tile_size) * int(engine.active.tile_size)
+    estimated_active_cells = (
+        active_tile_count * int(engine.active.tile_size) * int(engine.active.tile_size)
+    )
     return estimated_active_cells >= int(engine.gpu_realtime_budget_cell_threshold)
 
 
@@ -74,25 +78,37 @@ def _should_run_formal_collapse_this_frame(engine: "WorldEngine") -> bool:
     return (frame_id - 1) % interval == 0
 
 
-def _gpu_pipeline_available(engine: "WorldEngine", pipeline: Any, name: str, *, require: bool | None = None) -> bool:
+def _gpu_pipeline_available(
+    engine: "WorldEngine", pipeline: Any, name: str, *, require: bool | None = None
+) -> bool:
     if engine.simulation_backend == "cpu":
         return False
     available = bool(pipeline.available(engine))
     required = _gpu_world_simulation_required(engine) if require is None else bool(require)
     if required and not available:
-        raise RuntimeError(f"GPU world simulation requires the {name} GPU pipeline; CPU fallback is disabled")
+        raise RuntimeError(
+            f"GPU world simulation requires the {name} GPU pipeline; CPU fallback is disabled"
+        )
     return available
 
 
 def _require_gpu_stage(engine: "WorldEngine", name: str) -> None:
     if _gpu_world_simulation_required(engine):
-        raise RuntimeError(f"GPU world simulation requires GPU support for {name}; CPU fallback is disabled")
+        raise RuntimeError(
+            f"GPU world simulation requires GPU support for {name}; CPU fallback is disabled"
+        )
 
 
-def _require_gpu_authoritative_resources(engine: "WorldEngine", stage: str, *resource_names: str) -> None:
+def _require_gpu_authoritative_resources(
+    engine: "WorldEngine", stage: str, *resource_names: str
+) -> None:
     if not (engine.simulation_backend == "gpu" and engine._world_simulation_frame_active):
         return
-    missing = [str(name) for name in resource_names if str(name) not in engine.bridge.gpu_authoritative_resources]
+    missing = [
+        str(name)
+        for name in resource_names
+        if str(name) not in engine.bridge.gpu_authoritative_resources
+    ]
     if missing:
         joined = ", ".join(missing)
         raise RuntimeError(

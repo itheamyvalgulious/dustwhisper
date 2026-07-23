@@ -3,11 +3,10 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
-import random
 import statistics
 import sys
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
@@ -20,7 +19,6 @@ import moderngl
 
 from oracle_game.types import ForceSource, Phase
 from oracle_game.world import WorldEngine
-
 
 ScenarioSetup = Callable[[WorldEngine], None]
 
@@ -38,7 +36,15 @@ def create_context() -> tuple[object, str]:
     raise RuntimeError("unable to create ModernGL context: " + " | ".join(errors))
 
 
-def fill_rect(engine: WorldEngine, x0: int, y0: int, x1: int, y1: int, material: str, phase: Phase | None = None) -> None:
+def fill_rect(
+    engine: WorldEngine,
+    x0: int,
+    y0: int,
+    x1: int,
+    y1: int,
+    material: str,
+    phase: Phase | None = None,
+) -> None:
     for y in range(max(0, y0), min(engine.height, y1)):
         for x in range(max(0, x0), min(engine.width, x1)):
             engine.set_cell(x, y, material, phase=phase, mark_dirty=False)
@@ -51,7 +57,10 @@ def activate_all(engine: WorldEngine) -> None:
 
 def setup_random_materials(engine: WorldEngine) -> None:
     rng = np.random.default_rng(1729)
-    material_ids = np.asarray(sorted(material_id for material_id in engine.rulebook.materials_by_id if material_id > 0), dtype=np.int32)
+    material_ids = np.asarray(
+        sorted(material_id for material_id in engine.rulebook.materials_by_id if material_id > 0),
+        dtype=np.int32,
+    )
     if material_ids.size == 0:
         activate_all(engine)
         return
@@ -63,43 +72,93 @@ def setup_random_materials(engine: WorldEngine) -> None:
     engine.phase[:, :] = phase_lookup[engine.material_id]
     engine.cell_flags[:, :] = 0
     engine.velocity[:, :, :] = rng.normal(0.0, 0.15, size=engine.velocity.shape).astype(np.float32)
-    engine.cell_temperature[:, :] = rng.normal(20.0, 12.0, size=engine.cell_temperature.shape).astype(np.float32)
+    engine.cell_temperature[:, :] = rng.normal(
+        20.0, 12.0, size=engine.cell_temperature.shape
+    ).astype(np.float32)
     engine.timer_pack[:, :, :] = 0
-    engine.integrity[:, :] = rng.uniform(10.0, 100.0, size=engine.integrity.shape).astype(np.float32)
+    engine.integrity[:, :] = rng.uniform(10.0, 100.0, size=engine.integrity.shape).astype(
+        np.float32
+    )
     engine.island_id[:, :] = 0
     engine.entity_id[:, :] = 0
     engine.placeholder_displaced_material[:, :] = 0
-    engine.flow_velocity[:, :, :] = rng.normal(0.0, 0.2, size=engine.flow_velocity.shape).astype(np.float32)
-    engine.ambient_temperature[:, :] = rng.normal(20.0, 4.0, size=engine.ambient_temperature.shape).astype(np.float32)
-    engine.gas_concentration[:, :, :] = rng.uniform(0.0, 0.05, size=engine.gas_concentration.shape).astype(np.float32)
+    engine.flow_velocity[:, :, :] = rng.normal(0.0, 0.2, size=engine.flow_velocity.shape).astype(
+        np.float32
+    )
+    engine.ambient_temperature[:, :] = rng.normal(
+        20.0, 4.0, size=engine.ambient_temperature.shape
+    ).astype(np.float32)
+    engine.gas_concentration[:, :, :] = rng.uniform(
+        0.0, 0.05, size=engine.gas_concentration.shape
+    ).astype(np.float32)
     activate_all(engine)
 
 
 def setup_empty_active(engine: WorldEngine) -> None:
     activate_all(engine)
     engine.force_sources.append(
-        ForceSource(x=engine.width * 0.5, y=engine.height * 0.5, direction=(1.0, -0.25), radius=18.0, strength=1.2, lifetime=5.0)
+        ForceSource(
+            x=engine.width * 0.5,
+            y=engine.height * 0.5,
+            direction=(1.0, -0.25),
+            radius=18.0,
+            strength=1.2,
+            lifetime=5.0,
+        )
     )
 
 
 def setup_dense_liquid(engine: WorldEngine) -> None:
-    fill_rect(engine, 8, engine.height // 2, engine.width - 8, engine.height - 8, "water_liquid", Phase.LIQUID)
-    fill_rect(engine, 0, engine.height - 8, engine.width, engine.height, "raw_stone_solid", Phase.STATIC_SOLID)
+    fill_rect(
+        engine,
+        8,
+        engine.height // 2,
+        engine.width - 8,
+        engine.height - 8,
+        "water_liquid",
+        Phase.LIQUID,
+    )
+    fill_rect(
+        engine,
+        0,
+        engine.height - 8,
+        engine.width,
+        engine.height,
+        "raw_stone_solid",
+        Phase.STATIC_SOLID,
+    )
     activate_all(engine)
 
 
 def setup_dense_gas(engine: WorldEngine) -> None:
     water_gas = engine.rulebook.gas_id("water_gas")
-    engine.gas_concentration[water_gas, engine.gas_height // 4 : engine.gas_height * 3 // 4, :] = 0.9
+    engine.gas_concentration[water_gas, engine.gas_height // 4 : engine.gas_height * 3 // 4, :] = (
+        0.9
+    )
     engine.ambient_temperature[:, :] = 55.0
     engine.force_sources.append(
-        ForceSource(x=engine.width * 0.35, y=engine.height * 0.45, direction=(1.0, 0.0), radius=24.0, strength=2.0, lifetime=5.0)
+        ForceSource(
+            x=engine.width * 0.35,
+            y=engine.height * 0.45,
+            direction=(1.0, 0.0),
+            radius=24.0,
+            strength=2.0,
+            lifetime=5.0,
+        )
     )
     activate_all(engine)
 
 
 def setup_optics_branches(engine: WorldEngine) -> None:
-    fill_rect(engine, engine.width // 2, 8, engine.width // 2 + 3, engine.height - 8, "gold_solid", Phase.STATIC_SOLID)
+    fill_rect(
+        engine,
+        engine.width // 2,
+        8,
+        engine.width // 2 + 3,
+        engine.height - 8,
+        "gold_solid",
+        Phase.STATIC_SOLID,
+    )
     engine.emitters.append(
         {
             "light_type": "visible_light",
@@ -114,10 +173,26 @@ def setup_optics_branches(engine: WorldEngine) -> None:
 
 
 def setup_mixed_reaction_motion(engine: WorldEngine) -> None:
-    fill_rect(engine, 4, engine.height - 20, engine.width - 4, engine.height - 8, "raw_stone_solid", Phase.STATIC_SOLID)
+    fill_rect(
+        engine,
+        4,
+        engine.height - 20,
+        engine.width - 4,
+        engine.height - 8,
+        "raw_stone_solid",
+        Phase.STATIC_SOLID,
+    )
     fill_rect(engine, 12, 12, engine.width // 2, 44, "sand_powder", Phase.POWDER)
     fill_rect(engine, engine.width // 2, 18, engine.width - 16, 42, "acid_liquid", Phase.LIQUID)
-    fill_rect(engine, engine.width // 2 - 6, 18, engine.width // 2 - 3, 42, "raw_stone_solid", Phase.STATIC_SOLID)
+    fill_rect(
+        engine,
+        engine.width // 2 - 6,
+        18,
+        engine.width // 2 - 3,
+        42,
+        "raw_stone_solid",
+        Phase.STATIC_SOLID,
+    )
     engine.emitters.append(
         {
             "light_type": "chaos_light",
@@ -129,7 +204,14 @@ def setup_mixed_reaction_motion(engine: WorldEngine) -> None:
         }
     )
     engine.force_sources.append(
-        ForceSource(x=engine.width * 0.25, y=engine.height * 0.25, direction=(0.6, 0.1), radius=20.0, strength=1.5, lifetime=5.0)
+        ForceSource(
+            x=engine.width * 0.25,
+            y=engine.height * 0.25,
+            direction=(0.6, 0.1),
+            radius=20.0,
+            strength=1.5,
+            lifetime=5.0,
+        )
     )
     activate_all(engine)
 
@@ -185,7 +267,9 @@ def summarize_pass_profiles(profiles: list[dict[str, Any]]) -> dict[str, Any]:
             "total_cpu_ms": values["cpu_ms"],
             "avg_cpu_ms": values["cpu_ms"] / values["count"] if values["count"] else 0.0,
             "total_gpu_ms": values["gpu_ms"],
-            "avg_gpu_ms": (values["gpu_ms"] / values["count"]) if values["gpu_ms"] is not None and values["count"] else None,
+            "avg_gpu_ms": (values["gpu_ms"] / values["count"])
+            if values["gpu_ms"] is not None and values["count"]
+            else None,
         }
         for name, values in sorted(summary.items())
     }
@@ -222,9 +306,7 @@ def run_scenario(
                     heat_terminal_dirty_publish_fusion
                 )
             if heat_terminal_workgroup16x8 is not None:
-                heat_pipeline._terminal4x6_workgroup16x8_enabled = bool(
-                    heat_terminal_workgroup16x8
-                )
+                heat_pipeline._terminal4x6_workgroup16x8_enabled = bool(heat_terminal_workgroup16x8)
         active_heat_terminal_phase_fusion = bool(
             getattr(heat_pipeline, "_terminal_phase_fusion_enabled", False)
         )
@@ -243,7 +325,9 @@ def run_scenario(
                 prewarm_collapse()
         for _ in range(warmup):
             if readback:
-                engine.request_readback(width // 2, height // 2, 8, 8, ("cell", "gas", "optics"), label=f"{name}_warmup")
+                engine.request_readback(
+                    width // 2, height // 2, 8, 8, ("cell", "gas", "optics"), label=f"{name}_warmup"
+                )
             engine.step(dt)
             ctx.finish()
             engine.poll_all_readbacks()
@@ -254,24 +338,41 @@ def run_scenario(
         readbacks_completed = 0
         for frame_index in range(frames):
             if readback:
-                engine.request_readback(width // 2, height // 2, 8, 8, ("cell", "gas", "optics"), label=f"{name}_{frame_index}")
+                engine.request_readback(
+                    width // 2,
+                    height // 2,
+                    8,
+                    8,
+                    ("cell", "gas", "optics"),
+                    label=f"{name}_{frame_index}",
+                )
             start = time.perf_counter()
             engine.step(dt)
             ctx.finish()
             elapsed_ms = (time.perf_counter() - start) * 1000.0
             frame_ms.append(elapsed_ms)
-            collapse_pipeline = getattr(getattr(engine, "collapse_solver", None), "gpu_pipeline", None)
+            collapse_pipeline = getattr(
+                getattr(engine, "collapse_solver", None), "gpu_pipeline", None
+            )
             epoch = getattr(collapse_pipeline, "_formal_dirty_epoch", None)
             phase = getattr(collapse_pipeline, "last_incremental_collapse_phase", None)
             current_frame_id = int(getattr(engine, "frame_id", frame_index + 1))
             epoch_id = int(
-                getattr(epoch, "epoch_id", getattr(collapse_pipeline, "incremental_collapse_epoch_sequence", 0))
+                getattr(
+                    epoch,
+                    "epoch_id",
+                    getattr(collapse_pipeline, "incremental_collapse_epoch_sequence", 0),
+                )
             )
             started_frame_id = int(
                 getattr(
                     epoch,
                     "started_frame_id",
-                    getattr(collapse_pipeline, "last_incremental_collapse_epoch_started_frame_id", current_frame_id),
+                    getattr(
+                        collapse_pipeline,
+                        "last_incremental_collapse_epoch_started_frame_id",
+                        current_frame_id,
+                    ),
                 )
                 or current_frame_id
             )
@@ -283,8 +384,12 @@ def run_scenario(
                     "collapse_phase": None if phase is None else int(phase),
                     "epoch_id": epoch_id,
                     "epoch_age": max(0, current_frame_id - started_frame_id),
-                    "epochs_started": int(getattr(collapse_pipeline, "incremental_collapse_epochs_started", 0)),
-                    "epochs_completed": int(getattr(collapse_pipeline, "incremental_collapse_epochs_completed", 0)),
+                    "epochs_started": int(
+                        getattr(collapse_pipeline, "incremental_collapse_epochs_started", 0)
+                    ),
+                    "epochs_completed": int(
+                        getattr(collapse_pipeline, "incremental_collapse_epochs_completed", 0)
+                    ),
                     "outstanding": epoch is not None,
                 }
             )
@@ -327,21 +432,29 @@ def run_scenario(
         if profile_passes:
             result["pass_profiles"] = pass_profiles
             result["pass_profile_summary"] = summarize_pass_profiles(pass_profiles)
-            result["skipped_gpu_stages"] = list(report.get("gpu_realtime_budget", {}).get("skipped_stages", []))
+            result["skipped_gpu_stages"] = list(
+                report.get("gpu_realtime_budget", {}).get("skipped_stages", [])
+            )
         return result
     finally:
         engine.close()
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Benchmark DustWhisper core world engine GPU scenarios.")
+    parser = argparse.ArgumentParser(
+        description="Benchmark DustWhisper core world engine GPU scenarios."
+    )
     parser.add_argument("--width", type=int, default=192)
     parser.add_argument("--height", type=int, default=128)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--frames", type=int, default=30)
     parser.add_argument("--dt", type=float, default=1.0 / 60.0)
-    parser.add_argument("--readback", action="store_true", help="Queue one small async readback per frame.")
-    parser.add_argument("--profile-passes", action="store_true", help="Record per-frame pass-level CPU timings.")
+    parser.add_argument(
+        "--readback", action="store_true", help="Queue one small async readback per frame."
+    )
+    parser.add_argument(
+        "--profile-passes", action="store_true", help="Record per-frame pass-level CPU timings."
+    )
     parser.add_argument(
         "--profile-passes-sync",
         action="store_true",
@@ -366,7 +479,12 @@ def main() -> int:
         default=None,
         help="Benchmark the default-off terminal4x6 16x8 workgroup variant.",
     )
-    parser.add_argument("--scenario", action="append", choices=sorted(SCENARIOS), help="Run only the selected scenario; repeatable.")
+    parser.add_argument(
+        "--scenario",
+        action="append",
+        choices=sorted(SCENARIOS),
+        help="Run only the selected scenario; repeatable.",
+    )
     args = parser.parse_args()
 
     ctx, backend_label = create_context()

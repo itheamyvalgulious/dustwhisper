@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
 import math
+from collections.abc import Sequence
 
 import numpy as np
 
 from oracle_game.types import DebugView
 from oracle_game.world import WorldEngine
-
 
 MATERIAL_KEYS = [
     "sand",
@@ -113,7 +112,9 @@ def demo_velocity_from_drag(dx: int, dy: int) -> tuple[float, float]:
     return (float(dx) * 0.12, float(-dy) * 0.12)
 
 
-def demo_light_direction_and_spread_from_drag(dx: int, dy: int) -> tuple[tuple[float, float], float]:
+def demo_light_direction_and_spread_from_drag(
+    dx: int, dy: int
+) -> tuple[tuple[float, float], float]:
     if dx == 0 and dy == 0:
         return ((0.0, 0.0), 0.25)
     direction_x = float(dx)

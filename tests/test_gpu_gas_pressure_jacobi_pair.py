@@ -4,15 +4,16 @@ import inspect
 
 import numpy as np
 import pytest
+from test_gpu_gas_exact_candidates import _capture_gas_state, _seed_gas_world
 
-from oracle_game.sim.gpu_gas import GPUGasPipeline, _SHADER_SUBS
+from oracle_game.sim.gpu_gas import _SHADER_SUBS, GPUGasPipeline
 from oracle_game.sim.shader_loader import shader_source
 from oracle_game.world import WorldEngine
 
-from test_gpu_gas_exact_candidates import _capture_gas_state, _seed_gas_world
 
-
-def _capture_pair_case(*, candidate: bool, full_active: bool) -> tuple[list[dict[str, bytes]], list[bool]]:
+def _capture_pair_case(
+    *, candidate: bool, full_active: bool
+) -> tuple[list[dict[str, bytes]], list[bool]]:
     # 67x49 maps to a 17x13 gas grid, exercising partial pair cores on both axes.
     engine = WorldEngine(width=67, height=49, gas_cell_size=4)
     try:
@@ -26,9 +27,7 @@ def _capture_pair_case(*, candidate: bool, full_active: bool) -> tuple[list[dict
         for tile_y in range(engine.active.tile_height):
             for tile_x in range(engine.active.tile_width):
                 engine.active.active_tile_ttl[tile_y][tile_x] = (
-                    3
-                    if full_active or (tile_x + 2 * tile_y) % 3 != 0
-                    else 0
+                    3 if full_active or (tile_x + 2 * tile_y) % 3 != 0 else 0
                 )
         for row in engine.active.active_chunk_mask:
             row[:] = [True] * len(row)

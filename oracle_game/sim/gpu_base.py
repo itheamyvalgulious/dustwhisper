@@ -11,14 +11,48 @@ the bodies that were inlined in every pipeline (verified during the structural
 refactor of 2026-07).  Subclassing this base must not change any observable
 behavior — it only removes duplication.
 """
+
 from __future__ import annotations
 
-from contextlib import contextmanager
+import dataclasses
+import logging
 import time
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # avoid a circular import at runtime; WorldEngine is passed in
     from oracle_game.world import WorldEngine
+
+
+logger = logging.getLogger(__name__)
+
+
+def release_resource_fields(resources: Any) -> None:
+    """Release every dataclass field of *resources* that owns a GL object.
+
+    Fields are discovered with :func:`dataclasses.fields` instead of a
+    hand-written list, so a resource field added to the dataclass later is
+    released automatically.  Plain-value fields (``signature`` tuples,
+    counters, flags, …) are skipped because they expose no ``release``
+    method; ``None`` fields are skipped as well.  A failing ``release()`` is
+    logged at debug level and does not stop the remaining fields.
+    """
+    for field in dataclasses.fields(resources):
+        value = getattr(resources, field.name)
+        if value is None:
+            continue
+        release = getattr(value, "release", None)
+        if release is None:
+            continue
+        try:
+            release()
+        except Exception:
+            logger.debug(
+                "failed to release %s.%s",
+                type(resources).__name__,
+                field.name,
+                exc_info=True,
+            )
 
 
 class GPUPipelineBase:
@@ -57,7 +91,11 @@ class GPUPipelineBase:
         ``profile_passes_sync`` is set we force a GL finish so the timer
         captures GPU time rather than just CPU submit time.
         """
-        profile = self.last_pass_profile if bool(getattr(world, "profile_passes_enabled", False)) else None
+        profile = (
+            self.last_pass_profile
+            if bool(getattr(world, "profile_passes_enabled", False))
+            else None
+        )
         ctx = world.bridge.ctx if bool(getattr(world, "profile_passes_sync", False)) else None
         if profile is not None and ctx is not None:
             ctx.finish()
@@ -79,7 +117,9 @@ class GPUPipelineBase:
                     "gpu_ms": elapsed_ms if ctx is not None else None,
                 }
                 profile["passes"].append(entry)
-                summary = profile["summary"].setdefault(str(name), {"count": 0, "cpu_ms": 0.0, "gpu_ms": None})
+                summary = profile["summary"].setdefault(
+                    str(name), {"count": 0, "cpu_ms": 0.0, "gpu_ms": None}
+                )
                 summary["count"] += 1
                 summary["cpu_ms"] += elapsed_ms
                 if ctx is not None:
@@ -93,9 +133,8 @@ class GPUPipelineBase:
         Guards GPU-authoritative writes so that preview / CPU-oracle paths do
         not touch the bridge's authoritative resources.
         """
-        return (
-            getattr(world, "simulation_backend", "") == "gpu"
-            and bool(getattr(world, "_world_simulation_frame_active", False))
+        return getattr(world, "simulation_backend", "") == "gpu" and bool(
+            getattr(world, "_world_simulation_frame_active", False)
         )
 
     def _set_uniform_if_present(self, program: Any, name: str, value: Any) -> None:

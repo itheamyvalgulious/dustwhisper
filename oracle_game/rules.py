@@ -3,6 +3,18 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Iterable
 
+from oracle_game.rules_materials import (
+    _build_acid_materials,
+    _build_metal_materials,
+    _build_oil_materials,
+    _build_plant_materials,
+    _build_poison_materials,
+    _build_special_materials,
+    _build_stone_materials,
+    _build_terrain_materials,
+    _build_water_materials,
+)
+from oracle_game.rules_reactions import _build_rules
 from oracle_game.types import (
     Direction,
     GasSpeciesDef,
@@ -15,18 +27,6 @@ from oracle_game.types import (
     ReactionType,
     SelfReactionRule,
 )
-from oracle_game.rules_materials import (
-    _build_terrain_materials,
-    _build_stone_materials,
-    _build_plant_materials,
-    _build_metal_materials,
-    _build_water_materials,
-    _build_poison_materials,
-    _build_acid_materials,
-    _build_oil_materials,
-    _build_special_materials,
-)
-from oracle_game.rules_reactions import _build_rules
 
 
 class RuleBook:
@@ -38,7 +38,9 @@ class RuleBook:
         self.lights_by_name: dict[str, LightTypeDef] = {}
         self.lights_by_id: dict[int, LightTypeDef] = {}
         self.optics: dict[tuple[str, str], MaterialOpticsDef] = {}
-        self.reaction_actions: list[ReactionAction] = [ReactionAction(reaction_type=ReactionType.NONE)]
+        self.reaction_actions: list[ReactionAction] = [
+            ReactionAction(reaction_type=ReactionType.NONE)
+        ]
         self.material_material_rules: list[PairReactionRule] = []
         self.material_gas_rules: list[PairReactionRule] = []
         self.material_light_rules: list[PairReactionRule] = []
@@ -109,7 +111,6 @@ class RuleBook:
 
     def light_id(self, name: str) -> int:
         return self.lights_by_name[name].light_type_id
-
 
 
 def build_default_payloads() -> dict[str, object]:
@@ -218,12 +219,68 @@ def _build_materials() -> list[MaterialDef]:
 
 def _build_gases() -> list[GasSpeciesDef]:
     return [
-        GasSpeciesDef(0, "air", "空气", (0.75, 0.78, 0.85), 0.18, 0.02, 0.0, 0.0, None, None, 1.0, 1.0),
-        GasSpeciesDef(1, "water_gas", "水蒸气", (0.65, 0.80, 0.95), 0.35, 0.25, 0.01, 0.06, 95.0, "water_liquid", 0.9, 0.7),
-        GasSpeciesDef(2, "poison_gas", "毒雾", (0.55, 0.90, 0.20), 0.28, 0.15, 0.02, 0.03, 40.0, "poison_liquid", 1.0, 1.1),
-        GasSpeciesDef(3, "oil_gas", "油雾", (0.45, 0.33, 0.18), 0.22, 0.08, 0.02, 0.02, 55.0, "oil_liquid", 1.15, 1.25),
-        GasSpeciesDef(4, "pollution_gas", "污染气", (0.70, 0.18, 0.82), 0.25, 0.12, 0.015, 0.04, 50.0, "pollution_powder", 1.05, 0.95),
-        GasSpeciesDef(5, "fire_gas", "焰气", (1.0, 0.42, 0.10), 0.40, 0.45, 0.08, 0.12, None, None, 0.85, 0.18),
+        GasSpeciesDef(
+            0, "air", "空气", (0.75, 0.78, 0.85), 0.18, 0.02, 0.0, 0.0, None, None, 1.0, 1.0
+        ),
+        GasSpeciesDef(
+            1,
+            "water_gas",
+            "水蒸气",
+            (0.65, 0.80, 0.95),
+            0.35,
+            0.25,
+            0.01,
+            0.06,
+            95.0,
+            "water_liquid",
+            0.9,
+            0.7,
+        ),
+        GasSpeciesDef(
+            2,
+            "poison_gas",
+            "毒雾",
+            (0.55, 0.90, 0.20),
+            0.28,
+            0.15,
+            0.02,
+            0.03,
+            40.0,
+            "poison_liquid",
+            1.0,
+            1.1,
+        ),
+        GasSpeciesDef(
+            3,
+            "oil_gas",
+            "油雾",
+            (0.45, 0.33, 0.18),
+            0.22,
+            0.08,
+            0.02,
+            0.02,
+            55.0,
+            "oil_liquid",
+            1.15,
+            1.25,
+        ),
+        GasSpeciesDef(
+            4,
+            "pollution_gas",
+            "污染气",
+            (0.70, 0.18, 0.82),
+            0.25,
+            0.12,
+            0.015,
+            0.04,
+            50.0,
+            "pollution_powder",
+            1.05,
+            0.95,
+        ),
+        GasSpeciesDef(
+            5, "fire_gas", "焰气", (1.0, 0.42, 0.10), 0.40, 0.45, 0.08, 0.12, None, None, 0.85, 0.18
+        ),
     ]
 
 
@@ -238,9 +295,27 @@ def _build_lights() -> list[LightTypeDef]:
 
 def _build_actions() -> list[ReactionAction]:
     return [
-        ReactionAction(ReactionType.EMIT_MATERIAL, emit_material="root_solid", direction=Direction.DOWN, duration=4, speed=0.0),
-        ReactionAction(ReactionType.EMIT_MATERIAL, emit_material="log_solid", direction=Direction.UP, duration=4, speed=0.0),
-        ReactionAction(ReactionType.EMIT_MATERIAL, emit_material="leaf_powder", direction=Direction.RANDOM, duration=2, speed=1.0),
+        ReactionAction(
+            ReactionType.EMIT_MATERIAL,
+            emit_material="root_solid",
+            direction=Direction.DOWN,
+            duration=4,
+            speed=0.0,
+        ),
+        ReactionAction(
+            ReactionType.EMIT_MATERIAL,
+            emit_material="log_solid",
+            direction=Direction.UP,
+            duration=4,
+            speed=0.0,
+        ),
+        ReactionAction(
+            ReactionType.EMIT_MATERIAL,
+            emit_material="leaf_powder",
+            direction=Direction.RANDOM,
+            duration=2,
+            speed=1.0,
+        ),
         ReactionAction(ReactionType.HARM, value=1.5, duration=1),
         ReactionAction(
             ReactionType.CONVERT_MATERIAL,
@@ -274,10 +349,34 @@ def _build_actions() -> list[ReactionAction]:
             integrity_threshold=10.0,
         ),
         ReactionAction(ReactionType.HARM, value=2.5, duration=0),
-        ReactionAction(ReactionType.EMIT_LIGHT, light_type="visible_light", strength=1.0, duration=1, range_cells=16),
-        ReactionAction(ReactionType.EMIT_LIGHT, light_type="holy_light", strength=1.1, duration=1, range_cells=16),
-        ReactionAction(ReactionType.EMIT_LIGHT, light_type="chaos_light", strength=1.1, duration=1, range_cells=16),
-        ReactionAction(ReactionType.EMIT_LIGHT, light_type="magic_light", strength=1.1, duration=1, range_cells=16),
+        ReactionAction(
+            ReactionType.EMIT_LIGHT,
+            light_type="visible_light",
+            strength=1.0,
+            duration=1,
+            range_cells=16,
+        ),
+        ReactionAction(
+            ReactionType.EMIT_LIGHT,
+            light_type="holy_light",
+            strength=1.1,
+            duration=1,
+            range_cells=16,
+        ),
+        ReactionAction(
+            ReactionType.EMIT_LIGHT,
+            light_type="chaos_light",
+            strength=1.1,
+            duration=1,
+            range_cells=16,
+        ),
+        ReactionAction(
+            ReactionType.EMIT_LIGHT,
+            light_type="magic_light",
+            strength=1.1,
+            duration=1,
+            range_cells=16,
+        ),
         ReactionAction(ReactionType.MODIFY_TEMPERATURE, delta=-1.5, duration=1),
         ReactionAction(
             ReactionType.CONVERT_MATERIAL,
@@ -299,18 +398,36 @@ def _build_actions() -> list[ReactionAction]:
             harm_per_frame=1.5,
             integrity_threshold=12.0,
         ),
-        ReactionAction(ReactionType.MODIFY_GAS, gas_species="air", speed=-2.5, duration=1, strength=2.4, range_cells=14),
-        ReactionAction(ReactionType.MODIFY_GAS, gas_species="air", speed=1.5, duration=1, strength=1.2, range_cells=8),
+        ReactionAction(
+            ReactionType.MODIFY_GAS,
+            gas_species="air",
+            speed=-2.5,
+            duration=1,
+            strength=2.4,
+            range_cells=14,
+        ),
+        ReactionAction(
+            ReactionType.MODIFY_GAS,
+            gas_species="air",
+            speed=1.5,
+            duration=1,
+            strength=1.2,
+            range_cells=8,
+        ),
         ReactionAction(ReactionType.HARM, value=-1.5, duration=1),
         ReactionAction(ReactionType.MODIFY_TEMPERATURE, delta=12.0, duration=1),
         ReactionAction(ReactionType.MODIFY_GAS, gas_species="poison_gas", speed=1.5, duration=1),
         ReactionAction(ReactionType.MODIFY_GAS, gas_species="water_gas", speed=1.5, duration=1),
-        ReactionAction(ReactionType.MODIFY_GAS, gas_species="pollution_gas", speed=-10.0, duration=1),
+        ReactionAction(
+            ReactionType.MODIFY_GAS, gas_species="pollution_gas", speed=-10.0, duration=1
+        ),
         ReactionAction(ReactionType.MODIFY_GAS, gas_species="fire_gas", speed=2.0, duration=1),
     ]
 
 
-def _assign_reaction_slots(materials: list[MaterialDef], actions: list[ReactionAction]) -> list[MaterialDef]:
+def _assign_reaction_slots(
+    materials: list[MaterialDef], actions: list[ReactionAction]
+) -> list[MaterialDef]:
     slot_map = {
         "sandstone_solid": {0: 10},
         "raw_stone_solid": {0: 6},
@@ -403,7 +520,9 @@ def _assign_reaction_slots(materials: list[MaterialDef], actions: list[ReactionA
     return updated
 
 
-def _default_optics_values(material: MaterialDef, light: LightTypeDef) -> tuple[float, float, float]:
+def _default_optics_values(
+    material: MaterialDef, light: LightTypeDef
+) -> tuple[float, float, float]:
     defaults = {
         "powder": (0.20, 0.25, 0.00),
         "stone": (0.35, 0.08, 0.05),
@@ -447,4 +566,3 @@ def build_default_optics_entries(
                 )
             entries.append(entry)
     return entries
-

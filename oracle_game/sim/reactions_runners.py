@@ -28,7 +28,9 @@ def _advance_timed_slots(solver, world: "WorldEngine") -> None:
         solver.last_backend = "gpu"
         solver._note_runtime_backend("gpu")
         solver._apply_deferred_batch(world, deferred)
-        solver._finalize_stage_runtime(world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state)
+        solver._finalize_stage_runtime(
+            world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state
+        )
         return
     solver._require_materialized_cpu_solve_masks(
         world,
@@ -56,7 +58,9 @@ def _advance_timed_slots(solver, world: "WorldEngine") -> None:
             updated_timers[y, x, timer_index] = max(0, timer_value - 1)
     world.timer_pack[:] = updated_timers
     solver._apply_trigger_grid(world, trigger_grid)
-    solver._finalize_stage_runtime(world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state)
+    solver._finalize_stage_runtime(
+        world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state
+    )
 
 
 def _run_self_rules(solver, world: "WorldEngine") -> None:
@@ -79,7 +83,9 @@ def _run_self_rules(solver, world: "WorldEngine") -> None:
         solver.last_backend = "gpu"
         solver._note_runtime_backend("gpu")
         solver._apply_deferred_batch(world, deferred)
-        solver._finalize_stage_runtime(world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state)
+        solver._finalize_stage_runtime(
+            world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state
+        )
         return
     solver._require_materialized_cpu_solve_masks(
         world,
@@ -139,7 +145,9 @@ def _run_self_rules(solver, world: "WorldEngine") -> None:
     world.timer_pack[:] = updated_timers
     solver._apply_trigger_grid(world, trigger_lo)
     solver._apply_trigger_grid(world, trigger_hi)
-    solver._finalize_stage_runtime(world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state)
+    solver._finalize_stage_runtime(
+        world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state
+    )
 
 
 def _run_material_material(solver, world: "WorldEngine") -> None:
@@ -151,7 +159,9 @@ def _run_material_material(solver, world: "WorldEngine") -> None:
         seed_timer_cells=True,
         stage="material_material",
     )
-    solver._record_stage_solve_masks("material_material", solve_tile_mask, solve_cell_mask, solve_gas_mask)
+    solver._record_stage_solve_masks(
+        "material_material", solve_tile_mask, solve_cell_mask, solve_gas_mask
+    )
     if not solver._solve_mask_any(solve_tile_mask):
         return
     previous_state = solver._capture_activity_state(world, solve_cell_mask, solve_gas_mask)
@@ -164,7 +174,9 @@ def _run_material_material(solver, world: "WorldEngine") -> None:
         solver.last_backend = "gpu"
         solver._note_runtime_backend("gpu")
         solver._apply_deferred_batch(world, deferred)
-        solver._finalize_stage_runtime(world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state)
+        solver._finalize_stage_runtime(
+            world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state
+        )
         return
     solver._require_materialized_cpu_solve_masks(
         world,
@@ -222,7 +234,9 @@ def _run_material_material(solver, world: "WorldEngine") -> None:
                 scale = solver._rule_scale(rule, 1.0)
                 solver._execute_pair_rule(world, rule, x, y, scale)
                 solver._apply_material_material_consume(world, rule, x, y, match_xy, scale)
-    solver._finalize_stage_runtime(world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state)
+    solver._finalize_stage_runtime(
+        world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state
+    )
 
 
 def _try_run_material_pair_fused(solver, world: "WorldEngine") -> bool:
@@ -243,7 +257,9 @@ def _try_run_material_pair_fused(solver, world: "WorldEngine") -> bool:
         pipeline._material_pair_light_state_fusion_enabled
         and int(world.bridge.shadow_typed_tables["material_light_rule_table"].shape[0]) > 0
     ):
-        candidate_ml_masks = solver._solve_masks(world, seed_timer_cells=True, stage="material_light")
+        candidate_ml_masks = solver._solve_masks(
+            world, seed_timer_cells=True, stage="material_light"
+        )
         if solver._all_full_gpu_authoritative_masks(*candidate_ml_masks):
             ml_masks = candidate_ml_masks
             ml_previous = solver._capture_activity_state(world, ml_masks[1], ml_masks[2])
@@ -281,7 +297,9 @@ def _run_material_gas(solver, world: "WorldEngine") -> None:
         seed_timer_cells=True,
         stage="material_gas",
     )
-    solver._record_stage_solve_masks("material_gas", solve_tile_mask, solve_cell_mask, solve_gas_mask)
+    solver._record_stage_solve_masks(
+        "material_gas", solve_tile_mask, solve_cell_mask, solve_gas_mask
+    )
     if not solver._solve_mask_any(solve_tile_mask):
         return
     previous_state = solver._capture_activity_state(world, solve_cell_mask, solve_gas_mask)
@@ -294,7 +312,9 @@ def _run_material_gas(solver, world: "WorldEngine") -> None:
         solver.last_backend = "gpu"
         solver._note_runtime_backend("gpu")
         solver._apply_deferred_batch(world, deferred)
-        solver._finalize_stage_runtime(world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state)
+        solver._finalize_stage_runtime(
+            world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state
+        )
         return
     solver._require_materialized_cpu_solve_masks(
         world,
@@ -351,7 +371,9 @@ def _run_material_gas(solver, world: "WorldEngine") -> None:
                 scale = solver._rule_scale(rule, concentration)
                 solver._execute_pair_rule(world, rule, x, y, scale)
                 solver._apply_material_gas_consume(world, rule, x, y, gy, gx, species_id, scale)
-    solver._finalize_stage_runtime(world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state)
+    solver._finalize_stage_runtime(
+        world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state
+    )
 
 
 def _run_material_light(solver, world: "WorldEngine") -> None:
@@ -363,7 +385,9 @@ def _run_material_light(solver, world: "WorldEngine") -> None:
         seed_timer_cells=True,
         stage="material_light",
     )
-    solver._record_stage_solve_masks("material_light", solve_tile_mask, solve_cell_mask, solve_gas_mask)
+    solver._record_stage_solve_masks(
+        "material_light", solve_tile_mask, solve_cell_mask, solve_gas_mask
+    )
     if not solver._solve_mask_any(solve_tile_mask):
         return
     previous_state = solver._capture_activity_state(world, solve_cell_mask, solve_gas_mask)
@@ -376,7 +400,9 @@ def _run_material_light(solver, world: "WorldEngine") -> None:
         solver.last_backend = "gpu"
         solver._note_runtime_backend("gpu")
         solver._apply_deferred_batch(world, deferred)
-        solver._finalize_stage_runtime(world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state)
+        solver._finalize_stage_runtime(
+            world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state
+        )
         return
     solver._require_materialized_cpu_solve_masks(
         world,
@@ -410,7 +436,10 @@ def _run_material_light(solver, world: "WorldEngine") -> None:
         if int(rule["lhs_tag_mask"]) != 0:
             required_mask = np.uint32(int(rule["lhs_tag_mask"]))
             light_masks = np.asarray(
-                [solver._material_tag_mask(world, int(material_id), "light_tag_mask") for material_id in material_values],
+                [
+                    solver._material_tag_mask(world, int(material_id), "light_tag_mask")
+                    for material_id in material_values
+                ],
                 dtype=np.uint32,
             )
             mask &= (light_masks & required_mask) == required_mask
@@ -425,14 +454,18 @@ def _run_material_light(solver, world: "WorldEngine") -> None:
             scale = solver._rule_scale(rule, float(dose_values[index]))
             solver._execute_pair_rule(world, rule, x, y, scale)
             solver._apply_material_light_consume(world, rule, x, y, dose_channel, scale)
-    solver._finalize_stage_runtime(world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state)
+    solver._finalize_stage_runtime(
+        world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state
+    )
 
 
 def _run_gas_gas(solver, world: "WorldEngine") -> None:
     solver._ensure_runtime_state(world)
     if int(world.bridge.shadow_typed_tables["gas_gas_rule_table"].shape[0]) <= 0:
         return
-    solve_tile_mask, solve_cell_mask, solve_gas_mask = solver._solve_masks(world, seed_timer_cells=True)
+    solve_tile_mask, solve_cell_mask, solve_gas_mask = solver._solve_masks(
+        world, seed_timer_cells=True
+    )
     solver._record_stage_solve_masks("gas_gas", solve_tile_mask, solve_cell_mask, solve_gas_mask)
     if not np.any(solve_tile_mask):
         return
@@ -447,7 +480,9 @@ def _run_gas_gas(solver, world: "WorldEngine") -> None:
         solver._note_runtime_backend("gpu")
         if deferred is not True:
             solver._apply_deferred_batch(world, deferred)
-        solver._finalize_stage_runtime(world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state)
+        solver._finalize_stage_runtime(
+            world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state
+        )
         return
     world._require_gpu_stage("gas-gas reaction rules")
     solver.last_backend = "cpu"
@@ -479,9 +514,13 @@ def _run_gas_gas(solver, world: "WorldEngine") -> None:
         lhs_values = np.zeros(active_gy.shape, dtype=np.float32)
         rhs_values = np.zeros(active_gy.shape, dtype=np.float32)
         for species_id in lhs_species:
-            lhs_values = np.maximum(lhs_values, world.gas_concentration[species_id, active_gy, active_gx])
+            lhs_values = np.maximum(
+                lhs_values, world.gas_concentration[species_id, active_gy, active_gx]
+            )
         for species_id in rhs_species:
-            rhs_values = np.maximum(rhs_values, world.gas_concentration[species_id, active_gy, active_gx])
+            rhs_values = np.maximum(
+                rhs_values, world.gas_concentration[species_id, active_gy, active_gx]
+            )
         ambient_values = world.ambient_temperature[active_gy, active_gx]
         mask = (lhs_values >= float(rule["threshold"])) & (rhs_values >= float(rule["threshold"]))
         mask &= ambient_values >= float(rule["min_temperature"])
@@ -503,10 +542,16 @@ def _run_gas_gas(solver, world: "WorldEngine") -> None:
                 gas_id=rhs_id,
                 required_mask=rhs_tag_mask,
             )
-            scale = solver._rule_scale(rule, min(float(lhs_values[index]), float(rhs_values[index])))
+            scale = solver._rule_scale(
+                rule, min(float(lhs_values[index]), float(rhs_values[index]))
+            )
             solver._execute_gas_action(world, int(rule["result_action"]), gx, gy, scale)
-            solver._apply_gas_gas_consume(world, rule, gx, gy, lhs_species_id, rhs_species_id, scale)
-    solver._finalize_stage_runtime(world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state)
+            solver._apply_gas_gas_consume(
+                world, rule, gx, gy, lhs_species_id, rhs_species_id, scale
+            )
+    solver._finalize_stage_runtime(
+        world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state
+    )
 
 
 def _run_gas_light(solver, world: "WorldEngine") -> None:
@@ -532,7 +577,9 @@ def _run_gas_light(solver, world: "WorldEngine") -> None:
         solver._note_runtime_backend("gpu")
         if deferred is not True:
             solver._apply_deferred_batch(world, deferred)
-        solver._finalize_stage_runtime(world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state)
+        solver._finalize_stage_runtime(
+            world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state
+        )
         return
     solver._require_materialized_cpu_solve_masks(
         world,
@@ -559,13 +606,19 @@ def _run_gas_light(solver, world: "WorldEngine") -> None:
             continue
         dose_values = world.gas_optical_dose[dose_channel, active_gy, active_gx]
         ambient_values = world.ambient_temperature[active_gy, active_gx]
-        candidate_species = solver._matching_light_gas_species_ids(world, gas_id=gas_id, required_mask=rhs_tag_mask)
+        candidate_species = solver._matching_light_gas_species_ids(
+            world, gas_id=gas_id, required_mask=rhs_tag_mask
+        )
         if not candidate_species:
             continue
         best_gas_values = np.zeros_like(dose_values, dtype=np.float32)
         for species_id in candidate_species:
-            best_gas_values = np.maximum(best_gas_values, world.gas_concentration[species_id, active_gy, active_gx])
-        trigger_mask = (best_gas_values >= float(rule["threshold"])) & (dose_values >= float(rule["threshold"]))
+            best_gas_values = np.maximum(
+                best_gas_values, world.gas_concentration[species_id, active_gy, active_gx]
+            )
+        trigger_mask = (best_gas_values >= float(rule["threshold"])) & (
+            dose_values >= float(rule["threshold"])
+        )
         trigger_mask &= ambient_values >= float(rule["min_temperature"])
         trigger_mask &= ambient_values <= float(rule["max_temperature"])
         for index in np.nonzero(trigger_mask)[0].tolist():
@@ -578,7 +631,11 @@ def _run_gas_light(solver, world: "WorldEngine") -> None:
                 gas_id=gas_id,
                 required_mask=rhs_tag_mask,
             )
-            scale = solver._rule_scale(rule, min(float(best_gas_values[index]), float(dose_values[index])))
+            scale = solver._rule_scale(
+                rule, min(float(best_gas_values[index]), float(dose_values[index]))
+            )
             solver._execute_gas_action(world, int(rule["result_action"]), gx, gy, scale)
             solver._apply_gas_light_consume(world, rule, gx, gy, species_id, scale)
-    solver._finalize_stage_runtime(world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state)
+    solver._finalize_stage_runtime(
+        world, solve_tile_mask, solve_cell_mask, solve_gas_mask, previous_state
+    )

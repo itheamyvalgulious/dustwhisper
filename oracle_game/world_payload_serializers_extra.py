@@ -7,12 +7,12 @@ import path (`from oracle_game.world_payload_serializers import X`) is unchanged
 
 from __future__ import annotations
 
+from copy import deepcopy
+from dataclasses import asdict
 from typing import Any
 
 import numpy as np
 
-from copy import deepcopy
-from dataclasses import asdict
 from oracle_game.page_store import StoredStripeKey
 from oracle_game.types import (
     CarrierIntent,
@@ -42,7 +42,10 @@ from oracle_game.world_constants import ENTITY_STATE_PATCH_METADATA_FIELDS
 
 def serialize_world_command(engine, command: WorldCommand) -> dict[str, Any]:
     public_command = engine._public_world_command(command)
-    return {"kind": public_command.kind, "payload": engine._normalize_json_payload_value(public_command.payload)}
+    return {
+        "kind": public_command.kind,
+        "payload": engine._normalize_json_payload_value(public_command.payload),
+    }
 
 
 def serialize_entity_placeholder_input(placeholder: EntityPlaceholder) -> dict[str, Any]:
@@ -81,7 +84,9 @@ def serialize_page_stripe_update(update: PageStripeUpdate) -> dict[str, Any]:
         "buffer_start": int(update.buffer_start),
         "buffer_end": int(update.buffer_end),
         "kind": str(update.kind),
-        "cross_world_start": 0 if update.cross_world_start is None else int(update.cross_world_start),
+        "cross_world_start": 0
+        if update.cross_world_start is None
+        else int(update.cross_world_start),
         "cross_world_end": 0 if update.cross_world_end is None else int(update.cross_world_end),
     }
 
@@ -111,7 +116,9 @@ def serialize_change_intent_input(intent: ChangeIntent) -> dict[str, Any]:
         "radius": int(intent.radius),
         "material": intent.material,
         "temperature_delta": float(intent.temperature_delta),
-        "velocity": None if intent.velocity is None else [float(intent.velocity[0]), float(intent.velocity[1])],
+        "velocity": None
+        if intent.velocity is None
+        else [float(intent.velocity[0]), float(intent.velocity[1])],
         "velocity_carrier": intent.velocity_carrier,
         "velocity_mode": intent.velocity_mode,
         "require_empty": bool(intent.require_empty),
@@ -130,7 +137,9 @@ def serialize_carrier_intent_input(intent: CarrierIntent) -> dict[str, Any]:
         "target_query_id": intent.target_query_id,
         "center_x": None if intent.center_x is None else int(intent.center_x),
         "center_y": None if intent.center_y is None else int(intent.center_y),
-        "source_entity_id": None if intent.source_entity_id is None else int(intent.source_entity_id),
+        "source_entity_id": None
+        if intent.source_entity_id is None
+        else int(intent.source_entity_id),
         "source_x": None if intent.source_x is None else int(intent.source_x),
         "source_y": None if intent.source_y is None else int(intent.source_y),
         "target_dx": int(intent.target_dx),
@@ -158,13 +167,18 @@ def serialize_carrier_intent_input(intent: CarrierIntent) -> dict[str, Any]:
 def serialize_frame_input(engine, frame_input: WorldFrameInput) -> dict[str, Any]:
     return {
         "submission_id": frame_input.submission_id,
-        "focus_center": None if frame_input.focus_center is None else list(frame_input.focus_center),
+        "focus_center": None
+        if frame_input.focus_center is None
+        else list(frame_input.focus_center),
         "controller_state": deepcopy(frame_input.controller_state),
         "controller_state_provided": bool(frame_input.controller_state_provided),
         "entities": [engine.serialize_entity_state_input(entity) for entity in frame_input.entities]
         if frame_input.entities is not None
         else None,
-        "entity_placeholders": [engine.serialize_entity_placeholder_input(placeholder) for placeholder in frame_input.entity_placeholders]
+        "entity_placeholders": [
+            engine.serialize_entity_placeholder_input(placeholder)
+            for placeholder in frame_input.entity_placeholders
+        ]
         if frame_input.entity_placeholders is not None
         else None,
         "force_sources": None
@@ -183,11 +197,22 @@ def serialize_frame_input(engine, frame_input: WorldFrameInput) -> dict[str, Any
         "emitters": None
         if frame_input.emitters is None
         else [engine._serialize_emitter_record(emitter) for emitter in frame_input.emitters],
-        "target_queries": [engine.serialize_target_query_input(query) for query in frame_input.target_queries],
-        "change_intents": [engine.serialize_change_intent_input(intent) for intent in frame_input.change_intents],
-        "carrier_intents": [engine.serialize_carrier_intent_input(intent) for intent in frame_input.carrier_intents],
-        "observation_targets": [engine.serialize_observation_target(target) for target in frame_input.observation_targets],
-        "readback_requests": [engine.serialize_readback_request(request) for request in frame_input.readback_requests],
+        "target_queries": [
+            engine.serialize_target_query_input(query) for query in frame_input.target_queries
+        ],
+        "change_intents": [
+            engine.serialize_change_intent_input(intent) for intent in frame_input.change_intents
+        ],
+        "carrier_intents": [
+            engine.serialize_carrier_intent_input(intent) for intent in frame_input.carrier_intents
+        ],
+        "observation_targets": [
+            engine.serialize_observation_target(target)
+            for target in frame_input.observation_targets
+        ],
+        "readback_requests": [
+            engine.serialize_readback_request(request) for request in frame_input.readback_requests
+        ],
         "commands": [engine.serialize_world_command(command) for command in frame_input.commands],
     }
 
@@ -212,7 +237,9 @@ def serialize_resolved_target(engine, target: ResolvedTarget) -> dict[str, Any]:
         "anchor_filters": list(target.anchor_filters),
         "direction": target.direction,
         "distance_cells": int(target.distance_cells),
-        "distance_meters": None if target.distance_meters is None else float(target.distance_meters),
+        "distance_meters": None
+        if target.distance_meters is None
+        else float(target.distance_meters),
         "distance_hint": target.distance_hint,
         "label": target.label,
         "source_position": None if target.source_position is None else list(target.source_position),
@@ -225,7 +252,9 @@ def serialize_resolved_target(engine, target: ResolvedTarget) -> dict[str, Any]:
         "anchor_world_position": None
         if target.anchor_world_position is None
         else list(target.anchor_world_position),
-        "resolved_position": None if target.resolved_position is None else list(target.resolved_position),
+        "resolved_position": None
+        if target.resolved_position is None
+        else list(target.resolved_position),
         "resolved_world_position": None
         if target.resolved_world_position is None
         else list(target.resolved_world_position),
@@ -248,7 +277,9 @@ def serialize_resolved_change_intent(engine, intent: ResolvedChangeIntent) -> di
         "effective_radius": int(intent.effective_radius),
         "material": intent.material,
         "temperature_delta": float(intent.temperature_delta),
-        "velocity": None if intent.velocity is None else [float(intent.velocity[0]), float(intent.velocity[1])],
+        "velocity": None
+        if intent.velocity is None
+        else [float(intent.velocity[0]), float(intent.velocity[1])],
         "velocity_carrier": intent.velocity_carrier,
         "velocity_mode": intent.velocity_mode,
         "require_empty": bool(intent.require_empty),
@@ -257,7 +288,9 @@ def serialize_resolved_change_intent(engine, intent: ResolvedChangeIntent) -> di
         "effect_shape": intent.effect_shape,
         "effect_cells": [list(cell) for cell in intent.effect_cells],
         "effect_bounds": None if intent.effect_bounds is None else list(intent.effect_bounds),
-        "generated_commands": [engine.serialize_world_command(command) for command in intent.generated_commands],
+        "generated_commands": [
+            engine.serialize_world_command(command) for command in intent.generated_commands
+        ],
         "note": intent.note,
     }
 
@@ -290,14 +323,18 @@ def serialize_resolved_carrier_intent(engine, intent: ResolvedCarrierIntent) -> 
         "force_radius": float(intent.force_radius),
         "force_strength": float(intent.force_strength),
         "force_lifetime": float(intent.force_lifetime),
-        "direction": None if intent.direction is None else [float(intent.direction[0]), float(intent.direction[1])],
+        "direction": None
+        if intent.direction is None
+        else [float(intent.direction[0]), float(intent.direction[1])],
         "require_empty": bool(intent.require_empty),
         "fallback_mode": intent.fallback_mode,
         "fallback_applied": bool(intent.fallback_applied),
         "effect_shape": intent.effect_shape,
         "effect_cells": [list(cell) for cell in intent.effect_cells],
         "effect_bounds": None if intent.effect_bounds is None else list(intent.effect_bounds),
-        "generated_commands": [engine.serialize_world_command(command) for command in intent.generated_commands],
+        "generated_commands": [
+            engine.serialize_world_command(command) for command in intent.generated_commands
+        ],
         "note": intent.note,
     }
 
@@ -370,7 +407,9 @@ def serialize_entity_state_input(entity: EntityState) -> dict[str, Any]:
         "width": int(entity.width),
         "height": int(entity.height),
         "velocity_xy": [float(entity.velocity_xy[0]), float(entity.velocity_xy[1])],
-        "facing_xy": None if entity.facing_xy is None else [float(entity.facing_xy[0]), float(entity.facing_xy[1])],
+        "facing_xy": None
+        if entity.facing_xy is None
+        else [float(entity.facing_xy[0]), float(entity.facing_xy[1])],
         "placeholder_material": str(entity.placeholder_material),
         "tags": list(entity.tags),
         "observe_channels": list(entity.observe_channels),
@@ -394,7 +433,10 @@ def serialize_entity_state(engine, entity: EntityState) -> dict[str, Any]:
 
 
 def serialize_entity_states(engine) -> dict[str, Any]:
-    entities = [engine.serialize_entity_state(entity) for entity in sorted(engine.entity_states.values(), key=lambda item: item.entity_id)]
+    entities = [
+        engine.serialize_entity_state(entity)
+        for entity in sorted(engine.entity_states.values(), key=lambda item: item.entity_id)
+    ]
     return {"entities": entities}
 
 
@@ -422,12 +464,18 @@ def serialize_entity_observation_state(engine) -> dict[str, Any]:
     }
 
 
-def serialize_entity_placeholders(engine, *, allow_gpu_sync_readback: bool = False) -> dict[str, Any]:
+def serialize_entity_placeholders(
+    engine, *, allow_gpu_sync_readback: bool = False
+) -> dict[str, Any]:
     if not allow_gpu_sync_readback and engine._entity_placeholder_state_gpu_authoritative():
         return engine.serialize_entity_placeholder_index_snapshot()
     payload: list[dict[str, Any]] = []
-    cell_state = engine._current_cell_state_snapshot(allow_gpu_sync_readback=allow_gpu_sync_readback)
-    entity_runtime = engine._current_entity_runtime_snapshot(allow_gpu_sync_readback=allow_gpu_sync_readback)
+    cell_state = engine._current_cell_state_snapshot(
+        allow_gpu_sync_readback=allow_gpu_sync_readback
+    )
+    entity_runtime = engine._current_entity_runtime_snapshot(
+        allow_gpu_sync_readback=allow_gpu_sync_readback
+    )
     material_id_grid = cell_state["material_id"]
     phase_grid = cell_state["phase"]
     displaced_grid = entity_runtime["placeholder_displaced_material"]
@@ -451,7 +499,9 @@ def serialize_entity_placeholders(engine, *, allow_gpu_sync_readback: bool = Fal
                         "x": int(world_x),
                         "y": int(world_y),
                         "material_id": int(material_id_grid[buffer_y, buffer_x]),
-                        "material": engine._shadow_material_name(int(material_id_grid[buffer_y, buffer_x])),
+                        "material": engine._shadow_material_name(
+                            int(material_id_grid[buffer_y, buffer_x])
+                        ),
                         "phase": int(phase_grid[buffer_y, buffer_x]),
                         "displaced_material_id": int(displaced_grid[buffer_y, buffer_x]),
                         "displaced_material": (
@@ -474,7 +524,9 @@ def serialize_entity_placeholder_index_snapshot(engine) -> dict[str, Any]:
         if not cells:
             continue
         entity = engine.entity_states.get(int(entity_id))
-        material_name = str(entity.placeholder_material) if entity is not None else "placeholder_solid"
+        material_name = (
+            str(entity.placeholder_material) if entity is not None else "placeholder_solid"
+        )
         material_id = engine._resolve_sanctioned_placeholder_material_id(material_name)
         if material_id <= 0:
             material_id = int(engine.placeholder_material_id)
@@ -506,7 +558,9 @@ def serialize_entity_placeholder_index_snapshot(engine) -> dict[str, Any]:
     return {"placeholders": payload}
 
 
-def serialize_entity_feedback_snapshot(engine, *, allow_gpu_sync_readback: bool = False) -> dict[str, Any]:
+def serialize_entity_feedback_snapshot(
+    engine, *, allow_gpu_sync_readback: bool = False
+) -> dict[str, Any]:
     if not allow_gpu_sync_readback and engine._entity_placeholder_state_gpu_authoritative():
         return engine.serialize_consumed_entity_feedback_snapshot()
     feedback = {}
@@ -562,7 +616,9 @@ def serialize_frame_output(engine, output: WorldFrameOutput) -> dict[str, Any]:
         "frame_id": int(output.frame_id),
         "submission_id": output.submission_id,
         "controller_state": deepcopy(output.controller_state),
-        "consumed_readbacks": [engine.serialize_readback_result(result) for result in output.consumed_readbacks],
+        "consumed_readbacks": [
+            engine.serialize_readback_result(result) for result in output.consumed_readbacks
+        ],
         "resolved_targets": {
             query_id: engine.serialize_resolved_target(target)
             for query_id, target in output.resolved_targets.items()
@@ -585,14 +641,14 @@ def serialize_frame_output(engine, output: WorldFrameOutput) -> dict[str, Any]:
         },
         "paging_updates": [asdict(update) for update in output.paging_updates],
         "observation_plans": [
-            engine._normalize_json_payload_value(plan)
-            for plan in output.observation_plans
+            engine._normalize_json_payload_value(plan) for plan in output.observation_plans
         ],
         "readback_plans": [
-            engine._normalize_json_payload_value(plan)
-            for plan in output.readback_plans
+            engine._normalize_json_payload_value(plan) for plan in output.readback_plans
         ],
-        "bridge_upload_snapshot": engine._normalize_json_payload_value(output.bridge_upload_snapshot),
+        "bridge_upload_snapshot": engine._normalize_json_payload_value(
+            output.bridge_upload_snapshot
+        ),
         "bridge_frame_snapshot": engine._normalize_json_payload_value(output.bridge_frame_snapshot),
         "queued_observations": int(output.queued_observations),
         "queued_readbacks": int(output.queued_readbacks),
@@ -616,18 +672,24 @@ def serialize_frame_preview(engine, preview: WorldFramePreview) -> dict[str, Any
             intent_id: engine.serialize_resolved_carrier_intent(intent)
             for intent_id, intent in preview.resolved_carrier_intents.items()
         },
-        "resolved_commands": [engine.serialize_world_command(command) for command in preview.resolved_commands],
-        "observation_requests": [engine.serialize_readback_request(request) for request in preview.observation_requests],
+        "resolved_commands": [
+            engine.serialize_world_command(command) for command in preview.resolved_commands
+        ],
+        "observation_requests": [
+            engine.serialize_readback_request(request) for request in preview.observation_requests
+        ],
         "observation_plans": [
-            engine._normalize_json_payload_value(plan)
-            for plan in preview.observation_plans
+            engine._normalize_json_payload_value(plan) for plan in preview.observation_plans
         ],
-        "readback_requests": [engine.serialize_readback_request(request) for request in preview.readback_requests],
+        "readback_requests": [
+            engine.serialize_readback_request(request) for request in preview.readback_requests
+        ],
         "readback_plans": [
-            engine._normalize_json_payload_value(plan)
-            for plan in preview.readback_plans
+            engine._normalize_json_payload_value(plan) for plan in preview.readback_plans
         ],
-        "bridge_frame_snapshot": engine._normalize_json_payload_value(preview.bridge_frame_snapshot),
+        "bridge_frame_snapshot": engine._normalize_json_payload_value(
+            preview.bridge_frame_snapshot
+        ),
         "paging_updates": [asdict(update) for update in preview.paging_updates],
         "placeholder_count": int(preview.placeholder_count),
     }
@@ -657,6 +719,8 @@ def serialize_debug_frame(
         "origin": [int(engine.paging.origin_x), int(engine.paging.origin_y)],
         "size": [int(engine.width), int(engine.height)],
         "gas_species": None if resolved_view != DebugView.GAS else str(gas_species or "water_gas"),
-        "light_type": None if resolved_view not in {DebugView.OPTICS, DebugView.LIGHT} else light_type,
+        "light_type": None
+        if resolved_view not in {DebugView.OPTICS, DebugView.LIGHT}
+        else light_type,
         "frame": np.asarray(frame, dtype=np.float32).round(4).tolist(),
     }

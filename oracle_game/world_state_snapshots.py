@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -11,8 +11,12 @@ if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
 
-def _material_optics_snapshot_map(engine: "WorldEngine") -> dict[tuple[str, str], MaterialOpticsDef]:
-    payload = engine._stable_shadow_payload("optics", engine._material_optics_table_snapshot_payload)
+def _material_optics_snapshot_map(
+    engine: "WorldEngine",
+) -> dict[tuple[str, str], MaterialOpticsDef]:
+    payload = engine._stable_shadow_payload(
+        "optics", engine._material_optics_table_snapshot_payload
+    )
     snapshot: dict[tuple[str, str], MaterialOpticsDef] = {}
     for item in payload:
         entry = engine._coerce_material_optics_def(item)
@@ -22,7 +26,9 @@ def _material_optics_snapshot_map(engine: "WorldEngine") -> dict[tuple[str, str]
 
 def simulation_backend_report(engine: "WorldEngine") -> dict[str, Any]:
     ctx = engine.bridge.ctx
-    gpu_available = bool(engine.bridge.enabled and ctx is not None and getattr(ctx, "version_code", 0) >= 430)
+    gpu_available = bool(
+        engine.bridge.enabled and ctx is not None and getattr(ctx, "version_code", 0) >= 430
+    )
     ctx_info = getattr(ctx, "info", {}) if ctx is not None else {}
     backends = {
         "collapse": str(engine.collapse_solver.last_backend),
@@ -36,7 +42,9 @@ def simulation_backend_report(engine: "WorldEngine") -> dict[str, Any]:
         "world_commands": str(engine.grid_command_pipeline.last_backend),
         "optics": str(engine.optics_solver.last_backend),
     }
-    non_gpu = {name: backend for name, backend in backends.items() if backend not in {"gpu", "idle"}}
+    non_gpu = {
+        name: backend for name, backend in backends.items() if backend not in {"gpu", "idle"}
+    }
     return {
         "simulation_backend": engine.simulation_backend,
         "gpu_available": gpu_available,
@@ -96,7 +104,12 @@ def _preview_bridge_placeholder_dirty_rects(
         payload.append(
             {
                 "buffer_rect": [int(x), int(y), int(x) + 1, int(y) + 1],
-                "world_rect": [int(world_rect[0]), int(world_rect[1]), int(world_rect[2]), int(world_rect[3])],
+                "world_rect": [
+                    int(world_rect[0]),
+                    int(world_rect[1]),
+                    int(world_rect[2]),
+                    int(world_rect[3]),
+                ],
             }
         )
     return payload
@@ -113,7 +126,9 @@ def _bridge_shadow_buffer_coord_space(engine: "WorldEngine", array: np.ndarray) 
     return None
 
 
-def _current_cell_state_snapshot(engine: "WorldEngine", *, allow_gpu_sync_readback: bool = False) -> dict[str, np.ndarray]:
+def _current_cell_state_snapshot(
+    engine: "WorldEngine", *, allow_gpu_sync_readback: bool = False
+) -> dict[str, np.ndarray]:
     if (
         engine.simulation_backend == "gpu"
         and "cell_core" in engine.bridge.gpu_authoritative_resources
@@ -129,7 +144,9 @@ def _current_cell_state_snapshot(engine: "WorldEngine", *, allow_gpu_sync_readba
             }
         try:
             core = np.frombuffer(
-                engine.bridge.buffers["cell_core"].read(size=engine.width * engine.height * 5 * np.dtype(np.uint32).itemsize),
+                engine.bridge.buffers["cell_core"].read(
+                    size=engine.width * engine.height * 5 * np.dtype(np.uint32).itemsize
+                ),
                 dtype=np.uint32,
             ).reshape((engine.height, engine.width, 5))
             unpacked = unpack_cell_core(core)
@@ -150,7 +167,9 @@ def _current_cell_state_snapshot(engine: "WorldEngine", *, allow_gpu_sync_readba
     }
 
 
-def _current_entity_runtime_snapshot(engine: "WorldEngine", *, allow_gpu_sync_readback: bool = False) -> dict[str, np.ndarray]:
+def _current_entity_runtime_snapshot(
+    engine: "WorldEngine", *, allow_gpu_sync_readback: bool = False
+) -> dict[str, np.ndarray]:
     if (
         engine.simulation_backend == "gpu"
         and engine.bridge.enabled
@@ -172,7 +191,9 @@ def _current_entity_runtime_snapshot(engine: "WorldEngine", *, allow_gpu_sync_re
                     dtype=np.int32,
                 ).reshape(engine.entity_id.shape),
                 "placeholder_displaced_material": np.frombuffer(
-                    engine.bridge.buffers["placeholder_displaced_material"].read(size=engine.placeholder_displaced_material.nbytes),
+                    engine.bridge.buffers["placeholder_displaced_material"].read(
+                        size=engine.placeholder_displaced_material.nbytes
+                    ),
                     dtype=np.int32,
                 ).reshape(engine.placeholder_displaced_material.shape),
             }
@@ -215,8 +236,16 @@ def _runtime_entities_to_immediate_observation_targets(
         entity_height = max(1, int(entity.height))
         center_x = int((world_x + world_x + entity_width - 1) // 2)
         center_y = int((world_y + world_y + entity_height - 1) // 2)
-        width = int(entity.observe_width) if entity.observe_width is not None else entity_width + int(entity.observe_pad_cells) * 2
-        height = int(entity.observe_height) if entity.observe_height is not None else entity_height + int(entity.observe_pad_cells) * 2
+        width = (
+            int(entity.observe_width)
+            if entity.observe_width is not None
+            else entity_width + int(entity.observe_pad_cells) * 2
+        )
+        height = (
+            int(entity.observe_height)
+            if entity.observe_height is not None
+            else entity_height + int(entity.observe_pad_cells) * 2
+        )
         targets.append(
             ObservationTarget(
                 observer_id=int(entity.entity_id),

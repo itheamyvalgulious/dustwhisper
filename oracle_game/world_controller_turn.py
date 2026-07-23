@@ -49,18 +49,21 @@ def run_entity_controller_turn(
     consumed = engine.consume_entity_observation_results()
     paging_updates: list[PageStripeUpdate] = []
     if focus_center is not None:
-        paging_updates = engine.advance_paging(int(focus_center[0]), int(focus_center[1]), immediate=True)
+        paging_updates = engine.advance_paging(
+            int(focus_center[0]), int(focus_center[1]), immediate=True
+        )
     if entities is not None:
         engine.sync_entity_states(entities, immediate=True)
     if patches is not None:
         engine.patch_entity_states(patches, immediate=True)
     if entity_placeholders is not None:
         placeholder_inputs = [
-            engine._coerce_entity_placeholder(placeholder)
-            for placeholder in entity_placeholders
+            engine._coerce_entity_placeholder(placeholder) for placeholder in entity_placeholders
         ]
         if entities is not None:
-            entity_placeholder_inputs, _ = engine._frame_entities_to_placeholders_and_observations(list(engine.entity_states.values()))
+            entity_placeholder_inputs, _ = engine._frame_entities_to_placeholders_and_observations(
+                list(engine.entity_states.values())
+            )
             placeholder_inputs = entity_placeholder_inputs + placeholder_inputs
         engine.sync_entity_placeholders(placeholder_inputs, immediate=True)
     if observation_specs is not None:
@@ -98,7 +101,9 @@ def run_entity_controller_turn(
             engine._assign_readback_request_id(request) for request in queued_observation_requests
         ]
         engine.pending_readbacks.extend(queued_observation_requests)
-        engine.bridge_frame_readback_requests.extend(replace(request) for request in queued_observation_requests)
+        engine.bridge_frame_readback_requests.extend(
+            replace(request) for request in queued_observation_requests
+        )
     queued_readback_requests: list[ReadbackRequest] = []
     if readback_requests:
         if not engine._bridge_inputs_prepared:
@@ -111,7 +116,9 @@ def run_entity_controller_turn(
             engine._assign_readback_request_id(request) for request in queued_readback_requests
         ]
         engine.pending_readbacks.extend(queued_readback_requests)
-        engine.bridge_frame_readback_requests.extend(replace(request) for request in queued_readback_requests)
+        engine.bridge_frame_readback_requests.extend(
+            replace(request) for request in queued_readback_requests
+        )
     resolved_commands = (
         generated_commands
         + generated_carrier_commands
@@ -132,14 +139,20 @@ def run_entity_controller_turn(
             for query_id, target in resolved_targets.items()
         },
         "resolved_change_intents": {
-            intent_id: engine.serialize_resolved_change_intent(engine._public_resolved_change_intent(intent))
+            intent_id: engine.serialize_resolved_change_intent(
+                engine._public_resolved_change_intent(intent)
+            )
             for intent_id, intent in resolved_change_intents.items()
         },
         "resolved_carrier_intents": {
-            intent_id: engine.serialize_resolved_carrier_intent(engine._public_resolved_carrier_intent(intent))
+            intent_id: engine.serialize_resolved_carrier_intent(
+                engine._public_resolved_carrier_intent(intent)
+            )
             for intent_id, intent in resolved_carrier_intents.items()
         },
-        "resolved_commands": [engine.serialize_world_command(command) for command in resolved_commands],
+        "resolved_commands": [
+            engine.serialize_world_command(command) for command in resolved_commands
+        ],
         "observation_requests": [
             engine.serialize_readback_request(request) for request in queued_observation_requests
         ],
@@ -159,9 +172,12 @@ def run_entity_controller_turn(
         "pending_commands": engine.serialize_pending_commands(),
     }
 
+
 def set_controller_state(engine: "WorldEngine", controller_state: Any = None) -> dict[str, Any]:
     engine.controller_state_snapshot = engine._coerce_json_value(controller_state)
     return engine.serialize_controller_state()
+
+
 def _build_preview_controller_turn_entities(
     engine: "WorldEngine",
     *,
@@ -187,13 +203,23 @@ def _build_preview_controller_turn_entities(
             entity = next_entities.get(patch.entity_id)
             if entity is None:
                 raise KeyError(patch.entity_id)
-            patch_fields = {name: value for name, value in patch.fields.items() if not name.startswith("_")}
+            patch_fields = {
+                name: value for name, value in patch.fields.items() if not name.startswith("_")
+            }
             next_entity = replace(entity, **dict(patch_fields))
             if "_world_x" in patch.fields or "_world_y" in patch.fields:
                 next_entity = replace(
                     next_entity,
-                    world_x=int(patch.fields.get("_world_x", entity.world_x if entity.world_x is not None else entity.x)),
-                    world_y=int(patch.fields.get("_world_y", entity.world_y if entity.world_y is not None else entity.y)),
+                    world_x=int(
+                        patch.fields.get(
+                            "_world_x", entity.world_x if entity.world_x is not None else entity.x
+                        )
+                    ),
+                    world_y=int(
+                        patch.fields.get(
+                            "_world_y", entity.world_y if entity.world_y is not None else entity.y
+                        )
+                    ),
                 )
             elif "x" in patch_fields or "y" in patch_fields:
                 next_entity = replace(next_entity, world_x=None, world_y=None)
@@ -201,13 +227,17 @@ def _build_preview_controller_turn_entities(
     if observation_specs is not None:
         observation_by_entity_id = {
             observation.entity_id: observation
-            for observation in [engine._coerce_entity_observation_spec(spec) for spec in observation_specs]
+            for observation in [
+                engine._coerce_entity_observation_spec(spec) for spec in observation_specs
+            ]
         }
         next_entities = {
             entity_id: replace(
                 entity,
                 observe_channels=observation.observe_channels if observation is not None else (),
-                observe_pad_cells=int(observation.observe_pad_cells) if observation is not None else 0,
+                observe_pad_cells=int(observation.observe_pad_cells)
+                if observation is not None
+                else 0,
                 observe_width=None if observation is None else observation.observe_width,
                 observe_height=None if observation is None else observation.observe_height,
                 observe_label=None if observation is None else observation.observe_label,
@@ -216,6 +246,8 @@ def _build_preview_controller_turn_entities(
             for observation in [observation_by_entity_id.get(entity_id)]
         }
     return [next_entities[entity_id] for entity_id in sorted(next_entities)]
+
+
 def controller_turn_to_frame_input(
     engine: "WorldEngine",
     *,
@@ -235,12 +267,15 @@ def controller_turn_to_frame_input(
     readback_requests: list[ReadbackRequest | dict[str, Any]] | None = None,
     commands: list[WorldCommand | dict[str, Any]] | None = None,
 ) -> WorldFrameInput:
-    preview_entities = _build_preview_controller_turn_entities(engine, 
+    preview_entities = _build_preview_controller_turn_entities(
+        engine,
         entities=entities,
         patches=patches,
         observation_specs=observation_specs,
     )
-    normalized_controller_state_provided = bool(controller_state_provided or controller_state is not None)
+    normalized_controller_state_provided = bool(
+        controller_state_provided or controller_state is not None
+    )
     return WorldFrameInput(
         focus_center=focus_center,
         controller_state=(
@@ -252,7 +287,10 @@ def controller_turn_to_frame_input(
         entities=preview_entities,
         entity_placeholders=None
         if entity_placeholders is None
-        else [engine._public_entity_placeholder_input(placeholder) for placeholder in entity_placeholders],
+        else [
+            engine._public_entity_placeholder_input(placeholder)
+            for placeholder in entity_placeholders
+        ],
         force_sources=[]
         if force_sources == []
         else None
@@ -265,11 +303,18 @@ def controller_turn_to_frame_input(
         else [engine._coerce_emitter(emitter) for emitter in emitters],
         target_queries=[engine._coerce_target_query(query) for query in (target_queries or [])],
         change_intents=[engine._coerce_change_intent(intent) for intent in (change_intents or [])],
-        carrier_intents=[engine._coerce_carrier_intent(intent) for intent in (carrier_intents or [])],
-        observation_targets=[engine._coerce_observation_target(target) for target in (observation_targets or [])],
-        readback_requests=[engine._coerce_readback_request(request) for request in (readback_requests or [])],
+        carrier_intents=[
+            engine._coerce_carrier_intent(intent) for intent in (carrier_intents or [])
+        ],
+        observation_targets=[
+            engine._coerce_observation_target(target) for target in (observation_targets or [])
+        ],
+        readback_requests=[
+            engine._coerce_readback_request(request) for request in (readback_requests or [])
+        ],
         commands=[engine._coerce_world_command(command) for command in (commands or [])],
     )
+
 
 def preview_entity_controller_turn(
     engine: "WorldEngine",
@@ -291,7 +336,8 @@ def preview_entity_controller_turn(
     commands: list[WorldCommand | dict[str, Any]] | None = None,
     reserved_readback_request_ids: set[int] | None = None,
 ) -> dict[str, Any]:
-    frame_input = controller_turn_to_frame_input(engine, 
+    frame_input = controller_turn_to_frame_input(
+        engine,
         controller_state=controller_state,
         controller_state_provided=controller_state_provided,
         focus_center=focus_center,
@@ -317,13 +363,18 @@ def preview_entity_controller_turn(
     force_sources_payload = (
         engine.serialize_force_sources()
         if force_sources is None
-        else [engine._serialize_force_source_record(force_source) for force_source in frame_input.force_sources or []]
+        else [
+            engine._serialize_force_source_record(force_source)
+            for force_source in frame_input.force_sources or []
+        ]
     )
     emitters_payload = (
         engine.serialize_emitters()
         if emitters is None
         else {
-            "persistent_emitters": [engine._serialize_emitter_record(emitter) for emitter in frame_input.emitters or []],
+            "persistent_emitters": [
+                engine._serialize_emitter_record(emitter) for emitter in frame_input.emitters or []
+            ],
             "queued_emitters": [],
         }
     )
@@ -336,9 +387,15 @@ def preview_entity_controller_turn(
     saved_paging = deepcopy(engine.paging)
     saved_preview_runtime = engine._snapshot_preview_runtime_state()
     saved_entity_states = dict(engine.entity_states)
-    saved_entity_placeholders = {entity_id: set(cells) for entity_id, cells in engine.entity_placeholders.items()}
-    saved_blocked_cells = None if engine._resolver_blocked_cells is None else set(engine._resolver_blocked_cells)
-    saved_released_cells = None if engine._resolver_released_cells is None else set(engine._resolver_released_cells)
+    saved_entity_placeholders = {
+        entity_id: set(cells) for entity_id, cells in engine.entity_placeholders.items()
+    }
+    saved_blocked_cells = (
+        None if engine._resolver_blocked_cells is None else set(engine._resolver_blocked_cells)
+    )
+    saved_released_cells = (
+        None if engine._resolver_released_cells is None else set(engine._resolver_released_cells)
+    )
     try:
         (
             paging_updates,
@@ -348,7 +405,9 @@ def preview_entity_controller_turn(
             placeholder_count,
         ) = engine._prepare_preview_frame_context(frame_input)
         resolved_targets = engine._resolve_target_queries(frame_input.target_queries)
-        resolved_change_intents, generated_commands = engine._resolve_change_intents(frame_input.change_intents, resolved_targets)
+        resolved_change_intents, generated_commands = engine._resolve_change_intents(
+            frame_input.change_intents, resolved_targets
+        )
         resolved_carrier_intents, generated_carrier_commands = engine._resolve_carrier_intents(
             frame_input.carrier_intents,
             resolved_targets,
@@ -375,8 +434,7 @@ def preview_entity_controller_turn(
         )
         pending_commands["pending"] += len(resolved_commands)
         pending_commands["commands"].extend(
-            engine.serialize_world_command(command)
-            for command in resolved_commands
+            engine.serialize_world_command(command) for command in resolved_commands
         )
         bridge_frame_snapshot = engine._serialize_preview_bridge_frame_snapshot(
             current_entity_placeholders=saved_entity_placeholders,
@@ -398,14 +456,20 @@ def preview_entity_controller_turn(
                 for query_id, target in resolved_targets.items()
             },
             "resolved_change_intents": {
-                intent_id: engine.serialize_resolved_change_intent(engine._public_resolved_change_intent(intent))
+                intent_id: engine.serialize_resolved_change_intent(
+                    engine._public_resolved_change_intent(intent)
+                )
                 for intent_id, intent in resolved_change_intents.items()
             },
             "resolved_carrier_intents": {
-                intent_id: engine.serialize_resolved_carrier_intent(engine._public_resolved_carrier_intent(intent))
+                intent_id: engine.serialize_resolved_carrier_intent(
+                    engine._public_resolved_carrier_intent(intent)
+                )
                 for intent_id, intent in resolved_carrier_intents.items()
             },
-            "resolved_commands": [engine.serialize_world_command(command) for command in resolved_commands],
+            "resolved_commands": [
+                engine.serialize_world_command(command) for command in resolved_commands
+            ],
             "observation_requests": [
                 engine.serialize_readback_request(request) for request in observation_requests
             ],
@@ -437,6 +501,8 @@ def preview_entity_controller_turn(
         engine.entity_placeholders = saved_entity_placeholders
         engine._resolver_blocked_cells = saved_blocked_cells
         engine._resolver_released_cells = saved_released_cells
+
+
 def request_entity_controller_turn(
     engine: "WorldEngine",
     *,
@@ -474,7 +540,8 @@ def request_entity_controller_turn(
         commands=commands,
     )
     pending_frame_input = engine._pending_frame_input(submission_id)
-    preview = preview_entity_controller_turn(engine, 
+    preview = preview_entity_controller_turn(
+        engine,
         controller_state=controller_state,
         controller_state_provided=controller_state_provided,
         focus_center=focus_center,
@@ -488,10 +555,7 @@ def request_entity_controller_turn(
         change_intents=change_intents,
         carrier_intents=carrier_intents,
         observation_targets=observation_targets,
-        readback_requests=[
-            replace(request)
-            for request in pending_frame_input.readback_requests
-        ],
+        readback_requests=[replace(request) for request in pending_frame_input.readback_requests],
         commands=commands,
         reserved_readback_request_ids=set(engine._frame_readback_request_ids(pending_frame_input)),
     )
@@ -501,6 +565,7 @@ def request_entity_controller_turn(
         "submission_id": submission_id,
         "preview": preview,
     }
+
 
 def request_entity_controller_cycle(
     engine: "WorldEngine",
@@ -522,7 +587,8 @@ def request_entity_controller_cycle(
     readback_requests: list[ReadbackRequest | dict[str, Any]] | None = None,
     commands: list[WorldCommand | dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    preview = preview_entity_controller_turn(engine, 
+    preview = preview_entity_controller_turn(
+        engine,
         controller_state=controller_state,
         controller_state_provided=controller_state_provided,
         focus_center=focus_center,
@@ -566,7 +632,8 @@ def request_entity_controller_cycle(
         commands=commands,
     )
     pending_frame_input = engine._pending_frame_input(submission_id)
-    preview = preview_entity_controller_turn(engine, 
+    preview = preview_entity_controller_turn(
+        engine,
         controller_state=controller_state,
         controller_state_provided=controller_state_provided,
         focus_center=focus_center,
@@ -580,10 +647,7 @@ def request_entity_controller_cycle(
         change_intents=change_intents,
         carrier_intents=carrier_intents,
         observation_targets=observation_targets,
-        readback_requests=[
-            replace(request)
-            for request in pending_frame_input.readback_requests
-        ],
+        readback_requests=[replace(request) for request in pending_frame_input.readback_requests],
         commands=commands,
         reserved_readback_request_ids=set(engine._frame_readback_request_ids(pending_frame_input)),
     )
@@ -595,6 +659,7 @@ def request_entity_controller_cycle(
         "preview": preview,
         "result": None,
     }
+
 
 def run_entity_controller_cycle(
     engine: "WorldEngine",
@@ -616,7 +681,8 @@ def run_entity_controller_cycle(
     readback_requests: list[ReadbackRequest | dict[str, Any]] | None = None,
     commands: list[WorldCommand | dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    preview = preview_entity_controller_turn(engine, 
+    preview = preview_entity_controller_turn(
+        engine,
         controller_state=controller_state,
         controller_state_provided=controller_state_provided,
         focus_center=focus_center,
@@ -639,7 +705,8 @@ def run_entity_controller_cycle(
             "preview": preview,
             "result": None,
         }
-    result = run_entity_controller_turn(engine, 
+    result = run_entity_controller_turn(
+        engine,
         controller_state=controller_state,
         controller_state_provided=controller_state_provided,
         focus_center=focus_center,
@@ -661,4 +728,3 @@ def run_entity_controller_cycle(
         "preview": preview,
         "result": result,
     }
-

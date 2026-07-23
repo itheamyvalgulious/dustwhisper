@@ -115,7 +115,9 @@ def _solve_candidate(
             )
         finally:
             engine._world_simulation_frame_active = previous_frame_active
-        supported = np.frombuffer(supported_texture.read(), dtype="f4").reshape((height, width)) > 0.5
+        supported = (
+            np.frombuffer(supported_texture.read(), dtype="f4").reshape((height, width)) > 0.5
+        )
         if not capture_union:
             return supported
         roots_buffer = resources.support_tile_union_roots
@@ -260,10 +262,13 @@ def test_support_tile_union_matches_random_partial_tile_cases_without_stale_root
                         tile_mask_name,
                         publish_masks=False,
                     )
-                    supported = np.frombuffer(
-                        supported_texture.read(),
-                        dtype="f4",
-                    ).reshape((height, width)) > 0.5
+                    supported = (
+                        np.frombuffer(
+                            supported_texture.read(),
+                            dtype="f4",
+                        ).reshape((height, width))
+                        > 0.5
+                    )
                     assert np.array_equal(supported, _reachable(structural, seeds))
         finally:
             engine._world_simulation_frame_active = previous_frame_active

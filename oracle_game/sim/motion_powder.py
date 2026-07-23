@@ -18,7 +18,9 @@ from oracle_game.sim.motion import POWDER_SOLVER_SUSPENDED
 from oracle_game.types import Phase
 
 
-def _mark_powder_reservation_regions(solver, world: "WorldEngine", powder_reservations: np.ndarray) -> None:
+def _mark_powder_reservation_regions(
+    solver, world: "WorldEngine", powder_reservations: np.ndarray
+) -> None:
     for reservation in powder_reservations:
         resolve_state = int(reservation["resolve_state"])
         if resolve_state == POWDER_RESOLVE_STALE:
@@ -33,7 +35,6 @@ def _mark_powder_reservation_regions(solver, world: "WorldEngine", powder_reserv
             min(world.width, max(sx, tx) + 2),
             min(world.height, max(sy, ty) + 2),
         )
-
 
 
 def _plan_cpu_powder_reservations(
@@ -101,7 +102,6 @@ def _plan_cpu_powder_reservations(
     return packed
 
 
-
 def _move_powders(solver, world: "WorldEngine", solve_cell_mask: np.ndarray, dt: float) -> None:
     processed = np.zeros((world.height, world.width), dtype=bool)
     for y in range(world.height - 2, -1, -1):
@@ -146,7 +146,6 @@ def _move_powders(solver, world: "WorldEngine", solve_cell_mask: np.ndarray, dt:
                 processed[y, x] = True
 
 
-
 def _apply_powder_reservations(
     solver,
     world: "WorldEngine",
@@ -165,7 +164,9 @@ def _apply_powder_reservations(
             continue
         target_x = int(reservation["resolved_target_xy"][0])
         target_y = int(reservation["resolved_target_xy"][1])
-        if resolve_state in {POWDER_RESOLVE_DDA, POWDER_RESOLVE_FALLBACK} and (target_x != x or target_y != y):
+        if resolve_state in {POWDER_RESOLVE_DDA, POWDER_RESOLVE_FALLBACK} and (
+            target_x != x or target_y != y
+        ):
             world.swap_cells(x, y, target_x, target_y)
             material_id = int(world.material_id[target_y, target_x])
             desired_dx = int(reservation["desired_target_xy"][0]) - x
@@ -193,7 +194,6 @@ def _apply_powder_reservations(
             )
         else:
             world.velocity[y, x] *= 0.2
-
 
 
 def _resolve_powder_reservations(
@@ -228,15 +228,19 @@ def _resolve_powder_reservations(
             continue
         candidates = solver._powder_fallback_candidates(world, x, y, material_id)
         for fallback_x, fallback_y in candidates:
-            if not world.in_bounds(fallback_x, fallback_y) or int(shadow_material[fallback_y, fallback_x]) != 0:
+            if (
+                not world.in_bounds(fallback_x, fallback_y)
+                or int(shadow_material[fallback_y, fallback_x]) != 0
+            ):
                 continue
             shadow_material[y, x] = 0
             shadow_material[fallback_y, fallback_x] = material_id
-            resolved[index]["resolved_target_xy"] = np.asarray((fallback_x, fallback_y), dtype=np.int32)
+            resolved[index]["resolved_target_xy"] = np.asarray(
+                (fallback_x, fallback_y), dtype=np.int32
+            )
             resolved[index]["resolve_state"] = POWDER_RESOLVE_FALLBACK
             break
     return resolved
-
 
 
 def _powder_fallback_candidates(
@@ -246,12 +250,14 @@ def _powder_fallback_candidates(
     y: int,
     material_id: int,
 ) -> list[tuple[int, int]]:
-    if material_id > 0 and solver._material_powder_solver_kind(world, material_id) == POWDER_SOLVER_SUSPENDED:
+    if (
+        material_id > 0
+        and solver._material_powder_solver_kind(world, material_id) == POWDER_SOLVER_SUSPENDED
+    ):
         return []
     if material_id > 0 and solver._material_gravity(world, material_id) >= 0.0:
         return [(x, y + 1), (x - 1, y + 1), (x + 1, y + 1)]
     return [(x, y - 1), (x - 1, y - 1), (x + 1, y - 1)]
-
 
 
 def _resolve_powder_dda_target(
@@ -284,7 +290,6 @@ def _resolve_powder_dda_target(
     return furthest_free
 
 
-
 def _path_is_clear(solver, world: "WorldEngine", x0: int, y0: int, x1: int, y1: int) -> bool:
     for cell_x, cell_y in solver._dda_line_cells(x0, y0, x1, y1):
         if not world.in_bounds(cell_x, cell_y):
@@ -294,8 +299,9 @@ def _path_is_clear(solver, world: "WorldEngine", x0: int, y0: int, x1: int, y1: 
     return True
 
 
-
-def _path_is_clear_material(solver, material_id: np.ndarray, x0: int, y0: int, x1: int, y1: int) -> bool:
+def _path_is_clear_material(
+    solver, material_id: np.ndarray, x0: int, y0: int, x1: int, y1: int
+) -> bool:
     height, width = material_id.shape
     for cell_x, cell_y in solver._dda_line_cells(x0, y0, x1, y1):
         if cell_x < 0 or cell_y < 0 or cell_x >= width or cell_y >= height:
@@ -303,4 +309,3 @@ def _path_is_clear_material(solver, material_id: np.ndarray, x0: int, y0: int, x
         if material_id[cell_y, cell_x] != 0:
             return False
     return True
-

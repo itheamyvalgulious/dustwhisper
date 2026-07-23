@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -116,9 +116,15 @@ def _vector_field_frame(engine: "WorldEngine", vectors: np.ndarray) -> np.ndarra
         mask = sector == index
         if not np.any(mask):
             continue
-        rgb[..., 0][mask] = components[0][mask] if isinstance(components[0], np.ndarray) else components[0]
-        rgb[..., 1][mask] = components[1][mask] if isinstance(components[1], np.ndarray) else components[1]
-        rgb[..., 2][mask] = components[2][mask] if isinstance(components[2], np.ndarray) else components[2]
+        rgb[..., 0][mask] = (
+            components[0][mask] if isinstance(components[0], np.ndarray) else components[0]
+        )
+        rgb[..., 1][mask] = (
+            components[1][mask] if isinstance(components[1], np.ndarray) else components[1]
+        )
+        rgb[..., 2][mask] = (
+            components[2][mask] if isinstance(components[2], np.ndarray) else components[2]
+        )
     return rgb
 
 
@@ -143,7 +149,9 @@ def _active_frame(engine: "WorldEngine") -> np.ndarray:
     frame[..., 2] = chunk_cells * 0.35
     pending_mask = engine.placeholder_displaced_material > 0
     if np.any(pending_mask):
-        frame[pending_mask] = np.maximum(frame[pending_mask], np.array([0.95, 0.10, 0.95], dtype=np.float32))
+        frame[pending_mask] = np.maximum(
+            frame[pending_mask], np.array([0.95, 0.10, 0.95], dtype=np.float32)
+        )
     return np.clip(frame, 0.0, 1.0)
 
 
@@ -182,9 +190,17 @@ def _motion_frame(engine: "WorldEngine") -> np.ndarray:
         reserved_x, reserved_y = (int(value) for value in record["reserved_target_xy"])
         resolved_x, resolved_y = (int(value) for value in record["resolved_target_xy"])
         resolve_state = int(record["resolve_state"])
-        _accumulate_debug_point(engine, frame, source_x, source_y, np.array([0.95, 0.35, 0.10], dtype=np.float32))
+        _accumulate_debug_point(
+            engine, frame, source_x, source_y, np.array([0.95, 0.35, 0.10], dtype=np.float32)
+        )
         if (reserved_x, reserved_y) != (source_x, source_y):
-            _accumulate_debug_point(engine, frame, reserved_x, reserved_y, np.array([0.95, 0.80, 0.15], dtype=np.float32))
+            _accumulate_debug_point(
+                engine,
+                frame,
+                reserved_x,
+                reserved_y,
+                np.array([0.95, 0.80, 0.15], dtype=np.float32),
+            )
         _accumulate_debug_point(
             engine,
             frame,
@@ -198,7 +214,9 @@ def _motion_frame(engine: "WorldEngine") -> np.ndarray:
         target_dx, target_dy = (int(value) for value in record["target_shift"])
         resolved_dx, resolved_dy = (int(value) for value in record["resolved_shift"])
         resolve_state = int(record["resolve_state"])
-        _draw_debug_bbox_outline(engine, frame, (x0, y0, x1, y1), np.array([0.85, 0.20, 0.95], dtype=np.float32))
+        _draw_debug_bbox_outline(
+            engine, frame, (x0, y0, x1, y1), np.array([0.85, 0.20, 0.95], dtype=np.float32)
+        )
         if target_dx != 0 or target_dy != 0:
             _draw_debug_bbox_outline(
                 engine,
@@ -236,11 +254,15 @@ def _heat_frame(engine: "WorldEngine") -> np.ndarray:
 
     phase_ys, phase_xs = np.nonzero(phase_targets > 0)
     for y, x in zip(phase_ys.tolist(), phase_xs.tolist()):
-        _accumulate_debug_point(engine, frame, int(x), int(y), np.array([0.95, 0.15, 0.95], dtype=np.float32))
+        _accumulate_debug_point(
+            engine, frame, int(x), int(y), np.array([0.95, 0.15, 0.95], dtype=np.float32)
+        )
 
     boil_ys, boil_xs = np.nonzero(boil_targets > 0)
     for y, x in zip(boil_ys.tolist(), boil_xs.tolist()):
-        _accumulate_debug_point(engine, frame, int(x), int(y), np.array([1.0, 0.65, 0.05], dtype=np.float32))
+        _accumulate_debug_point(
+            engine, frame, int(x), int(y), np.array([1.0, 0.65, 0.05], dtype=np.float32)
+        )
 
     if condense_targets.size > 0:
         condense_any = np.any(condense_targets, axis=0).astype(np.float32, copy=False)
@@ -265,16 +287,26 @@ def _liquid_frame(engine: "WorldEngine") -> np.ndarray:
     if post_cell_mask.size > 0:
         frame += post_cell_mask[..., None] * np.array([0.02, 0.16, 0.06], dtype=np.float32)
     if np.any(changed_cell_mask):
-        frame[changed_cell_mask] = np.maximum(frame[changed_cell_mask], np.array([0.18, 0.85, 1.0], dtype=np.float32))
+        frame[changed_cell_mask] = np.maximum(
+            frame[changed_cell_mask], np.array([0.18, 0.85, 1.0], dtype=np.float32)
+        )
     if np.any(vertical_seam_mask):
-        frame[vertical_seam_mask] = np.maximum(frame[vertical_seam_mask], np.array([0.95, 0.18, 0.95], dtype=np.float32))
+        frame[vertical_seam_mask] = np.maximum(
+            frame[vertical_seam_mask], np.array([0.95, 0.18, 0.95], dtype=np.float32)
+        )
     if np.any(horizontal_seam_mask):
-        frame[horizontal_seam_mask] = np.maximum(frame[horizontal_seam_mask], np.array([0.10, 0.92, 1.0], dtype=np.float32))
+        frame[horizontal_seam_mask] = np.maximum(
+            frame[horizontal_seam_mask], np.array([0.10, 0.92, 1.0], dtype=np.float32)
+        )
     if np.any(buoyancy_mask):
-        frame[buoyancy_mask] = np.maximum(frame[buoyancy_mask], np.array([1.0, 0.78, 0.10], dtype=np.float32))
+        frame[buoyancy_mask] = np.maximum(
+            frame[buoyancy_mask], np.array([1.0, 0.78, 0.10], dtype=np.float32)
+        )
     pending_mask = engine.placeholder_displaced_material > 0
     if np.any(pending_mask):
-        frame[pending_mask] = np.maximum(frame[pending_mask], np.array([1.0, 0.18, 0.18], dtype=np.float32))
+        frame[pending_mask] = np.maximum(
+            frame[pending_mask], np.array([1.0, 0.18, 0.18], dtype=np.float32)
+        )
     return np.clip(frame, 0.0, 1.0)
 
 
@@ -300,7 +332,9 @@ def _reaction_frame(engine: "WorldEngine") -> np.ndarray:
         )[: engine.height, : engine.width]
         frame += solve_gas_cells[..., None] * np.array([0.04, 0.08, 0.18], dtype=np.float32)
     if np.any(changed_cell_mask):
-        frame[changed_cell_mask] = np.maximum(frame[changed_cell_mask], np.array([0.18, 0.88, 1.0], dtype=np.float32))
+        frame[changed_cell_mask] = np.maximum(
+            frame[changed_cell_mask], np.array([0.18, 0.88, 1.0], dtype=np.float32)
+        )
     if ambient_changed_mask.size > 0:
         ambient_cells = np.repeat(
             np.repeat(ambient_changed_mask, engine.gas_cell_size, axis=0),
@@ -316,11 +350,17 @@ def _reaction_frame(engine: "WorldEngine") -> np.ndarray:
         )[: engine.height, : engine.width]
         frame += gas_changed_cells[..., None] * np.array([0.12, 0.48, 0.92], dtype=np.float32)
     if np.any(timer_changed_mask):
-        frame[timer_changed_mask] = np.maximum(frame[timer_changed_mask], np.array([1.0, 0.82, 0.16], dtype=np.float32))
+        frame[timer_changed_mask] = np.maximum(
+            frame[timer_changed_mask], np.array([1.0, 0.82, 0.16], dtype=np.float32)
+        )
     if np.any(emitted_light_mask):
-        frame[emitted_light_mask] = np.maximum(frame[emitted_light_mask], np.array([1.0, 0.42, 0.08], dtype=np.float32))
+        frame[emitted_light_mask] = np.maximum(
+            frame[emitted_light_mask], np.array([1.0, 0.42, 0.08], dtype=np.float32)
+        )
     if np.any(emitted_material_mask):
-        frame[emitted_material_mask] = np.maximum(frame[emitted_material_mask], np.array([1.0, 0.18, 0.85], dtype=np.float32))
+        frame[emitted_material_mask] = np.maximum(
+            frame[emitted_material_mask], np.array([1.0, 0.18, 0.85], dtype=np.float32)
+        )
     return np.clip(frame, 0.0, 1.0)
 
 
@@ -338,17 +378,29 @@ def _collapse_frame(engine: "WorldEngine") -> np.ndarray:
     if solve_region_mask.size > 0:
         frame += solve_region_mask[..., None] * np.array([0.04, 0.08, 0.18], dtype=np.float32)
     if np.any(supported_mask):
-        frame[supported_mask] = np.maximum(frame[supported_mask], np.array([0.18, 0.82, 0.18], dtype=np.float32))
+        frame[supported_mask] = np.maximum(
+            frame[supported_mask], np.array([0.18, 0.82, 0.18], dtype=np.float32)
+        )
     if np.any(unsupported_mask):
-        frame[unsupported_mask] = np.maximum(frame[unsupported_mask], np.array([1.0, 0.78, 0.10], dtype=np.float32))
+        frame[unsupported_mask] = np.maximum(
+            frame[unsupported_mask], np.array([1.0, 0.78, 0.10], dtype=np.float32)
+        )
     if np.any(delayed_pending_mask):
-        frame[delayed_pending_mask] = np.maximum(frame[delayed_pending_mask], np.array([1.0, 0.46, 0.10], dtype=np.float32))
+        frame[delayed_pending_mask] = np.maximum(
+            frame[delayed_pending_mask], np.array([1.0, 0.46, 0.10], dtype=np.float32)
+        )
     if np.any(immune_unsupported_mask):
-        frame[immune_unsupported_mask] = np.maximum(frame[immune_unsupported_mask], np.array([0.22, 0.78, 1.0], dtype=np.float32))
+        frame[immune_unsupported_mask] = np.maximum(
+            frame[immune_unsupported_mask], np.array([0.22, 0.78, 1.0], dtype=np.float32)
+        )
     if np.any(collapsed_cell_mask):
-        frame[collapsed_cell_mask] = np.maximum(frame[collapsed_cell_mask], np.array([1.0, 0.20, 0.92], dtype=np.float32))
+        frame[collapsed_cell_mask] = np.maximum(
+            frame[collapsed_cell_mask], np.array([1.0, 0.20, 0.92], dtype=np.float32)
+        )
     if np.any(support_seed_mask):
-        frame[support_seed_mask] = np.maximum(frame[support_seed_mask], np.array([0.16, 1.0, 1.0], dtype=np.float32))
+        frame[support_seed_mask] = np.maximum(
+            frame[support_seed_mask], np.array([0.16, 1.0, 1.0], dtype=np.float32)
+        )
     return np.clip(frame, 0.0, 1.0)
 
 
@@ -379,7 +431,9 @@ def _optics_frame(engine: "WorldEngine", *, light_type: str | None = None) -> np
             np.clip(engine.visible_illumination[visible_changed_mask], 0.0, 1.0),
         )
     if light_type is None and np.any(cell_dose_changed_mask):
-        frame[cell_dose_changed_mask] = np.maximum(frame[cell_dose_changed_mask], np.array([0.16, 0.95, 1.0], dtype=np.float32))
+        frame[cell_dose_changed_mask] = np.maximum(
+            frame[cell_dose_changed_mask], np.array([0.16, 0.95, 1.0], dtype=np.float32)
+        )
     if light_type is None and gas_dose_changed_mask.size > 0:
         gas_changed_cells = np.repeat(
             np.repeat(gas_dose_changed_mask, engine.gas_cell_size, axis=0),
@@ -409,7 +463,9 @@ def _optics_frame(engine: "WorldEngine", *, light_type: str | None = None) -> np
             color = np.clip(shadow_color * 1.15, 0.0, 1.0)
             _accumulate_debug_point(engine, frame, ox, oy, color)
     elif np.any(emitter_origin_mask):
-        frame[emitter_origin_mask] = np.maximum(frame[emitter_origin_mask], np.array([1.0, 0.42, 0.10], dtype=np.float32))
+        frame[emitter_origin_mask] = np.maximum(
+            frame[emitter_origin_mask], np.array([1.0, 0.42, 0.10], dtype=np.float32)
+        )
     return np.clip(frame, 0.0, 1.0)
 
 
@@ -460,13 +516,19 @@ def _gas_frame(engine: "WorldEngine", gas_species: str) -> np.ndarray:
     if species_id < 0:
         raise KeyError(gas_species)
     gas_field = engine.gas_concentration[species_id]
-    gas_cells = np.repeat(np.repeat(gas_field, engine.gas_cell_size, axis=0), engine.gas_cell_size, axis=1)[: engine.height, : engine.width]
+    gas_cells = np.repeat(
+        np.repeat(gas_field, engine.gas_cell_size, axis=0), engine.gas_cell_size, axis=1
+    )[: engine.height, : engine.width]
     normalized = np.clip(gas_cells / max(1e-5, gas_cells.max(initial=1.0)), 0.0, 1.0)
-    frame = np.stack([normalized * 0.3, normalized, normalized * 0.6], axis=-1).astype(np.float32, copy=False)
+    frame = np.stack([normalized * 0.3, normalized, normalized * 0.6], axis=-1).astype(
+        np.float32, copy=False
+    )
     snapshot = engine.gas_solver.runtime_snapshot()
     solve_gas_mask = np.asarray(snapshot["solve_gas_mask"], dtype=np.float32)
     if solve_gas_mask.size > 0:
-        solve_cells = np.repeat(np.repeat(solve_gas_mask, engine.gas_cell_size, axis=0), engine.gas_cell_size, axis=1)[: engine.height, : engine.width]
+        solve_cells = np.repeat(
+            np.repeat(solve_gas_mask, engine.gas_cell_size, axis=0), engine.gas_cell_size, axis=1
+        )[: engine.height, : engine.width]
         frame += solve_cells[..., None] * np.array([0.25, 0.05, 0.35], dtype=np.float32)
     for force in engine.force_sources:
         force_color = np.array([1.0, 0.45, 0.15], dtype=np.float32)
@@ -480,7 +542,9 @@ def _gas_frame(engine: "WorldEngine", gas_species: str) -> np.ndarray:
     return np.clip(frame, 0.0, 1.0)
 
 
-def _accumulate_debug_point(engine: "WorldEngine", frame: np.ndarray, x: int, y: int, color: np.ndarray) -> None:
+def _accumulate_debug_point(
+    engine: "WorldEngine", frame: np.ndarray, x: int, y: int, color: np.ndarray
+) -> None:
     if 0 <= x < engine.width and 0 <= y < engine.height:
         frame[y, x] = np.maximum(frame[y, x], color)
 

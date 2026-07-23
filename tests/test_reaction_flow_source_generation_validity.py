@@ -3,22 +3,21 @@ from __future__ import annotations
 import inspect
 import re
 
-from oracle_game.sim.gpu_reactions import GPUReactionPipeline, _SHADER_SUBS
+from oracle_game.sim.gpu_reactions import _SHADER_SUBS, GPUReactionPipeline
 from oracle_game.sim.gpu_reactions_bridge import _apply_flow_sources_to_bridge_velocity
+from oracle_game.sim.gpu_reactions_cell_pass import _run_timed_candidate_action_pass
+from oracle_game.sim.gpu_reactions_pairings import run_self_actions, run_timed_actions
 from oracle_game.sim.gpu_reactions_resources import _ensure_resources
+from oracle_game.sim.gpu_reactions_side_effects import (
+    _run_cell_gas_action_delta_pass,
+    _run_self_candidate_gas_side_effect_pass,
+)
 from oracle_game.sim.gpu_reactions_transient import (
     _advance_flow_source_generation,
     _bind_flow_source_generation_output,
     _clear_transient_state,
 )
-from oracle_game.sim.gpu_reactions_cell_pass import _run_timed_candidate_action_pass
-from oracle_game.sim.gpu_reactions_pairings import run_self_actions, run_timed_actions
-from oracle_game.sim.gpu_reactions_side_effects import (
-    _run_cell_gas_action_delta_pass,
-    _run_self_candidate_gas_side_effect_pass,
-)
 from oracle_game.sim.shader_loader import shader_source
-
 
 FLOW_SOURCE_PRODUCERS = (
     "reactions/scatter_cell_gas_action_delta.comp",
@@ -132,9 +131,11 @@ def test_flow_source_generation_binding_is_shared_by_all_writer_dispatches() -> 
     assert '"flow_source_generation"' in helper_source
     assert "flow_source_generation_tex.bind_to_image" in helper_source
 
-    from oracle_game.sim import gpu_reactions_cell_pass
-    from oracle_game.sim import gpu_reactions_pairings
-    from oracle_game.sim import gpu_reactions_side_effects
+    from oracle_game.sim import (
+        gpu_reactions_cell_pass,
+        gpu_reactions_pairings,
+        gpu_reactions_side_effects,
+    )
 
     callsites = "\n".join(
         (
@@ -150,9 +151,12 @@ def test_flow_source_generation_binding_is_shared_by_all_writer_dispatches() -> 
 
 def test_sparse_self_and_timed_paths_propagate_exact_flow_source_lifecycle() -> None:
     self_source = inspect.getsource(run_self_actions)
-    assert self_source.count(
-        "may_have_flow_sources=pipeline._compiled_actions_include_flow_sources(compiled)"
-    ) == 2
+    assert (
+        self_source.count(
+            "may_have_flow_sources=pipeline._compiled_actions_include_flow_sources(compiled)"
+        )
+        == 2
+    )
 
     timed_source = inspect.getsource(run_timed_actions)
     assert "may_have_flow_sources=may_have_flow_sources" in timed_source

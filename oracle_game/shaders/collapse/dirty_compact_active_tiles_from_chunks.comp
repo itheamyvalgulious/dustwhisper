@@ -1,0 +1,70 @@
+#version 430
+layout(local_size_x={{COMPACT_LOCAL_SIZE}}, local_size_y=1, local_size_z=1) in;
+uniform ivec2 tile_grid_size;
+uniform int chunk_tiles;
+uniform int expansion_radius;
+uniform uint workgroups_per_tile;
+layout(std430, binding=0) buffer ActiveTileCountBuffer {
+    uint active_tile_count[];
+};
+layout(std430, binding=1) buffer ActiveTileListBuffer {
+    ivec2 active_tile_list[];
+};
+layout(std430, binding=2) buffer ActiveTileDispatchArgsBuffer {
+    uint active_tile_dispatch_args[];
+};
+layout(std430, binding=3) readonly buffer ActiveChunkCountBuffer {
+    uint active_chunk_count[];
+};
+layout(std430, binding=4) readonly buffer ActiveChunkListBuffer {
+    ivec2 active_chunk_list[];
+};
+layout(std430, binding=5) readonly buffer ActiveTileTTLBuffer {
+    int active_tile_ttl[];
+};
+layout(std430, binding=6) buffer ActiveTileFlagsBuffer {
+    uint active_tile_flags[];
+};
+void append_tile(ivec2 tile) {
+    if (tile.x < 0 || tile.y < 0 || tile.x >= tile_grid_size.x || tile.y >= tile_grid_size.y) {
+        return;
+    }
+    int tile_index = tile.y * tile_grid_size.x + tile.x;
+    if (atomicCompSwap(active_tile_flags[tile_index], 0u, 1u) != 0u) {
+        return;
+    }
+    uint slot = atomicAdd(active_tile_count[0], 1u);
+    active_tile_list[int(slot)] = tile;
+    atomicMax(active_tile_dispatch_args[0], (slot + 1u) * max(workgroups_per_tile, 1u));
+}
+void main() {
+    uint chunk_index = gl_WorkGroupID.x;
+    if (chunk_index >= active_chunk_count[0]) {
+        return;
+    }
+    ivec2 chunk = active_chunk_list[int(chunk_index)];
+    int chunk_side = max(chunk_tiles, 1);
+    int tile_slots = chunk_side * chunk_side;
+    for (int tile_slot = int(gl_LocalInvocationIndex); tile_slot < tile_slots; tile_slot += {{COMPACT_LOCAL_SIZE}}) {
+        ivec2 local_tile = ivec2(tile_slot % chunk_side, tile_slot / chunk_side);
+        ivec2 source_tile = chunk * chunk_side + local_tile;
+        if (
+            source_tile.x < 0
+            || source_tile.y < 0
+            || source_tile.x >= tile_grid_size.x
+            || source_tile.y >= tile_grid_size.y
+        ) {
+            continue;
+        }
+        int source_index = source_tile.y * tile_grid_size.x + source_tile.x;
+        if (active_tile_ttl[source_index] <= 0) {
+            continue;
+        }
+        int radius = max(0, expansion_radius);
+        for (int dy = -radius; dy <= radius; ++dy) {
+            for (int dx = -radius; dx <= radius; ++dx) {
+                append_tile(source_tile + ivec2(dx, dy));
+            }
+        }
+    }
+}

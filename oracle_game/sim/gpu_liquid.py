@@ -5,10 +5,8 @@ from typing import Any
 
 import numpy as np
 
-from oracle_game.gpu import typed_material_id
 from oracle_game.sim.gpu_base import GPUPipelineBase
 from oracle_game.sim.shader_loader import build_compute_shader
-from oracle_game.types import Phase
 
 TILE_SIZE = 32
 TILE_LOCAL_SIZE = TILE_SIZE
@@ -98,45 +96,43 @@ class GPULiquidResources:
     material_params_signature: tuple[int, int] | None = None
 
 
-from oracle_game.sim.gpu_liquid_resources import (
-    release,
-    _ensure_resources,
-    _active_scheduler_gpu_authoritative,
-    _refresh_active_scheduler_from_ttl,
-    _upload_active_tile_mask,
-    _load_authoritative_active_tile_mask,
-    _active_tile_workgroups_per_tile,
-    _next_placeholder_claim_epoch,
-    _seam_workgroups_per_boundary,
-    _reload_and_compact_active_cell_tiles,
-    _run_active_tile_indirect
+from oracle_game.sim.gpu_liquid_bridge import (
+    _barrier_bits,
+    _download_outputs,
+    _load_authoritative_bridge_flow_intent_inputs,
+    _load_authoritative_bridge_inputs,
+    _publish_bridge_outputs,
+    _run_liquid_intent_pass,
+    _upload_inputs,
+    prepare_motion_flow_intent,
+    step,
 )
-
+from oracle_game.sim.gpu_liquid_resources import (
+    _active_scheduler_gpu_authoritative,
+    _active_tile_workgroups_per_tile,
+    _ensure_resources,
+    _load_authoritative_active_tile_mask,
+    _next_placeholder_claim_epoch,
+    _refresh_active_scheduler_from_ttl,
+    _reload_and_compact_active_cell_tiles,
+    _run_active_tile_indirect,
+    _seam_workgroups_per_boundary,
+    _upload_active_tile_mask,
+    release,
+)
 from oracle_game.sim.gpu_liquid_solve import (
-    _build_seam_boundary_dispatch,
-    _prefetch_seam_boundary_bridge_inputs,
     _build_placeholder_dirty_affected_tile_dispatch,
+    _build_seam_boundary_dispatch,
     _compact_active_tiles,
-    _run_tile_solve,
-    _run_seam_pass,
-    _run_provenance_init,
+    _prefetch_seam_boundary_bridge_inputs,
     _run_buoyancy_pass,
+    _run_cleanup_runtime,
     _run_copy_core_state,
     _run_copy_for_placeholder,
     _run_placeholder_displacement,
-    _run_cleanup_runtime
-)
-
-from oracle_game.sim.gpu_liquid_bridge import (
-    step,
-    prepare_motion_flow_intent,
-    _upload_inputs,
-    _load_authoritative_bridge_inputs,
-    _load_authoritative_bridge_flow_intent_inputs,
-    _publish_bridge_outputs,
-    _run_liquid_intent_pass,
-    _download_outputs,
-    _barrier_bits
+    _run_provenance_init,
+    _run_seam_pass,
+    _run_tile_solve,
 )
 
 
@@ -273,6 +269,7 @@ class GPULiquidPipeline(GPUPipelineBase):
         self._buoyancy_blocker_displaced_hydration_frame_enabled = False
         self.last_buoyancy_blocker_displaced_hydration_used = False
         self._blocker_displaced_hydration_frame_enabled = False
+
     # ``available`` inherited from GPUPipelineBase.
     # ``reset_pass_profile`` inherited from GPUPipelineBase.
     # ``_profile_pass`` inherited from GPUPipelineBase.
@@ -280,28 +277,54 @@ class GPULiquidPipeline(GPUPipelineBase):
     def _ensure_programs(self, ctx: Any) -> None:
         if self.programs:
             return
-        self.programs["load_active_tiles"] = build_compute_shader(ctx, "liquid/load_active_tiles.comp", _SHADER_SUBS)
-        self.programs["clear_active_tile_dispatch"] = build_compute_shader(ctx, "liquid/clear_active_tile_dispatch.comp", _SHADER_SUBS)
-        self.programs["retarget_active_tile_dispatch"] = build_compute_shader(ctx, "liquid/retarget_active_tile_dispatch.comp", _SHADER_SUBS)
+        self.programs["load_active_tiles"] = build_compute_shader(
+            ctx, "liquid/load_active_tiles.comp", _SHADER_SUBS
+        )
+        self.programs["clear_active_tile_dispatch"] = build_compute_shader(
+            ctx, "_shared/clear_active_tile_dispatch.comp", _SHADER_SUBS
+        )
+        self.programs["retarget_active_tile_dispatch"] = build_compute_shader(
+            ctx, "liquid/retarget_active_tile_dispatch.comp", _SHADER_SUBS
+        )
         self.programs["retarget_seam_prefetch_dispatch"] = build_compute_shader(
             ctx,
             "liquid/retarget_seam_prefetch_dispatch.comp",
             _SHADER_SUBS,
         )
-        self.programs["compact_active_tiles"] = build_compute_shader(ctx, "liquid/compact_active_tiles.comp", _SHADER_SUBS)
-        self.programs["compact_active_tiles_from_chunks"] = build_compute_shader(ctx, "liquid/compact_active_tiles_from_chunks.comp", _SHADER_SUBS)
-        self.programs["compact_placeholder_dirty_affected_tiles"] = build_compute_shader(ctx, "liquid/compact_placeholder_dirty_affected_tiles.comp", _SHADER_SUBS)
-        self.programs["compact_placeholder_active_pending_affected_tiles"] = build_compute_shader(ctx, "liquid/compact_placeholder_active_pending_affected_tiles.comp", _SHADER_SUBS)
-        self.programs["compact_placeholder_active_pending_affected_tiles_bridge_aux"] = build_compute_shader(
-            ctx,
-            "liquid/compact_placeholder_active_pending_affected_tiles.comp",
-            {**_SHADER_SUBS, "DIRECT_BRIDGE_AUX_INPUTS": 1},
+        self.programs["compact_active_tiles"] = build_compute_shader(
+            ctx, "_shared/compact_active_tiles.comp", _SHADER_SUBS
         )
-        self.programs["clear_affected_tile_flags"] = build_compute_shader(ctx, "liquid/clear_affected_tile_flags.comp", _SHADER_SUBS)
-        self.programs["compact_seam_x_boundaries_from_active_tiles"] = build_compute_shader(ctx, "liquid/compact_seam_x_boundaries_from_active_tiles.comp", _SHADER_SUBS)
-        self.programs["compact_seam_y_boundaries_from_active_tiles"] = build_compute_shader(ctx, "liquid/compact_seam_y_boundaries_from_active_tiles.comp", _SHADER_SUBS)
-        self.programs["prefetch_seam_boundary_bridge_inputs"] = build_compute_shader(ctx, "liquid/prefetch_seam_boundary_bridge_inputs.comp", _SHADER_SUBS)
-        self.programs["prefetch_seam_boundary_bridge_aux_inputs"] = build_compute_shader(ctx, "liquid/prefetch_seam_boundary_bridge_aux_inputs.comp", _SHADER_SUBS)
+        self.programs["compact_active_tiles_from_chunks"] = build_compute_shader(
+            ctx, "_shared/compact_active_tiles_from_chunks.comp", _SHADER_SUBS
+        )
+        self.programs["compact_placeholder_dirty_affected_tiles"] = build_compute_shader(
+            ctx, "liquid/compact_placeholder_dirty_affected_tiles.comp", _SHADER_SUBS
+        )
+        self.programs["compact_placeholder_active_pending_affected_tiles"] = build_compute_shader(
+            ctx, "liquid/compact_placeholder_active_pending_affected_tiles.comp", _SHADER_SUBS
+        )
+        self.programs["compact_placeholder_active_pending_affected_tiles_bridge_aux"] = (
+            build_compute_shader(
+                ctx,
+                "liquid/compact_placeholder_active_pending_affected_tiles.comp",
+                {**_SHADER_SUBS, "DIRECT_BRIDGE_AUX_INPUTS": 1},
+            )
+        )
+        self.programs["clear_affected_tile_flags"] = build_compute_shader(
+            ctx, "liquid/clear_affected_tile_flags.comp", _SHADER_SUBS
+        )
+        self.programs["compact_seam_x_boundaries_from_active_tiles"] = build_compute_shader(
+            ctx, "liquid/compact_seam_x_boundaries_from_active_tiles.comp", _SHADER_SUBS
+        )
+        self.programs["compact_seam_y_boundaries_from_active_tiles"] = build_compute_shader(
+            ctx, "liquid/compact_seam_y_boundaries_from_active_tiles.comp", _SHADER_SUBS
+        )
+        self.programs["prefetch_seam_boundary_bridge_inputs"] = build_compute_shader(
+            ctx, "liquid/prefetch_seam_boundary_bridge_inputs.comp", _SHADER_SUBS
+        )
+        self.programs["prefetch_seam_boundary_bridge_aux_inputs"] = build_compute_shader(
+            ctx, "liquid/prefetch_seam_boundary_bridge_aux_inputs.comp", _SHADER_SUBS
+        )
         required_warp_extensions = {
             "GL_NV_gpu_shader5",
             "GL_NV_shader_thread_group",
@@ -310,7 +333,7 @@ class GPULiquidPipeline(GPUPipelineBase):
         available_extensions = set(getattr(ctx, "extensions", ()))
         warp_size = 0
         if required_warp_extensions.issubset(available_extensions):
-            warp_size_program = build_compute_shader(ctx, "liquid/query_nv_warp_size.comp")
+            warp_size_program = build_compute_shader(ctx, "_shared/query_nv_warp_size.comp")
             warp_size_buffer = ctx.buffer(reserve=np.dtype(np.uint32).itemsize)
             try:
                 warp_size_buffer.bind_to_storage_buffer(binding=0)
@@ -321,17 +344,14 @@ class GPULiquidPipeline(GPUPipelineBase):
                 warp_size_buffer.release()
                 warp_size_program.release()
         self.tile_solve_warp_fast_path = bool(
-            TILE_LOCAL_SIZE == 32
-            and warp_size == TILE_LOCAL_SIZE
+            TILE_LOCAL_SIZE == 32 and warp_size == TILE_LOCAL_SIZE
         )
         tile_solve_subs = dict(_SHADER_SUBS)
         tile_solve_subs["TILE_WARP_FAST_PATH"] = int(self.tile_solve_warp_fast_path)
         tile_solve_subs["TILE_WARP_DIRECT_VERTICAL_MAPPING"] = int(
             self._tile_warp_direct_vertical_mapping_enabled
         )
-        tile_solve_subs["TILE_NO_LIQUID_FAST_PATH"] = int(
-            self._tile_no_liquid_fast_path_enabled
-        )
+        tile_solve_subs["TILE_NO_LIQUID_FAST_PATH"] = int(self._tile_no_liquid_fast_path_enabled)
         tile_solve_subs["TILE_WARP_LANE_CHANGE_VOTE"] = int(
             self._tile_warp_lane_change_vote_enabled
         )
@@ -346,7 +366,9 @@ class GPULiquidPipeline(GPUPipelineBase):
                     "#extension GL_NV_shader_thread_shuffle : require",
                 )
             )
-        self.programs["tile_solve"] = build_compute_shader(ctx, "liquid/tile_solve.comp", tile_solve_subs)
+        self.programs["tile_solve"] = build_compute_shader(
+            ctx, "liquid/tile_solve.comp", tile_solve_subs
+        )
         self.programs["tile_solve_bridge"] = build_compute_shader(
             ctx,
             "liquid/tile_solve.comp",
@@ -456,70 +478,80 @@ class GPULiquidPipeline(GPUPipelineBase):
                     "TILE_WARP_PROVENANCE_ROW_STREAM": 1,
                 },
             )
-            self.programs["tile_solve_bridge_snapshot_row_stream_provenance"] = build_compute_shader(
-                ctx,
-                "liquid/tile_solve.comp",
-                {
-                    **tile_solve_subs,
-                    "DIRECT_BRIDGE_INPUTS": 1,
-                    "TILE_SNAPSHOT_OUTPUT": 1,
-                    "TILE_COMPACT_SNAPSHOT": int(self._compact_tile_solve_snapshot_enabled),
-                    "TILE_WARP_PROVENANCE_ROW_STREAM": 1,
-                    "LIQUID_PROVENANCE": 1,
-                },
+            self.programs["tile_solve_bridge_snapshot_row_stream_provenance"] = (
+                build_compute_shader(
+                    ctx,
+                    "liquid/tile_solve.comp",
+                    {
+                        **tile_solve_subs,
+                        "DIRECT_BRIDGE_INPUTS": 1,
+                        "TILE_SNAPSHOT_OUTPUT": 1,
+                        "TILE_COMPACT_SNAPSHOT": int(self._compact_tile_solve_snapshot_enabled),
+                        "TILE_WARP_PROVENANCE_ROW_STREAM": 1,
+                        "LIQUID_PROVENANCE": 1,
+                    },
+                )
             )
-            self.programs["tile_solve_bridge_snapshot_row_stream_provenance_aux"] = build_compute_shader(
-                ctx,
-                "liquid/tile_solve.comp",
-                {
-                    **tile_solve_subs,
-                    "DIRECT_BRIDGE_INPUTS": 1,
-                    "DIRECT_BRIDGE_AUX_INPUTS": 1,
-                    "TILE_SNAPSHOT_OUTPUT": 1,
-                    "TILE_COMPACT_SNAPSHOT": int(self._compact_tile_solve_snapshot_enabled),
-                    "TILE_WARP_PROVENANCE_ROW_STREAM": 1,
-                    "LIQUID_PROVENANCE": 1,
-                },
+            self.programs["tile_solve_bridge_snapshot_row_stream_provenance_aux"] = (
+                build_compute_shader(
+                    ctx,
+                    "liquid/tile_solve.comp",
+                    {
+                        **tile_solve_subs,
+                        "DIRECT_BRIDGE_INPUTS": 1,
+                        "DIRECT_BRIDGE_AUX_INPUTS": 1,
+                        "TILE_SNAPSHOT_OUTPUT": 1,
+                        "TILE_COMPACT_SNAPSHOT": int(self._compact_tile_solve_snapshot_enabled),
+                        "TILE_WARP_PROVENANCE_ROW_STREAM": 1,
+                        "LIQUID_PROVENANCE": 1,
+                    },
+                )
             )
-            self.programs["tile_solve_bridge_snapshot_row_stream_provenance_blocker"] = build_compute_shader(
-                ctx,
-                "liquid/tile_solve.comp",
-                {
-                    **tile_solve_subs,
-                    "DIRECT_BRIDGE_INPUTS": 1,
-                    "TILE_SNAPSHOT_OUTPUT": 1,
-                    "TILE_COMPACT_SNAPSHOT": int(self._compact_tile_solve_snapshot_enabled),
-                    "TILE_WARP_PROVENANCE_ROW_STREAM": 1,
-                    "LIQUID_PROVENANCE": 1,
-                    "TILE_BLOCKER_MASK_INPUT": 1,
-                },
+            self.programs["tile_solve_bridge_snapshot_row_stream_provenance_blocker"] = (
+                build_compute_shader(
+                    ctx,
+                    "liquid/tile_solve.comp",
+                    {
+                        **tile_solve_subs,
+                        "DIRECT_BRIDGE_INPUTS": 1,
+                        "TILE_SNAPSHOT_OUTPUT": 1,
+                        "TILE_COMPACT_SNAPSHOT": int(self._compact_tile_solve_snapshot_enabled),
+                        "TILE_WARP_PROVENANCE_ROW_STREAM": 1,
+                        "LIQUID_PROVENANCE": 1,
+                        "TILE_BLOCKER_MASK_INPUT": 1,
+                    },
+                )
             )
-            self.programs["tile_solve_bridge_snapshot_row_stream_provenance_kind_cache"] = build_compute_shader(
-                ctx,
-                "liquid/tile_solve.comp",
-                {
-                    **tile_solve_subs,
-                    "DIRECT_BRIDGE_INPUTS": 1,
-                    "TILE_SNAPSHOT_OUTPUT": 1,
-                    "TILE_COMPACT_SNAPSHOT": int(self._compact_tile_solve_snapshot_enabled),
-                    "TILE_WARP_PROVENANCE_ROW_STREAM": 1,
-                    "LIQUID_PROVENANCE": 1,
-                    "TILE_LIQUID_KIND_CACHE": 1,
-                },
+            self.programs["tile_solve_bridge_snapshot_row_stream_provenance_kind_cache"] = (
+                build_compute_shader(
+                    ctx,
+                    "liquid/tile_solve.comp",
+                    {
+                        **tile_solve_subs,
+                        "DIRECT_BRIDGE_INPUTS": 1,
+                        "TILE_SNAPSHOT_OUTPUT": 1,
+                        "TILE_COMPACT_SNAPSHOT": int(self._compact_tile_solve_snapshot_enabled),
+                        "TILE_WARP_PROVENANCE_ROW_STREAM": 1,
+                        "LIQUID_PROVENANCE": 1,
+                        "TILE_LIQUID_KIND_CACHE": 1,
+                    },
+                )
             )
-            self.programs["tile_solve_bridge_snapshot_row_stream_provenance_kind_cache_aux"] = build_compute_shader(
-                ctx,
-                "liquid/tile_solve.comp",
-                {
-                    **tile_solve_subs,
-                    "DIRECT_BRIDGE_INPUTS": 1,
-                    "DIRECT_BRIDGE_AUX_INPUTS": 1,
-                    "TILE_SNAPSHOT_OUTPUT": 1,
-                    "TILE_COMPACT_SNAPSHOT": int(self._compact_tile_solve_snapshot_enabled),
-                    "TILE_WARP_PROVENANCE_ROW_STREAM": 1,
-                    "LIQUID_PROVENANCE": 1,
-                    "TILE_LIQUID_KIND_CACHE": 1,
-                },
+            self.programs["tile_solve_bridge_snapshot_row_stream_provenance_kind_cache_aux"] = (
+                build_compute_shader(
+                    ctx,
+                    "liquid/tile_solve.comp",
+                    {
+                        **tile_solve_subs,
+                        "DIRECT_BRIDGE_INPUTS": 1,
+                        "DIRECT_BRIDGE_AUX_INPUTS": 1,
+                        "TILE_SNAPSHOT_OUTPUT": 1,
+                        "TILE_COMPACT_SNAPSHOT": int(self._compact_tile_solve_snapshot_enabled),
+                        "TILE_WARP_PROVENANCE_ROW_STREAM": 1,
+                        "LIQUID_PROVENANCE": 1,
+                        "TILE_LIQUID_KIND_CACHE": 1,
+                    },
+                )
             )
         if self._buoyancy_snapshot_pre_state_enabled:
             for name, row_stream, direct_aux, blocker_mask in (
@@ -683,8 +715,12 @@ class GPULiquidPipeline(GPUPipelineBase):
                 "LIQUID_PROVENANCE": 1,
             },
         )
-        self.programs["buoyancy_float"] = build_compute_shader(ctx, "liquid/buoyancy_float.comp", _SHADER_SUBS)
-        self.programs["buoyancy_fused"] = build_compute_shader(ctx, "liquid/buoyancy_fused.comp", _SHADER_SUBS)
+        self.programs["buoyancy_float"] = build_compute_shader(
+            ctx, "liquid/buoyancy_float.comp", _SHADER_SUBS
+        )
+        self.programs["buoyancy_fused"] = build_compute_shader(
+            ctx, "liquid/buoyancy_fused.comp", _SHADER_SUBS
+        )
         self.programs["buoyancy_fused_provenance"] = build_compute_shader(
             ctx, "liquid/buoyancy_fused.comp", {**_SHADER_SUBS, "LIQUID_PROVENANCE": 1}
         )
@@ -705,32 +741,32 @@ class GPULiquidPipeline(GPUPipelineBase):
                 },
             )
             if self._tile_snapshot_state_elision_enabled:
-                self.programs[
-                    "buoyancy_fused_provenance_cleanup_snapshot_pre_state_elided"
-                ] = build_compute_shader(
-                    ctx,
-                    "liquid/buoyancy_fused.comp",
-                    {
-                        **_SHADER_SUBS,
-                        "LIQUID_PROVENANCE": 1,
-                        "FUSE_CLEANUP": 1,
-                        "TILE_SNAPSHOT_PRE_STATE": 1,
-                        "TILE_SNAPSHOT_STATE_ELISION": 1,
-                    },
+                self.programs["buoyancy_fused_provenance_cleanup_snapshot_pre_state_elided"] = (
+                    build_compute_shader(
+                        ctx,
+                        "liquid/buoyancy_fused.comp",
+                        {
+                            **_SHADER_SUBS,
+                            "LIQUID_PROVENANCE": 1,
+                            "FUSE_CLEANUP": 1,
+                            "TILE_SNAPSHOT_PRE_STATE": 1,
+                            "TILE_SNAPSHOT_STATE_ELISION": 1,
+                        },
+                    )
                 )
             if self._buoyancy_shared_sink_cache_enabled:
-                self.programs[
-                    "buoyancy_fused_provenance_cleanup_snapshot_pre_shared_sink"
-                ] = build_compute_shader(
-                    ctx,
-                    "liquid/buoyancy_fused.comp",
-                    {
-                        **_SHADER_SUBS,
-                        "LIQUID_PROVENANCE": 1,
-                        "FUSE_CLEANUP": 1,
-                        "TILE_SNAPSHOT_PRE_STATE": 1,
-                        "BUOYANCY_SHARED_SINK_CACHE": 1,
-                    },
+                self.programs["buoyancy_fused_provenance_cleanup_snapshot_pre_shared_sink"] = (
+                    build_compute_shader(
+                        ctx,
+                        "liquid/buoyancy_fused.comp",
+                        {
+                            **_SHADER_SUBS,
+                            "LIQUID_PROVENANCE": 1,
+                            "FUSE_CLEANUP": 1,
+                            "TILE_SNAPSHOT_PRE_STATE": 1,
+                            "BUOYANCY_SHARED_SINK_CACHE": 1,
+                        },
+                    )
                 )
                 if self._tile_snapshot_state_elision_enabled:
                     self.programs[
@@ -747,7 +783,9 @@ class GPULiquidPipeline(GPUPipelineBase):
                             "BUOYANCY_SHARED_SINK_CACHE": 1,
                         },
                     )
-        self.programs["copy_with_pending"] = build_compute_shader(ctx, "liquid/copy_with_pending.comp", _SHADER_SUBS)
+        self.programs["copy_with_pending"] = build_compute_shader(
+            ctx, "liquid/copy_with_pending.comp", _SHADER_SUBS
+        )
         self.programs["copy_with_pending_bridge_aux"] = build_compute_shader(
             ctx, "liquid/copy_with_pending.comp", {**_SHADER_SUBS, "DIRECT_BRIDGE_AUX_INPUTS": 1}
         )
@@ -759,8 +797,12 @@ class GPULiquidPipeline(GPUPipelineBase):
             "liquid/copy_with_pending.comp",
             {**_SHADER_SUBS, "DIRECT_BRIDGE_AUX_INPUTS": 1, "LIQUID_PROVENANCE": 1},
         )
-        self.programs["copy_core_state"] = build_compute_shader(ctx, "liquid/copy_core_state.comp", _SHADER_SUBS)
-        self.programs["placeholder_displace"] = build_compute_shader(ctx, "liquid/placeholder_displace.comp", _SHADER_SUBS)
+        self.programs["copy_core_state"] = build_compute_shader(
+            ctx, "liquid/copy_core_state.comp", _SHADER_SUBS
+        )
+        self.programs["placeholder_displace"] = build_compute_shader(
+            ctx, "liquid/placeholder_displace.comp", _SHADER_SUBS
+        )
         self.programs["placeholder_displace_bridge_aux"] = build_compute_shader(
             ctx, "liquid/placeholder_displace.comp", {**_SHADER_SUBS, "DIRECT_BRIDGE_AUX_INPUTS": 1}
         )
@@ -772,7 +814,9 @@ class GPULiquidPipeline(GPUPipelineBase):
             "liquid/placeholder_displace.comp",
             {**_SHADER_SUBS, "DIRECT_BRIDGE_AUX_INPUTS": 1, "LIQUID_PROVENANCE": 1},
         )
-        self.programs["cleanup_runtime"] = build_compute_shader(ctx, "liquid/cleanup_runtime.comp", _SHADER_SUBS)
+        self.programs["cleanup_runtime"] = build_compute_shader(
+            ctx, "liquid/cleanup_runtime.comp", _SHADER_SUBS
+        )
         self.programs["cleanup_runtime_bridge"] = build_compute_shader(
             ctx,
             "liquid/cleanup_runtime.comp",
@@ -852,7 +896,9 @@ class GPULiquidPipeline(GPUPipelineBase):
                 "DIRECT_BRIDGE_AUX_OUTPUTS": 1,
             },
         )
-        self.programs["liquid_flow_intent"] = build_compute_shader(ctx, "liquid/liquid_flow_intent.comp", _SHADER_SUBS)
+        self.programs["liquid_flow_intent"] = build_compute_shader(
+            ctx, "liquid/liquid_flow_intent.comp", _SHADER_SUBS
+        )
         self.programs["liquid_flow_intent_bridge_aux"] = build_compute_shader(
             ctx,
             "liquid/liquid_flow_intent.comp",
@@ -887,62 +933,72 @@ class GPULiquidPipeline(GPUPipelineBase):
             "liquid/liquid_flow_intent_shared_halo.comp",
             {**_SHADER_SUBS, "LIQUID_PROVENANCE": 1, "PROVENANCE_TERMINAL": 1},
         )
-        self.programs["liquid_flow_intent_shared_halo_provenance_bridge_aux"] = build_compute_shader(
-            ctx,
-            "liquid/liquid_flow_intent_shared_halo.comp",
-            {
-                **_SHADER_SUBS,
-                "DIRECT_BRIDGE_AUX_INPUTS": 1,
-                "LIQUID_PROVENANCE": 1,
-                "PROVENANCE_TERMINAL": 1,
-            },
+        self.programs["liquid_flow_intent_shared_halo_provenance_bridge_aux"] = (
+            build_compute_shader(
+                ctx,
+                "liquid/liquid_flow_intent_shared_halo.comp",
+                {
+                    **_SHADER_SUBS,
+                    "DIRECT_BRIDGE_AUX_INPUTS": 1,
+                    "LIQUID_PROVENANCE": 1,
+                    "PROVENANCE_TERMINAL": 1,
+                },
+            )
         )
-        self.programs["liquid_flow_intent_shared_halo_provenance_cleanup_bridge_aux"] = build_compute_shader(
-            ctx,
-            "liquid/liquid_flow_intent_shared_halo.comp",
-            {
-                **_SHADER_SUBS,
-                "DIRECT_BRIDGE_AUX_INPUTS": 1,
-                "LIQUID_PROVENANCE": 1,
-                "PROVENANCE_TERMINAL": 1,
-                "FUSE_CLEANUP": 1,
-            },
+        self.programs["liquid_flow_intent_shared_halo_provenance_cleanup_bridge_aux"] = (
+            build_compute_shader(
+                ctx,
+                "liquid/liquid_flow_intent_shared_halo.comp",
+                {
+                    **_SHADER_SUBS,
+                    "DIRECT_BRIDGE_AUX_INPUTS": 1,
+                    "LIQUID_PROVENANCE": 1,
+                    "PROVENANCE_TERMINAL": 1,
+                    "FUSE_CLEANUP": 1,
+                },
+            )
         )
-        self.programs["liquid_flow_intent_shared_halo_provenance_mask_cache"] = build_compute_shader(
-            ctx,
-            "liquid/liquid_flow_intent_shared_halo.comp",
-            {
-                **_SHADER_SUBS,
-                "DIRECT_BRIDGE_AUX_INPUTS": 1,
-                "LIQUID_PROVENANCE": 1,
-                "PROVENANCE_TERMINAL": 1,
-                "PROVENANCE_ACTIVE_MASK_CACHE": 1,
-            },
+        self.programs["liquid_flow_intent_shared_halo_provenance_mask_cache"] = (
+            build_compute_shader(
+                ctx,
+                "liquid/liquid_flow_intent_shared_halo.comp",
+                {
+                    **_SHADER_SUBS,
+                    "DIRECT_BRIDGE_AUX_INPUTS": 1,
+                    "LIQUID_PROVENANCE": 1,
+                    "PROVENANCE_TERMINAL": 1,
+                    "PROVENANCE_ACTIVE_MASK_CACHE": 1,
+                },
+            )
         )
-        self.programs["liquid_flow_intent_shared_halo_provenance_shared_meta"] = build_compute_shader(
-            ctx,
-            "liquid/liquid_flow_intent_shared_halo.comp",
-            {
-                **_SHADER_SUBS,
-                "DIRECT_BRIDGE_AUX_INPUTS": 1,
-                "LIQUID_PROVENANCE": 1,
-                "PROVENANCE_TERMINAL": 1,
-                "PROVENANCE_ACTIVE_MASK_CACHE": 1,
-                "PROVENANCE_SHARED_META_CACHE": 1,
-            },
+        self.programs["liquid_flow_intent_shared_halo_provenance_shared_meta"] = (
+            build_compute_shader(
+                ctx,
+                "liquid/liquid_flow_intent_shared_halo.comp",
+                {
+                    **_SHADER_SUBS,
+                    "DIRECT_BRIDGE_AUX_INPUTS": 1,
+                    "LIQUID_PROVENANCE": 1,
+                    "PROVENANCE_TERMINAL": 1,
+                    "PROVENANCE_ACTIVE_MASK_CACHE": 1,
+                    "PROVENANCE_SHARED_META_CACHE": 1,
+                },
+            )
         )
-        self.programs["liquid_flow_intent_shared_halo_provenance_shared_meta_lazy_aux"] = build_compute_shader(
-            ctx,
-            "liquid/liquid_flow_intent_shared_halo.comp",
-            {
-                **_SHADER_SUBS,
-                "DIRECT_BRIDGE_AUX_INPUTS": 1,
-                "LIQUID_PROVENANCE": 1,
-                "PROVENANCE_TERMINAL": 1,
-                "PROVENANCE_ACTIVE_MASK_CACHE": 1,
-                "PROVENANCE_SHARED_META_CACHE": 1,
-                "PROVENANCE_LAZY_AUX": 1,
-            },
+        self.programs["liquid_flow_intent_shared_halo_provenance_shared_meta_lazy_aux"] = (
+            build_compute_shader(
+                ctx,
+                "liquid/liquid_flow_intent_shared_halo.comp",
+                {
+                    **_SHADER_SUBS,
+                    "DIRECT_BRIDGE_AUX_INPUTS": 1,
+                    "LIQUID_PROVENANCE": 1,
+                    "PROVENANCE_TERMINAL": 1,
+                    "PROVENANCE_ACTIVE_MASK_CACHE": 1,
+                    "PROVENANCE_SHARED_META_CACHE": 1,
+                    "PROVENANCE_LAZY_AUX": 1,
+                },
+            )
         )
         self.programs["liquid_flow_intent_shared_halo_bridge_aux"] = build_compute_shader(
             ctx,
@@ -958,16 +1014,26 @@ class GPULiquidPipeline(GPUPipelineBase):
                 "DIRECT_BRIDGE_AUX_INPUTS": 1,
             },
         )
-        self.programs["load_bridge_cell"] = build_compute_shader(ctx, "liquid/load_bridge_cell.comp", _SHADER_SUBS)
+        self.programs["load_bridge_cell"] = build_compute_shader(
+            ctx, "liquid/load_bridge_cell.comp", _SHADER_SUBS
+        )
         self.programs["load_bridge_blocker_displaced"] = build_compute_shader(
             ctx,
             "liquid/load_bridge_blocker_displaced.comp",
             _SHADER_SUBS,
         )
-        self.programs["load_bridge_flow_intent_inputs"] = build_compute_shader(ctx, "liquid/load_bridge_flow_intent_inputs.comp", _SHADER_SUBS)
-        self.programs["load_bridge_cell_out"] = build_compute_shader(ctx, "liquid/load_bridge_cell_out.comp", _SHADER_SUBS)
-        self.programs["load_bridge_cell_aux"] = build_compute_shader(ctx, "liquid/load_bridge_cell_aux.comp", _SHADER_SUBS)
-        self.programs["publish_bridge_cell"] = build_compute_shader(ctx, "liquid/publish_bridge_cell.comp", _SHADER_SUBS)
+        self.programs["load_bridge_flow_intent_inputs"] = build_compute_shader(
+            ctx, "liquid/load_bridge_flow_intent_inputs.comp", _SHADER_SUBS
+        )
+        self.programs["load_bridge_cell_out"] = build_compute_shader(
+            ctx, "liquid/load_bridge_cell_out.comp", _SHADER_SUBS
+        )
+        self.programs["load_bridge_cell_aux"] = build_compute_shader(
+            ctx, "liquid/load_bridge_cell_aux.comp", _SHADER_SUBS
+        )
+        self.programs["publish_bridge_cell"] = build_compute_shader(
+            ctx, "liquid/publish_bridge_cell.comp", _SHADER_SUBS
+        )
 
     # --- resources bucket ---
     release = release
@@ -985,7 +1051,9 @@ class GPULiquidPipeline(GPUPipelineBase):
     # --- solve bucket ---
     _build_seam_boundary_dispatch = _build_seam_boundary_dispatch
     _prefetch_seam_boundary_bridge_inputs = _prefetch_seam_boundary_bridge_inputs
-    _build_placeholder_dirty_affected_tile_dispatch = _build_placeholder_dirty_affected_tile_dispatch
+    _build_placeholder_dirty_affected_tile_dispatch = (
+        _build_placeholder_dirty_affected_tile_dispatch
+    )
     _compact_active_tiles = _compact_active_tiles
     _run_tile_solve = _run_tile_solve
     _run_seam_pass = _run_seam_pass

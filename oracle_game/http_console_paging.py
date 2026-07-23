@@ -55,6 +55,7 @@ def route_paging_post(
         handler._send({"stored": engine.page_store_has_stripe(update)})
         return True
     if path == "/api/paging/store/capture":
+        console._ensure_gpu_attached()
         update = PageStripeUpdate(**payload["update"])
         stripe_payload = engine.capture_page_stripe_to_store(update)
         handler._send(
@@ -72,13 +73,17 @@ def route_paging_post(
             {
                 "ok": True,
                 "stored": stripe_payload is not None,
-                "payload": None if stripe_payload is None else engine.serialize_page_stripe_payload(stripe_payload),
+                "payload": None
+                if stripe_payload is None
+                else engine.serialize_page_stripe_payload(stripe_payload),
             }
         )
         return True
     if path == "/api/paging/store/apply":
         update = PageStripeUpdate(**payload["update"])
         immediate = bool(payload.get("immediate", False))
+        if immediate:
+            console._ensure_gpu_attached()
         stripe_payload = engine.apply_stored_page_stripe(update, immediate=immediate)
         handler._send(
             {
@@ -103,9 +108,12 @@ def route_paging_post(
         return True
     if path == "/api/paging/store/clear":
         cleared = engine.clear_page_store()
-        handler._send({"ok": True, "cleared": cleared, "stored_stripes": engine.page_store.stored_count()})
+        handler._send(
+            {"ok": True, "cleared": cleared, "stored_stripes": engine.page_store.stored_count()}
+        )
         return True
     if path == "/api/paging/stripe/capture":
+        console._ensure_gpu_attached()
         update = PageStripeUpdate(**payload["update"])
         stripe_payload = engine.capture_page_stripe(update)
         handler._send({"ok": True, "payload": engine.serialize_page_stripe_payload(stripe_payload)})
@@ -113,6 +121,8 @@ def route_paging_post(
     if path == "/api/paging/stripe/apply":
         update = PageStripeUpdate(**payload["update"])
         immediate = handler._payload_immediate(payload)
+        if immediate:
+            console._ensure_gpu_attached()
         engine.apply_page_stripe(update, dict(payload["payload"]), immediate=immediate)
         handler._send_mutation_result(immediate=immediate)
         return True

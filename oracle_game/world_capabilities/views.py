@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from oracle_game.readback_contract import READBACK_ALLOWED_CHANNELS
-
 
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine

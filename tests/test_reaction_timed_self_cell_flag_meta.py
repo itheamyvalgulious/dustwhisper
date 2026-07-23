@@ -5,7 +5,7 @@ import inspect
 import numpy as np
 import pytest
 
-from oracle_game.sim.gpu_reactions import GPUReactionPipeline, _SHADER_SUBS
+from oracle_game.sim.gpu_reactions import _SHADER_SUBS, GPUReactionPipeline
 from oracle_game.sim.shader_loader import shader_source
 from oracle_game.types import CellFlag, ReactionAction, ReactionType, SelfReactionRule
 from oracle_game.world import WorldEngine
@@ -56,17 +56,13 @@ def test_formal_timed_self_metadata_skips_segment_accumulation(
                 "material_light": [],
                 "gas_gas": [],
                 "gas_light": [],
-                "self_rules": [
-                    SelfReactionRule(material="root_solid", trigger_slot_index=4)
-                ],
+                "self_rules": [SelfReactionRule(material="root_solid", trigger_slot_index=4)],
             },
         )
         engine.patch_material(
             "root_solid",
             reaction_slots=(
-                (2, 0, 0, 0, 1, 0, 0, 0)
-                if reverse_action_order
-                else (1, 0, 0, 0, 2, 0, 0, 0)
+                (2, 0, 0, 0, 1, 0, 0, 0) if reverse_action_order else (1, 0, 0, 0, 2, 0, 0, 0)
             ),
         )
         root_id = engine.rulebook.material_id("root_solid")
@@ -122,9 +118,7 @@ def test_formal_timed_self_metadata_skips_segment_accumulation(
                 # Timed latches first; the later self reset clears every flag.
                 assert np.all(flags == 0)
             else:
-                expected_latched = int(
-                    CellFlag.RECENTLY_CONVERTED | CellFlag.REACTION_LATCHED
-                )
+                expected_latched = int(CellFlag.RECENTLY_CONVERTED | CellFlag.REACTION_LATCHED)
                 assert np.all(flags[killed] == 0)
                 assert np.all(flags[~killed] == expected_latched)
 

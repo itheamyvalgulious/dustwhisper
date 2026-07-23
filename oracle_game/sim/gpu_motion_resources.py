@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -10,80 +10,17 @@ if TYPE_CHECKING:
 # GPUMotionResources is imported at runtime (not just TYPE_CHECKING) because
 # _ensure_resources constructs it. It is defined in the facade before the
 # bucket import block, so the partial-init resolves this without a cycle.
+from oracle_game.sim.gpu_base import release_resource_fields
 from oracle_game.sim.gpu_motion import (
-    GPUMotionResources,
     MAX_MATERIALS,
+    GPUMotionResources,
 )
 
 
 def release(pipeline) -> None:
     if pipeline.resources is None:
         return
-    for resource in (
-        pipeline.resources.cell_state_tex,
-        pipeline.resources.cell_state_out_tex,
-        pipeline.resources.velocity_tex,
-        pipeline.resources.velocity_out_tex,
-        pipeline.resources.temp_tex,
-        pipeline.resources.temp_out_tex,
-        pipeline.resources.timer_tex,
-        pipeline.resources.timer_out_tex,
-        pipeline.resources.integrity_tex,
-        pipeline.resources.integrity_out_tex,
-        pipeline.resources.flow_tex,
-        pipeline.resources.ambient_tex,
-        pipeline.resources.island_id_tex,
-        pipeline.resources.island_id_out_tex,
-        pipeline.resources.entity_id_tex,
-        pipeline.resources.entity_id_out_tex,
-        pipeline.resources.displaced_tex,
-        pipeline.resources.displaced_out_tex,
-        pipeline.resources.active_tile_tex,
-        pipeline.resources.active_tile_list,
-        pipeline.resources.active_tile_count,
-        pipeline.resources.active_tile_dispatch_args,
-        pipeline.resources.island_materialization_candidate_tile_list,
-        pipeline.resources.island_materialization_candidate_tile_count,
-        pipeline.resources.island_materialization_candidate_dispatch_args,
-        pipeline.resources.powder_apply_tile_flags,
-        pipeline.resources.powder_target_tex,
-        pipeline.resources.powder_target_winner,
-        pipeline.resources.powder_apply_incoming,
-        pipeline.resources.powder_apply_outgoing,
-        pipeline.resources.powder_apply_epoch,
-        pipeline.resources.powder_direct_apply_unsafe,
-        pipeline.resources.powder_source_cell_core_snapshot,
-        pipeline.resources.powder_source_aux_snapshot,
-        pipeline.resources.powder_reservations,
-        pipeline.resources.powder_compact_reservations,
-        pipeline.resources.powder_reservation_count,
-        pipeline.resources.powder_provisional_moving_count,
-        pipeline.resources.powder_reservation_dispatch_args,
-        pipeline.resources.island_reservations,
-        pipeline.resources.island_reservation_count,
-        pipeline.resources.island_runtime_dispatch_args,
-        pipeline.resources.island_apply_incoming,
-        pipeline.resources.island_apply_outgoing,
-        pipeline.resources.island_materialization_index,
-        pipeline.resources.island_reservation_source_index,
-        pipeline.resources.island_ids,
-        pipeline.resources.island_bboxes,
-        pipeline.resources.island_motion,
-        pipeline.resources.island_shift_results,
-        pipeline.resources.component_label_ping,
-        pipeline.resources.component_label_pong,
-        pipeline.resources.component_labels,
-        pipeline.resources.component_island_ids,
-        pipeline.resources.component_metadata,
-        pipeline.resources.component_change_flag,
-        pipeline.resources.material_params,
-        pipeline.resources.material_contact_params,
-        pipeline.resources.material_falling_params,
-    ):
-        try:
-            resource.release()
-        except Exception:
-            pass
+    release_resource_fields(pipeline.resources)
     pipeline.resources = None
 
 
@@ -120,12 +57,16 @@ def _ensure_resources(pipeline, world: "WorldEngine") -> GPUMotionResources:
     entity_id_out_tex = ctx.texture((world.width, world.height), 1, dtype="f4")
     displaced_tex = ctx.texture((world.width, world.height), 1, dtype="f4")
     displaced_out_tex = ctx.texture((world.width, world.height), 1, dtype="f4")
-    active_tile_tex = ctx.texture((world.active.tile_width, world.active.tile_height), 1, dtype="f4")
+    active_tile_tex = ctx.texture(
+        (world.active.tile_width, world.active.tile_height), 1, dtype="f4"
+    )
     tile_count = max(1, int(world.active.tile_width * world.active.tile_height))
     active_tile_list = ctx.buffer(reserve=max(8, tile_count * 2 * 4), dynamic=True)
     active_tile_count = ctx.buffer(reserve=4, dynamic=True)
     active_tile_dispatch_args = ctx.buffer(reserve=3 * 4, dynamic=True)
-    island_materialization_candidate_tile_list = ctx.buffer(reserve=max(8, tile_count * 2 * 4), dynamic=True)
+    island_materialization_candidate_tile_list = ctx.buffer(
+        reserve=max(8, tile_count * 2 * 4), dynamic=True
+    )
     island_materialization_candidate_tile_count = ctx.buffer(reserve=4, dynamic=True)
     island_materialization_candidate_dispatch_args = ctx.buffer(reserve=3 * 4, dynamic=True)
     powder_apply_tile_flags = ctx.buffer(reserve=max(4, tile_count * 4), dynamic=True)
@@ -239,7 +180,9 @@ def _ensure_resources(pipeline, world: "WorldEngine") -> GPUMotionResources:
     return pipeline.resources
 
 
-def _write_dynamic_buffer(pipeline, ctx: Any, resources: GPUMotionResources, name: str, data: np.ndarray) -> None:
+def _write_dynamic_buffer(
+    pipeline, ctx: Any, resources: GPUMotionResources, name: str, data: np.ndarray
+) -> None:
     buffer = getattr(resources, name)
     nbytes = max(4, int(data.nbytes))
     if buffer.size < nbytes:
@@ -252,7 +195,9 @@ def _write_dynamic_buffer(pipeline, ctx: Any, resources: GPUMotionResources, nam
         buffer.write(np.ascontiguousarray(data).tobytes())
 
 
-def _ensure_dynamic_buffer_capacity(pipeline, ctx: Any, resources: GPUMotionResources, name: str, nbytes: int) -> None:
+def _ensure_dynamic_buffer_capacity(
+    pipeline, ctx: Any, resources: GPUMotionResources, name: str, nbytes: int
+) -> None:
     buffer = getattr(resources, name)
     required = max(4, int(nbytes))
     if buffer.size < required:

@@ -38,14 +38,22 @@ def cell_xy_to_gas(engine: "WorldEngine", x: int, y: int) -> tuple[int, int]:
 
 
 def sample_ambient_to_cells(engine: "WorldEngine") -> np.ndarray:
-    return np.repeat(np.repeat(engine.ambient_temperature, engine.gas_cell_size, axis=0), engine.gas_cell_size, axis=1)[: engine.height, : engine.width]
+    return np.repeat(
+        np.repeat(engine.ambient_temperature, engine.gas_cell_size, axis=0),
+        engine.gas_cell_size,
+        axis=1,
+    )[: engine.height, : engine.width]
 
 
 def sample_flow_to_cells(engine: "WorldEngine") -> np.ndarray:
-    return np.repeat(np.repeat(engine.flow_velocity, engine.gas_cell_size, axis=0), engine.gas_cell_size, axis=1)[: engine.height, : engine.width]
+    return np.repeat(
+        np.repeat(engine.flow_velocity, engine.gas_cell_size, axis=0), engine.gas_cell_size, axis=1
+    )[: engine.height, : engine.width]
 
 
-def add_gas_from_cells(engine: "WorldEngine", mask: np.ndarray, species: str, amount: float) -> None:
+def add_gas_from_cells(
+    engine: "WorldEngine", mask: np.ndarray, species: str, amount: float
+) -> None:
     species_id = engine._resolve_sanctioned_gas_id(species)
     if species_id < 0:
         raise KeyError(species)
@@ -56,7 +64,15 @@ def add_gas_from_cells(engine: "WorldEngine", mask: np.ndarray, species: str, am
         engine.gas_concentration[species_id, gy, gx] += amount
 
 
-def set_cell_by_id(engine: "WorldEngine", x: int, y: int, material_id: int, *, phase: Phase | None = None, mark_dirty: bool = True) -> None:
+def set_cell_by_id(
+    engine: "WorldEngine",
+    x: int,
+    y: int,
+    material_id: int,
+    *,
+    phase: Phase | None = None,
+    mark_dirty: bool = True,
+) -> None:
     engine._invalidate_gpu_authoritative_cell_resources()
     previous_material = int(engine.material_id[y, x])
     previous_phase = int(engine.phase[y, x])
@@ -91,12 +107,18 @@ def set_cell_by_id(engine: "WorldEngine", x: int, y: int, material_id: int, *, p
     current_displaced = int(engine.placeholder_displaced_material[y, x])
     if current_is_placeholder or previous_is_placeholder or previous_displaced != current_displaced:
         engine._pending_placeholder_dirty_rects.append((int(x), int(y), int(x) + 1, int(y) + 1))
-    engine.island_id[y, x] = 0 if engine.phase[y, x] != int(Phase.FALLING_ISLAND) else engine.island_id[y, x]
+    engine.island_id[y, x] = (
+        0 if engine.phase[y, x] != int(Phase.FALLING_ISLAND) else engine.island_id[y, x]
+    )
     engine._refresh_island_records_for_ids((previous_island_id, int(engine.island_id[y, x])))
-    engine._mark_active_rect_runtime(max(0, x - 1), max(0, y - 1), min(engine.width, x + 2), min(engine.height, y + 2))
+    engine._mark_active_rect_runtime(
+        max(0, x - 1), max(0, y - 1), min(engine.width, x + 2), min(engine.height, y + 2)
+    )
     if mark_dirty and (
         engine._cell_participates_in_collapse(previous_material, previous_phase)
-        or engine._cell_participates_in_collapse(int(engine.material_id[y, x]), int(engine.phase[y, x]))
+        or engine._cell_participates_in_collapse(
+            int(engine.material_id[y, x]), int(engine.phase[y, x])
+        )
     ):
         engine._mark_collapse_dirty_rect(x, y, x + 1, y + 1)
 
@@ -119,7 +141,7 @@ def _inject_velocity_immediate(
     if carrier in {"cell", "both"}:
         engine._invalidate_gpu_authoritative_resources("cell_core")
         yy, xx = np.mgrid[0 : engine.height, 0 : engine.width]
-        cell_mask = (xx - x) ** 2 + (yy - y) ** 2 <= radius ** 2
+        cell_mask = (xx - x) ** 2 + (yy - y) ** 2 <= radius**2
         if mode == "set":
             engine.velocity[cell_mask] = velocity_vec
         else:
@@ -130,7 +152,7 @@ def _inject_velocity_immediate(
         gas_center_y = min(engine.gas_height - 1, max(0, y // engine.gas_cell_size))
         gas_radius = max(0, (radius + engine.gas_cell_size - 1) // engine.gas_cell_size)
         yy, xx = np.mgrid[0 : engine.gas_height, 0 : engine.gas_width]
-        flow_mask = (xx - gas_center_x) ** 2 + (yy - gas_center_y) ** 2 <= gas_radius ** 2
+        flow_mask = (xx - gas_center_x) ** 2 + (yy - gas_center_y) ** 2 <= gas_radius**2
         if mode == "set":
             engine.flow_velocity[flow_mask] = velocity_vec
         else:
@@ -143,25 +165,49 @@ def _inject_velocity_immediate(
     )
 
 
-def _inject_temperature_immediate(engine: "WorldEngine", x: int, y: int, delta: float, radius: int) -> None:
+def _inject_temperature_immediate(
+    engine: "WorldEngine", x: int, y: int, delta: float, radius: int
+) -> None:
     engine._invalidate_gpu_authoritative_resources("cell_core")
     yy, xx = np.mgrid[0 : engine.height, 0 : engine.width]
-    mask = (xx - x) ** 2 + (yy - y) ** 2 <= radius ** 2
+    mask = (xx - x) ** 2 + (yy - y) ** 2 <= radius**2
     engine.cell_temperature[mask] += delta
-    engine._mark_active_rect_runtime(max(0, x - radius), max(0, y - radius), min(engine.width, x + radius + 1), min(engine.height, y + radius + 1))
+    engine._mark_active_rect_runtime(
+        max(0, x - radius),
+        max(0, y - radius),
+        min(engine.width, x + radius + 1),
+        min(engine.height, y + radius + 1),
+    )
 
 
-def _inject_gas_immediate(engine: "WorldEngine", x: int, y: int, species: str, amount: float, radius: int) -> None:
+def _inject_gas_immediate(
+    engine: "WorldEngine", x: int, y: int, species: str, amount: float, radius: int
+) -> None:
     gy, gx = cell_xy_to_gas(engine, x, y)
     species_id = engine._resolve_sanctioned_gas_id(species)
     if species_id < 0:
         raise KeyError(species)
     engine._invalidate_gpu_authoritative_resources("gas_concentration")
-    engine.gas_concentration[species_id, gy, gx] = max(0.0, engine.gas_concentration[species_id, gy, gx] + amount)
-    engine._mark_active_rect_runtime(max(0, x - radius), max(0, y - radius), min(engine.width, x + radius + 1), min(engine.height, y + radius + 1))
+    engine.gas_concentration[species_id, gy, gx] = max(
+        0.0, engine.gas_concentration[species_id, gy, gx] + amount
+    )
+    engine._mark_active_rect_runtime(
+        max(0, x - radius),
+        max(0, y - radius),
+        min(engine.width, x + radius + 1),
+        min(engine.height, y + radius + 1),
+    )
 
 
-def set_cell(engine: "WorldEngine", x: int, y: int, material_name: str, *, phase: Phase | None = None, mark_dirty: bool = True) -> None:
+def set_cell(
+    engine: "WorldEngine",
+    x: int,
+    y: int,
+    material_name: str,
+    *,
+    phase: Phase | None = None,
+    mark_dirty: bool = True,
+) -> None:
     material_id = engine._resolve_sanctioned_material_id(material_name)
     if material_id <= 0:
         raise KeyError(material_name)
@@ -188,7 +234,9 @@ def clear_cell(engine: "WorldEngine", x: int, y: int, *, mark_dirty: bool = True
     if previous_is_placeholder or previous_displaced != 0:
         engine._pending_placeholder_dirty_rects.append((int(x), int(y), int(x) + 1, int(y) + 1))
     engine._refresh_island_records_for_ids((previous_island_id,))
-    engine._mark_active_rect_runtime(max(0, x - 1), max(0, y - 1), min(engine.width, x + 2), min(engine.height, y + 2))
+    engine._mark_active_rect_runtime(
+        max(0, x - 1), max(0, y - 1), min(engine.width, x + 2), min(engine.height, y + 2)
+    )
     if mark_dirty and engine._cell_participates_in_collapse(previous_material, previous_phase):
         engine._mark_collapse_dirty_rect(x, y, x + 1, y + 1)
 
@@ -199,7 +247,14 @@ def clear_cells(engine: "WorldEngine", mask: np.ndarray, *, mark_dirty: bool = T
         clear_cell(engine, int(x), int(y), mark_dirty=mark_dirty)
 
 
-def set_material_by_mask(engine: "WorldEngine", mask: np.ndarray, material_name: str, *, phase: Phase | None = None, mark_dirty: bool = True) -> None:
+def set_material_by_mask(
+    engine: "WorldEngine",
+    mask: np.ndarray,
+    material_name: str,
+    *,
+    phase: Phase | None = None,
+    mark_dirty: bool = True,
+) -> None:
     ys, xs = np.nonzero(mask)
     for y, x in zip(ys.tolist(), xs.tolist()):
         set_cell(engine, int(x), int(y), material_name, phase=phase, mark_dirty=mark_dirty)
@@ -229,7 +284,11 @@ def swap_cells(engine: "WorldEngine", x0: int, y0: int, x1: int, y1: int) -> Non
             engine.entity_id,
             engine.placeholder_displaced_material,
         ):
-            value = array[src_y, src_x].copy() if hasattr(array[src_y, src_x], "copy") else array[src_y, src_x]
+            value = (
+                array[src_y, src_x].copy()
+                if hasattr(array[src_y, src_x], "copy")
+                else array[src_y, src_x]
+            )
             array[dst_y, dst_x] = value
         for array in (engine.velocity, engine.timer_pack):
             array[dst_y, dst_x] = array[src_y, src_x].copy()
@@ -272,7 +331,11 @@ def swap_cells(engine: "WorldEngine", x0: int, y0: int, x1: int, y1: int) -> Non
     for cell_x, cell_y in ((x0, y0), (x1, y1)):
         entity_id = int(engine.entity_id[cell_y, cell_x])
         material_id = int(engine.material_id[cell_y, cell_x])
-        if entity_id > 0 and material_id > 0 and engine._shadow_material_is_placeholder(material_id):
+        if (
+            entity_id > 0
+            and material_id > 0
+            and engine._shadow_material_is_placeholder(material_id)
+        ):
             engine.entity_placeholders.setdefault(entity_id, set()).add((cell_x, cell_y))
     engine._refresh_island_records_for_ids(
         previous_island_ids
@@ -281,10 +344,17 @@ def swap_cells(engine: "WorldEngine", x0: int, y0: int, x1: int, y1: int) -> Non
             int(engine.island_id[y1, x1]),
         )
     )
-    engine._mark_active_rect_runtime(max(0, min(x0, x1) - 1), max(0, min(y0, y1) - 1), min(engine.width, max(x0, x1) + 2), min(engine.height, max(y0, y1) + 2))
+    engine._mark_active_rect_runtime(
+        max(0, min(x0, x1) - 1),
+        max(0, min(y0, y1) - 1),
+        min(engine.width, max(x0, x1) + 2),
+        min(engine.height, max(y0, y1) + 2),
+    )
 
 
-def clear_cell_region(engine: "WorldEngine", x0: int, y0: int, x1: int, y1: int, *, mark_dirty: bool = True) -> None:
+def clear_cell_region(
+    engine: "WorldEngine", x0: int, y0: int, x1: int, y1: int, *, mark_dirty: bool = True
+) -> None:
     engine._invalidate_gpu_authoritative_cell_resources()
     region_material = engine.material_id[y0:y1, x0:x1]
     region_phase = engine.phase[y0:y1, x0:x1]
@@ -295,7 +365,10 @@ def clear_cell_region(engine: "WorldEngine", x0: int, y0: int, x1: int, y1: int,
         and np.any(
             (region_material != 0)
             & (region_phase != int(Phase.FALLING_ISLAND))
-            & (engine.material_is_structural[region_material] | engine.material_is_support_anchor[region_material])
+            & (
+                engine.material_is_structural[region_material]
+                | engine.material_is_support_anchor[region_material]
+            )
         )
     )
     engine.material_id[y0:y1, x0:x1] = 0
@@ -328,13 +401,19 @@ def ambient_temperature_at_cell(engine: "WorldEngine", x: int, y: int) -> float:
     return float(engine.ambient_temperature[gy, gx])
 
 
-def ambient_temperature_region(engine: "WorldEngine", x0: int, y0: int, x1: int, y1: int) -> np.ndarray:
+def ambient_temperature_region(
+    engine: "WorldEngine", x0: int, y0: int, x1: int, y1: int
+) -> np.ndarray:
     if x0 >= x1 or y0 >= y1:
         return np.zeros((0, 0), dtype=np.float32)
     gx0 = min(engine.gas_width, max(0, x0 // engine.gas_cell_size))
     gy0 = min(engine.gas_height, max(0, y0 // engine.gas_cell_size))
-    gx1 = min(engine.gas_width, max(gx0 + 1, (x1 + engine.gas_cell_size - 1) // engine.gas_cell_size))
-    gy1 = min(engine.gas_height, max(gy0 + 1, (y1 + engine.gas_cell_size - 1) // engine.gas_cell_size))
+    gx1 = min(
+        engine.gas_width, max(gx0 + 1, (x1 + engine.gas_cell_size - 1) // engine.gas_cell_size)
+    )
+    gy1 = min(
+        engine.gas_height, max(gy0 + 1, (y1 + engine.gas_cell_size - 1) // engine.gas_cell_size)
+    )
     repeated = np.repeat(
         np.repeat(engine.ambient_temperature[gy0:gy1, gx0:gx1], engine.gas_cell_size, axis=0),
         engine.gas_cell_size,
@@ -342,10 +421,14 @@ def ambient_temperature_region(engine: "WorldEngine", x0: int, y0: int, x1: int,
     )
     local_y0 = y0 - gy0 * engine.gas_cell_size
     local_x0 = x0 - gx0 * engine.gas_cell_size
-    return np.ascontiguousarray(repeated[local_y0 : local_y0 + (y1 - y0), local_x0 : local_x0 + (x1 - x0)])
+    return np.ascontiguousarray(
+        repeated[local_y0 : local_y0 + (y1 - y0), local_x0 : local_x0 + (x1 - x0)]
+    )
 
 
-def _gas_window_for_cell_rect(engine: "WorldEngine", x0: int, y0: int, x1: int, y1: int) -> tuple[int, int, int, int]:
+def _gas_window_for_cell_rect(
+    engine: "WorldEngine", x0: int, y0: int, x1: int, y1: int
+) -> tuple[int, int, int, int]:
     gx0 = min(engine.gas_width, max(0, x0 // engine.gas_cell_size))
     gy0 = min(engine.gas_height, max(0, y0 // engine.gas_cell_size))
     gx1 = min(engine.gas_width, max(gx0, (x1 + engine.gas_cell_size - 1) // engine.gas_cell_size))

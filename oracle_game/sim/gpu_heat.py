@@ -6,8 +6,7 @@ from typing import Any
 import numpy as np
 
 from oracle_game.sim.gpu_base import GPUPipelineBase
-from oracle_game.sim.shader_loader import build_compute_shader, shader_source
-
+from oracle_game.sim.shader_loader import build_compute_shader
 
 LOCAL_SIZE = 8
 MAX_MATERIALS = 256
@@ -98,33 +97,33 @@ class GPUHeatStageTargets:
 
 
 from oracle_game.sim.gpu_heat_resources import (
-    release,
     _ensure_resources,
-    _upload_inputs,
     _load_authoritative_active_tile_mask,
+    _upload_inputs,
+    release,
 )
 from oracle_game.sim.gpu_heat_stages import (
-    step,
-    _load_authoritative_bridge_inputs,
-    _run_cell_heat,
-    _run_ambient_exchange,
-    _run_ambient_exchange_feedback4,
-    _run_ambient_diffuse,
-    _run_ambient_feedback,
-    _run_phase_boil_targets,
-    _run_phase_targets,
-    _run_boil_targets,
-    _run_condense_targets,
-    _run_apply_cell_targets,
-    _run_apply_cell_aux_targets,
-    _run_apply_gas_targets,
-    _run_apply_terminal4x6,
-    _run_apply_condense_cells,
-    _run_apply_condense_cell_aux,
     _download_outputs,
     _empty_stage_targets,
+    _load_authoritative_bridge_inputs,
     _publish_bridge_outputs,
+    _run_ambient_diffuse,
+    _run_ambient_exchange,
+    _run_ambient_exchange_feedback4,
+    _run_ambient_feedback,
+    _run_apply_cell_aux_targets,
+    _run_apply_cell_targets,
+    _run_apply_condense_cell_aux,
+    _run_apply_condense_cells,
+    _run_apply_gas_targets,
+    _run_apply_terminal4x6,
+    _run_boil_targets,
+    _run_cell_heat,
+    _run_condense_targets,
+    _run_phase_boil_targets,
+    _run_phase_targets,
     abort_deferred_cell_core,
+    step,
 )
 
 
@@ -234,8 +233,12 @@ class GPUHeatPipeline(GPUPipelineBase):
     def _ensure_programs(self, ctx: Any) -> None:
         if self.programs:
             return
-        self.programs["load_active_tiles"] = build_compute_shader(ctx, "heat/load_active_tiles.comp", _SHADER_SUBS)
-        self.programs["cell_heat"] = build_compute_shader(ctx, "heat/cell_heat.comp", _SHADER_SUBS, includes=["heat/_common.comp"])
+        self.programs["load_active_tiles"] = build_compute_shader(
+            ctx, "heat/load_active_tiles.comp", _SHADER_SUBS
+        )
+        self.programs["cell_heat"] = build_compute_shader(
+            ctx, "heat/cell_heat.comp", _SHADER_SUBS, includes=["heat/_common.comp"]
+        )
         self.programs["cell_heat_bridge"] = build_compute_shader(
             ctx, "heat/cell_heat_bridge.comp", _SHADER_SUBS, includes=["heat/_common.comp"]
         )
@@ -251,16 +254,24 @@ class GPUHeatPipeline(GPUPipelineBase):
             _SHADER_SUBS,
             includes=["heat/_common.comp"],
         )
-        self.programs["ambient_exchange"] = build_compute_shader(ctx, "heat/ambient_exchange.comp", _SHADER_SUBS, includes=["heat/_common.comp"])
+        self.programs["ambient_exchange"] = build_compute_shader(
+            ctx, "heat/ambient_exchange.comp", _SHADER_SUBS, includes=["heat/_common.comp"]
+        )
         self.programs["ambient_exchange_feedback4"] = build_compute_shader(
             ctx,
             "heat/ambient_exchange_feedback4.comp",
             _SHADER_SUBS,
             includes=["heat/_common.comp"],
         )
-        self.programs["ambient_feedback"] = build_compute_shader(ctx, "heat/ambient_feedback.comp", _SHADER_SUBS, includes=["heat/_common.comp"])
-        self.programs["ambient_diffuse"] = build_compute_shader(ctx, "heat/ambient_diffuse.comp", _SHADER_SUBS, includes=["heat/_common.comp"])
-        self.programs["phase_targets"] = build_compute_shader(ctx, "heat/phase_targets.comp", _SHADER_SUBS, includes=["heat/_common.comp"])
+        self.programs["ambient_feedback"] = build_compute_shader(
+            ctx, "heat/ambient_feedback.comp", _SHADER_SUBS, includes=["heat/_common.comp"]
+        )
+        self.programs["ambient_diffuse"] = build_compute_shader(
+            ctx, "heat/ambient_diffuse.comp", _SHADER_SUBS, includes=["heat/_common.comp"]
+        )
+        self.programs["phase_targets"] = build_compute_shader(
+            ctx, "heat/phase_targets.comp", _SHADER_SUBS, includes=["heat/_common.comp"]
+        )
         self.programs["phase_boil_targets"] = build_compute_shader(
             ctx, "heat/phase_boil_targets.comp", _SHADER_SUBS, includes=["heat/_common.comp"]
         )
@@ -274,19 +285,27 @@ class GPUHeatPipeline(GPUPipelineBase):
         )
         packed_lazy_action_subs = dict(lazy_action_subs)
         packed_lazy_action_subs["HEAT_PACKED_PHASE_BOIL_TARGETS"] = 1
-        self.programs[
-            "phase_boil_targets_packed_lazy_action_inputs"
-        ] = build_compute_shader(
+        self.programs["phase_boil_targets_packed_lazy_action_inputs"] = build_compute_shader(
             ctx,
             "heat/phase_boil_targets.comp",
             packed_lazy_action_subs,
             includes=["heat/_common.comp"],
         )
-        self.programs["apply_cell_targets"] = build_compute_shader(ctx, "heat/apply_cell_targets.comp", _SHADER_SUBS, includes=["heat/_common.comp"])
-        self.programs["apply_cell_aux_targets"] = build_compute_shader(ctx, "heat/apply_cell_aux_targets.comp", _SHADER_SUBS, includes=["heat/_common.comp"])
-        self.programs["boil_targets"] = build_compute_shader(ctx, "heat/boil_targets.comp", _SHADER_SUBS, includes=["heat/_common.comp"])
-        self.programs["condense_targets"] = build_compute_shader(ctx, "heat/condense_targets.comp", _SHADER_SUBS, includes=["heat/_common.comp"])
-        self.programs["apply_gas_targets"] = build_compute_shader(ctx, "heat/apply_gas_targets.comp", _SHADER_SUBS, includes=["heat/_common.comp"])
+        self.programs["apply_cell_targets"] = build_compute_shader(
+            ctx, "heat/apply_cell_targets.comp", _SHADER_SUBS, includes=["heat/_common.comp"]
+        )
+        self.programs["apply_cell_aux_targets"] = build_compute_shader(
+            ctx, "heat/apply_cell_aux_targets.comp", _SHADER_SUBS, includes=["heat/_common.comp"]
+        )
+        self.programs["boil_targets"] = build_compute_shader(
+            ctx, "heat/boil_targets.comp", _SHADER_SUBS, includes=["heat/_common.comp"]
+        )
+        self.programs["condense_targets"] = build_compute_shader(
+            ctx, "heat/condense_targets.comp", _SHADER_SUBS, includes=["heat/_common.comp"]
+        )
+        self.programs["apply_gas_targets"] = build_compute_shader(
+            ctx, "heat/apply_gas_targets.comp", _SHADER_SUBS, includes=["heat/_common.comp"]
+        )
         self.programs["apply_gas_targets4x6"] = build_compute_shader(
             ctx,
             "heat/apply_gas_targets4x6.comp",
@@ -337,21 +356,17 @@ class GPUHeatPipeline(GPUPipelineBase):
         )
         bridge_resident_dirty_subs = dict(bridge_resident_subs)
         bridge_resident_dirty_subs["DIRTY_WORKGROUP_AGGREGATE"] = 1
-        self.programs[
-            "apply_terminal4x6_bridge_resident_dirty_workgroup"
-        ] = build_compute_shader(
+        self.programs["apply_terminal4x6_bridge_resident_dirty_workgroup"] = build_compute_shader(
             ctx,
             "heat/apply_terminal4x6.comp",
             bridge_resident_dirty_subs,
         )
         sparse_resident_specialized_subs = dict(dirty_workgroup_subs)
         sparse_resident_specialized_subs["TERMINAL_SPARSE_RESIDENT_SPECIALIZED"] = 1
-        self.programs["apply_terminal4x6_sparse_resident_specialized"] = (
-            build_compute_shader(
-                ctx,
-                "heat/apply_terminal4x6.comp",
-                sparse_resident_specialized_subs,
-            )
+        self.programs["apply_terminal4x6_sparse_resident_specialized"] = build_compute_shader(
+            ctx,
+            "heat/apply_terminal4x6.comp",
+            sparse_resident_specialized_subs,
         )
         sparse_resident_lazy_subs = dict(sparse_resident_specialized_subs)
         sparse_resident_lazy_subs["HEAT_LAZY_ACTION_INPUTS"] = 1
@@ -364,25 +379,21 @@ class GPUHeatPipeline(GPUPipelineBase):
         )
         sparse_resident_packed_lazy_subs = dict(sparse_resident_lazy_subs)
         sparse_resident_packed_lazy_subs["HEAT_PACKED_PHASE_BOIL_TARGETS"] = 1
-        self.programs[
-            "apply_terminal4x6_sparse_resident_packed_lazy_action_inputs"
-        ] = build_compute_shader(
-            ctx,
-            "heat/apply_terminal4x6.comp",
-            sparse_resident_packed_lazy_subs,
+        self.programs["apply_terminal4x6_sparse_resident_packed_lazy_action_inputs"] = (
+            build_compute_shader(
+                ctx,
+                "heat/apply_terminal4x6.comp",
+                sparse_resident_packed_lazy_subs,
+            )
         )
-        sparse_resident_packed_lazy_row_summary_subs = dict(
-            sparse_resident_packed_lazy_subs
-        )
-        sparse_resident_packed_lazy_row_summary_subs[
-            "TERMINAL_HIERARCHICAL_ROW_SUMMARY"
-        ] = 1
-        self.programs[
-            "apply_terminal4x6_sparse_resident_packed_lazy_row_summary"
-        ] = build_compute_shader(
-            ctx,
-            "heat/apply_terminal4x6.comp",
-            sparse_resident_packed_lazy_row_summary_subs,
+        sparse_resident_packed_lazy_row_summary_subs = dict(sparse_resident_packed_lazy_subs)
+        sparse_resident_packed_lazy_row_summary_subs["TERMINAL_HIERARCHICAL_ROW_SUMMARY"] = 1
+        self.programs["apply_terminal4x6_sparse_resident_packed_lazy_row_summary"] = (
+            build_compute_shader(
+                ctx,
+                "heat/apply_terminal4x6.comp",
+                sparse_resident_packed_lazy_row_summary_subs,
+            )
         )
         if self._terminal_nv32_ballot_supported:
             nv32_ballot_subs = dict(sparse_resident_packed_lazy_subs)
@@ -393,12 +404,12 @@ class GPUHeatPipeline(GPUPipelineBase):
                     "#extension GL_NV_shader_thread_group : require",
                 )
             )
-            self.programs[
-                "apply_terminal4x6_sparse_resident_packed_lazy_nv32_ballot"
-            ] = build_compute_shader(
-                ctx,
-                "heat/apply_terminal4x6.comp",
-                nv32_ballot_subs,
+            self.programs["apply_terminal4x6_sparse_resident_packed_lazy_nv32_ballot"] = (
+                build_compute_shader(
+                    ctx,
+                    "heat/apply_terminal4x6.comp",
+                    nv32_ballot_subs,
+                )
             )
         terminal16x8_subs = {
             **_SHADER_SUBS,
@@ -432,19 +443,39 @@ class GPUHeatPipeline(GPUPipelineBase):
                 "heat/apply_terminal4x6.comp",
                 substitutions,
             )
-        self.programs["apply_condense_cells"] = build_compute_shader(ctx, "heat/apply_condense_cells.comp", _SHADER_SUBS, includes=["heat/_condense_common.comp"])
-        self.programs["apply_condense_cell_aux"] = build_compute_shader(ctx, "heat/apply_condense_cell_aux.comp", _SHADER_SUBS, includes=["heat/_condense_common.comp"])
-        self.programs["publish_bridge_cell"] = build_compute_shader(ctx, "heat/publish_bridge_cell.comp", _SHADER_SUBS)
+        self.programs["apply_condense_cells"] = build_compute_shader(
+            ctx,
+            "heat/apply_condense_cells.comp",
+            _SHADER_SUBS,
+            includes=["heat/_condense_common.comp"],
+        )
+        self.programs["apply_condense_cell_aux"] = build_compute_shader(
+            ctx,
+            "heat/apply_condense_cell_aux.comp",
+            _SHADER_SUBS,
+            includes=["heat/_condense_common.comp"],
+        )
+        self.programs["publish_bridge_cell"] = build_compute_shader(
+            ctx, "heat/publish_bridge_cell.comp", _SHADER_SUBS
+        )
         self.programs["publish_bridge_cell_aux_dirty"] = build_compute_shader(
             ctx, "heat/publish_bridge_cell_aux_dirty.comp", _SHADER_SUBS
         )
-        self.programs["publish_bridge_gas"] = build_compute_shader(ctx, "heat/publish_bridge_gas.comp", _SHADER_SUBS)
+        self.programs["publish_bridge_gas"] = build_compute_shader(
+            ctx, "heat/publish_bridge_gas.comp", _SHADER_SUBS
+        )
         self.programs["publish_bridge_ambient"] = build_compute_shader(
             ctx, "heat/publish_bridge_ambient.comp", _SHADER_SUBS
         )
-        self.programs["load_bridge_cell"] = build_compute_shader(ctx, "heat/load_bridge_cell.comp", _SHADER_SUBS)
-        self.programs["load_bridge_cell_aux"] = build_compute_shader(ctx, "heat/load_bridge_cell_aux.comp", _SHADER_SUBS)
-        self.programs["load_bridge_gas"] = build_compute_shader(ctx, "heat/load_bridge_gas.comp", _SHADER_SUBS)
+        self.programs["load_bridge_cell"] = build_compute_shader(
+            ctx, "heat/load_bridge_cell.comp", _SHADER_SUBS
+        )
+        self.programs["load_bridge_cell_aux"] = build_compute_shader(
+            ctx, "heat/load_bridge_cell_aux.comp", _SHADER_SUBS
+        )
+        self.programs["load_bridge_gas"] = build_compute_shader(
+            ctx, "heat/load_bridge_gas.comp", _SHADER_SUBS
+        )
 
     release = release
     _ensure_resources = _ensure_resources

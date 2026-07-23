@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
@@ -11,7 +11,6 @@ from oracle_game.gpu._common import (
     CPU_READBACK_LATENCY_FRAMES,
     GPU_READBACK_LATENCY_FRAMES,
 )
-
 from oracle_game.gpu.readback import (
     GLReadbackSlot,
     ReadbackPayloadLayout,
@@ -127,9 +126,15 @@ def _serialize_readback_slot(cls, slot: GLReadbackSlot) -> dict[str, Any]:
         "min_poll_frame_id": None if slot.min_poll_frame_id < 0 else int(slot.min_poll_frame_id),
         "latency_frames": int(slot.latency_frames),
         "gpu_backed": bool(slot.gpu_backed),
-        "pending_gpu_latency": bool(slot.gpu_backed and slot.min_poll_frame_id > slot.ready_frame_id >= 0),
-        "request_id": None if request is None or request.request_id is None else int(request.request_id),
-        "observer_id": None if request is None or request.observer_id is None else int(request.observer_id),
+        "pending_gpu_latency": bool(
+            slot.gpu_backed and slot.min_poll_frame_id > slot.ready_frame_id >= 0
+        ),
+        "request_id": None
+        if request is None or request.request_id is None
+        else int(request.request_id),
+        "observer_id": None
+        if request is None or request.observer_id is None
+        else int(request.observer_id),
         "label": None if request is None or request.label is None else str(request.label),
         "channels": None if request is None else [str(channel) for channel in request.channels],
         "window": None
@@ -140,7 +145,9 @@ def _serialize_readback_slot(cls, slot: GLReadbackSlot) -> dict[str, Any]:
             "width": int(request.width),
             "height": int(request.height),
         },
-        "target_query_id": None if request is None or request.target_query_id is None else str(request.target_query_id),
+        "target_query_id": None
+        if request is None or request.target_query_id is None
+        else str(request.target_query_id),
         "target_dx": None if request is None else int(request.target_dx),
         "target_dy": None if request is None else int(request.target_dy),
         "nbytes": int(slot.nbytes),

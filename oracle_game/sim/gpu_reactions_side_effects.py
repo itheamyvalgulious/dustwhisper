@@ -1,14 +1,15 @@
 from __future__ import annotations
-from typing import Any, TYPE_CHECKING
+
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
 from oracle_game.sim.gpu_reactions import (
-    FLOW_SOURCE_LAYERS,
     FLOW_SOURCE_GENERATION_BINDING,
-    GPUReactionResources,
+    FLOW_SOURCE_LAYERS,
     LOCAL_SIZE,
+    GPUReactionResources,
 )
 
 
@@ -96,14 +97,22 @@ def _run_cell_gas_side_effect_pass(
     pipeline._set_uniform_if_present(program, "gas_grid_size", (world.gas_width, world.gas_height))
     pipeline._set_uniform_if_present(program, "gas_cell_size", world.gas_cell_size)
     pipeline._set_uniform_if_present(program, "gas_count", world.gas_concentration.shape[0])
-    pipeline._set_uniform_if_present(program, "apply_action_side_effects", int(apply_action_side_effects))
-    pipeline._set_uniform_if_present(program, "material_gas_rule_count", int(material_gas_rule_count))
-    pipeline._set_uniform_if_present(program, "use_local_deferred_outputs", bool(direct_core_outputs))
+    pipeline._set_uniform_if_present(
+        program, "apply_action_side_effects", int(apply_action_side_effects)
+    )
+    pipeline._set_uniform_if_present(
+        program, "material_gas_rule_count", int(material_gas_rule_count)
+    )
+    pipeline._set_uniform_if_present(
+        program, "use_local_deferred_outputs", bool(direct_core_outputs)
+    )
     pipeline._set_uniform_if_present(program, "deferred_hi_valid", bool(deferred_hi_valid))
     if material_gas_rule_count > 0 or modify_gas_layer_mask is None:
         modify_gas_layer_mask = (1 << min(31, int(world.gas_concentration.shape[0]))) - 1
     pipeline._set_uniform_if_present(program, "modify_gas_layer_mask", int(modify_gas_layer_mask))
-    cell_state_in, _phase_in, temp_in, _integrity_in, _velocity_in, _timer_in = pipeline._current_cell_textures(resources)
+    cell_state_in, _phase_in, temp_in, _integrity_in, _velocity_in, _timer_in = (
+        pipeline._current_cell_textures(resources)
+    )
     resources.gas_ping.use(location=0)
     resources.trigger_lo_tex.use(location=1)
     resources.trigger_hi_tex.use(location=2)
@@ -164,7 +173,6 @@ def _run_cell_gas_side_effect_pass(
         )
 
 
-
 def _run_cell_gas_action_delta_pass(
     pipeline,
     world: "WorldEngine",
@@ -184,9 +192,7 @@ def _run_cell_gas_action_delta_pass(
     assert ctx is not None
     segment_key = pipeline._formal_segment_batch_key
     batch_formal_delta = (
-        pipeline._formal_segment_batch_active()
-        and direct_core_outputs
-        and segment_key is not None
+        pipeline._formal_segment_batch_active() and direct_core_outputs and segment_key is not None
     )
     gas_delta_count = int(world.gas_width * world.gas_height * world.gas_concentration.shape[0])
     if gas_delta_already_applied:
@@ -466,7 +472,6 @@ def _run_timed_candidate_gas_side_effect_pass(
         )
 
 
-
 def _run_material_light_dose_consume_pass(
     pipeline,
     world: "WorldEngine",
@@ -510,7 +515,9 @@ def _run_material_light_dose_consume_pass(
 
     gas_program = pipeline.programs["material_light_gas_dose_consume"]
     pipeline._set_uniform_if_present(gas_program, "cell_grid_size", (world.width, world.height))
-    pipeline._set_uniform_if_present(gas_program, "gas_grid_size", (world.gas_width, world.gas_height))
+    pipeline._set_uniform_if_present(
+        gas_program, "gas_grid_size", (world.gas_width, world.gas_height)
+    )
     pipeline._set_uniform_if_present(gas_program, "gas_cell_size", world.gas_cell_size)
     pipeline._set_uniform_if_present(gas_program, "light_count", world.gas_optical_dose.shape[0])
     pipeline._set_uniform_if_present(gas_program, "rule_count", int(rule_count))
@@ -550,7 +557,6 @@ def _run_material_light_dose_consume_pass(
         pipeline._download_dose_state(world, resources)
 
 
-
 def _run_cell_material_side_effect_pass(
     pipeline,
     world: "WorldEngine",
@@ -575,14 +581,18 @@ def _run_cell_material_side_effect_pass(
         return
     program = pipeline.programs["cell_material_side_effects"]
     pipeline._set_uniform_if_present(program, "cell_grid_size", (world.width, world.height))
-    pipeline._set_uniform_if_present(program, "use_local_deferred_outputs", bool(direct_core_outputs))
+    pipeline._set_uniform_if_present(
+        program, "use_local_deferred_outputs", bool(direct_core_outputs)
+    )
     pipeline._set_uniform_if_present(
         program,
         "use_packed_local_deferred_outputs",
         bool(packed_local_deferred_outputs),
     )
     pipeline._set_uniform_if_present(program, "deferred_hi_valid", bool(deferred_hi_valid))
-    pipeline._set_uniform_if_present(program, "copy_velocity_passthrough", bool(copy_velocity_passthrough))
+    pipeline._set_uniform_if_present(
+        program, "copy_velocity_passthrough", bool(copy_velocity_passthrough)
+    )
     pipeline._set_uniform_if_present(program, "velocity_in_place", bool(velocity_in_place))
     cell_state_in, _phase_in, temp_in, _integrity_in, velocity_in, _timer_in = (
         pipeline._current_cell_textures(resources)
@@ -592,7 +602,9 @@ def _run_cell_material_side_effect_pass(
             pipeline._current_cell_textures(resources)
         )
     else:
-        cell_state_out, _phase_out, temp_out, integrity_out, velocity_out, timer_out = pipeline._next_cell_textures(resources)
+        cell_state_out, _phase_out, temp_out, integrity_out, velocity_out, timer_out = (
+            pipeline._next_cell_textures(resources)
+        )
     cell_state_in.use(location=0)
     (velocity_out if velocity_in_place else velocity_in).use(location=1)
     resources.trigger_lo_tex.use(location=2)
@@ -632,7 +644,6 @@ def _run_cell_material_side_effect_pass(
     pipeline._sync_compute_writes(world.bridge.ctx)
 
 
-
 def _run_timed_candidate_material_side_effect_pass(
     pipeline,
     world: "WorldEngine",
@@ -659,7 +670,9 @@ def _run_timed_candidate_material_side_effect_pass(
     resources.timed_material_target_marks.bind_to_storage_buffer(binding=5)
     with pipeline._profile_pass(world, "timed_material_targets_compact"):
         if not hasattr(compact_program, "run_indirect"):
-            raise RuntimeError("formal timed material side-effect target compaction requires indirect dispatch")
+            raise RuntimeError(
+                "formal timed material side-effect target compaction requires indirect dispatch"
+            )
         compact_program.run_indirect(resources.timed_candidate_dispatch_args)
         pipeline._sync_storage_and_indirect_writes(ctx)
 
@@ -678,9 +691,13 @@ def _run_timed_candidate_material_side_effect_pass(
     resources.timed_material_target_list.bind_to_storage_buffer(binding=5)
     resources.light_emitter_count.bind_to_storage_buffer(binding=15)
     if inplace:
-        cell_state_out, _phase_out, temp_out, integrity_out, velocity_out, timer_out = pipeline._current_cell_textures(resources)
+        cell_state_out, _phase_out, temp_out, integrity_out, velocity_out, timer_out = (
+            pipeline._current_cell_textures(resources)
+        )
     else:
-        cell_state_out, _phase_out, temp_out, integrity_out, velocity_out, timer_out = pipeline._next_cell_textures(resources)
+        cell_state_out, _phase_out, temp_out, integrity_out, velocity_out, timer_out = (
+            pipeline._next_cell_textures(resources)
+        )
     cell_state_out.bind_to_image(0, read=False, write=True)
     temp_out.bind_to_image(2, read=False, write=True)
     integrity_out.bind_to_image(3, read=False, write=True)
@@ -693,7 +710,6 @@ def _run_timed_candidate_material_side_effect_pass(
         program.run_indirect(resources.timed_material_target_dispatch_args)
         pipeline._sync_compute_writes(ctx)
         ctx.memory_barrier(ctx.SHADER_STORAGE_BARRIER_BIT)
-
 
 
 def _run_packed_timed_material_side_effect_pass(
@@ -745,7 +761,6 @@ def _run_packed_timed_material_side_effect_pass(
     )
 
 
-
 def _clear_packed_timed_material_target_worklist(
     pipeline,
     world: "WorldEngine",
@@ -767,7 +782,6 @@ def _clear_packed_timed_material_target_worklist(
     with pipeline._profile_pass(world, "packed_timed_material_targets_clear"):
         clear_program.run(1, 1, 1)
         pipeline._sync_storage_and_indirect_writes(world.bridge.ctx)
-
 
 
 def _run_produced_packed_timed_material_side_effect_pass(
@@ -804,7 +818,6 @@ def _run_produced_packed_timed_material_side_effect_pass(
         profile_name="packed_timed_material_targets_apply",
         core_in_place=core_in_place,
     )
-
 
 
 def _run_packed_material_target_apply_pass(

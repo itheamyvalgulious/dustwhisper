@@ -17,9 +17,19 @@ def route_frame_get(
     engine = console.engine
     path = parsed.path  # type: ignore[attr-defined]
     if path == "/api/frame/pending":
-        handler._send({"pending": len(engine.pending_frame_inputs), "submission_ids": engine.pending_frame_submission_ids()})
+        handler._send(
+            {
+                "pending": len(engine.pending_frame_inputs),
+                "submission_ids": engine.pending_frame_submission_ids(),
+            }
+        )
         return True
     if path == "/api/frame/pending/detail":
+        if any(
+            console._frame_focus_advances_paging(getattr(frame_input, "focus_center", None))
+            for frame_input in engine.pending_frame_inputs
+        ):
+            console._ensure_gpu_attached()
         handler._send(engine.serialize_pending_frame_inputs())
         return True
     if path == "/api/frame/state":
@@ -48,7 +58,12 @@ def route_frame_get(
         return True
     if path == "/api/frame/output/status":
         submission_id = int(query["submission_id"][0])
-        handler._send({"submission_id": submission_id, "status": engine.frame_submission_status(submission_id)})
+        handler._send(
+            {
+                "submission_id": submission_id,
+                "status": engine.frame_submission_status(submission_id),
+            }
+        )
         return True
     return False
 
@@ -62,10 +77,14 @@ def route_frame_post(
     engine = console.engine
     path = parsed.path  # type: ignore[attr-defined]
     if path == "/api/frame/preview":
+        if console._frame_focus_advances_paging(payload.get("focus_center")):
+            console._ensure_gpu_attached()
         preview = engine.preview_frame_input(payload)
         handler._send({"ok": True, "preview": engine.serialize_frame_preview(preview)})
         return True
     if path == "/api/frame/request":
+        if console._frame_focus_advances_paging(payload.get("focus_center")):
+            console._ensure_gpu_attached()
         queued = engine.request_frame_input(payload)
         handler._send(
             {
@@ -79,10 +98,21 @@ def route_frame_post(
         return True
     if path == "/api/frame/submit":
         submission_id = engine.submit_frame_input(payload)
-        handler._send({"ok": True, "queued": True, "pending_frames": len(engine.pending_frame_inputs), "submission_id": submission_id})
+        handler._send(
+            {
+                "ok": True,
+                "queued": True,
+                "pending_frames": len(engine.pending_frame_inputs),
+                "submission_id": submission_id,
+            }
+        )
         return True
     if path == "/api/frame/cycle":
-        cycle = engine.request_frame_cycle(payload, apply_frame=bool(payload.get("apply_frame", True)))
+        if console._frame_focus_advances_paging(payload.get("focus_center")):
+            console._ensure_gpu_attached()
+        cycle = engine.request_frame_cycle(
+            payload, apply_frame=bool(payload.get("apply_frame", True))
+        )
         handler._send(
             {
                 "ok": True,
@@ -109,6 +139,12 @@ def route_frame_post(
         return True
     if path == "/api/frame/cancel_all":
         canceled = engine.cancel_all_pending_frame_submissions()
-        handler._send({"ok": True, "canceled_submission_ids": canceled, "pending_frames": len(engine.pending_frame_inputs)})
+        handler._send(
+            {
+                "ok": True,
+                "canceled_submission_ids": canceled,
+                "pending_frames": len(engine.pending_frame_inputs),
+            }
+        )
         return True
     return False

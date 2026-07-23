@@ -9,7 +9,6 @@ from oracle_game.sim.gpu_motion import GPUMotionPipeline, powder_reservation_dty
 from oracle_game.types import Phase
 from oracle_game.world import WorldEngine
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -82,7 +81,9 @@ def _run_powder_case(*, dedup: bool) -> list[tuple[dict[str, bytes], set[tuple[i
                     )[0]
                 )
                 active_count = int(
-                    np.frombuffer(resources.active_tile_count.read(size=4), dtype=np.uint32, count=1)[0]
+                    np.frombuffer(
+                        resources.active_tile_count.read(size=4), dtype=np.uint32, count=1
+                    )[0]
                 )
                 active_tiles = np.frombuffer(
                     resources.active_tile_list.read(size=active_count * 8),
@@ -98,9 +99,7 @@ def _run_powder_case(*, dedup: bool) -> list[tuple[dict[str, bytes], set[tuple[i
                 ).copy()
                 if reservation_count:
                     source_xy = reservations["source_xy"]
-                    reservations = reservations[
-                        np.lexsort((source_xy[:, 0], source_xy[:, 1]))
-                    ]
+                    reservations = reservations[np.lexsort((source_xy[:, 0], source_xy[:, 1]))]
                 snapshots.append(
                     (
                         {

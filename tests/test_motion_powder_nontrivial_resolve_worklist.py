@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 
 from oracle_game.sim import gpu_motion_powder
-from oracle_game.sim.gpu_motion import GPUMotionPipeline, _SHADER_SUBS
+from oracle_game.sim.gpu_motion import _SHADER_SUBS, GPUMotionPipeline
 from oracle_game.sim.shader_loader import shader_source
 
 
@@ -73,8 +73,10 @@ def test_powder_nontrivial_resolve_variant_has_no_shared_hash_and_only_stages_ta
 
     assert source.index(canonical_index) < source.index(load)
     assert "#if !1" in source
-    assert source.index("#if !1") < source.index(source_stage) < source.index(
-        "#endif", source.index(source_stage)
+    assert (
+        source.index("#if !1")
+        < source.index(source_stage)
+        < source.index("#endif", source.index(source_stage))
     )
     shared_hash = "shared int apply_tile_hash[APPLY_TILE_HASH_SLOTS];"
     hash_index = source.index(shared_hash)

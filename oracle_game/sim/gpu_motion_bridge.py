@@ -1,20 +1,19 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 if TYPE_CHECKING:
-    from oracle_game.world import WorldEngine
     from oracle_game.sim.gpu_motion import GPUMotionResources
+    from oracle_game.world import WorldEngine
 
 from oracle_game.gpu import ISLAND_RUNTIME_DTYPE, pack_island_runtime_upload
-
 from oracle_game.sim.gpu_motion import (
+    FALLING_ISLAND_RESERVATION_DTYPE,
     LOCAL_SIZE,
     MAX_MATERIALS,
     POWDER_RESERVATION_DTYPE,
-    FALLING_ISLAND_RESERVATION_DTYPE
 )
 
 
@@ -29,7 +28,9 @@ def _pack_cell_state_texture(
     return np.ascontiguousarray(material | (phase_u32 << 16) | (flags_u32 << 24))
 
 
-def _upload_inputs(pipeline, world: "WorldEngine", resources: GPUMotionResources, solve_tile_mask: np.ndarray) -> None:
+def _upload_inputs(
+    pipeline, world: "WorldEngine", resources: GPUMotionResources, solve_tile_mask: np.ndarray
+) -> None:
     upload_plan = pipeline._cpu_upload_plan(world)
     pipeline._record_cpu_upload_plan(upload_plan)
     if upload_plan["cell_core"]:
@@ -78,7 +79,9 @@ def _cpu_upload_plan(pipeline, world: "WorldEngine") -> dict[str, bool]:
         *required_resources,
     )
     return {
-        "cell_core": not (formal_gpu_frame and ("cell_core" in authoritative or deferred_cell_core)),
+        "cell_core": not (
+            formal_gpu_frame and ("cell_core" in authoritative or deferred_cell_core)
+        ),
         "island_id": not (formal_gpu_frame and "island_id" in authoritative),
         "entity_id": not (formal_gpu_frame and "entity_id" in authoritative),
         "placeholder_displaced_material": not (
@@ -94,7 +97,9 @@ def _record_cpu_upload_plan(pipeline, upload_plan: dict[str, bool]) -> None:
     pipeline.last_cpu_cell_state_upload_skipped = not upload_plan["cell_core"]
     pipeline.last_cpu_island_id_upload_skipped = not upload_plan["island_id"]
     pipeline.last_cpu_entity_id_upload_skipped = not upload_plan["entity_id"]
-    pipeline.last_cpu_displaced_material_upload_skipped = not upload_plan["placeholder_displaced_material"]
+    pipeline.last_cpu_displaced_material_upload_skipped = not upload_plan[
+        "placeholder_displaced_material"
+    ]
     pipeline.last_cpu_flow_velocity_upload_skipped = not upload_plan["flow_velocity"]
     pipeline.last_cpu_ambient_upload_skipped = not upload_plan["ambient_temperature"]
     pipeline.last_cpu_active_upload_skipped = not upload_plan["active_tile_ttl"]
@@ -124,10 +129,15 @@ def _load_authoritative_active_tile_mask(
     pipeline._sync_compute_writes(bridge.ctx)
 
 
-def _upload_material_rule_params(pipeline, world: "WorldEngine", resources: GPUMotionResources) -> None:
+def _upload_material_rule_params(
+    pipeline, world: "WorldEngine", resources: GPUMotionResources
+) -> None:
     world.bridge.sync_rule_tables(world)
     material_table = world.bridge.shadow_typed_tables["material_table"]
-    table_signature = (world.bridge.table_generations.get("materials", 0), int(material_table.shape[0]))
+    table_signature = (
+        world.bridge.table_generations.get("materials", 0),
+        int(material_table.shape[0]),
+    )
     if resources.material_params_signature == table_signature:
         return
     params = np.zeros((MAX_MATERIALS, 4), dtype="f4")
@@ -152,15 +162,17 @@ def _upload_material_rule_params(pipeline, world: "WorldEngine", resources: GPUM
     resources.material_falling_params.write(falling.reshape((MAX_MATERIALS * 2, 4)).tobytes())
     resources.material_params_signature = table_signature
 
+
 # ``_formal_gpu_frame`` inherited from GPUPipelineBase.
 
 
 def _bridge_authoritative_cell_blockers(pipeline, world: "WorldEngine") -> bool:
     authoritative = world.bridge.gpu_authoritative_resources
-    return (
-        pipeline._formal_gpu_frame(world)
-        and {"cell_core", "entity_id", "placeholder_displaced_material"}.issubset(authoritative)
-    )
+    return pipeline._formal_gpu_frame(world) and {
+        "cell_core",
+        "entity_id",
+        "placeholder_displaced_material",
+    }.issubset(authoritative)
 
 
 def _bridge_authoritative_powder_inputs(pipeline, world: "WorldEngine") -> bool:
@@ -182,7 +194,9 @@ def _bind_bridge_cell_blockers(pipeline, world: "WorldEngine", *, cell_binding: 
     bridge.buffers["cell_core"].bind_to_storage_buffer(binding=cell_binding)
     bridge.buffers["island_id"].bind_to_storage_buffer(binding=cell_binding + 1)
     bridge.buffers["entity_id"].bind_to_storage_buffer(binding=cell_binding + 2)
-    bridge.buffers["placeholder_displaced_material"].bind_to_storage_buffer(binding=cell_binding + 3)
+    bridge.buffers["placeholder_displaced_material"].bind_to_storage_buffer(
+        binding=cell_binding + 3
+    )
 
 
 def _bridge_authoritative_island_state(pipeline, world: "WorldEngine") -> bool:
@@ -222,9 +236,13 @@ def _load_authoritative_bridge_inputs(
     bridge = world.bridge
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("GPU motion pipeline requires bridge GPU resources for authoritative input state")
+        raise RuntimeError(
+            "GPU motion pipeline requires bridge GPU resources for authoritative input state"
+        )
     if not pipeline._bridge_context_active(world):
-        raise RuntimeError("GPU motion pipeline cannot consume authoritative bridge state from a separate GL context")
+        raise RuntimeError(
+            "GPU motion pipeline cannot consume authoritative bridge state from a separate GL context"
+        )
 
     authoritative = bridge.gpu_authoritative_resources
     copy_cell_core = "cell_core" in authoritative
@@ -233,7 +251,14 @@ def _load_authoritative_bridge_inputs(
     copy_displaced = "placeholder_displaced_material" in authoritative
     copy_flow = bool(load_gas_inputs and "flow_velocity" in authoritative)
     copy_ambient = bool(load_gas_inputs and "ambient_temperature" in authoritative)
-    if not (copy_cell_core or copy_island_id or copy_entity_id or copy_displaced or copy_flow or copy_ambient):
+    if not (
+        copy_cell_core
+        or copy_island_id
+        or copy_entity_id
+        or copy_displaced
+        or copy_flow
+        or copy_ambient
+    ):
         return False
 
     active_tile_indirect = bool(pipeline._active_scheduler_gpu_authoritative(world))
@@ -313,9 +338,13 @@ def _load_authoritative_integrate_inputs(
     bridge = world.bridge
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("GPU motion pipeline requires bridge GPU resources for authoritative input state")
+        raise RuntimeError(
+            "GPU motion pipeline requires bridge GPU resources for authoritative input state"
+        )
     if not pipeline._bridge_context_active(world):
-        raise RuntimeError("GPU motion pipeline cannot consume authoritative bridge state from a separate GL context")
+        raise RuntimeError(
+            "GPU motion pipeline cannot consume authoritative bridge state from a separate GL context"
+        )
 
     authoritative = bridge.gpu_authoritative_resources
     copy_cell_core = "cell_core" in authoritative
@@ -345,7 +374,9 @@ def _load_authoritative_integrate_inputs(
         if active_tile_indirect:
             resources.active_tile_count.bind_to_storage_buffer(binding=1)
             resources.active_tile_list.bind_to_storage_buffer(binding=2)
-            pipeline._run_active_tile_indirect(program, resources, "motion integrate bridge input load")
+            pipeline._run_active_tile_indirect(
+                program, resources, "motion integrate bridge input load"
+            )
         else:
             program.run(group_x, group_y, 1)
 
@@ -419,11 +450,15 @@ def _publish_bridge_outputs(
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
         if pipeline._formal_gpu_frame(world):
-            raise RuntimeError("GPU motion pipeline requires bridge GPU resources for authoritative output state")
+            raise RuntimeError(
+                "GPU motion pipeline requires bridge GPU resources for authoritative output state"
+            )
         return
     if not pipeline._bridge_context_active(world):
         if pipeline._formal_gpu_frame(world):
-            raise RuntimeError("GPU motion pipeline cannot publish authoritative state from a separate GL context")
+            raise RuntimeError(
+                "GPU motion pipeline cannot publish authoritative state from a separate GL context"
+            )
         return
 
     cell_state_tex = resources.cell_state_out_tex if output_textures else resources.cell_state_tex
@@ -469,8 +504,16 @@ def _publish_bridge_outputs(
     bridge.buffers["island_id"].bind_to_storage_buffer(binding=1)
     bridge.buffers["entity_id"].bind_to_storage_buffer(binding=2)
     bridge.buffers["placeholder_displaced_material"].bind_to_storage_buffer(binding=3)
-    tile_count_buffer = active_tile_count_buffer if active_tile_count_buffer is not None else resources.active_tile_count
-    tile_list_buffer = active_tile_list_buffer if active_tile_list_buffer is not None else resources.active_tile_list
+    tile_count_buffer = (
+        active_tile_count_buffer
+        if active_tile_count_buffer is not None
+        else resources.active_tile_count
+    )
+    tile_list_buffer = (
+        active_tile_list_buffer
+        if active_tile_list_buffer is not None
+        else resources.active_tile_list
+    )
     tile_count_buffer.bind_to_storage_buffer(binding=4)
     tile_list_buffer.bind_to_storage_buffer(binding=5)
     if use_powder_apply_touch_sources:
@@ -533,16 +576,22 @@ def _publish_bridge_velocity_words(
     return True
 
 
-def _publish_bridge_island_id(pipeline, world: "WorldEngine", resources: GPUMotionResources, island_tex: Any) -> None:
+def _publish_bridge_island_id(
+    pipeline, world: "WorldEngine", resources: GPUMotionResources, island_tex: Any
+) -> None:
     bridge = world.bridge
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
         if pipeline._formal_gpu_frame(world):
-            raise RuntimeError("GPU motion pipeline requires bridge GPU resources for authoritative island state")
+            raise RuntimeError(
+                "GPU motion pipeline requires bridge GPU resources for authoritative island state"
+            )
         return
     if not pipeline._bridge_context_active(world):
         if pipeline._formal_gpu_frame(world):
-            raise RuntimeError("GPU motion pipeline cannot publish island state from a separate GL context")
+            raise RuntimeError(
+                "GPU motion pipeline cannot publish island state from a separate GL context"
+            )
         return
     program = pipeline.programs["publish_bridge_island_id"]
     program["cell_grid_size"].value = (world.width, world.height)
@@ -567,11 +616,15 @@ def publish_bridge_falling_island_reservations(
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
         if pipeline._formal_gpu_frame(world):
-            raise RuntimeError("GPU motion pipeline requires bridge GPU resources for island reservations")
+            raise RuntimeError(
+                "GPU motion pipeline requires bridge GPU resources for island reservations"
+            )
         return False
     if not pipeline._bridge_context_active(world):
         if pipeline._formal_gpu_frame(world):
-            raise RuntimeError("GPU motion pipeline cannot publish island reservations from a separate GL context")
+            raise RuntimeError(
+                "GPU motion pipeline cannot publish island reservations from a separate GL context"
+            )
         return False
     pipeline._ensure_programs(bridge.ctx)
     resources = pipeline._ensure_resources(world)
@@ -610,7 +663,9 @@ def publish_bridge_falling_island_reservations(
             resources.island_reservations,
             size=reservation_count * FALLING_ISLAND_RESERVATION_DTYPE.itemsize,
         )
-    bridge.buffers["island_reservation_count"].write(np.array([reservation_count], dtype=np.int32).tobytes())
+    bridge.buffers["island_reservation_count"].write(
+        np.array([reservation_count], dtype=np.int32).tobytes()
+    )
     return True
 
 
@@ -626,11 +681,15 @@ def publish_bridge_powder_reservations(
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
         if pipeline._formal_gpu_frame(world):
-            raise RuntimeError("GPU motion pipeline requires bridge GPU resources for powder reservations")
+            raise RuntimeError(
+                "GPU motion pipeline requires bridge GPU resources for powder reservations"
+            )
         return False
     if not pipeline._bridge_context_active(world):
         if pipeline._formal_gpu_frame(world):
-            raise RuntimeError("GPU motion pipeline cannot publish powder reservations from a separate GL context")
+            raise RuntimeError(
+                "GPU motion pipeline cannot publish powder reservations from a separate GL context"
+            )
         return False
     resources = pipeline._ensure_resources(world)
     required_bytes = max(4, reservation_capacity * POWDER_RESERVATION_DTYPE.itemsize)
@@ -669,7 +728,9 @@ def publish_bridge_powder_reservations(
                 resources.powder_reservations,
                 size=reservation_capacity * POWDER_RESERVATION_DTYPE.itemsize,
             )
-        bridge.ctx.copy_buffer(bridge.buffers["powder_reservation_count"], resources.powder_reservation_count, size=4)
+        bridge.ctx.copy_buffer(
+            bridge.buffers["powder_reservation_count"], resources.powder_reservation_count, size=4
+        )
     return True
 
 
@@ -684,9 +745,13 @@ def publish_bridge_compact_powder_reservations(
     bridge = world.bridge
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("GPU motion pipeline requires bridge GPU resources for compact powder reservations")
+        raise RuntimeError(
+            "GPU motion pipeline requires bridge GPU resources for compact powder reservations"
+        )
     if not pipeline._bridge_context_active(world):
-        raise RuntimeError("GPU motion pipeline cannot publish compact powder reservations from a separate GL context")
+        raise RuntimeError(
+            "GPU motion pipeline cannot publish compact powder reservations from a separate GL context"
+        )
     resources = pipeline._ensure_resources(world)
     required_bytes = max(4, reservation_capacity * 24)
     bridge_buffer = bridge.buffers["powder_reservation_compact"]
@@ -703,6 +768,12 @@ def publish_bridge_compact_powder_reservations(
             bridge.buffers["powder_reservation_count"],
             resources.powder_reservation_count,
         )
+        # The standard 48B ABI buffer stays lazily materialized: formal frames
+        # only consume the compact stream, and eagerly expanding a grid-scale
+        # reservation count costs ~1.2ms/frame at 1080p random_materials
+        # (measured: ~1.69M records, ~81MB of SSBO writes). CPU observers must
+        # call materialize_compact_powder_reservations before reading
+        # powder_reservation (the bridge CPU-upload path already does).
         bridge.clear_gpu_authoritative(
             "powder_reservation_standard",
             "powder_reservation_cpu_mirror",
@@ -726,11 +797,15 @@ def publish_bridge_falling_island_runtime_from_reservations(
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
         if pipeline._formal_gpu_frame(world):
-            raise RuntimeError("GPU motion pipeline requires bridge GPU resources for island runtime")
+            raise RuntimeError(
+                "GPU motion pipeline requires bridge GPU resources for island runtime"
+            )
         return False
     if not pipeline._bridge_context_active(world):
         if pipeline._formal_gpu_frame(world):
-            raise RuntimeError("GPU motion pipeline cannot publish island runtime from a separate GL context")
+            raise RuntimeError(
+                "GPU motion pipeline cannot publish island runtime from a separate GL context"
+            )
         return False
     formal_frame = pipeline._formal_gpu_frame(world)
     pipeline._ensure_programs(bridge.ctx)
@@ -752,7 +827,10 @@ def publish_bridge_falling_island_runtime_from_reservations(
             program["reservation_count"].value = int(reservation_count)
             program["use_reservation_count_buffer"].value = bool(formal_frame)
             program["cell_grid_size"].value = (world.width, world.height)
-            program["paging_origin"].value = (int(world.paging.origin_x), int(world.paging.origin_y))
+            program["paging_origin"].value = (
+                int(world.paging.origin_x),
+                int(world.paging.origin_y),
+            )
             program["paging_buffer_origin"].value = (
                 int(world.paging.buffer_origin_x),
                 int(world.paging.buffer_origin_y),
@@ -784,11 +862,15 @@ def seed_bridge_falling_island_runtime_from_cpu(pipeline, world: "WorldEngine") 
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
         if pipeline._formal_gpu_frame(world):
-            raise RuntimeError("GPU motion pipeline requires bridge GPU resources for island runtime seeding")
+            raise RuntimeError(
+                "GPU motion pipeline requires bridge GPU resources for island runtime seeding"
+            )
         return 0
     if not pipeline._bridge_context_active(world):
         if pipeline._formal_gpu_frame(world):
-            raise RuntimeError("GPU motion pipeline cannot seed island runtime from a separate GL context")
+            raise RuntimeError(
+                "GPU motion pipeline cannot seed island runtime from a separate GL context"
+            )
         return 0
     runtime = pack_island_runtime_upload(world)
     runtime_count = int(runtime.shape[0])
@@ -802,7 +884,9 @@ def seed_bridge_falling_island_runtime_from_cpu(pipeline, world: "WorldEngine") 
         bridge_buffer.orphan(required_bytes)
     if runtime.nbytes > 0:
         bridge_buffer.write(runtime.tobytes())
-    bridge.buffers["island_runtime_count"].write(np.array([runtime_count], dtype=np.int32).tobytes())
+    bridge.buffers["island_runtime_count"].write(
+        np.array([runtime_count], dtype=np.int32).tobytes()
+    )
     pipeline.last_published_island_runtime_capacity = runtime_count
     if pipeline._formal_gpu_frame(world):
         bridge.mark_gpu_authoritative("island_runtime")
@@ -811,15 +895,19 @@ def seed_bridge_falling_island_runtime_from_cpu(pipeline, world: "WorldEngine") 
 
 def _download_outputs(pipeline, world: "WorldEngine", resources: GPUMotionResources) -> np.ndarray:
     return np.rint(
-        np.frombuffer(resources.powder_target_tex.read(), dtype="f4").reshape((world.height, world.width, 4))[
-            :, :, :2
-        ]
+        np.frombuffer(resources.powder_target_tex.read(), dtype="f4").reshape(
+            (world.height, world.width, 4)
+        )[:, :, :2]
     ).astype(np.int32)
 
 
-def _download_velocity_output(pipeline, world: "WorldEngine", resources: GPUMotionResources) -> np.ndarray:
+def _download_velocity_output(
+    pipeline, world: "WorldEngine", resources: GPUMotionResources
+) -> np.ndarray:
     velocity = world.velocity.copy()
-    velocity_out = np.frombuffer(resources.velocity_out_tex.read(), dtype="f4").reshape(world.velocity.shape)
+    velocity_out = np.frombuffer(resources.velocity_out_tex.read(), dtype="f4").reshape(
+        world.velocity.shape
+    )
     active_tiles = np.frombuffer(resources.active_tile_tex.read(), dtype="f4").reshape(
         (world.active.tile_height, world.active.tile_width)
     )
@@ -833,7 +921,9 @@ def _download_velocity_output(pipeline, world: "WorldEngine", resources: GPUMoti
     return velocity
 
 
-def _upload_powder_apply_state(pipeline, world: "WorldEngine", resources: GPUMotionResources) -> None:
+def _upload_powder_apply_state(
+    pipeline, world: "WorldEngine", resources: GPUMotionResources
+) -> None:
     upload_plan = pipeline._cpu_upload_plan(world)
     pipeline._record_cpu_upload_plan(upload_plan)
     if upload_plan["cell_core"]:
@@ -854,7 +944,9 @@ def _upload_powder_apply_state(pipeline, world: "WorldEngine", resources: GPUMot
         resources.ambient_tex.write(world.ambient_temperature.astype("f4").tobytes())
 
 
-def _download_powder_apply_state(pipeline, world: "WorldEngine", resources: GPUMotionResources) -> None:
+def _download_powder_apply_state(
+    pipeline, world: "WorldEngine", resources: GPUMotionResources
+) -> None:
     packed_cell_state = np.frombuffer(
         resources.cell_state_out_tex.read(),
         dtype=np.uint32,
@@ -862,18 +954,32 @@ def _download_powder_apply_state(pipeline, world: "WorldEngine", resources: GPUM
     world.material_id[:] = (packed_cell_state & 0xFFFF).astype(np.int32)
     world.phase[:] = ((packed_cell_state >> 16) & 0xFF).astype(np.uint8)
     world.cell_flags[:] = ((packed_cell_state >> 24) & 0xFF).astype(np.uint8)
-    world.velocity[:] = np.frombuffer(resources.velocity_out_tex.read(), dtype="f4").reshape(world.velocity.shape)
-    world.cell_temperature[:] = np.frombuffer(resources.temp_out_tex.read(), dtype="f4").reshape((world.height, world.width))
+    world.velocity[:] = np.frombuffer(resources.velocity_out_tex.read(), dtype="f4").reshape(
+        world.velocity.shape
+    )
+    world.cell_temperature[:] = np.frombuffer(resources.temp_out_tex.read(), dtype="f4").reshape(
+        (world.height, world.width)
+    )
     world.timer_pack[:] = np.rint(
-        np.frombuffer(resources.timer_out_tex.read(), dtype="f4").reshape((world.height, world.width, 4))
+        np.frombuffer(resources.timer_out_tex.read(), dtype="f4").reshape(
+            (world.height, world.width, 4)
+        )
     ).astype(np.uint8)
-    world.integrity[:] = np.frombuffer(resources.integrity_out_tex.read(), dtype="f4").reshape((world.height, world.width))
+    world.integrity[:] = np.frombuffer(resources.integrity_out_tex.read(), dtype="f4").reshape(
+        (world.height, world.width)
+    )
     world.island_id[:] = np.rint(
-        np.frombuffer(resources.island_id_out_tex.read(), dtype="f4").reshape((world.height, world.width))
+        np.frombuffer(resources.island_id_out_tex.read(), dtype="f4").reshape(
+            (world.height, world.width)
+        )
     ).astype(np.int32)
     world.entity_id[:] = np.rint(
-        np.frombuffer(resources.entity_id_out_tex.read(), dtype="f4").reshape((world.height, world.width))
+        np.frombuffer(resources.entity_id_out_tex.read(), dtype="f4").reshape(
+            (world.height, world.width)
+        )
     ).astype(np.int32)
     world.placeholder_displaced_material[:] = np.rint(
-        np.frombuffer(resources.displaced_out_tex.read(), dtype="f4").reshape((world.height, world.width))
+        np.frombuffer(resources.displaced_out_tex.read(), dtype="f4").reshape(
+            (world.height, world.width)
+        )
     ).astype(np.int32)

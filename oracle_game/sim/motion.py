@@ -23,46 +23,6 @@ class _IslandComponentEntry:
     cell_count: int
 
 
-from oracle_game.sim.motion_material import (
-    _collision_response,
-    _dda_line_cells,
-    _material_default_phase,
-    _material_elasticity,
-    _material_falling_island_break_kind,
-    _material_friction,
-    _material_gravity,
-    _material_int,
-    _material_is_placeholder,
-    _material_max_dda_step,
-    _material_powder_generation_id,
-    _material_powder_solver_kind,
-    _material_scalar,
-    _material_scalar_field,
-    _material_table_row,
-)
-from oracle_game.sim.motion_runtime import (
-    _capture_public_island_reservations,
-    _capture_public_powder_reservations,
-    release,
-    reset_runtime_state,
-    runtime_snapshot,
-)
-from oracle_game.sim.motion_velocity import (
-    _integrate_velocity,
-    _solve_tile_mask,
-    step,
-)
-from oracle_game.sim.motion_powder import (
-    _apply_powder_reservations,
-    _mark_powder_reservation_regions,
-    _move_powders,
-    _path_is_clear,
-    _path_is_clear_material,
-    _plan_cpu_powder_reservations,
-    _powder_fallback_candidates,
-    _resolve_powder_dda_target,
-    _resolve_powder_reservations,
-)
 from oracle_game.sim.motion_falling_island import (
     _assign_split_component_cells_cpu,
     _bbox_from_coords,
@@ -88,9 +48,49 @@ from oracle_game.sim.motion_falling_island import (
     _resolve_island_dda_target,
     _resolve_island_dda_target_material,
     _same_island_neighbors,
-    _shed_falling_island_fragments,
     _shadow_shift_island_material,
+    _shed_falling_island_fragments,
     _shift_island,
+)
+from oracle_game.sim.motion_material import (
+    _collision_response,
+    _dda_line_cells,
+    _material_default_phase,
+    _material_elasticity,
+    _material_falling_island_break_kind,
+    _material_friction,
+    _material_gravity,
+    _material_int,
+    _material_is_placeholder,
+    _material_max_dda_step,
+    _material_powder_generation_id,
+    _material_powder_solver_kind,
+    _material_scalar,
+    _material_scalar_field,
+    _material_table_row,
+)
+from oracle_game.sim.motion_powder import (
+    _apply_powder_reservations,
+    _mark_powder_reservation_regions,
+    _move_powders,
+    _path_is_clear,
+    _path_is_clear_material,
+    _plan_cpu_powder_reservations,
+    _powder_fallback_candidates,
+    _resolve_powder_dda_target,
+    _resolve_powder_reservations,
+)
+from oracle_game.sim.motion_runtime import (
+    _capture_public_island_reservations,
+    _capture_public_powder_reservations,
+    release,
+    reset_runtime_state,
+    runtime_snapshot,
+)
+from oracle_game.sim.motion_velocity import (
+    _integrate_velocity,
+    _solve_tile_mask,
+    step,
 )
 
 

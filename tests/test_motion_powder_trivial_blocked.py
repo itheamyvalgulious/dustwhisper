@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 
-from oracle_game.sim.gpu_motion import GPUMotionPipeline, _SHADER_SUBS
+from oracle_game.sim.gpu_motion import _SHADER_SUBS, GPUMotionPipeline
 from oracle_game.sim.shader_loader import shader_source
 
 

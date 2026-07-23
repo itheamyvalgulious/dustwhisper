@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import json
 import threading
+from copy import deepcopy
 from dataclasses import dataclass
 from enum import Enum
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlparse
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from oracle_game.world import WorldEngine
 
 from oracle_game.gpu import moderngl
 
@@ -24,9 +29,13 @@ def _json_default(value: object) -> object:
 
 def _controller_turn_kwargs(payload: dict[str, object]) -> dict[str, object]:
     focus_center_payload = payload.get("focus_center")
-    focus_center = None if focus_center_payload is None else (
-        int(focus_center_payload[0]),  # type: ignore[index]
-        int(focus_center_payload[1]),  # type: ignore[index]
+    focus_center = (
+        None
+        if focus_center_payload is None
+        else (
+            int(focus_center_payload[0]),  # type: ignore[index]
+            int(focus_center_payload[1]),  # type: ignore[index]
+        )
     )
     return {
         "controller_state": payload.get("controller_state"),
@@ -49,7 +58,9 @@ def _controller_turn_kwargs(payload: dict[str, object]) -> dict[str, object]:
 
 def _target_query_kwargs(payload: dict[str, object]) -> dict[str, object]:
     return {
-        "target_query_id": None if payload.get("target_query_id") is None else str(payload["target_query_id"]),
+        "target_query_id": None
+        if payload.get("target_query_id") is None
+        else str(payload["target_query_id"]),
         "target_dx": int(payload.get("target_dx", 0)),
         "target_dy": int(payload.get("target_dy", 0)),
         "target_queries": payload.get("target_queries"),
@@ -109,10 +120,18 @@ class EngineHTTPConsole:
         self._thread: threading.Thread | None = None
         self._ready_event = threading.Event()
         self._startup_error: BaseException | None = None
+        # Console-owned GPU context, created lazily on the console thread by
+        # ``_ensure_gpu_attached`` (see there for why it is not created at
+        # ``start()``), and the bridge state captured right before it is
+        # attached so ``stop`` can hand the engine its original
+        # (main-thread-owned) context back.
+        self._http_ctx: object | None = None
+        self._prev_bridge_state: tuple[object, bool, bool, int | None] | None = None
 
     def start(self) -> None:
         if self._thread is not None:
             return
+        self._heal_pending_gpu_state()
         self._ready_event.clear()
         self._startup_error = None
         self._thread = threading.Thread(target=self._serve, daemon=True)
@@ -120,7 +139,37 @@ class EngineHTTPConsole:
         if not self._ready_event.wait(timeout=5.0):
             raise RuntimeError("HTTP console failed to initialize GPU context")
         if self._startup_error is not None:
-            raise RuntimeError("HTTP console failed to initialize GPU context") from self._startup_error
+            raise RuntimeError(
+                "HTTP console failed to initialize GPU context"
+            ) from self._startup_error
+
+    def _heal_pending_gpu_state(self) -> None:
+        """Re-upload CPU-dirty resources before serving.
+
+        The legacy start-time attach used to mask pending CPU-dirty
+        invalidations (e.g. from ``clear_cell_region``) with a forced full
+        re-upload; without it the next ``step()`` would hit the world command
+        pipeline before the pre-simulation sync and fail its authoritative
+        resource check.  Run the same re-sync the pre-simulation pass would
+        have run, on the caller's thread, while we still can.
+        """
+        engine = self.engine
+        if not self.own_gpu_context:
+            return
+        if getattr(engine, "simulation_backend", "") != "gpu":
+            return
+        if not engine._gpu_cpu_dirty_resources:
+            return
+        bridge = engine.bridge
+        if (
+            not bridge.enabled
+            or bridge.ctx is None
+            or bridge.owner_thread_id != threading.get_ident()
+        ):
+            return
+        with engine.state_lock:
+            bridge.sync_world(engine)
+            engine._gpu_cpu_dirty_resources.clear()
 
     def stop(self) -> None:
         self._server.shutdown()
@@ -128,66 +177,163 @@ class EngineHTTPConsole:
         if self._thread is not None:
             self._thread.join(timeout=1.0)
             self._thread = None
+        self._restore_bridge_context()
+
+    def _restore_bridge_context(self) -> None:
+        """Hand the engine's pre-console bridge context back on this thread.
+
+        ``_ensure_gpu_attached`` replaces the bridge context with a
+        console-owned standalone context, which ``_serve`` releases when the
+        server exits.  Without a restore the engine is left with
+        ``bridge.ctx is None`` and GPU stepping fails permanently.  The saved
+        context belongs to the thread that created the engine, so the
+        re-attach and the re-sync must run here (the stopping thread), not on
+        the dying console thread.
+        """
+        saved = self._prev_bridge_state
+        if saved is None:
+            return
+        self._prev_bridge_state = None
+        ctx, own_context, enabled, owner_thread_id = saved
+        if ctx is None:
+            return
+        engine = self.engine
+        with engine.state_lock:
+            bridge = engine.bridge
+            bridge.ctx = ctx
+            bridge.own_context = own_context
+            bridge.enabled = enabled
+            bridge.owner_thread_id = owner_thread_id
+            if enabled and getattr(engine, "simulation_backend", "") == "gpu":
+                # The console's teardown released every GPU resource.
+                # Invalidate the cached signatures (as attach_context does) so
+                # the re-sync rebuilds them on the restored context instead of
+                # believing the released ones are still live, then re-upload
+                # from the CPU mirror, mirroring the attach + sync_world in
+                # ``_ensure_gpu_attached``.
+                bridge.world_signature = None
+                bridge.rule_table_signature = None
+                bridge.atlas_dirty = True
+                bridge.write_index = 0
+                bridge.sync_world(engine, force_cpu_resource_upload=True)
+                # Re-queue readbacks that were in flight on the console
+                # context when its teardown detached their slots.
+                bridge.requeue_detached_readbacks(engine)
+                # Keep ``_gpu_cpu_dirty_resources`` entries queued while the
+                # console ran: they are what triggers the pre-simulation
+                # sync (and world_command publication) on the next step.
 
     def _serve(self) -> None:
-        http_ctx = None
-        try:
-            if getattr(self.engine, "simulation_backend", "") == "gpu" and self.own_gpu_context:
-                if moderngl is None:
-                    raise RuntimeError("GPU HTTP console requires ModernGL; CPU fallback is disabled")
-                errors: list[Exception] = []
-                for kwargs in ({"require": 430, "backend": "egl"}, {"require": 430}):
-                    try:
-                        http_ctx = moderngl.create_standalone_context(**kwargs)
-                        break
-                    except Exception as exc:
-                        errors.append(exc)
-                if http_ctx is None:
-                    raise RuntimeError("GPU HTTP console failed to initialize a ModernGL context") from (errors[-1] if errors else None)
-                with self.engine.state_lock:
-                    self.engine.bridge.attach_context(http_ctx)
-                    self.engine.bridge.sync_world(self.engine, force_cpu_resource_upload=True)
-                    self.engine.bridge.mark_gpu_authoritative(
-                        "cell_core",
-                        "material",
-                        "island_id",
-                        "entity_id",
-                        "placeholder_displaced_material",
-                        "collapse_delay_pending",
-                        "gas_concentration",
-                        "ambient_temperature",
-                        "flow_velocity",
-                        "pressure_ping",
-                        "visible_illumination",
-                        "cell_optical_dose",
-                        "gas_optical_dose",
-                        "active_meta",
-                        "active_tile_ttl",
-                        "active_chunk_mask",
-                    )
-                    self.engine._gpu_cpu_dirty_resources.clear()
-        except BaseException as exc:
-            self._startup_error = exc
-            self._ready_event.set()
-            return
         self._ready_event.set()
         try:
             self._server.serve_forever()
         finally:
-            if http_ctx is not None:
+            if self._http_ctx is not None:
                 with self.engine.state_lock:
-                    self.engine.bridge.release_resources()
+                    bridge = self.engine.bridge
+                    # Formal GPU frames never refreshed the CPU mirror, so the
+                    # forced re-upload in ``_restore_bridge_context`` would
+                    # regress GPU-resident writes made through the console.
+                    # Download the GPU-authoritative resources first; the
+                    # restore then re-uploads the live state.  Best-effort:
+                    # teardown must proceed even if a read fails.
                     try:
-                        http_ctx.release()
+                        bridge.download_gpu_authoritative_resources(self.engine)
                     except Exception:
                         pass
+                    bridge.release_resources()
+                    try:
+                        self._http_ctx.release()
+                    except Exception:
+                        pass
+                    self._http_ctx = None
                     self.engine.bridge.ctx = None
                     self.engine.bridge.enabled = False
                     self.engine.bridge.owner_thread_id = None
 
+    def _frame_focus_advances_paging(self, focus_center: object) -> bool:
+        """Whether a frame preview with this focus_center would touch the GPU.
+
+        Frame previews only need the console-owned context when the focus
+        actually advances the paging window (the preview then captures page
+        stripes from GPU buffers).  Probe the threshold check on a deepcopy
+        because ``RingPagingWindow.focus_on`` mutates the window.
+        """
+        if focus_center is None:
+            return False
+        engine = self.engine
+        if getattr(engine, "simulation_backend", "") != "gpu":
+            return False
+        probe = deepcopy(engine.paging)
+        return bool(probe.focus_on(int(focus_center[0]), int(focus_center[1])))  # type: ignore[index]
+
+    def _ensure_gpu_attached(self) -> None:
+        """Attach the console-owned GPU context on first GL use.
+
+        A ModernGL standalone context is pinned to the thread that created
+        it, so the console can only run GL work (``/api/control/tick``,
+        ``immediate=True`` mutations) on a context created on its own thread.
+        Attaching lazily — instead of at ``start()`` — keeps the bridge on the
+        engine's main-thread context between such requests, so the engine can
+        keep stepping on the main thread while the console serves queued
+        commands and reads.
+        """
+        if self._http_ctx is not None:
+            return
+        engine = self.engine
+        if getattr(engine, "simulation_backend", "") != "gpu" or not self.own_gpu_context:
+            return
+        if moderngl is None:
+            raise RuntimeError("GPU HTTP console requires ModernGL; CPU fallback is disabled")
+        errors: list[Exception] = []
+        http_ctx = None
+        for kwargs in ({"require": 430, "backend": "egl"}, {"require": 430}):
+            try:
+                http_ctx = moderngl.create_standalone_context(**kwargs)
+                break
+            except Exception as exc:
+                errors.append(exc)
+        if http_ctx is None:
+            raise RuntimeError("GPU HTTP console failed to initialize a ModernGL context") from (
+                errors[-1] if errors else None
+            )
+        with engine.state_lock:
+            self._prev_bridge_state = (
+                engine.bridge.ctx,
+                engine.bridge.own_context,
+                engine.bridge.enabled,
+                engine.bridge.owner_thread_id,
+            )
+            engine.bridge.attach_context(http_ctx)
+            engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+            engine.bridge.mark_gpu_authoritative(
+                "cell_core",
+                "material",
+                "island_id",
+                "entity_id",
+                "placeholder_displaced_material",
+                "collapse_delay_pending",
+                "gas_concentration",
+                "ambient_temperature",
+                "flow_velocity",
+                "pressure_ping",
+                "visible_illumination",
+                "cell_optical_dose",
+                "gas_optical_dose",
+                "active_meta",
+                "active_tile_ttl",
+                "active_chunk_mask",
+            )
+            engine._gpu_cpu_dirty_resources.clear()
+            # Re-queue any readbacks that were in flight on the previous
+            # context: attach_context detached their slots, and they must
+            # complete with their original frame timing instead of leaking
+            # in ``engine.inflight_readbacks``.
+            engine.bridge.requeue_detached_readbacks(engine)
+        self._http_ctx = http_ctx
+
     def _make_handler(self) -> type[BaseHTTPRequestHandler]:
         engine = self.engine
-        state = self.state
         console = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -357,6 +503,7 @@ class EngineHTTPConsole:
             handler._send({"single_step": True})
             return True
         if path == "/api/control/tick":
+            self._ensure_gpu_attached()
             engine.step()
             handler._send(
                 {

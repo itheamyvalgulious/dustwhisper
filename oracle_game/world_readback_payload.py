@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -34,13 +34,13 @@ def make_readback_payload(engine: "WorldEngine", request: ReadbackRequest) -> di
     cell_contiguous = len(x_spans) <= 1 and len(y_spans) <= 1
     x0 = x_spans[0][0] if x_spans else 0
     y0 = y_spans[0][0] if y_spans else 0
-    x1 = x0 + cell_width
-    y1 = y0 + cell_height
-    gas_world_x0, gas_world_y0, gas_world_x1, gas_world_y1 = engine._world_gas_window_for_cell_world_rect(
-        world_x0,
-        world_y0,
-        world_x1,
-        world_y1,
+    gas_world_x0, gas_world_y0, gas_world_x1, gas_world_y1 = (
+        engine._world_gas_window_for_cell_world_rect(
+            world_x0,
+            world_y0,
+            world_x1,
+            world_y1,
+        )
     )
     gas_width = gas_world_x1 - gas_world_x0
     gas_height = gas_world_y1 - gas_world_y0
@@ -49,8 +49,6 @@ def make_readback_payload(engine: "WorldEngine", request: ReadbackRequest) -> di
     gas_contiguous = len(gx_spans) <= 1 and len(gy_spans) <= 1
     gx0 = gx_spans[0][0] if gx_spans else 0
     gy0 = gy_spans[0][0] if gy_spans else 0
-    gx1 = gx0 + gas_width
-    gy1 = gy0 + gas_height
     gpu_mode = engine.simulation_backend == "gpu"
 
     def axis_segments(spans: list[tuple[int, int]]) -> list[tuple[int, int, int, int]]:
@@ -205,7 +203,10 @@ def make_readback_payload(engine: "WorldEngine", request: ReadbackRequest) -> di
             dtype=np.dtype(np.float32).str,
             shape=(gas_height, gas_width),
             grid_width=engine.gas_width,
-            base_offset=int(species_id) * engine.gas_height * engine.gas_width * np.dtype(np.float32).itemsize,
+            base_offset=int(species_id)
+            * engine.gas_height
+            * engine.gas_width
+            * np.dtype(np.float32).itemsize,
             segments=gas_segments,
         )
 
@@ -429,7 +430,10 @@ def make_readback_payload(engine: "WorldEngine", request: ReadbackRequest) -> di
                 origin_y=y0,
                 contiguous=cell_contiguous,
                 segments=cell_segments,
-                base_offset=int(dose_channel) * engine.height * engine.width * np.dtype(np.float32).itemsize,
+                base_offset=int(dose_channel)
+                * engine.height
+                * engine.width
+                * np.dtype(np.float32).itemsize,
                 cpu_array_factory=lambda dose_channel=dose_channel: engine._extract_world_window(
                     engine.cell_optical_dose[dose_channel],
                     world_x0,
@@ -452,7 +456,10 @@ def make_readback_payload(engine: "WorldEngine", request: ReadbackRequest) -> di
                 origin_y=gy0,
                 contiguous=gas_contiguous,
                 segments=gas_segments,
-                base_offset=int(dose_channel) * engine.gas_height * engine.gas_width * np.dtype(np.float32).itemsize,
+                base_offset=int(dose_channel)
+                * engine.gas_height
+                * engine.gas_width
+                * np.dtype(np.float32).itemsize,
                 cpu_array_factory=lambda dose_channel=dose_channel: engine._extract_world_window(
                     engine.gas_optical_dose[dose_channel],
                     gas_world_x0,
@@ -478,8 +485,6 @@ def make_readback_payload(engine: "WorldEngine", request: ReadbackRequest) -> di
             "origin": [gas_world_x0, gas_world_y0],
             "size": [gas_width, gas_height],
             "grid": "gas",
-            "species": {
-                name: gas_species_source(species_id) for species_id, name in gas_entries
-            },
+            "species": {name: gas_species_source(species_id) for species_id, name in gas_entries},
         }
     return payload

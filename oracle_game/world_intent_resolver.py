@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -67,7 +67,9 @@ def _resolve_target_query(engine: "WorldEngine", query: TargetQuery) -> Resolved
         )
 
     resolved_world_position = anchor["world_position"]
-    direction_vector = engine._query_direction_vector(query, source_entity_id=query.source_entity_id)
+    direction_vector = engine._query_direction_vector(
+        query, source_entity_id=query.source_entity_id
+    )
     if direction_vector is not None and resolved_distance_cells:
         resolved_world_position = engine._clamp_world_position(
             resolved_world_position[0] + direction_vector[0] * resolved_distance_cells,
@@ -120,7 +122,9 @@ def _resolve_target_query(engine: "WorldEngine", query: TargetQuery) -> Resolved
     )
 
 
-def _resolve_target_queries(engine: "WorldEngine", queries: list[TargetQuery]) -> dict[str, ResolvedTarget]:
+def _resolve_target_queries(
+    engine: "WorldEngine", queries: list[TargetQuery]
+) -> dict[str, ResolvedTarget]:
     resolved: dict[str, ResolvedTarget] = {}
     for query in queries:
         resolved[query.query_id] = _resolve_target_query(engine, query)
@@ -231,7 +235,9 @@ def _resolve_change_intent(
 
     center_position = engine._world_to_buffer_clamped(*final_world_position)
     effect_world_cells = engine._disk_world_cells(final_world_position, effective_radius)
-    effect_cells = [engine._world_to_buffer_clamped(world_x, world_y) for world_x, world_y in effect_world_cells]
+    effect_cells = [
+        engine._world_to_buffer_clamped(world_x, world_y) for world_x, world_y in effect_world_cells
+    ]
 
     generated_commands: list[WorldCommand] = []
     base_meta: dict[str, Any] = {"resolved_change_intent_id": intent.intent_id}
@@ -428,12 +434,20 @@ def _resolve_carrier_intent(
     effect_shape = "impact"
     if intent.release_mode in {"beam", "projectile"} and source_world_position is not None:
         effect_shape = "beam"
-        effect_world_cells = engine._capsule_world_cells(source_world_position, final_world_position, effective_radius)
-        raw_effect_world_cells = engine._capsule_world_cells_raw(source_world_position, final_world_position, effective_radius)
+        effect_world_cells = engine._capsule_world_cells(
+            source_world_position, final_world_position, effective_radius
+        )
+        raw_effect_world_cells = engine._capsule_world_cells_raw(
+            source_world_position, final_world_position, effective_radius
+        )
     else:
         effect_world_cells = engine._disk_world_cells(final_world_position, effective_radius)
-        raw_effect_world_cells = engine._disk_world_cells_raw(final_world_position, effective_radius)
-    effect_cells = [engine._world_to_buffer_clamped(world_x, world_y) for world_x, world_y in effect_world_cells]
+        raw_effect_world_cells = engine._disk_world_cells_raw(
+            final_world_position, effective_radius
+        )
+    effect_cells = [
+        engine._world_to_buffer_clamped(world_x, world_y) for world_x, world_y in effect_world_cells
+    ]
 
     generated_commands: list[WorldCommand] = []
     base_meta: dict[str, Any] = {"resolved_carrier_intent_id": intent.intent_id}
@@ -443,7 +457,11 @@ def _resolve_carrier_intent(
     note = engine._combine_resolution_notes(drift_note, fallback_note)
     status = engine._intent_resolution_status(drifted=drifted, fallback_applied=fallback_applied)
 
-    resolved_force_radius = float(intent.force_radius) * potency if intent.force_radius > 0.0 else max(1.0, float(effective_radius))
+    resolved_force_radius = (
+        float(intent.force_radius) * potency
+        if intent.force_radius > 0.0
+        else max(1.0, float(effective_radius))
+    )
 
     if kind == "material":
         if intent.material is None:
@@ -477,7 +495,9 @@ def _resolve_carrier_intent(
                     **base_meta,
                 },
             )
-            for cell in (raw_effect_world_cells if effect_shape == "beam" else [final_world_position])
+            for cell in (
+                raw_effect_world_cells if effect_shape == "beam" else [final_world_position]
+            )
         )
     elif kind == "gas":
         if intent.gas_species is None or intent.gas_amount == 0.0:
@@ -539,23 +559,42 @@ def _resolve_carrier_intent(
                 note="light carrier intent requires light_type",
             )
         light_strength = float(intent.light_strength) * potency
-        origin_position = impact_position
         light_direction = (0.0, 0.0)
         light_range = max(1, effective_radius if effective_radius > 0 else int(intent.radius) or 1)
-        if intent.release_mode in {"beam", "projectile"} and source_position is not None and source_world_position is not None:
-            origin_position = source_position
+        if (
+            intent.release_mode in {"beam", "projectile"}
+            and source_position is not None
+            and source_world_position is not None
+        ):
             light_direction = (0.0, 0.0) if direction is None else direction
             if int(intent.radius) <= 0:
                 light_range = max(
                     1,
-                    int(round(np.linalg.norm(np.asarray(final_world_position, dtype=np.float32) - np.asarray(source_world_position, dtype=np.float32)))),
+                    int(
+                        round(
+                            np.linalg.norm(
+                                np.asarray(final_world_position, dtype=np.float32)
+                                - np.asarray(source_world_position, dtype=np.float32)
+                            )
+                        )
+                    ),
                 )
         generated_commands.append(
             WorldCommand(
                 kind="inject_light",
                 payload={
-                    "x": int(source_world_position[0] if intent.release_mode in {"beam", "projectile"} and source_world_position is not None else final_world_position[0]),
-                    "y": int(source_world_position[1] if intent.release_mode in {"beam", "projectile"} and source_world_position is not None else final_world_position[1]),
+                    "x": int(
+                        source_world_position[0]
+                        if intent.release_mode in {"beam", "projectile"}
+                        and source_world_position is not None
+                        else final_world_position[0]
+                    ),
+                    "y": int(
+                        source_world_position[1]
+                        if intent.release_mode in {"beam", "projectile"}
+                        and source_world_position is not None
+                        else final_world_position[1]
+                    ),
                     "light_type": intent.light_type,
                     "strength": light_strength,
                     "radius": light_range,
@@ -592,7 +631,9 @@ def _resolve_carrier_intent(
                 source_x=None,
                 source_y=None,
             )
-            direction = engine._normalized_world_direction(source_world_position, final_world_position)
+            direction = engine._normalized_world_direction(
+                source_world_position, final_world_position
+            )
         force_direction = (1.0, 0.0) if direction is None else direction
         generated_commands.append(
             WorldCommand(

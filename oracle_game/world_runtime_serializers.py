@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -15,7 +15,9 @@ def serialize_gas_runtime(engine: "WorldEngine") -> dict[str, Any]:
     species_total = np.asarray(snapshot["species_total_concentration"], dtype=np.float32)
     species_active = np.asarray(snapshot["species_active_concentration"], dtype=np.float32)
     species_runtime = []
-    for species_id in range(max(len(engine.gas_name_by_id), int(species_total.shape[0]), int(species_active.shape[0]))):
+    for species_id in range(
+        max(len(engine.gas_name_by_id), int(species_total.shape[0]), int(species_active.shape[0]))
+    ):
         species_name = engine._shadow_gas_name(species_id)
         if not species_name:
             continue
@@ -43,9 +45,13 @@ def serialize_gas_runtime(engine: "WorldEngine") -> dict[str, Any]:
         "velocity_changed": bool(snapshot["velocity_changed"]),
         "ambient_changed": bool(snapshot["ambient_changed"]),
         "gas_changed": bool(snapshot["gas_changed"]),
-        "pressure_range": np.asarray(snapshot["pressure_range"], dtype=np.float32).round(4).tolist(),
+        "pressure_range": np.asarray(snapshot["pressure_range"], dtype=np.float32)
+        .round(4)
+        .tolist(),
         "ambient_range": np.asarray(snapshot["ambient_range"], dtype=np.float32).round(4).tolist(),
-        "flow_speed_range": np.asarray(snapshot["flow_speed_range"], dtype=np.float32).round(4).tolist(),
+        "flow_speed_range": np.asarray(snapshot["flow_speed_range"], dtype=np.float32)
+        .round(4)
+        .tolist(),
         "species_runtime": species_runtime,
     }
 
@@ -173,9 +179,17 @@ def serialize_heat_runtime(engine: "WorldEngine") -> dict[str, Any]:
         "phase_changed": bool(snapshot["phase_changed"]),
         "integrity_changed": bool(snapshot["integrity_changed"]),
         "gas_changed": bool(snapshot["gas_changed"]),
-        "cell_temperature_range": np.asarray(snapshot["cell_temperature_range"], dtype=np.float32).round(4).tolist(),
-        "ambient_temperature_range": np.asarray(snapshot["ambient_temperature_range"], dtype=np.float32).round(4).tolist(),
-        "integrity_range": np.asarray(snapshot["integrity_range"], dtype=np.float32).round(4).tolist(),
+        "cell_temperature_range": np.asarray(snapshot["cell_temperature_range"], dtype=np.float32)
+        .round(4)
+        .tolist(),
+        "ambient_temperature_range": np.asarray(
+            snapshot["ambient_temperature_range"], dtype=np.float32
+        )
+        .round(4)
+        .tolist(),
+        "integrity_range": np.asarray(snapshot["integrity_range"], dtype=np.float32)
+        .round(4)
+        .tolist(),
         "phase_targets": phase_payload,
         "boil_targets": boil_payload,
         "condense_targets": condense_payload,
@@ -236,7 +250,9 @@ def serialize_reaction_runtime(engine: "WorldEngine") -> dict[str, Any]:
     timer_changed_mask = np.asarray(snapshot["timer_changed_mask"], dtype=np.uint8)
     emitted_light_mask = np.asarray(snapshot["emitted_light_mask"], dtype=np.uint8)
     emitted_material_mask = np.asarray(snapshot["emitted_material_mask"], dtype=np.uint8)
-    solve_tile_mask = np.zeros((engine.active.tile_height, engine.active.tile_width), dtype=np.uint8)
+    solve_tile_mask = np.zeros(
+        (engine.active.tile_height, engine.active.tile_width), dtype=np.uint8
+    )
     for mask in stage_tile_masks.values():
         solve_tile_mask |= mask
     return {
@@ -260,7 +276,9 @@ def serialize_reaction_runtime(engine: "WorldEngine") -> dict[str, Any]:
         "convert_material_action_count": int(snapshot["convert_material_action_count"]),
         "modify_temperature_action_count": int(snapshot["modify_temperature_action_count"]),
         "harm_action_count": int(snapshot["harm_action_count"]),
-        "stage_action_counts": {stage: int(count) for stage, count in snapshot["stage_action_counts"].items()},
+        "stage_action_counts": {
+            stage: int(count) for stage, count in snapshot["stage_action_counts"].items()
+        },
         "stage_tile_masks": {stage: mask.tolist() for stage, mask in stage_tile_masks.items()},
         "solve_cell_mask": solve_cell_mask.tolist(),
         "solve_gas_mask": solve_gas_mask.tolist(),
@@ -273,7 +291,9 @@ def serialize_reaction_runtime(engine: "WorldEngine") -> dict[str, Any]:
     }
 
 
-def serialize_collapse_runtime(engine: "WorldEngine", *, allow_gpu_sync_readback: bool = False) -> dict[str, Any]:
+def serialize_collapse_runtime(
+    engine: "WorldEngine", *, allow_gpu_sync_readback: bool = False
+) -> dict[str, Any]:
     snapshot = engine.collapse_solver.runtime_snapshot(
         engine,
         allow_gpu_sync_readback=allow_gpu_sync_readback,
@@ -292,7 +312,9 @@ def serialize_collapse_runtime(engine: "WorldEngine", *, allow_gpu_sync_readback
         "gpu_authoritative_resources": list(snapshot.get("gpu_authoritative_resources", [])),
         "snapshot_source": str(snapshot.get("snapshot_source", "cpu")),
         "snapshot_stale": bool(snapshot.get("snapshot_stale", False)),
-        "gpu_authoritative_snapshot_stale": bool(snapshot.get("gpu_authoritative_snapshot_stale", False)),
+        "gpu_authoritative_snapshot_stale": bool(
+            snapshot.get("gpu_authoritative_snapshot_stale", False)
+        ),
         "stale_resources": list(snapshot.get("stale_resources", [])),
         "sync_readback_required": bool(snapshot.get("sync_readback_required", False)),
         "sync_readback_performed": bool(snapshot.get("sync_readback_performed", False)),
@@ -322,7 +344,11 @@ def serialize_collapse_runtime(engine: "WorldEngine", *, allow_gpu_sync_readback
                 "bbox": (
                     list(component["world_bbox"])
                     if component.get("world_bbox") is not None
-                    else list(engine._buffer_bbox_to_world_bbox(tuple(int(value) for value in component["bbox"])))
+                    else list(
+                        engine._buffer_bbox_to_world_bbox(
+                            tuple(int(value) for value in component["bbox"])
+                        )
+                    )
                 ),
                 "cell_count": int(component["cell_count"]),
             }
@@ -358,7 +384,9 @@ def serialize_optics_runtime(engine: "WorldEngine") -> dict[str, Any]:
             {
                 "light_type": str(emitter["light_type"]),
                 "origin": list(
-                    engine._buffer_to_world_position((int(emitter["origin"][0]), int(emitter["origin"][1])))
+                    engine._buffer_to_world_position(
+                        (int(emitter["origin"][0]), int(emitter["origin"][1]))
+                    )
                 ),
                 "direction": [float(emitter["direction"][0]), float(emitter["direction"][1])],
                 "spread": float(emitter["spread"]),
@@ -433,7 +461,9 @@ def serialize_motion_runtime(engine: "WorldEngine") -> dict[str, Any]:
     snapshot = engine.motion_solver.runtime_snapshot()
     public_powder_reservations = snapshot.get("public_powder_reservations")
     if isinstance(public_powder_reservations, list) and public_powder_reservations:
-        powder_payload: list[dict[str, Any]] = [dict(record) for record in public_powder_reservations]
+        powder_payload: list[dict[str, Any]] = [
+            dict(record) for record in public_powder_reservations
+        ]
     else:
         powder_payload = []
         for record in snapshot["powder_reservations"]:
@@ -441,8 +471,15 @@ def serialize_motion_runtime(engine: "WorldEngine") -> dict[str, Any]:
             for name in snapshot["powder_reservations"].dtype.names or ():
                 value = record[name]
                 if isinstance(value, np.ndarray):
-                    if name in {"source_xy", "desired_target_xy", "reserved_target_xy", "resolved_target_xy"}:
-                        world_x, world_y = engine._buffer_to_world_position((int(value[0]), int(value[1])))
+                    if name in {
+                        "source_xy",
+                        "desired_target_xy",
+                        "reserved_target_xy",
+                        "resolved_target_xy",
+                    }:
+                        world_x, world_y = engine._buffer_to_world_position(
+                            (int(value[0]), int(value[1]))
+                        )
                         item[name] = [int(world_x), int(world_y)]
                     else:
                         item[name] = value.tolist()
@@ -453,7 +490,9 @@ def serialize_motion_runtime(engine: "WorldEngine") -> dict[str, Any]:
             powder_payload.append(item)
     public_island_reservations = snapshot.get("public_island_reservations")
     if isinstance(public_island_reservations, list) and public_island_reservations:
-        island_payload: list[dict[str, Any]] = [dict(record) for record in public_island_reservations]
+        island_payload: list[dict[str, Any]] = [
+            dict(record) for record in public_island_reservations
+        ]
     else:
         island_payload = []
         for record in snapshot["island_reservations"]:
@@ -462,7 +501,9 @@ def serialize_motion_runtime(engine: "WorldEngine") -> dict[str, Any]:
                 value = record[name]
                 if name == "buffer_bbox":
                     item["world_bbox"] = list(
-                        engine._buffer_bbox_to_world_bbox(tuple(int(component) for component in np.asarray(value).tolist()))
+                        engine._buffer_bbox_to_world_bbox(
+                            tuple(int(component) for component in np.asarray(value).tolist())
+                        )
                     )
                     continue
                 if isinstance(value, np.ndarray):

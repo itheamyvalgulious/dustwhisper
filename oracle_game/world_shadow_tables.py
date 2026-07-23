@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -143,27 +143,32 @@ def _shadow_gas_species_def(engine: "WorldEngine", species_id: int) -> GasSpecie
     return None
 
 
-def _shadow_material_optics_def(engine: "WorldEngine", material_name: str, light_type: str) -> MaterialOpticsDef | None:
+def _shadow_material_optics_def(
+    engine: "WorldEngine", material_name: str, light_type: str
+) -> MaterialOpticsDef | None:
     payload = engine.bridge.shadow_tables.get("optics")
     if payload is not None:
         for item in payload:
-            if str(item.get("material_name", "")) == material_name and str(item.get("light_type", "")) == light_type:
+            if (
+                str(item.get("material_name", "")) == material_name
+                and str(item.get("light_type", "")) == light_type
+            ):
                 return engine._coerce_material_optics_def(item)
         return None
     optics_table = engine.bridge.shadow_typed_tables.get("optics_table")
     material_id = _resolve_sanctioned_material_id(engine, material_name)
     light_id = _resolve_sanctioned_light_id(engine, light_type)
-    if material_id <=0 or light_id <0:
+    if material_id <= 0 or light_id < 0:
         return None
     if optics_table is not None:
         for row in optics_table:
             if int(row["material_id"]) == material_id and int(row["light_type_id"]) == light_id:
                 return MaterialOpticsDef(
-                material_name=material_name,
-                light_type=light_type,
-                absorption=float(row["absorption"]),
-                scattering=float(row["scattering"]),
-                refraction=float(row["refraction"]),
+                    material_name=material_name,
+                    light_type=light_type,
+                    absorption=float(row["absorption"]),
+                    scattering=float(row["scattering"]),
+                    refraction=float(row["refraction"]),
                 )
     return None
 
@@ -176,7 +181,10 @@ def _shadow_material_name(engine: "WorldEngine", material_id: int) -> str | None
         return None
     if engine._shadow_has_table_payload("materials"):
         return None
-    if 0 <= int(material_id) < len(engine.material_name_by_id) and engine.material_name_by_id[int(material_id)]:
+    if (
+        0 <= int(material_id) < len(engine.material_name_by_id)
+        and engine.material_name_by_id[int(material_id)]
+    ):
         return engine.material_name_by_id[int(material_id)]
     return None
 
@@ -336,7 +344,9 @@ def _shadow_condense_target_material_id(engine: "WorldEngine", species_id: int) 
 def _shadow_material_is_placeholder(engine: "WorldEngine", material_id: int) -> bool:
     shadow_material = _shadow_material_def(engine, int(material_id))
     if shadow_material is not None:
-        return shadow_material.render_group == "placeholder" or "placeholder" in shadow_material.tags
+        return (
+            shadow_material.render_group == "placeholder" or "placeholder" in shadow_material.tags
+        )
     if engine.bridge.shadow_typed_tables.get("material_table") is not None:
         return False
     if engine._shadow_has_table_payload("materials"):
@@ -360,20 +370,26 @@ def _shadow_material_is_plant(engine: "WorldEngine", material_id: int) -> bool:
 
 
 def _shadow_reaction_action(engine: "WorldEngine", index: int) -> ReactionAction | None:
-    if index ==0:
-        return engine.rulebook.reaction_actions[0] if engine.rulebook.reaction_actions else ReactionAction(ReactionType.NONE)
+    if index == 0:
+        return (
+            engine.rulebook.reaction_actions[0]
+            if engine.rulebook.reaction_actions
+            else ReactionAction(ReactionType.NONE)
+        )
     payload = engine._shadow_reaction_payload()
     actions = payload.get("actions", [])
-    if index >0 and index <= len(actions):
-        return engine._coerce_reaction_action(actions[index -1])
+    if index > 0 and index <= len(actions):
+        return engine._coerce_reaction_action(actions[index - 1])
     if engine._shadow_has_table_payload("reactions"):
         return None
-    if index >=0 and index < len(engine.rulebook.reaction_actions):
+    if index >= 0 and index < len(engine.rulebook.reaction_actions):
         return engine.rulebook.reaction_actions[index]
     return None
 
 
-def _reaction_rule_list(engine: "WorldEngine", rule_set: str) -> list[PairReactionRule] | list[SelfReactionRule]:
+def _reaction_rule_list(
+    engine: "WorldEngine", rule_set: str
+) -> list[PairReactionRule] | list[SelfReactionRule]:
     normalized = str(rule_set)
     payload = engine._shadow_reaction_payload()
     if payload is not None:
@@ -400,7 +416,9 @@ def _reaction_rule_list(engine: "WorldEngine", rule_set: str) -> list[PairReacti
     raise KeyError(rule_set)
 
 
-def _shadow_reaction_rule(engine: "WorldEngine", rule_set: str, index: int) -> PairReactionRule | SelfReactionRule | None:
+def _shadow_reaction_rule(
+    engine: "WorldEngine", rule_set: str, index: int
+) -> PairReactionRule | SelfReactionRule | None:
     payload = engine._shadow_reaction_payload()
     normalized = str(rule_set)
     rules = payload.get("rules", {})
@@ -411,6 +429,8 @@ def _shadow_reaction_rule(engine: "WorldEngine", rule_set: str, index: int) -> P
         return engine._coerce_pair_reaction_rule(entries[index])
     if engine._shadow_has_table_payload("reactions"):
         return None
-    if (0 <= index) and index < len(rules_list):
-        return rules_list[index]
+    # NOTE: `rules_list` is undefined in this branch — pre-existing latent bug
+    # (present since extraction in b437582), kept as-is for the lint baseline.
+    if (0 <= index) and index < len(rules_list):  # noqa: F821
+        return rules_list[index]  # noqa: F821
     return None

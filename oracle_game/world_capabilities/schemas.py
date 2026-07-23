@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from oracle_game.readback_contract import READBACK_ALLOWED_CHANNELS
 from oracle_game.world_constants import (
@@ -10,11 +10,10 @@ from oracle_game.world_constants import (
     IGNORED_ANCHOR_FILTERS,
     MAX_ASYNC_READBACK_HEIGHT,
     MAX_ASYNC_READBACK_WIDTH,
-    TARGETED_COMMAND_COORD_FIELDS,
     TARGET_QUERY_DISTANCE_HINT_CELLS,
+    TARGETED_COMMAND_COORD_FIELDS,
     TERRAIN_ANCHOR_FILTERS,
 )
-
 
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
@@ -26,7 +25,6 @@ def _capabilities_schemas_section(engine: "WorldEngine", ctx) -> dict[str, Any]:
     force_source_fields = ctx.force_source_fields
     emitter_fields = ctx.emitter_fields
     target_query_fields = ctx.target_query_fields
-    target_query_overlay_fields = ctx.target_query_overlay_fields
     inline_target_query_optional_fields = ctx.inline_target_query_optional_fields
     readback_request_fields = ctx.readback_request_fields
     observation_target_fields = ctx.observation_target_fields
@@ -187,7 +185,10 @@ def _capabilities_schemas_section(engine: "WorldEngine", ctx) -> dict[str, Any]:
         "readback_request": {
             "fields": readback_request_fields,
             "allowed_channels": list(READBACK_ALLOWED_CHANNELS),
-            "max_async_window_size": [int(MAX_ASYNC_READBACK_WIDTH), int(MAX_ASYNC_READBACK_HEIGHT)],
+            "max_async_window_size": [
+                int(MAX_ASYNC_READBACK_WIDTH),
+                int(MAX_ASYNC_READBACK_HEIGHT),
+            ],
             "field_types": {
                 "request_id": {"type": "int", "optional": True},
                 "center_x": {"type": "int", "optional": True},

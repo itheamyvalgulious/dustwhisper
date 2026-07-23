@@ -56,8 +56,12 @@ def _add_species_to_capacity(engine: WorldEngine) -> None:
 def _seed_gas_world(engine: WorldEngine, *, seed: int) -> np.ndarray:
     rng = np.random.default_rng(seed)
     engine.flow_velocity[:] = rng.uniform(-1.75, 1.75, size=engine.flow_velocity.shape).astype("f4")
-    engine.ambient_temperature[:] = rng.uniform(-80.0, 240.0, size=engine.ambient_temperature.shape).astype("f4")
-    engine.gas_concentration[:] = rng.uniform(0.0, 1.4, size=engine.gas_concentration.shape).astype("f4")
+    engine.ambient_temperature[:] = rng.uniform(
+        -80.0, 240.0, size=engine.ambient_temperature.shape
+    ).astype("f4")
+    engine.gas_concentration[:] = rng.uniform(0.0, 1.4, size=engine.gas_concentration.shape).astype(
+        "f4"
+    )
     engine.pressure_ping[:] = rng.uniform(-3.0, 3.0, size=engine.pressure_ping.shape).astype("f4")
     engine.force_sources.append(
         ForceSource(
@@ -99,7 +103,9 @@ def _capture_gas_state(engine: WorldEngine) -> dict[str, bytes]:
         "bridge.velocity": engine.bridge.textures["flow_velocity"].read(),
         "bridge.ambient": engine.bridge.textures["ambient_temperature"].read(),
         "bridge.pressure": engine.bridge.textures["pressure_ping"].read(),
-        "bridge.gas": engine.bridge.buffers["gas_concentration"].read(size=engine.gas_concentration.nbytes),
+        "bridge.gas": engine.bridge.buffers["gas_concentration"].read(
+            size=engine.gas_concentration.nbytes
+        ),
         "cpu.velocity": engine.flow_velocity.tobytes(),
         "cpu.ambient": engine.ambient_temperature.tobytes(),
         "cpu.pressure": engine.pressure_ping.tobytes(),
@@ -256,7 +262,9 @@ def test_gpu_gas_candidates_match_legacy_raw_state_exactly(
     assert control_used == (False, False)
     assert candidate_used == (pressure_seed, cooperative_terminal)
     assert len(actual) == len(expected) == 2
-    for frame_index, (expected_frame, actual_frame) in enumerate(zip(expected, actual, strict=True), start=1):
+    for frame_index, (expected_frame, actual_frame) in enumerate(
+        zip(expected, actual, strict=True), start=1
+    ):
         assert actual_frame.keys() == expected_frame.keys()
         for resource_name in expected_frame:
             assert actual_frame[resource_name] == expected_frame[resource_name], (

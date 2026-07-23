@@ -7,17 +7,17 @@ byte-for-byte identical to the previous monolithic implementation.
 
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ._context import build_capabilities_context
-from .meta import _capabilities_meta_section
+from .control import _capabilities_control_section
 from .entities import _capabilities_entities_section
-from .views import _capabilities_views_section
+from .frame import _capabilities_frame_section
+from .meta import _capabilities_meta_section
+from .paging import _capabilities_paging_section
 from .schemas import _capabilities_schemas_section
 from .tables import _capabilities_tables_section
-from .control import _capabilities_control_section
-from .frame import _capabilities_frame_section
-from .paging import _capabilities_paging_section
+from .views import _capabilities_views_section
 
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine

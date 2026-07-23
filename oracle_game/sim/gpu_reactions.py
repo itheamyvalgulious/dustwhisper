@@ -1,29 +1,40 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+import time  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+from contextlib import (
+    contextmanager,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+)
 from dataclasses import dataclass, field
-import time
 from typing import Any
 
 import numpy as np
 
-from oracle_game.gpu import CONSUME_POLICY_IDS, DIRECTION_IDS, typed_material_id
-from oracle_game.sim.gpu_base import GPUPipelineBase
-from oracle_game.sim.shader_loader import build_compute_shader, shader_source
-from oracle_game.sim.gpu_collapse_dirty import (
-    COLLAPSE_STRUCTURE_DIRTY_TILE_COUNT_BUFFER,
-    COLLAPSE_STRUCTURE_DIRTY_TILE_DISPATCH_ARGS_BUFFER,
-    COLLAPSE_STRUCTURE_DIRTY_TILE_LIST_BUFFER,
-    COLLAPSE_STRUCTURE_DIRTY_TILE_MASK_BUFFER,
-    _active_scheduler_gpu_authoritative,
-    _ensure_material_flags_buffer,
-    ensure_collapse_structure_dirty_tile_mask,
-    ensure_collapse_structure_dirty_tile_queue,
-    mark_collapse_structure_dirty_tiles_from_bridge_cell_core,
+from oracle_game.gpu import (  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    CONSUME_POLICY_IDS,
+    DIRECTION_IDS,
+    typed_material_id,
 )
-from oracle_game.types import ForceSource
-from oracle_game.types import CellFlag, Phase, ReactionType
-
+from oracle_game.sim.gpu_base import GPUPipelineBase
+from oracle_game.sim.gpu_collapse_dirty import (
+    COLLAPSE_STRUCTURE_DIRTY_TILE_COUNT_BUFFER,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    COLLAPSE_STRUCTURE_DIRTY_TILE_DISPATCH_ARGS_BUFFER,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    COLLAPSE_STRUCTURE_DIRTY_TILE_LIST_BUFFER,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    COLLAPSE_STRUCTURE_DIRTY_TILE_MASK_BUFFER,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    _ensure_material_flags_buffer,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    ensure_collapse_structure_dirty_tile_mask,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    ensure_collapse_structure_dirty_tile_queue,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    mark_collapse_structure_dirty_tiles_from_bridge_cell_core,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+)
+from oracle_game.sim.shader_loader import (  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    build_compute_shader,
+    shader_source,
+)
+from oracle_game.types import (  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    CellFlag,
+    ForceSource,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    Phase,
+    ReactionType,
+)
 
 LOCAL_SIZE = 8
 MAX_MATERIALS = 256
@@ -157,8 +168,12 @@ class GPUDeferredActionBatch:
     scale_lo: np.ndarray
     scale_hi: np.ndarray
     emitted_lights: np.ndarray = field(default_factory=lambda: np.zeros((0, 8), dtype=np.float32))
-    emitted_material_mask: np.ndarray = field(default_factory=lambda: np.zeros((0, 0), dtype=np.bool_))
-    gpu_local_action_counts: np.ndarray = field(default_factory=lambda: np.zeros((8,), dtype=np.uint32))
+    emitted_material_mask: np.ndarray = field(
+        default_factory=lambda: np.zeros((0, 0), dtype=np.bool_)
+    )
+    gpu_local_action_counts: np.ndarray = field(
+        default_factory=lambda: np.zeros((8,), dtype=np.uint32)
+    )
     formal_gpu_empty: bool = False
 
 
@@ -339,192 +354,184 @@ class GPUReactionResources:
     material_pair_terminal_rule_upload_key: tuple[object, ...] | None = None
 
 
-from oracle_game.sim.gpu_reactions_resources import (
-    _record_profile_pass,
-    _upload_state_profile_scope,
-    _profile_scoped_pass,
-    _ensure_resources,
+from oracle_game.sim.gpu_reactions_bridge import (
+    _append_flow_sources_from_gpu,
+    _apply_flow_sources_to_bridge_velocity,
+    _download_cell_state,
+    _download_deferred_batch,
+    _download_dose_state,
+    _download_gas_state,
+    _load_authoritative_bridge_inputs,
+    _publish_bridge_cell_state,
+    _publish_bridge_dose_state,
+    _publish_bridge_gas_state,
+    _publish_bridge_light_emitters,
+    _unsupported_deferred_action_indices,
 )
-
+from oracle_game.sim.gpu_reactions_cell_pass import (
+    _accumulate_timed_candidate_segment_cell_transient_state,
+    _bind_local_cell_action_output_images,
+    _clear_timed_candidate_local_meta,
+    _copy_current_velocity_to_next_role,
+    _prepare_self_candidate_worklist,
+    _prepare_timed_candidate_worklist,
+    _publish_timed_candidate_cell_state,
+    _run_cell_pass,
+    _run_local_cell_action_pass,
+    _run_material_pair_fused_pass,
+    _run_timed_candidate_action_pass,
+    _scatter_local_cell_action_outputs,
+    _scatter_local_emit_cell_outputs,
+)
 from oracle_game.sim.gpu_reactions_pairings import (
-    run_timed_actions,
-    run_timed_triggers,
-    run_self_triggers,
-    run_self_actions,
-    run_material_material,
-    run_material_gas,
-    run_material_pair_fused,
     _compile_material_pair_plan,
     _compile_material_pair_plan_cached,
     _material_pair_plan_cache_key,
-    run_material_light,
+    _run_formal_guarded_gas_light,
     _run_formal_guarded_material_light,
+    clear_reaction_latches,
     run_gas_gas,
     run_gas_light,
-    _run_formal_guarded_gas_light,
-    clear_reaction_latches,
+    run_material_gas,
+    run_material_light,
+    run_material_material,
+    run_material_pair_fused,
+    run_self_actions,
+    run_self_triggers,
+    run_timed_actions,
+    run_timed_triggers,
 )
-
+from oracle_game.sim.gpu_reactions_resources import (
+    _ensure_resources,
+    _profile_scoped_pass,
+    _record_profile_pass,
+    _upload_state_profile_scope,
+)
+from oracle_game.sim.gpu_reactions_rules import (
+    _cached_used_action_indices_for_material_slots,
+    _cached_used_action_indices_for_pair_rules,
+    _cached_used_action_indices_for_self_rules,
+    _compile_action_buffers,
+    _compile_action_buffers_cached,
+    _compile_gas_action_buffers,
+    _compile_gas_gas_rules,
+    _compile_gas_light_action_buffers,
+    _compile_gas_light_rules,
+    _compile_material_gas_rules,
+    _compile_material_light_packed_descriptors,
+    _compile_material_light_packed_descriptors_cached,
+    _compile_material_light_rules,
+    _compile_material_material_rules,
+    _compile_material_pair_packed_descriptors,
+    _compile_material_pair_packed_descriptors_cached,
+    _compile_material_rule_candidate_masks,
+    _compile_single_gas_gas_rule,
+    _compile_single_gas_light_rule,
+    _compiled_actions_include_emit_light,
+    _compiled_actions_include_emit_material,
+    _compiled_actions_include_flow_sources,
+    _compiled_actions_include_modify_gas,
+    _compiled_actions_may_change_structure,
+    _compiled_actions_require_deferred_outputs,
+    _compiled_modify_gas_layer_mask,
+    _compiled_rules_include_rhs_consume,
+    _compiled_self_rule_flow_source_layers,
+    _empty_rule_candidate_masks,
+    _has_unsupported_consume_policies,
+    _modify_gas_action_requires_cpu_flow_side_effect,
+    _rule_candidate_word_count,
+    _self_rules_require_deferred_hi_outputs,
+    _set_rule_candidate,
+    _used_action_indices,
+    _used_action_indices_for_material_slots,
+    _used_action_indices_for_pair_rules,
+    _used_action_indices_for_self_rules,
+)
 from oracle_game.sim.gpu_reactions_segments import (
-    _active_scheduler_gpu_authoritative,
-    _formal_light_dose_guard_buffer,
-    _build_light_dose_guarded_dispatch_args,
-    _run_light_dose_guarded_dispatch,
     _active_masks_for_cell_reaction_upload,
-    _reaction_state_segment,
+    _active_scheduler_gpu_authoritative,
+    _advance_formal_cell_read_role,
+    _advance_formal_velocity_read_role,
     _bridge_cell_core_read_role_only_load,
-    _formal_reaction_segment_base_key,
-    _formal_reaction_segment_cache_key,
-    _formal_reaction_state_cache_key,
-    _formal_reaction_active_mask_cache_key,
+    _build_light_dose_guarded_dispatch_args,
     _can_use_expanded_active_tile_mask,
-    _formal_reaction_state_cache_active,
-    _formal_segment_batch_active,
-    _formal_terminal_gas_publish_fusion_pending,
-    _formal_state_key_is_before_motion,
+    _cell_role_textures,
+    _clear_formal_external_cell_state,
+    _clear_formal_segment_gas_delta,
+    _clear_reaction_latches_on_bridge,
+    _current_cell_textures,
+    _flush_formal_segment_gas_delta,
     _formal_before_motion_cell_roles_active,
     _formal_cell_read_role,
     _formal_cell_write_role,
-    _set_formal_cell_read_role,
-    _advance_formal_cell_read_role,
-    _reset_formal_cell_read_role,
+    _formal_light_dose_guard_buffer,
+    _formal_reaction_active_mask_cache_key,
+    _formal_reaction_segment_base_key,
+    _formal_reaction_segment_cache_key,
+    _formal_reaction_state_cache_active,
+    _formal_reaction_state_cache_key,
+    _formal_segment_batch_active,
+    _formal_state_key_is_before_motion,
+    _formal_terminal_gas_publish_fusion_pending,
     _formal_velocity_read_role,
     _formal_velocity_write_role,
-    _set_formal_velocity_read_role,
-    _advance_formal_velocity_read_role,
-    _reset_formal_velocity_read_role,
-    _clear_formal_external_cell_state,
-    _cell_role_textures,
-    _current_cell_textures,
+    _load_authoritative_active_masks,
+    _mark_formal_bridge_publish_pending,
     _next_cell_textures,
+    _reaction_state_segment,
+    _reset_formal_cell_read_role,
+    _reset_formal_velocity_read_role,
+    _run_light_dose_guarded_dispatch,
+    _set_formal_cell_read_role,
+    _set_formal_velocity_read_role,
+    _upload_active_masks,
     begin_formal_reaction_segment,
     end_formal_reaction_segment,
-    _mark_formal_bridge_publish_pending,
     flush_formal_reaction_segment,
-    _clear_formal_segment_gas_delta,
-    _flush_formal_segment_gas_delta,
-    _clear_reaction_latches_on_bridge,
-    _upload_active_masks,
-    _load_authoritative_active_masks,
 )
-
-from oracle_game.sim.gpu_reactions_cell_pass import (
-    _run_cell_pass,
-    _run_material_pair_fused_pass,
-    _run_local_cell_action_pass,
-    _run_timed_candidate_action_pass,
-    _prepare_timed_candidate_worklist,
-    _prepare_self_candidate_worklist,
-    _clear_timed_candidate_local_meta,
-    _publish_timed_candidate_cell_state,
-    _accumulate_timed_candidate_segment_cell_transient_state,
-    _bind_local_cell_action_output_images,
-    _scatter_local_cell_action_outputs,
-    _copy_current_velocity_to_next_role,
-    _scatter_local_emit_cell_outputs,
-)
-
 from oracle_game.sim.gpu_reactions_side_effects import (
-    _run_cell_gas_side_effect_pass,
-    _run_cell_gas_action_delta_pass,
-    _run_self_candidate_gas_side_effect_pass,
-    _run_timed_candidate_gas_side_effect_pass,
-    _run_material_light_dose_consume_pass,
-    _run_cell_material_side_effect_pass,
-    _run_timed_candidate_material_side_effect_pass,
     _clear_packed_timed_material_target_worklist,
+    _run_cell_gas_action_delta_pass,
+    _run_cell_gas_side_effect_pass,
+    _run_cell_material_side_effect_pass,
+    _run_material_light_dose_consume_pass,
+    _run_packed_material_target_apply_pass,
     _run_packed_timed_material_side_effect_pass,
     _run_produced_packed_timed_material_side_effect_pass,
-    _run_packed_material_target_apply_pass,
+    _run_self_candidate_gas_side_effect_pass,
+    _run_timed_candidate_gas_side_effect_pass,
+    _run_timed_candidate_material_side_effect_pass,
 )
 from oracle_game.sim.gpu_reactions_timed_self import _run_timed_self_combined_action_pass
-
-from oracle_game.sim.gpu_reactions_bridge import (
-    _load_authoritative_bridge_inputs,
-    _publish_bridge_cell_state,
-    _publish_bridge_gas_state,
-    _publish_bridge_dose_state,
-    _apply_flow_sources_to_bridge_velocity,
-    _publish_bridge_light_emitters,
-    _download_cell_state,
-    _download_gas_state,
-    _download_dose_state,
-    _download_deferred_batch,
-    _unsupported_deferred_action_indices,
-    _append_flow_sources_from_gpu,
-)
-
 from oracle_game.sim.gpu_reactions_transient import (
-    release,
-    _upload_state,
-    _bridge_input_load_requirements,
-    _missing_formal_bridge_input_loads,
-    _record_formal_bridge_inputs_loaded,
-    _transient_clear_requirements,
-    _upload_random_targets,
-    _clear_transient_state,
-    _flow_source_generation_validity_active,
-    _advance_flow_source_generation,
-    _bind_flow_source_generation_output,
-    _clear_segment_transient_state,
-    _begin_formal_segment_meta_lazy_zero,
-    _reset_formal_segment_meta_lazy_zero,
-    _record_formal_segment_cell_meta_in_flags,
-    _ensure_formal_segment_meta_physical_zero,
-    _can_use_terminal_segment_meta_zero,
     _accumulate_segment_cell_transient_state,
-    _upload_local_metadata,
-    _promote_cell_pong_to_ping,
+    _advance_flow_source_generation,
+    _begin_formal_segment_meta_lazy_zero,
+    _bind_flow_source_generation_output,
+    _bridge_input_load_requirements,
+    _can_use_terminal_segment_meta_zero,
+    _clear_segment_transient_state,
+    _clear_transient_state,
+    _copy_bridge_flow_velocity_to_reaction,
     _copy_gas_state,
+    _ensure_formal_segment_meta_physical_zero,
+    _flow_source_generation_validity_active,
+    _missing_formal_bridge_input_loads,
+    _promote_cell_pong_to_ping,
+    _promote_dose_pong_to_ping,
     _promote_gas_pong_to_ping,
     _promote_gas_result,
-    _promote_dose_pong_to_ping,
-    _copy_bridge_flow_velocity_to_reaction,
-    _sync_storage_and_indirect_writes,
+    _record_formal_bridge_inputs_loaded,
+    _record_formal_segment_cell_meta_in_flags,
+    _reset_formal_segment_meta_lazy_zero,
     _sync_compute_writes,
+    _sync_storage_and_indirect_writes,
+    _transient_clear_requirements,
+    _upload_local_metadata,
+    _upload_random_targets,
+    _upload_state,
+    release,
 )
-
-from oracle_game.sim.gpu_reactions_rules import (
-    _compile_action_buffers,
-    _compile_action_buffers_cached,
-    _compiled_actions_include_modify_gas,
-    _compiled_actions_include_flow_sources,
-    _compiled_self_rule_flow_source_layers,
-    _compiled_modify_gas_layer_mask,
-    _compiled_actions_include_emit_material,
-    _compiled_actions_include_emit_light,
-    _compiled_actions_require_deferred_outputs,
-    _self_rules_require_deferred_hi_outputs,
-    _compiled_actions_may_change_structure,
-    _compiled_rules_include_rhs_consume,
-    _compile_gas_action_buffers,
-    _compile_gas_light_action_buffers,
-    _modify_gas_action_requires_cpu_flow_side_effect,
-    _rule_candidate_word_count,
-    _empty_rule_candidate_masks,
-    _set_rule_candidate,
-    _compile_material_rule_candidate_masks,
-    _compile_material_material_rules,
-    _compile_material_gas_rules,
-    _compile_material_light_rules,
-    _compile_material_light_packed_descriptors,
-    _compile_material_light_packed_descriptors_cached,
-    _compile_material_pair_packed_descriptors,
-    _compile_material_pair_packed_descriptors_cached,
-    _compile_gas_gas_rules,
-    _compile_single_gas_gas_rule,
-    _compile_gas_light_rules,
-    _compile_single_gas_light_rule,
-    _used_action_indices,
-    _used_action_indices_for_material_slots,
-    _cached_used_action_indices_for_material_slots,
-    _used_action_indices_for_self_rules,
-    _cached_used_action_indices_for_self_rules,
-    _used_action_indices_for_pair_rules,
-    _cached_used_action_indices_for_pair_rules,
-    _has_unsupported_consume_policies,
-)
-
 
 
 class GPUReactionPipeline(GPUPipelineBase):
@@ -548,7 +555,9 @@ class GPUReactionPipeline(GPUPipelineBase):
         self.random_targets = np.zeros((MAX_MATERIALS,), dtype=np.int32)
         self.random_target_count = 0
         self._used_action_indices_cache: dict[tuple[object, ...], set[int] | None] = {}
-        self._compiled_action_cache: dict[tuple[object, ...], tuple[np.ndarray, np.ndarray] | None] = {}
+        self._compiled_action_cache: dict[
+            tuple[object, ...], tuple[np.ndarray, np.ndarray] | None
+        ] = {}
         self._material_light_packed_descriptor_cache_key: tuple[object, ...] | None = None
         self._material_light_packed_descriptor_cache: np.ndarray | None = None
         self._material_pair_packed_descriptor_cache_key: tuple[object, ...] | None = None
@@ -684,17 +693,15 @@ class GPUReactionPipeline(GPUPipelineBase):
         )
         flow_source_subs = {
             **_SHADER_SUBS,
-            "FLOW_SOURCE_GENERATION_VALIDITY": int(
-                self._flow_source_generation_programs_enabled
-            ),
+            "FLOW_SOURCE_GENERATION_VALIDITY": int(self._flow_source_generation_programs_enabled),
             "FLOW_SOURCE_GENERATION_IMAGE_FORMAT": (
-                "r8ui"
-                if self._flow_source_generation_u8_programs_enabled
-                else "r32ui"
+                "r8ui" if self._flow_source_generation_u8_programs_enabled else "r32ui"
             ),
         }
         self.programs["load_active_cell"] = build_compute_shader(
-            ctx, "reactions/load_active_cell.comp", _SHADER_SUBS,
+            ctx,
+            "reactions/load_active_cell.comp",
+            _SHADER_SUBS,
             includes=["reactions/_active_helper.comp"],
         )
         self.programs["load_expanded_active_tiles"] = build_compute_shader(
@@ -704,38 +711,80 @@ class GPUReactionPipeline(GPUPipelineBase):
             includes=["reactions/_active_helper.comp"],
         )
         self.programs["load_active_gas"] = build_compute_shader(
-            ctx, "reactions/load_active_gas.comp", _SHADER_SUBS,
+            ctx,
+            "reactions/load_active_gas.comp",
+            _SHADER_SUBS,
             includes=["reactions/_active_helper.comp"],
         )
-        self.programs["load_bridge_cell"] = build_compute_shader(ctx, "reactions/load_bridge_cell.comp", _SHADER_SUBS)
-        self.programs["load_bridge_cell_role"] = build_compute_shader(ctx, "reactions/load_bridge_cell_role.comp", _SHADER_SUBS)
-        self.programs["load_bridge_cell_aux"] = build_compute_shader(ctx, "reactions/load_bridge_cell_aux.comp", _SHADER_SUBS)
-        self.programs["load_bridge_cell_aux_role"] = build_compute_shader(ctx, "reactions/load_bridge_cell_aux_role.comp", _SHADER_SUBS)
-        self.programs["load_bridge_gas"] = build_compute_shader(ctx, "reactions/load_bridge_gas.comp", _SHADER_SUBS)
-        self.programs["load_bridge_dose"] = build_compute_shader(ctx, "reactions/load_bridge_dose.comp", _SHADER_SUBS)
-        self.programs["publish_bridge_cell"] = build_compute_shader(ctx, "reactions/publish_bridge_cell.comp", _SHADER_SUBS)
-        self.programs["publish_bridge_gas"] = build_compute_shader(ctx, "reactions/publish_bridge_gas.comp", _SHADER_SUBS)
-        self.programs["publish_bridge_cell_dose"] = build_compute_shader(ctx, "reactions/publish_bridge_cell_dose.comp", _SHADER_SUBS)
-        self.programs["publish_bridge_gas_dose"] = build_compute_shader(ctx, "reactions/publish_bridge_gas_dose.comp", _SHADER_SUBS)
+        self.programs["load_bridge_cell"] = build_compute_shader(
+            ctx, "reactions/load_bridge_cell.comp", _SHADER_SUBS
+        )
+        self.programs["load_bridge_cell_role"] = build_compute_shader(
+            ctx, "reactions/load_bridge_cell_role.comp", _SHADER_SUBS
+        )
+        self.programs["load_bridge_cell_aux"] = build_compute_shader(
+            ctx, "reactions/load_bridge_cell_aux.comp", _SHADER_SUBS
+        )
+        self.programs["load_bridge_cell_aux_role"] = build_compute_shader(
+            ctx, "reactions/load_bridge_cell_aux_role.comp", _SHADER_SUBS
+        )
+        self.programs["load_bridge_gas"] = build_compute_shader(
+            ctx, "reactions/load_bridge_gas.comp", _SHADER_SUBS
+        )
+        self.programs["load_bridge_dose"] = build_compute_shader(
+            ctx, "reactions/load_bridge_dose.comp", _SHADER_SUBS
+        )
+        self.programs["publish_bridge_cell"] = build_compute_shader(
+            ctx, "reactions/publish_bridge_cell.comp", _SHADER_SUBS
+        )
+        self.programs["publish_bridge_gas"] = build_compute_shader(
+            ctx, "reactions/publish_bridge_gas.comp", _SHADER_SUBS
+        )
+        self.programs["publish_bridge_cell_dose"] = build_compute_shader(
+            ctx, "reactions/publish_bridge_cell_dose.comp", _SHADER_SUBS
+        )
+        self.programs["publish_bridge_gas_dose"] = build_compute_shader(
+            ctx, "reactions/publish_bridge_gas_dose.comp", _SHADER_SUBS
+        )
         self.programs["apply_bridge_flow_sources"] = build_compute_shader(
             ctx,
             "reactions/apply_bridge_flow_sources.comp",
             flow_source_subs,
         )
-        self.programs["promote_reaction_cell_state"] = build_compute_shader(ctx, "reactions/promote_reaction_cell_state.comp", _SHADER_SUBS)
-        self.programs["copy_reaction_velocity_state"] = build_compute_shader(ctx, "reactions/copy_reaction_velocity_state.comp", _SHADER_SUBS)
-        self.programs["promote_reaction_gas_state"] = build_compute_shader(ctx, "reactions/promote_reaction_gas_state.comp", _SHADER_SUBS)
-        self.programs["promote_reaction_dose_state"] = build_compute_shader(ctx, "reactions/promote_reaction_dose_state.comp", _SHADER_SUBS)
-        self.programs["copy_bridge_flow_velocity_to_reaction"] = build_compute_shader(ctx, "reactions/copy_bridge_flow_velocity_to_reaction.comp", _SHADER_SUBS)
-        self.programs["publish_bridge_light_emitters"] = build_compute_shader(ctx, "reactions/publish_bridge_light_emitters.comp", _SHADER_SUBS)
-        self.programs["timed_trigger"] = build_compute_shader(ctx, "reactions/timed_trigger.comp", _SHADER_SUBS)
-        self.programs["self_trigger"] = build_compute_shader(ctx, "reactions/self_trigger.comp", _SHADER_SUBS)
+        self.programs["promote_reaction_cell_state"] = build_compute_shader(
+            ctx, "reactions/promote_reaction_cell_state.comp", _SHADER_SUBS
+        )
+        self.programs["copy_reaction_velocity_state"] = build_compute_shader(
+            ctx, "reactions/copy_reaction_velocity_state.comp", _SHADER_SUBS
+        )
+        self.programs["promote_reaction_gas_state"] = build_compute_shader(
+            ctx, "reactions/promote_reaction_gas_state.comp", _SHADER_SUBS
+        )
+        self.programs["promote_reaction_dose_state"] = build_compute_shader(
+            ctx, "reactions/promote_reaction_dose_state.comp", _SHADER_SUBS
+        )
+        self.programs["copy_bridge_flow_velocity_to_reaction"] = build_compute_shader(
+            ctx, "reactions/copy_bridge_flow_velocity_to_reaction.comp", _SHADER_SUBS
+        )
+        self.programs["publish_bridge_light_emitters"] = build_compute_shader(
+            ctx, "reactions/publish_bridge_light_emitters.comp", _SHADER_SUBS
+        )
+        self.programs["timed_trigger"] = build_compute_shader(
+            ctx, "reactions/timed_trigger.comp", _SHADER_SUBS
+        )
+        self.programs["self_trigger"] = build_compute_shader(
+            ctx, "reactions/self_trigger.comp", _SHADER_SUBS
+        )
         self.programs["timed_apply"] = build_compute_shader(
-            ctx, "reactions/timed_apply.comp", _SHADER_SUBS,
+            ctx,
+            "reactions/timed_apply.comp",
+            _SHADER_SUBS,
             includes=["reactions/_common.comp", "reactions/_local_action_output.comp"],
         )
         self.programs["timed_apply_packed"] = build_compute_shader(
-            ctx, "reactions/timed_apply.comp", _SHADER_SUBS,
+            ctx,
+            "reactions/timed_apply.comp",
+            _SHADER_SUBS,
             includes=["reactions/_common.comp", "reactions/_local_action_output_packed.comp"],
         )
         timed_emit_target_subs = {**_SHADER_SUBS, "TIMED_EMIT_TARGET_PRODUCER": 1}
@@ -751,7 +800,9 @@ class GPUReactionPipeline(GPUPipelineBase):
         )
         packed_cell_meta_subs = {**_SHADER_SUBS, "PACK_CELL_META_IN_STATE": 1}
         self.programs["timed_apply_packed_cell_flag_meta"] = build_compute_shader(
-            ctx, "reactions/timed_apply.comp", packed_cell_meta_subs,
+            ctx,
+            "reactions/timed_apply.comp",
+            packed_cell_meta_subs,
             includes=["reactions/_common.comp", "reactions/_local_action_output_packed.comp"],
         )
         timed_emit_target_cell_meta_subs = {
@@ -781,27 +832,39 @@ class GPUReactionPipeline(GPUPipelineBase):
                 "reactions/_local_action_output_packed.comp",
             ],
         )
-        self.programs["clear_timed_candidate_worklist"] = build_compute_shader(ctx, "reactions/clear_timed_candidate_worklist.comp", _SHADER_SUBS)
+        self.programs["clear_timed_candidate_worklist"] = build_compute_shader(
+            ctx, "reactions/clear_timed_candidate_worklist.comp", _SHADER_SUBS
+        )
         self.programs["clear_timed_material_target_worklist"] = build_compute_shader(
             ctx,
             "reactions/clear_timed_material_target_worklist.comp",
             _SHADER_SUBS,
         )
-        self.programs["build_light_dose_guarded_dispatch_args"] = build_compute_shader(ctx, "reactions/build_light_dose_guarded_dispatch_args.comp", _SHADER_SUBS)
-        self.programs["compact_timed_candidates"] = build_compute_shader(ctx, "reactions/compact_timed_candidates.comp", _SHADER_SUBS)
+        self.programs["build_light_dose_guarded_dispatch_args"] = build_compute_shader(
+            ctx, "reactions/build_light_dose_guarded_dispatch_args.comp", _SHADER_SUBS
+        )
+        self.programs["compact_timed_candidates"] = build_compute_shader(
+            ctx, "reactions/compact_timed_candidates.comp", _SHADER_SUBS
+        )
         self.programs["compact_self_candidates"] = build_compute_shader(
             ctx, "reactions/compact_self_candidates.comp", _SHADER_SUBS
         )
         self.programs["timed_apply_candidates"] = build_compute_shader(
-            ctx, "reactions/timed_apply_candidates.comp", _SHADER_SUBS,
+            ctx,
+            "reactions/timed_apply_candidates.comp",
+            _SHADER_SUBS,
             includes=["reactions/_common_no_direct.comp", "reactions/_local_action_output.comp"],
         )
         self.programs["self_apply"] = build_compute_shader(
-            ctx, "reactions/self_apply.comp", _SHADER_SUBS,
+            ctx,
+            "reactions/self_apply.comp",
+            _SHADER_SUBS,
             includes=["reactions/_common_self_apply.comp", "reactions/_local_action_output.comp"],
         )
         self.programs["self_apply_packed"] = build_compute_shader(
-            ctx, "reactions/self_apply.comp", _SHADER_SUBS,
+            ctx,
+            "reactions/self_apply.comp",
+            _SHADER_SUBS,
             includes=[
                 "reactions/_common_self_apply.comp",
                 "reactions/_local_action_output_packed.comp",
@@ -810,7 +873,9 @@ class GPUReactionPipeline(GPUPipelineBase):
         )
         cached_self_state_subs = {**_SHADER_SUBS, "SELF_CACHE_CELL_STATE": 1}
         self.programs["self_apply_packed_cached_cell_state"] = build_compute_shader(
-            ctx, "reactions/self_apply.comp", cached_self_state_subs,
+            ctx,
+            "reactions/self_apply.comp",
+            cached_self_state_subs,
             includes=[
                 "reactions/_common_self_apply.comp",
                 "reactions/_local_action_output_packed.comp",
@@ -818,16 +883,16 @@ class GPUReactionPipeline(GPUPipelineBase):
             ],
         )
         self.programs["self_apply_packed_cell_flag_meta"] = build_compute_shader(
-            ctx, "reactions/self_apply.comp", packed_cell_meta_subs,
+            ctx,
+            "reactions/self_apply.comp",
+            packed_cell_meta_subs,
             includes=[
                 "reactions/_common_self_apply.comp",
                 "reactions/_local_action_output_packed.comp",
                 "reactions/_self_emit_target_output.comp",
             ],
         )
-        self.programs[
-            "self_apply_packed_cell_flag_meta_cached_cell_state"
-        ] = build_compute_shader(
+        self.programs["self_apply_packed_cell_flag_meta_cached_cell_state"] = build_compute_shader(
             ctx,
             "reactions/self_apply.comp",
             {
@@ -842,7 +907,9 @@ class GPUReactionPipeline(GPUPipelineBase):
         )
         sparse_self_subs = {**_SHADER_SUBS, "SELF_SPARSE_INPLACE": 1}
         self.programs["self_apply_packed_sparse"] = build_compute_shader(
-            ctx, "reactions/self_apply.comp", sparse_self_subs,
+            ctx,
+            "reactions/self_apply.comp",
+            sparse_self_subs,
             includes=[
                 "reactions/_common_self_apply.comp",
                 "reactions/_local_action_output.comp",
@@ -854,7 +921,9 @@ class GPUReactionPipeline(GPUPipelineBase):
             "SELF_RULE_DIRECT_ACTION_SPANS": 1,
         }
         self.programs["self_apply_packed_sparse_direct_spans"] = build_compute_shader(
-            ctx, "reactions/self_apply.comp", sparse_self_direct_subs,
+            ctx,
+            "reactions/self_apply.comp",
+            sparse_self_direct_subs,
             includes=[
                 "reactions/_common_self_apply.comp",
                 "reactions/_local_action_output.comp",
@@ -862,7 +931,8 @@ class GPUReactionPipeline(GPUPipelineBase):
             ],
         )
         self.programs["self_apply_packed_sparse_cell_flag_meta"] = build_compute_shader(
-            ctx, "reactions/self_apply.comp",
+            ctx,
+            "reactions/self_apply.comp",
             {**sparse_self_subs, "PACK_CELL_META_IN_STATE": 1},
             includes=[
                 "reactions/_common_self_apply.comp",
@@ -870,14 +940,17 @@ class GPUReactionPipeline(GPUPipelineBase):
                 "reactions/_self_sparse_dispatch_io.comp",
             ],
         )
-        self.programs["self_apply_packed_sparse_direct_spans_cell_flag_meta"] = build_compute_shader(
-            ctx, "reactions/self_apply.comp",
-            {**sparse_self_direct_subs, "PACK_CELL_META_IN_STATE": 1},
-            includes=[
-                "reactions/_common_self_apply.comp",
-                "reactions/_local_action_output.comp",
-                "reactions/_self_sparse_dispatch_io.comp",
-            ],
+        self.programs["self_apply_packed_sparse_direct_spans_cell_flag_meta"] = (
+            build_compute_shader(
+                ctx,
+                "reactions/self_apply.comp",
+                {**sparse_self_direct_subs, "PACK_CELL_META_IN_STATE": 1},
+                includes=[
+                    "reactions/_common_self_apply.comp",
+                    "reactions/_local_action_output.comp",
+                    "reactions/_self_sparse_dispatch_io.comp",
+                ],
+            )
         )
         direct_self_span_subs = {
             **_SHADER_SUBS,
@@ -893,9 +966,7 @@ class GPUReactionPipeline(GPUPipelineBase):
                 "reactions/_self_emit_target_output.comp",
             ],
         )
-        self.programs[
-            "self_apply_packed_direct_spans_cached_cell_state"
-        ] = build_compute_shader(
+        self.programs["self_apply_packed_direct_spans_cached_cell_state"] = build_compute_shader(
             ctx,
             "reactions/self_apply.comp",
             {
@@ -922,24 +993,26 @@ class GPUReactionPipeline(GPUPipelineBase):
                 "reactions/_self_emit_target_output.comp",
             ],
         )
-        self.programs[
-            "self_apply_packed_direct_spans_cell_flag_meta_cached_cell_state"
-        ] = build_compute_shader(
-            ctx,
-            "reactions/self_apply.comp",
-            {
-                **direct_self_span_cell_meta_subs,
-                "SELF_CACHE_CELL_STATE": 1,
-            },
-            includes=[
-                "reactions/_common_self_apply.comp",
-                "reactions/_local_action_output_packed.comp",
-                "reactions/_self_emit_target_output.comp",
-            ],
+        self.programs["self_apply_packed_direct_spans_cell_flag_meta_cached_cell_state"] = (
+            build_compute_shader(
+                ctx,
+                "reactions/self_apply.comp",
+                {
+                    **direct_self_span_cell_meta_subs,
+                    "SELF_CACHE_CELL_STATE": 1,
+                },
+                includes=[
+                    "reactions/_common_self_apply.comp",
+                    "reactions/_local_action_output_packed.comp",
+                    "reactions/_self_emit_target_output.comp",
+                ],
+            )
         )
         fused_self_subs = {**flow_source_subs, "SELF_FUSED_GAS_OUTPUT": 1}
         self.programs["self_apply_packed_fused_gas"] = build_compute_shader(
-            ctx, "reactions/self_apply.comp", fused_self_subs,
+            ctx,
+            "reactions/self_apply.comp",
+            fused_self_subs,
             includes=[
                 "reactions/_common_self_apply.comp",
                 "reactions/_local_action_output_packed.comp",
@@ -947,9 +1020,7 @@ class GPUReactionPipeline(GPUPipelineBase):
                 "reactions/_self_fused_gas_output.comp",
             ],
         )
-        self.programs[
-            "self_apply_packed_fused_gas_cached_cell_state"
-        ] = build_compute_shader(
+        self.programs["self_apply_packed_fused_gas_cached_cell_state"] = build_compute_shader(
             ctx,
             "reactions/self_apply.comp",
             {
@@ -968,7 +1039,9 @@ class GPUReactionPipeline(GPUPipelineBase):
             "PACK_CELL_META_IN_STATE": 1,
         }
         self.programs["self_apply_packed_fused_gas_cell_flag_meta"] = build_compute_shader(
-            ctx, "reactions/self_apply.comp", fused_self_cell_meta_subs,
+            ctx,
+            "reactions/self_apply.comp",
+            fused_self_cell_meta_subs,
             includes=[
                 "reactions/_common_self_apply.comp",
                 "reactions/_local_action_output_packed.comp",
@@ -976,21 +1049,21 @@ class GPUReactionPipeline(GPUPipelineBase):
                 "reactions/_self_fused_gas_output.comp",
             ],
         )
-        self.programs[
-            "self_apply_packed_fused_gas_cell_flag_meta_cached_cell_state"
-        ] = build_compute_shader(
-            ctx,
-            "reactions/self_apply.comp",
-            {
-                **fused_self_cell_meta_subs,
-                "SELF_CACHE_CELL_STATE": 1,
-            },
-            includes=[
-                "reactions/_common_self_apply.comp",
-                "reactions/_local_action_output_packed.comp",
-                "reactions/_self_emit_target_output.comp",
-                "reactions/_self_fused_gas_output.comp",
-            ],
+        self.programs["self_apply_packed_fused_gas_cell_flag_meta_cached_cell_state"] = (
+            build_compute_shader(
+                ctx,
+                "reactions/self_apply.comp",
+                {
+                    **fused_self_cell_meta_subs,
+                    "SELF_CACHE_CELL_STATE": 1,
+                },
+                includes=[
+                    "reactions/_common_self_apply.comp",
+                    "reactions/_local_action_output_packed.comp",
+                    "reactions/_self_emit_target_output.comp",
+                    "reactions/_self_fused_gas_output.comp",
+                ],
+            )
         )
         self.programs["timed_self_apply_combined"] = build_compute_shader(
             ctx,
@@ -1013,37 +1086,83 @@ class GPUReactionPipeline(GPUPipelineBase):
             "reactions/scatter_self_gas_action_delta_candidates.comp",
             flow_source_subs,
         )
-        self.programs["scatter_local_action_outputs"] = build_compute_shader(ctx, "reactions/scatter_local_action_outputs.comp", _SHADER_SUBS)
-        self.programs["scatter_local_action_deferred_meta_outputs"] = build_compute_shader(ctx, "reactions/scatter_local_action_deferred_meta_outputs.comp", _SHADER_SUBS)
-        self.programs["scatter_local_action_tail_outputs"] = build_compute_shader(ctx, "reactions/scatter_local_action_tail_outputs.comp", _SHADER_SUBS)
-        self.programs["scatter_local_emit_cell_outputs"] = build_compute_shader(ctx, "reactions/scatter_local_emit_cell_outputs.comp", _SHADER_SUBS)
-        self.programs["clear_transient_cell_state"] = build_compute_shader(ctx, "reactions/clear_transient_cell_state.comp", _SHADER_SUBS)
-        self.programs["clear_transient_aux_state"] = build_compute_shader(ctx, "reactions/clear_transient_aux_state.comp", _SHADER_SUBS)
-        self.programs["clear_transient_light_counters"] = build_compute_shader(ctx, "reactions/clear_transient_light_counters.comp", _SHADER_SUBS)
-        self.programs["clear_timed_candidate_local_meta"] = build_compute_shader(ctx, "reactions/clear_timed_candidate_local_meta.comp", _SHADER_SUBS)
-        self.programs["clear_transient_emit_material_mask"] = build_compute_shader(ctx, "reactions/clear_transient_emit_material_mask.comp", _SHADER_SUBS)
-        self.programs["clear_transient_emit_material_buffers"] = build_compute_shader(ctx, "reactions/clear_transient_emit_material_buffers.comp", _SHADER_SUBS)
-        self.programs["clear_transient_flow_sources"] = build_compute_shader(ctx, "reactions/clear_transient_flow_sources.comp", _SHADER_SUBS)
+        self.programs["scatter_local_action_outputs"] = build_compute_shader(
+            ctx, "reactions/scatter_local_action_outputs.comp", _SHADER_SUBS
+        )
+        self.programs["scatter_local_action_deferred_meta_outputs"] = build_compute_shader(
+            ctx, "reactions/scatter_local_action_deferred_meta_outputs.comp", _SHADER_SUBS
+        )
+        self.programs["scatter_local_action_tail_outputs"] = build_compute_shader(
+            ctx, "reactions/scatter_local_action_tail_outputs.comp", _SHADER_SUBS
+        )
+        self.programs["scatter_local_emit_cell_outputs"] = build_compute_shader(
+            ctx, "reactions/scatter_local_emit_cell_outputs.comp", _SHADER_SUBS
+        )
+        self.programs["clear_transient_cell_state"] = build_compute_shader(
+            ctx, "reactions/clear_transient_cell_state.comp", _SHADER_SUBS
+        )
+        self.programs["clear_transient_aux_state"] = build_compute_shader(
+            ctx, "reactions/clear_transient_aux_state.comp", _SHADER_SUBS
+        )
+        self.programs["clear_transient_light_counters"] = build_compute_shader(
+            ctx, "reactions/clear_transient_light_counters.comp", _SHADER_SUBS
+        )
+        self.programs["clear_timed_candidate_local_meta"] = build_compute_shader(
+            ctx, "reactions/clear_timed_candidate_local_meta.comp", _SHADER_SUBS
+        )
+        self.programs["clear_transient_emit_material_mask"] = build_compute_shader(
+            ctx, "reactions/clear_transient_emit_material_mask.comp", _SHADER_SUBS
+        )
+        self.programs["clear_transient_emit_material_buffers"] = build_compute_shader(
+            ctx, "reactions/clear_transient_emit_material_buffers.comp", _SHADER_SUBS
+        )
+        self.programs["clear_transient_flow_sources"] = build_compute_shader(
+            ctx, "reactions/clear_transient_flow_sources.comp", _SHADER_SUBS
+        )
         self.programs["clear_transient_flow_source_generations"] = build_compute_shader(
             ctx,
             "reactions/clear_transient_flow_source_generations.comp",
             flow_source_subs,
         )
-        self.programs["clear_segment_cell_transient_state"] = build_compute_shader(ctx, "reactions/clear_segment_cell_transient_state.comp", _SHADER_SUBS)
+        self.programs["clear_segment_cell_transient_state"] = build_compute_shader(
+            ctx, "reactions/clear_segment_cell_transient_state.comp", _SHADER_SUBS
+        )
         self.programs["clear_segment_cell_transient_state_light_counters"] = build_compute_shader(
             ctx,
             "reactions/clear_segment_cell_transient_state.comp",
             {**_SHADER_SUBS, "CLEAR_LIGHT_COUNTERS": 1},
         )
-        self.programs["accumulate_segment_cell_transient_state"] = build_compute_shader(ctx, "reactions/accumulate_segment_cell_transient_state.comp", _SHADER_SUBS)
-        self.programs["accumulate_timed_candidate_segment_cell_transient_state"] = build_compute_shader(ctx, "reactions/accumulate_timed_candidate_segment_cell_transient_state.comp", _SHADER_SUBS)
-        self.programs["cell_material_side_effects"] = build_compute_shader(ctx, "reactions/cell_material_side_effects.comp", _SHADER_SUBS)
-        self.programs["compact_timed_material_targets"] = build_compute_shader(ctx, "reactions/compact_timed_material_targets.comp", _SHADER_SUBS)
-        self.programs["cell_material_side_effects_candidates"] = build_compute_shader(ctx, "reactions/cell_material_side_effects_candidates.comp", _SHADER_SUBS)
-        self.programs["compact_packed_timed_material_targets"] = build_compute_shader(ctx, "reactions/compact_packed_timed_material_targets.comp", _SHADER_SUBS)
-        self.programs["cell_material_side_effects_packed_targets"] = build_compute_shader(ctx, "reactions/cell_material_side_effects_packed_targets.comp", _SHADER_SUBS)
-        self.programs["build_packed_material_target_dispatch"] = build_compute_shader(ctx, "reactions/build_packed_material_target_dispatch.comp", _SHADER_SUBS)
-        self.programs["clear_cell_gas_delta"] = build_compute_shader(ctx, "reactions/clear_cell_gas_delta.comp", _SHADER_SUBS)
+        self.programs["accumulate_segment_cell_transient_state"] = build_compute_shader(
+            ctx, "reactions/accumulate_segment_cell_transient_state.comp", _SHADER_SUBS
+        )
+        self.programs["accumulate_timed_candidate_segment_cell_transient_state"] = (
+            build_compute_shader(
+                ctx,
+                "reactions/accumulate_timed_candidate_segment_cell_transient_state.comp",
+                _SHADER_SUBS,
+            )
+        )
+        self.programs["cell_material_side_effects"] = build_compute_shader(
+            ctx, "reactions/cell_material_side_effects.comp", _SHADER_SUBS
+        )
+        self.programs["compact_timed_material_targets"] = build_compute_shader(
+            ctx, "reactions/compact_timed_material_targets.comp", _SHADER_SUBS
+        )
+        self.programs["cell_material_side_effects_candidates"] = build_compute_shader(
+            ctx, "reactions/cell_material_side_effects_candidates.comp", _SHADER_SUBS
+        )
+        self.programs["compact_packed_timed_material_targets"] = build_compute_shader(
+            ctx, "reactions/compact_packed_timed_material_targets.comp", _SHADER_SUBS
+        )
+        self.programs["cell_material_side_effects_packed_targets"] = build_compute_shader(
+            ctx, "reactions/cell_material_side_effects_packed_targets.comp", _SHADER_SUBS
+        )
+        self.programs["build_packed_material_target_dispatch"] = build_compute_shader(
+            ctx, "reactions/build_packed_material_target_dispatch.comp", _SHADER_SUBS
+        )
+        self.programs["clear_cell_gas_delta"] = build_compute_shader(
+            ctx, "reactions/clear_cell_gas_delta.comp", _SHADER_SUBS
+        )
         self.programs["scatter_cell_gas_action_delta"] = build_compute_shader(
             ctx,
             "reactions/scatter_cell_gas_action_delta.comp",
@@ -1054,7 +1173,9 @@ class GPUReactionPipeline(GPUPipelineBase):
             "reactions/scatter_cell_gas_action_delta_candidates.comp",
             flow_source_subs,
         )
-        self.programs["apply_cell_gas_delta"] = build_compute_shader(ctx, "reactions/apply_cell_gas_delta.comp", _SHADER_SUBS)
+        self.programs["apply_cell_gas_delta"] = build_compute_shader(
+            ctx, "reactions/apply_cell_gas_delta.comp", _SHADER_SUBS
+        )
         self.programs["apply_cell_gas_delta_publish_bridge"] = build_compute_shader(
             ctx,
             "reactions/apply_cell_gas_delta_publish_bridge.comp",
@@ -1065,14 +1186,22 @@ class GPUReactionPipeline(GPUPipelineBase):
             "reactions/cell_gas_side_effects.comp",
             flow_source_subs,
         )
-        self.programs["material_light_cell_dose_consume"] = build_compute_shader(ctx, "reactions/material_light_cell_dose_consume.comp", _SHADER_SUBS)
-        self.programs["material_light_gas_dose_consume"] = build_compute_shader(ctx, "reactions/material_light_gas_dose_consume.comp", _SHADER_SUBS)
+        self.programs["material_light_cell_dose_consume"] = build_compute_shader(
+            ctx, "reactions/material_light_cell_dose_consume.comp", _SHADER_SUBS
+        )
+        self.programs["material_light_gas_dose_consume"] = build_compute_shader(
+            ctx, "reactions/material_light_gas_dose_consume.comp", _SHADER_SUBS
+        )
         self.programs["material_material"] = build_compute_shader(
-            ctx, "reactions/material_material.comp", _SHADER_SUBS,
+            ctx,
+            "reactions/material_material.comp",
+            _SHADER_SUBS,
             includes=["reactions/_common.comp", "reactions/_lhs_candidate.comp"],
         )
         self.programs["material_material_authoritative_lhs"] = build_compute_shader(
-            ctx, "reactions/material_material.comp", _SHADER_SUBS,
+            ctx,
+            "reactions/material_material.comp",
+            _SHADER_SUBS,
             includes=[
                 "reactions/_common.comp",
                 "reactions/_lhs_candidate.comp",
@@ -1080,11 +1209,15 @@ class GPUReactionPipeline(GPUPipelineBase):
             ],
         )
         self.programs["material_gas"] = build_compute_shader(
-            ctx, "reactions/material_gas.comp", _SHADER_SUBS,
+            ctx,
+            "reactions/material_gas.comp",
+            _SHADER_SUBS,
             includes=["reactions/_common.comp", "reactions/_lhs_candidate.comp"],
         )
         self.programs["material_gas_authoritative_lhs"] = build_compute_shader(
-            ctx, "reactions/material_gas.comp", _SHADER_SUBS,
+            ctx,
+            "reactions/material_gas.comp",
+            _SHADER_SUBS,
             includes=[
                 "reactions/_common.comp",
                 "reactions/_lhs_candidate.comp",
@@ -1096,9 +1229,7 @@ class GPUReactionPipeline(GPUPipelineBase):
             "ENABLE_LIGHT_EMITTER_OUTPUT": 0,
             "MAX_RULES": MAX_RULES * 2 + 1,
             "RULE_I_CAPACITY": MATERIAL_PAIR_RULE_I_ENTRY_COUNT,
-            "MAX_MATERIALS_TIMES_RULE_CANDIDATE_VECS": (
-                MAX_MATERIALS * RULE_CANDIDATE_VECS * 2
-            ),
+            "MAX_MATERIALS_TIMES_RULE_CANDIDATE_VECS": (MAX_MATERIALS * RULE_CANDIDATE_VECS * 2),
         }
         self.programs["material_pair_fused"] = build_compute_shader(
             ctx,
@@ -1142,33 +1273,39 @@ class GPUReactionPipeline(GPUPipelineBase):
             },
             includes=["reactions/_common.comp", "reactions/_lhs_candidate.comp"],
         )
-        self.programs["material_pair_fused_terminal_local16_dirty_fast_shared_transpose"] = build_compute_shader(
-            ctx,
-            "reactions/material_pair_fused.comp",
-            {
-                **material_pair_terminal_subs,
-                "LOCAL_SIZE": 16,
-                "LOCAL_SIZE_X": 16,
-                "LOCAL_SIZE_Y": 16,
-                "MATERIAL_PAIR_TERMINAL_DIRTY_FAST_EQUAL": 1,
-                "MATERIAL_PAIR_TERMINAL_SHARED_TRANSPOSE": 1,
-            },
-            includes=["reactions/_common.comp", "reactions/_lhs_candidate.comp"],
+        self.programs["material_pair_fused_terminal_local16_dirty_fast_shared_transpose"] = (
+            build_compute_shader(
+                ctx,
+                "reactions/material_pair_fused.comp",
+                {
+                    **material_pair_terminal_subs,
+                    "LOCAL_SIZE": 16,
+                    "LOCAL_SIZE_X": 16,
+                    "LOCAL_SIZE_Y": 16,
+                    "MATERIAL_PAIR_TERMINAL_DIRTY_FAST_EQUAL": 1,
+                    "MATERIAL_PAIR_TERMINAL_SHARED_TRANSPOSE": 1,
+                },
+                includes=["reactions/_common.comp", "reactions/_lhs_candidate.comp"],
+            )
         )
-        self.programs["material_pair_fused_terminal_local32x8_dirty_fast_shared_transpose"] = build_compute_shader(
-            ctx,
-            "reactions/material_pair_fused.comp",
-            {
-                **material_pair_terminal_subs,
-                "LOCAL_SIZE": 16,
-                "LOCAL_SIZE_X": 32,
-                "LOCAL_SIZE_Y": 8,
-                "MATERIAL_PAIR_TERMINAL_DIRTY_FAST_EQUAL": 1,
-                "MATERIAL_PAIR_TERMINAL_SHARED_TRANSPOSE": 1,
-            },
-            includes=["reactions/_common.comp", "reactions/_lhs_candidate.comp"],
+        self.programs["material_pair_fused_terminal_local32x8_dirty_fast_shared_transpose"] = (
+            build_compute_shader(
+                ctx,
+                "reactions/material_pair_fused.comp",
+                {
+                    **material_pair_terminal_subs,
+                    "LOCAL_SIZE": 16,
+                    "LOCAL_SIZE_X": 32,
+                    "LOCAL_SIZE_Y": 8,
+                    "MATERIAL_PAIR_TERMINAL_DIRTY_FAST_EQUAL": 1,
+                    "MATERIAL_PAIR_TERMINAL_SHARED_TRANSPOSE": 1,
+                },
+                includes=["reactions/_common.comp", "reactions/_lhs_candidate.comp"],
+            )
         )
-        self.programs["material_pair_fused_terminal_local32x8_dirty_fast_shared_transpose_segment_zero"] = build_compute_shader(
+        self.programs[
+            "material_pair_fused_terminal_local32x8_dirty_fast_shared_transpose_segment_zero"
+        ] = build_compute_shader(
             ctx,
             "reactions/material_pair_fused.comp",
             {
@@ -1188,11 +1325,15 @@ class GPUReactionPipeline(GPUPipelineBase):
             "RULE_I_CAPACITY": MAX_RULES + 1,
         }
         self.programs["material_light"] = build_compute_shader(
-            ctx, "reactions/material_light.comp", material_light_subs,
+            ctx,
+            "reactions/material_light.comp",
+            material_light_subs,
             includes=["reactions/_common.comp", "reactions/_lhs_candidate.comp"],
         )
         self.programs["material_light_authoritative_lhs"] = build_compute_shader(
-            ctx, "reactions/material_light.comp", material_light_subs,
+            ctx,
+            "reactions/material_light.comp",
+            material_light_subs,
             includes=[
                 "reactions/_common.comp",
                 "reactions/_lhs_candidate.comp",
@@ -1280,7 +1421,9 @@ class GPUReactionPipeline(GPUPipelineBase):
     _prepare_self_candidate_worklist = _prepare_self_candidate_worklist
     _clear_timed_candidate_local_meta = _clear_timed_candidate_local_meta
     _publish_timed_candidate_cell_state = _publish_timed_candidate_cell_state
-    _accumulate_timed_candidate_segment_cell_transient_state = _accumulate_timed_candidate_segment_cell_transient_state
+    _accumulate_timed_candidate_segment_cell_transient_state = (
+        _accumulate_timed_candidate_segment_cell_transient_state
+    )
     _bind_local_cell_action_output_images = _bind_local_cell_action_output_images
     _scatter_local_cell_action_outputs = _scatter_local_cell_action_outputs
     _copy_current_velocity_to_next_role = _copy_current_velocity_to_next_role
@@ -1295,7 +1438,9 @@ class GPUReactionPipeline(GPUPipelineBase):
     _run_timed_candidate_material_side_effect_pass = _run_timed_candidate_material_side_effect_pass
     _clear_packed_timed_material_target_worklist = _clear_packed_timed_material_target_worklist
     _run_packed_timed_material_side_effect_pass = _run_packed_timed_material_side_effect_pass
-    _run_produced_packed_timed_material_side_effect_pass = _run_produced_packed_timed_material_side_effect_pass
+    _run_produced_packed_timed_material_side_effect_pass = (
+        _run_produced_packed_timed_material_side_effect_pass
+    )
     _run_packed_material_target_apply_pass = _run_packed_material_target_apply_pass
     _run_timed_self_combined_action_pass = _run_timed_self_combined_action_pass
 
@@ -1354,7 +1499,9 @@ class GPUReactionPipeline(GPUPipelineBase):
     _compiled_rules_include_rhs_consume = _compiled_rules_include_rhs_consume
     _compile_gas_action_buffers = _compile_gas_action_buffers
     _compile_gas_light_action_buffers = _compile_gas_light_action_buffers
-    _modify_gas_action_requires_cpu_flow_side_effect = staticmethod(_modify_gas_action_requires_cpu_flow_side_effect)
+    _modify_gas_action_requires_cpu_flow_side_effect = staticmethod(
+        _modify_gas_action_requires_cpu_flow_side_effect
+    )
     _rule_candidate_word_count = staticmethod(_rule_candidate_word_count)
     _empty_rule_candidate_masks = staticmethod(_empty_rule_candidate_masks)
     _set_rule_candidate = staticmethod(_set_rule_candidate)

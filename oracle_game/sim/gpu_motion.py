@@ -5,11 +5,13 @@ from typing import Any
 
 import numpy as np
 
-from oracle_game.gpu import ISLAND_RUNTIME_DTYPE, pack_island_runtime_upload
+from oracle_game.gpu import (  # noqa: F401  # monkeypatch target in tests
+    ISLAND_RUNTIME_DTYPE,
+    pack_island_runtime_upload,
+)
 from oracle_game.sim.gpu_base import GPUPipelineBase
 from oracle_game.sim.shader_loader import build_compute_shader
 from oracle_game.types import CellFlag
-
 
 LOCAL_SIZE = 8
 POWDER_RESERVATION_LOCAL_SIZE = 64
@@ -118,7 +120,6 @@ def falling_island_reservation_dtype() -> np.dtype:
     return FALLING_ISLAND_RESERVATION_DTYPE
 
 
-
 @dataclass(slots=True)
 class GPUMotionResources:
     signature: tuple[int, ...]
@@ -184,120 +185,118 @@ class GPUMotionResources:
     material_params_signature: tuple[int, int] | None = None
 
 
-
-
-from oracle_game.sim.gpu_motion_resources import (
-    release,
-    _ensure_resources,
-    _write_dynamic_buffer,
-    _ensure_dynamic_buffer_capacity
-)
 from oracle_game.sim.gpu_motion_bridge import (
-    _upload_inputs,
-    _cpu_upload_plan,
-    _record_cpu_upload_plan,
-    _load_authoritative_active_tile_mask,
-    _upload_material_rule_params,
-    _bridge_authoritative_cell_blockers,
-    _bridge_authoritative_powder_inputs,
-    _bind_bridge_cell_blockers,
-    _bridge_authoritative_island_state,
-    _bind_bridge_island_state,
-    _bridge_context_active,
     _active_context,
+    _bind_bridge_cell_blockers,
+    _bind_bridge_island_state,
+    _bridge_authoritative_cell_blockers,
+    _bridge_authoritative_island_state,
+    _bridge_authoritative_powder_inputs,
+    _bridge_context_active,
+    _cpu_upload_plan,
+    _download_outputs,
+    _download_powder_apply_state,
+    _download_velocity_output,
+    _load_authoritative_active_tile_mask,
     _load_authoritative_bridge_inputs,
     _load_authoritative_integrate_inputs,
     _load_authoritative_materialization_inputs,
+    _publish_bridge_island_id,
     _publish_bridge_outputs,
     _publish_bridge_velocity_words,
-    _publish_bridge_island_id,
-    publish_bridge_falling_island_reservations,
-    publish_bridge_powder_reservations,
-    publish_bridge_compact_powder_reservations,
-    publish_bridge_falling_island_runtime_from_reservations,
-    seed_bridge_falling_island_runtime_from_cpu,
-    _download_outputs,
-    _download_velocity_output,
+    _record_cpu_upload_plan,
+    _upload_inputs,
+    _upload_material_rule_params,
     _upload_powder_apply_state,
-    _download_powder_apply_state
+    publish_bridge_compact_powder_reservations,
+    publish_bridge_falling_island_reservations,
+    publish_bridge_falling_island_runtime_from_reservations,
+    publish_bridge_powder_reservations,
+    seed_bridge_falling_island_runtime_from_cpu,
 )
 from oracle_game.sim.gpu_motion_dispatch import (
-    _active_tile_workgroups_per_tile,
     _active_scheduler_gpu_authoritative,
-    _compact_active_tiles,
-    _build_active_tile_count_dispatch_args,
-    _build_falling_island_materialization_candidate_dispatch,
-    _copy_scalar_texture,
-    _swap_powder_apply_textures,
+    _active_tile_workgroups_per_tile,
     _barrier_bits,
-    _run_active_tile_indirect,
-    _refresh_authoritative_active_scheduler_after_apply,
-    _build_powder_reservation_dispatch_args,
-    _run_powder_reservation_indirect,
-    _build_island_reservation_dispatch_args,
-    _run_island_reservation_indirect,
-    _build_island_runtime_dispatch_args,
-    _run_island_runtime_indirect,
-    _build_powder_apply_dispatch,
+    _build_active_tile_count_dispatch_args,
     _build_falling_island_apply_dispatch,
-    _ensure_falling_island_index_capacity,
+    _build_falling_island_materialization_candidate_dispatch,
+    _build_island_reservation_dispatch_args,
+    _build_island_runtime_dispatch_args,
+    _build_powder_apply_dispatch,
+    _build_powder_reservation_dispatch_args,
     _clear_falling_island_index,
+    _compact_active_tiles,
+    _copy_scalar_texture,
+    _ensure_bridge_runtime_planning_capacity,
     _ensure_bridge_runtime_reservation_capacity,
-    _ensure_bridge_runtime_planning_capacity
-)
-from oracle_game.sim.gpu_motion_powder import (
-    _clear_powder_target_winners_for_reservations,
-    _clear_powder_apply_index_for_reservations,
-    _clear_powder_apply_index_for_active_tiles,
-    _run_powder_targets,
-    _run_generate_powder_reservations,
-    plan_powder_reservations,
-    upload_powder_reservations,
-    resolve_and_apply_powders,
-    _dispatch_apply_powder_fast_path,
-    apply_powder_reservations,
-    _dispatch_index_powder_apply,
-    _dispatch_apply_powder_reservations,
-    _powder_direct_apply_is_safe,
-    _read_powder_reservations,
-    materialize_compact_powder_reservations,
-    _build_powder_reservations
+    _ensure_falling_island_index_capacity,
+    _refresh_authoritative_active_scheduler_after_apply,
+    _run_active_tile_indirect,
+    _run_island_reservation_indirect,
+    _run_island_runtime_indirect,
+    _run_powder_reservation_indirect,
+    _swap_powder_apply_textures,
 )
 from oracle_game.sim.gpu_motion_island import (
-    _dispatch_index_falling_island_reservation_sources,
-    _dispatch_index_falling_island_apply,
-    _dispatch_index_falling_island_materialization,
-    apply_falling_island_reservations,
-    apply_uploaded_falling_island_reservations,
-    shed_falling_island_fragments,
-    apply_falling_island_settlements,
-    apply_uploaded_falling_island_settlements,
     _dispatch_apply_falling_island_materialization,
     _dispatch_apply_falling_island_reservations,
-    plan_uploaded_falling_island_reservations,
-    plan_uploaded_falling_island_reservations_from_bridge_runtime,
-    plan_falling_island_reservations,
-    upload_falling_island_reservations,
-    resolve_falling_island_reservations,
-    resolve_uploaded_falling_island_reservations,
+    _dispatch_index_falling_island_apply,
+    _dispatch_index_falling_island_materialization,
+    _dispatch_index_falling_island_reservation_sources,
     _dispatch_resolve_falling_island_reservations,
     _read_falling_island_reservations,
-    resolve_falling_island_shifts
+    apply_falling_island_reservations,
+    apply_falling_island_settlements,
+    apply_uploaded_falling_island_reservations,
+    apply_uploaded_falling_island_settlements,
+    plan_falling_island_reservations,
+    plan_uploaded_falling_island_reservations,
+    plan_uploaded_falling_island_reservations_from_bridge_runtime,
+    resolve_falling_island_reservations,
+    resolve_falling_island_shifts,
+    resolve_uploaded_falling_island_reservations,
+    shed_falling_island_fragments,
+    upload_falling_island_reservations,
 )
 from oracle_game.sim.gpu_motion_island_labeling import (
-    label_falling_island_components,
+    _summarize_falling_island_label_texture,
     label_falling_island_component_metadata,
     label_falling_island_component_metadata_texture,
-    _summarize_falling_island_label_texture,
+    label_falling_island_components,
+    relabel_falling_island_component_texture,
     relabel_falling_island_components,
-    relabel_falling_island_component_texture
+)
+from oracle_game.sim.gpu_motion_powder import (
+    _build_powder_reservations,
+    _clear_powder_apply_index_for_active_tiles,
+    _clear_powder_apply_index_for_reservations,
+    _clear_powder_target_winners_for_reservations,
+    _dispatch_apply_powder_fast_path,
+    _dispatch_apply_powder_reservations,
+    _dispatch_index_powder_apply,
+    _powder_direct_apply_is_safe,
+    _read_powder_reservations,
+    _run_generate_powder_reservations,
+    _run_powder_targets,
+    apply_powder_reservations,
+    materialize_compact_powder_reservations,
+    plan_powder_reservations,
+    resolve_and_apply_powders,
+    upload_powder_reservations,
+)
+from oracle_game.sim.gpu_motion_resources import (
+    _ensure_dynamic_buffer_capacity,
+    _ensure_resources,
+    _write_dynamic_buffer,
+    release,
 )
 from oracle_game.sim.gpu_motion_stages import (
-    step,
-    integrate_velocity,
+    _integrate_reaction_handoff,
     can_consume_deferred_heat_core,
     can_consume_reaction_handoff,
-    _integrate_reaction_handoff,
+    integrate_velocity,
+    step,
 )
 
 
@@ -372,7 +371,6 @@ class GPUMotionPipeline(GPUPipelineBase):
         # normal path remains canonical until redundant motion input setup is
         # validated independently at frame level.
 
-
     def _reset_pass_profile(self) -> None:
         self.last_pass_profile = {"passes": [], "summary": {}}
 
@@ -383,70 +381,158 @@ class GPUMotionPipeline(GPUPipelineBase):
     def _ensure_programs(self, ctx: Any) -> None:
         if self.programs:
             return
-        self.programs["load_active_tiles"] = build_compute_shader(ctx, "motion/load_active_tiles.comp", _SHADER_SUBS)
-        self.programs["clear_active_tile_dispatch"] = build_compute_shader(ctx, "motion/clear_active_tile_dispatch.comp", _SHADER_SUBS)
-        self.programs["compact_active_tiles"] = build_compute_shader(ctx, "motion/compact_active_tiles.comp", _SHADER_SUBS)
-        self.programs["compact_active_tiles_from_chunks"] = build_compute_shader(ctx, "motion/compact_active_tiles_from_chunks.comp", _SHADER_SUBS)
-        self.programs["build_falling_island_materialization_candidate_dispatch"] = build_compute_shader(ctx, "motion/build_falling_island_materialization_candidate_dispatch.comp", _SHADER_SUBS)
-        self.programs["build_powder_reservation_dispatch"] = build_compute_shader(ctx, "motion/build_powder_reservation_dispatch.comp", _SHADER_SUBS)
-        self.programs["build_island_runtime_dispatch"] = build_compute_shader(ctx, "motion/build_island_runtime_dispatch.comp", _SHADER_SUBS)
-        self.programs["clear_powder_affected_tile_dispatch"] = build_compute_shader(ctx, "motion/clear_powder_affected_tile_dispatch.comp", _SHADER_SUBS)
-        self.programs["build_powder_apply_dispatch"] = build_compute_shader(ctx, "motion/build_powder_apply_dispatch.comp", _SHADER_SUBS)
-        self.programs["build_falling_island_apply_dispatch"] = build_compute_shader(ctx, "motion/build_falling_island_apply_dispatch.comp", _SHADER_SUBS)
-        self.programs["clear_powder_target_winners_for_reservations"] = build_compute_shader(ctx, "motion/clear_powder_target_winners_for_reservations.comp", _SHADER_SUBS)
-        self.programs["clear_powder_apply_index_for_reservations"] = build_compute_shader(ctx, "motion/clear_powder_apply_index_for_reservations.comp", _SHADER_SUBS)
-        self.programs["clear_powder_apply_index_for_active_tiles"] = build_compute_shader(ctx, "motion/clear_powder_apply_index_for_active_tiles.comp", _SHADER_SUBS)
-        self.programs["integrate_velocity"] = build_compute_shader(ctx, "motion/integrate_velocity.comp", _SHADER_SUBS)
-        self.programs["integrate_reaction_handoff"] = build_compute_shader(ctx, "motion/integrate_reaction_handoff.comp", _SHADER_SUBS)
-        self.programs["load_bridge_cell"] = build_compute_shader(ctx, "motion/load_bridge_cell.comp", _SHADER_SUBS)
-        self.programs["load_bridge_integrate_inputs"] = build_compute_shader(ctx, "motion/load_bridge_integrate_inputs.comp", _SHADER_SUBS)
-        self.programs["load_bridge_materialization_inputs"] = build_compute_shader(ctx, "motion/load_bridge_materialization_inputs.comp", _SHADER_SUBS)
-        self.programs["load_bridge_cell_aux"] = build_compute_shader(ctx, "motion/load_bridge_cell_aux.comp", _SHADER_SUBS)
-        self.programs["load_bridge_gas"] = build_compute_shader(ctx, "motion/load_bridge_gas.comp", _SHADER_SUBS)
-        self.programs["publish_bridge_cell"] = build_compute_shader(ctx, "motion/publish_bridge_cell.comp", _SHADER_SUBS)
-        self.programs["publish_bridge_velocity_word"] = build_compute_shader(ctx, "motion/publish_bridge_velocity_word.comp", _SHADER_SUBS)
-        self.programs["publish_bridge_island_id"] = build_compute_shader(ctx, "motion/publish_bridge_island_id.comp", _SHADER_SUBS)
-        self.programs["copy_scalar_texture"] = build_compute_shader(ctx, "motion/copy_scalar_texture.comp", _SHADER_SUBS)
-        self.programs["powder_targets"] = build_compute_shader(ctx, "motion/powder_targets.comp", _SHADER_SUBS)
-        self.programs["island_component_init"] = build_compute_shader(ctx, "motion/island_component_init.comp", _SHADER_SUBS)
-        self.programs["island_component_propagate"] = build_compute_shader(ctx, "motion/island_component_propagate.comp", _SHADER_SUBS)
-        self.programs["relabel_falling_island_components"] = build_compute_shader(ctx, "motion/relabel_falling_island_components.comp", _SHADER_SUBS)
-        self.programs["summarize_falling_island_components"] = build_compute_shader(ctx, "motion/summarize_falling_island_components.comp", _SHADER_SUBS)
-        self.programs["island_shifts"] = build_compute_shader(ctx, "motion/island_shifts.comp", _SHADER_SUBS)
-        self.programs["plan_bridge_runtime_falling_island_reservations"] = build_compute_shader(ctx, "motion/plan_bridge_runtime_falling_island_reservations.comp", _SHADER_SUBS)
-        self.programs["pack_falling_island_reservations"] = build_compute_shader(ctx, "motion/pack_falling_island_reservations.comp", _SHADER_SUBS)
-        self.programs["publish_falling_island_runtime"] = build_compute_shader(ctx, "motion/publish_falling_island_runtime.comp", _SHADER_SUBS)
-        self.programs["publish_powder_reservations"] = build_compute_shader(ctx, "motion/publish_powder_reservations.comp", _SHADER_SUBS)
-        self.programs["publish_falling_island_reservations"] = build_compute_shader(ctx, "motion/publish_falling_island_reservations.comp", _SHADER_SUBS)
-        self.programs["unpack_bridge_island_runtime"] = build_compute_shader(ctx, "motion/unpack_bridge_island_runtime.comp", _SHADER_SUBS)
-        self.programs["fill_falling_island_reservation_source_index"] = build_compute_shader(ctx, "motion/fill_falling_island_reservation_source_index.comp", _SHADER_SUBS)
-        self.programs["resolve_falling_island_reservations"] = build_compute_shader(ctx, "motion/resolve_falling_island_reservations.comp", _SHADER_SUBS)
-        self.programs["generate_powder_reservations"] = build_compute_shader(ctx, "motion/generate_powder_reservations.comp", _SHADER_SUBS)
+        self.programs["load_active_tiles"] = build_compute_shader(
+            ctx, "motion/load_active_tiles.comp", _SHADER_SUBS
+        )
+        self.programs["clear_active_tile_dispatch"] = build_compute_shader(
+            ctx, "_shared/clear_active_tile_dispatch.comp", _SHADER_SUBS
+        )
+        self.programs["compact_active_tiles"] = build_compute_shader(
+            ctx, "_shared/compact_active_tiles.comp", _SHADER_SUBS
+        )
+        self.programs["compact_active_tiles_from_chunks"] = build_compute_shader(
+            ctx, "_shared/compact_active_tiles_from_chunks.comp", _SHADER_SUBS
+        )
+        self.programs["build_falling_island_materialization_candidate_dispatch"] = (
+            build_compute_shader(
+                ctx,
+                "motion/build_falling_island_materialization_candidate_dispatch.comp",
+                _SHADER_SUBS,
+            )
+        )
+        self.programs["build_powder_reservation_dispatch"] = build_compute_shader(
+            ctx, "motion/build_powder_reservation_dispatch.comp", _SHADER_SUBS
+        )
+        self.programs["build_island_runtime_dispatch"] = build_compute_shader(
+            ctx, "motion/build_island_runtime_dispatch.comp", _SHADER_SUBS
+        )
+        self.programs["clear_powder_affected_tile_dispatch"] = build_compute_shader(
+            ctx, "motion/clear_powder_affected_tile_dispatch.comp", _SHADER_SUBS
+        )
+        self.programs["build_powder_apply_dispatch"] = build_compute_shader(
+            ctx, "motion/build_powder_apply_dispatch.comp", _SHADER_SUBS
+        )
+        self.programs["build_falling_island_apply_dispatch"] = build_compute_shader(
+            ctx, "motion/build_falling_island_apply_dispatch.comp", _SHADER_SUBS
+        )
+        self.programs["clear_powder_target_winners_for_reservations"] = build_compute_shader(
+            ctx, "motion/clear_powder_target_winners_for_reservations.comp", _SHADER_SUBS
+        )
+        self.programs["clear_powder_apply_index_for_reservations"] = build_compute_shader(
+            ctx, "motion/clear_powder_apply_index_for_reservations.comp", _SHADER_SUBS
+        )
+        self.programs["clear_powder_apply_index_for_active_tiles"] = build_compute_shader(
+            ctx, "motion/clear_powder_apply_index_for_active_tiles.comp", _SHADER_SUBS
+        )
+        self.programs["integrate_velocity"] = build_compute_shader(
+            ctx, "motion/integrate_velocity.comp", _SHADER_SUBS
+        )
+        self.programs["integrate_reaction_handoff"] = build_compute_shader(
+            ctx, "motion/integrate_reaction_handoff.comp", _SHADER_SUBS
+        )
+        self.programs["load_bridge_cell"] = build_compute_shader(
+            ctx, "motion/load_bridge_cell.comp", _SHADER_SUBS
+        )
+        self.programs["load_bridge_integrate_inputs"] = build_compute_shader(
+            ctx, "motion/load_bridge_integrate_inputs.comp", _SHADER_SUBS
+        )
+        self.programs["load_bridge_materialization_inputs"] = build_compute_shader(
+            ctx, "motion/load_bridge_materialization_inputs.comp", _SHADER_SUBS
+        )
+        self.programs["load_bridge_cell_aux"] = build_compute_shader(
+            ctx, "motion/load_bridge_cell_aux.comp", _SHADER_SUBS
+        )
+        self.programs["load_bridge_gas"] = build_compute_shader(
+            ctx, "motion/load_bridge_gas.comp", _SHADER_SUBS
+        )
+        self.programs["publish_bridge_cell"] = build_compute_shader(
+            ctx, "motion/publish_bridge_cell.comp", _SHADER_SUBS
+        )
+        self.programs["publish_bridge_velocity_word"] = build_compute_shader(
+            ctx, "motion/publish_bridge_velocity_word.comp", _SHADER_SUBS
+        )
+        self.programs["publish_bridge_island_id"] = build_compute_shader(
+            ctx, "motion/publish_bridge_island_id.comp", _SHADER_SUBS
+        )
+        self.programs["copy_scalar_texture"] = build_compute_shader(
+            ctx, "motion/copy_scalar_texture.comp", _SHADER_SUBS
+        )
+        self.programs["powder_targets"] = build_compute_shader(
+            ctx, "motion/powder_targets.comp", _SHADER_SUBS
+        )
+        self.programs["island_component_init"] = build_compute_shader(
+            ctx, "motion/island_component_init.comp", _SHADER_SUBS
+        )
+        self.programs["island_component_propagate"] = build_compute_shader(
+            ctx, "motion/island_component_propagate.comp", _SHADER_SUBS
+        )
+        self.programs["relabel_falling_island_components"] = build_compute_shader(
+            ctx, "motion/relabel_falling_island_components.comp", _SHADER_SUBS
+        )
+        self.programs["summarize_falling_island_components"] = build_compute_shader(
+            ctx, "motion/summarize_falling_island_components.comp", _SHADER_SUBS
+        )
+        self.programs["island_shifts"] = build_compute_shader(
+            ctx, "motion/island_shifts.comp", _SHADER_SUBS
+        )
+        self.programs["plan_bridge_runtime_falling_island_reservations"] = build_compute_shader(
+            ctx, "motion/plan_bridge_runtime_falling_island_reservations.comp", _SHADER_SUBS
+        )
+        self.programs["pack_falling_island_reservations"] = build_compute_shader(
+            ctx, "motion/pack_falling_island_reservations.comp", _SHADER_SUBS
+        )
+        self.programs["publish_falling_island_runtime"] = build_compute_shader(
+            ctx, "motion/publish_falling_island_runtime.comp", _SHADER_SUBS
+        )
+        self.programs["publish_powder_reservations"] = build_compute_shader(
+            ctx, "motion/publish_powder_reservations.comp", _SHADER_SUBS
+        )
+        self.programs["publish_falling_island_reservations"] = build_compute_shader(
+            ctx, "motion/publish_falling_island_reservations.comp", _SHADER_SUBS
+        )
+        self.programs["unpack_bridge_island_runtime"] = build_compute_shader(
+            ctx, "motion/unpack_bridge_island_runtime.comp", _SHADER_SUBS
+        )
+        self.programs["fill_falling_island_reservation_source_index"] = build_compute_shader(
+            ctx, "motion/fill_falling_island_reservation_source_index.comp", _SHADER_SUBS
+        )
+        self.programs["resolve_falling_island_reservations"] = build_compute_shader(
+            ctx, "motion/resolve_falling_island_reservations.comp", _SHADER_SUBS
+        )
+        self.programs["generate_powder_reservations"] = build_compute_shader(
+            ctx, "motion/generate_powder_reservations.comp", _SHADER_SUBS
+        )
         self.programs["generate_powder_reservations_compact"] = build_compute_shader(
             ctx,
             "motion/generate_powder_reservations.comp",
             {**_SHADER_SUBS, "POWDER_COMPACT_RESERVATION": 1},
         )
-        self.programs[
-            "generate_powder_reservations_compact_nontrivial_worklist"
-        ] = build_compute_shader(
-            ctx,
-            "motion/generate_powder_reservations.comp",
-            {
-                **_SHADER_SUBS,
-                "POWDER_COMPACT_RESERVATION": 1,
-                "POWDER_NONTRIVIAL_RESOLVE_WORKLIST": 1,
-                "POWDER_SOURCE_TILE_PRODUCER": 1,
-            },
+        self.programs["generate_powder_reservations_compact_nontrivial_worklist"] = (
+            build_compute_shader(
+                ctx,
+                "motion/generate_powder_reservations.comp",
+                {
+                    **_SHADER_SUBS,
+                    "POWDER_COMPACT_RESERVATION": 1,
+                    "POWDER_NONTRIVIAL_RESOLVE_WORKLIST": 1,
+                    "POWDER_SOURCE_TILE_PRODUCER": 1,
+                },
+            )
         )
-        self.programs["clear_powder_target_winners"] = build_compute_shader(ctx, "motion/clear_powder_target_winners.comp", _SHADER_SUBS)
+        self.programs["clear_powder_target_winners"] = build_compute_shader(
+            ctx, "motion/clear_powder_target_winners.comp", _SHADER_SUBS
+        )
         self.programs["clear_powder_target_winners_local64"] = build_compute_shader(
             ctx,
             "motion/clear_powder_target_winners.comp",
             {**_SHADER_SUBS, "POWDER_CLEAR_LOCAL_SIZE": 64},
         )
-        self.programs["index_powder_target_winners"] = build_compute_shader(ctx, "motion/index_powder_target_winners.comp", _SHADER_SUBS)
-        self.programs["resolve_powder_reservations"] = build_compute_shader(ctx, "motion/resolve_powder_reservations.comp", _SHADER_SUBS)
+        self.programs["index_powder_target_winners"] = build_compute_shader(
+            ctx, "motion/index_powder_target_winners.comp", _SHADER_SUBS
+        )
+        self.programs["resolve_powder_reservations"] = build_compute_shader(
+            ctx, "motion/resolve_powder_reservations.comp", _SHADER_SUBS
+        )
         self.programs["resolve_powder_reservations_tile_dedup"] = build_compute_shader(
             ctx,
             "motion/resolve_powder_reservations.comp",
@@ -475,17 +561,17 @@ class GPUMotionPipeline(GPUPipelineBase):
                 "POWDER_APPLY_TILE_WORKGROUP_DEDUP": 1,
             },
         )
-        self.programs[
-            "resolve_powder_reservations_compact_tile_dedup_trivial_blocked"
-        ] = build_compute_shader(
-            ctx,
-            "motion/resolve_powder_reservations.comp",
-            {
-                **_SHADER_SUBS,
-                "POWDER_COMPACT_RESERVATION": 1,
-                "POWDER_APPLY_TILE_WORKGROUP_DEDUP": 1,
-                "POWDER_TRIVIAL_BLOCKED_CLASSIFICATION": 1,
-            },
+        self.programs["resolve_powder_reservations_compact_tile_dedup_trivial_blocked"] = (
+            build_compute_shader(
+                ctx,
+                "motion/resolve_powder_reservations.comp",
+                {
+                    **_SHADER_SUBS,
+                    "POWDER_COMPACT_RESERVATION": 1,
+                    "POWDER_APPLY_TILE_WORKGROUP_DEDUP": 1,
+                    "POWDER_TRIVIAL_BLOCKED_CLASSIFICATION": 1,
+                },
+            )
         )
         self.programs[
             "resolve_powder_reservations_compact_tile_dedup_trivial_blocked_moving_worklist"
@@ -520,19 +606,23 @@ class GPUMotionPipeline(GPUPipelineBase):
             "motion/apply_powder_reservations_source_indexed_direct.comp",
             _SHADER_SUBS,
         )
-        self.programs["apply_powder_reservations_source_indexed_direct_compact"] = build_compute_shader(
-            ctx,
-            "motion/apply_powder_reservations_source_indexed_direct.comp",
-            {**_SHADER_SUBS, "POWDER_COMPACT_RESERVATION": 1},
+        self.programs["apply_powder_reservations_source_indexed_direct_compact"] = (
+            build_compute_shader(
+                ctx,
+                "motion/apply_powder_reservations_source_indexed_direct.comp",
+                {**_SHADER_SUBS, "POWDER_COMPACT_RESERVATION": 1},
+            )
         )
-        self.programs["apply_powder_reservations_source_indexed_direct_compact_lazy"] = build_compute_shader(
-            ctx,
-            "motion/apply_powder_reservations_source_indexed_direct.comp",
-            {
-                **_SHADER_SUBS,
-                "POWDER_COMPACT_RESERVATION": 1,
-                "POWDER_COMPACT_LAZY_EXPAND": 1,
-            },
+        self.programs["apply_powder_reservations_source_indexed_direct_compact_lazy"] = (
+            build_compute_shader(
+                ctx,
+                "motion/apply_powder_reservations_source_indexed_direct.comp",
+                {
+                    **_SHADER_SUBS,
+                    "POWDER_COMPACT_RESERVATION": 1,
+                    "POWDER_COMPACT_LAZY_EXPAND": 1,
+                },
+            )
         )
         self.programs[
             "apply_powder_reservations_source_indexed_direct_compact_lazy_moving_worklist"
@@ -551,20 +641,38 @@ class GPUMotionPipeline(GPUPipelineBase):
             "motion/expand_compact_powder_reservations.comp",
             _SHADER_SUBS,
         )
-        self.programs["clear_powder_apply_index"] = build_compute_shader(ctx, "motion/clear_powder_apply_index.comp", _SHADER_SUBS)
-        self.programs["clear_falling_island_index"] = build_compute_shader(ctx, "motion/clear_falling_island_index.comp", _SHADER_SUBS)
-        self.programs["clear_falling_island_index_for_active_tiles"] = build_compute_shader(ctx, "motion/clear_falling_island_index_for_active_tiles.comp", _SHADER_SUBS)
-        self.programs["clear_falling_island_index_for_reservations"] = build_compute_shader(ctx, "motion/clear_falling_island_index_for_reservations.comp", _SHADER_SUBS)
-        self.programs["fill_falling_island_apply_index"] = build_compute_shader(ctx, "motion/fill_falling_island_apply_index.comp", _SHADER_SUBS)
-        self.programs["fill_falling_island_materialization_index"] = build_compute_shader(ctx, "motion/fill_falling_island_materialization_index.comp", _SHADER_SUBS)
-        self.programs["index_powder_apply_winners"] = build_compute_shader(ctx, "motion/index_powder_apply_winners.comp", _SHADER_SUBS)
+        self.programs["clear_powder_apply_index"] = build_compute_shader(
+            ctx, "motion/clear_powder_apply_index.comp", _SHADER_SUBS
+        )
+        self.programs["clear_falling_island_index"] = build_compute_shader(
+            ctx, "motion/clear_falling_island_index.comp", _SHADER_SUBS
+        )
+        self.programs["clear_falling_island_index_for_active_tiles"] = build_compute_shader(
+            ctx, "motion/clear_falling_island_index_for_active_tiles.comp", _SHADER_SUBS
+        )
+        self.programs["clear_falling_island_index_for_reservations"] = build_compute_shader(
+            ctx, "motion/clear_falling_island_index_for_reservations.comp", _SHADER_SUBS
+        )
+        self.programs["fill_falling_island_apply_index"] = build_compute_shader(
+            ctx, "motion/fill_falling_island_apply_index.comp", _SHADER_SUBS
+        )
+        self.programs["fill_falling_island_materialization_index"] = build_compute_shader(
+            ctx, "motion/fill_falling_island_materialization_index.comp", _SHADER_SUBS
+        )
+        self.programs["index_powder_apply_winners"] = build_compute_shader(
+            ctx, "motion/index_powder_apply_winners.comp", _SHADER_SUBS
+        )
         self.programs["fill_powder_apply_index_legacy"] = build_compute_shader(
             ctx, "motion/fill_powder_apply_index.comp", _SHADER_SUBS
         )
         self.programs["fill_powder_apply_index"] = build_compute_shader(
-            ctx, "motion/fill_powder_apply_index.comp", {**_SHADER_SUBS, "POWDER_APPLY_INDEX_EPOCH": 1}
+            ctx,
+            "motion/fill_powder_apply_index.comp",
+            {**_SHADER_SUBS, "POWDER_APPLY_INDEX_EPOCH": 1},
         )
-        self.programs["apply_powder_fast_path"] = build_compute_shader(ctx, "motion/apply_powder_fast_path.comp", _SHADER_SUBS)
+        self.programs["apply_powder_fast_path"] = build_compute_shader(
+            ctx, "motion/apply_powder_fast_path.comp", _SHADER_SUBS
+        )
         self.programs["apply_powder_reservations_legacy"] = build_compute_shader(
             ctx, "motion/apply_powder_reservations.comp", _SHADER_SUBS
         )
@@ -574,7 +682,9 @@ class GPUMotionPipeline(GPUPipelineBase):
             {**_SHADER_SUBS, "DIRECT_BRIDGE_OUTPUTS": 1},
         )
         self.programs["apply_powder_reservations"] = build_compute_shader(
-            ctx, "motion/apply_powder_reservations.comp", {**_SHADER_SUBS, "POWDER_APPLY_INDEX_EPOCH": 1}
+            ctx,
+            "motion/apply_powder_reservations.comp",
+            {**_SHADER_SUBS, "POWDER_APPLY_INDEX_EPOCH": 1},
         )
         self.programs["apply_powder_reservations_bridge"] = build_compute_shader(
             ctx,
@@ -590,39 +700,53 @@ class GPUMotionPipeline(GPUPipelineBase):
             ctx, "motion/apply_powder_reservation_aux.comp", _SHADER_SUBS
         )
         self.programs["apply_powder_reservation_aux"] = build_compute_shader(
-            ctx, "motion/apply_powder_reservation_aux.comp", {**_SHADER_SUBS, "POWDER_APPLY_INDEX_EPOCH": 1}
+            ctx,
+            "motion/apply_powder_reservation_aux.comp",
+            {**_SHADER_SUBS, "POWDER_APPLY_INDEX_EPOCH": 1},
         )
-        self.programs["apply_falling_island_reservations"] = build_compute_shader(ctx, "motion/apply_falling_island_reservations.comp", _SHADER_SUBS)
+        self.programs["apply_falling_island_reservations"] = build_compute_shader(
+            ctx, "motion/apply_falling_island_reservations.comp", _SHADER_SUBS
+        )
         self.programs["apply_falling_island_reservations_bridge"] = build_compute_shader(
             ctx,
             "motion/apply_falling_island_reservations.comp",
             {**_SHADER_SUBS, "DIRECT_BRIDGE_OUTPUTS": 1},
         )
-        self.programs["apply_falling_island_reservations_bridge_changed_only"] = build_compute_shader(
-            ctx,
-            "motion/apply_falling_island_reservations.comp",
-            {
-                **_SHADER_SUBS,
-                "DIRECT_BRIDGE_OUTPUTS": 1,
-                "ISLAND_APPLY_CHANGED_ONLY": 1,
-            },
+        self.programs["apply_falling_island_reservations_bridge_changed_only"] = (
+            build_compute_shader(
+                ctx,
+                "motion/apply_falling_island_reservations.comp",
+                {
+                    **_SHADER_SUBS,
+                    "DIRECT_BRIDGE_OUTPUTS": 1,
+                    "ISLAND_APPLY_CHANGED_ONLY": 1,
+                },
+            )
         )
-        self.programs["apply_falling_island_reservation_aux"] = build_compute_shader(ctx, "motion/apply_falling_island_reservation_aux.comp", _SHADER_SUBS)
-        self.programs["apply_falling_island_materialization"] = build_compute_shader(ctx, "motion/apply_falling_island_materialization.comp", _SHADER_SUBS)
+        self.programs["apply_falling_island_reservation_aux"] = build_compute_shader(
+            ctx, "motion/apply_falling_island_reservation_aux.comp", _SHADER_SUBS
+        )
+        self.programs["apply_falling_island_materialization"] = build_compute_shader(
+            ctx, "motion/apply_falling_island_materialization.comp", _SHADER_SUBS
+        )
         self.programs["apply_falling_island_materialization_bridge"] = build_compute_shader(
             ctx,
             "motion/apply_falling_island_materialization.comp",
             {**_SHADER_SUBS, "DIRECT_BRIDGE_OUTPUTS": 1},
         )
-        self.programs["apply_falling_island_materialization_bridge_changed_only"] = build_compute_shader(
-            ctx,
-            "motion/apply_falling_island_materialization.comp",
-            {
-                **_SHADER_SUBS,
-                "DIRECT_BRIDGE_OUTPUTS": 2,
-            },
+        self.programs["apply_falling_island_materialization_bridge_changed_only"] = (
+            build_compute_shader(
+                ctx,
+                "motion/apply_falling_island_materialization.comp",
+                {
+                    **_SHADER_SUBS,
+                    "DIRECT_BRIDGE_OUTPUTS": 2,
+                },
+            )
         )
-        self.programs["apply_falling_island_materialization_aux"] = build_compute_shader(ctx, "motion/apply_falling_island_materialization_aux.comp", _SHADER_SUBS)
+        self.programs["apply_falling_island_materialization_aux"] = build_compute_shader(
+            ctx, "motion/apply_falling_island_materialization_aux.comp", _SHADER_SUBS
+        )
 
     release = release
     _ensure_resources = _ensure_resources
@@ -650,7 +774,9 @@ class GPUMotionPipeline(GPUPipelineBase):
     publish_bridge_falling_island_reservations = publish_bridge_falling_island_reservations
     publish_bridge_powder_reservations = publish_bridge_powder_reservations
     publish_bridge_compact_powder_reservations = publish_bridge_compact_powder_reservations
-    publish_bridge_falling_island_runtime_from_reservations = publish_bridge_falling_island_runtime_from_reservations
+    publish_bridge_falling_island_runtime_from_reservations = (
+        publish_bridge_falling_island_runtime_from_reservations
+    )
     seed_bridge_falling_island_runtime_from_cpu = seed_bridge_falling_island_runtime_from_cpu
     _download_outputs = _download_outputs
     _download_velocity_output = _download_velocity_output
@@ -661,12 +787,16 @@ class GPUMotionPipeline(GPUPipelineBase):
     _active_scheduler_gpu_authoritative = _active_scheduler_gpu_authoritative
     _compact_active_tiles = _compact_active_tiles
     _build_active_tile_count_dispatch_args = _build_active_tile_count_dispatch_args
-    _build_falling_island_materialization_candidate_dispatch = _build_falling_island_materialization_candidate_dispatch
+    _build_falling_island_materialization_candidate_dispatch = (
+        _build_falling_island_materialization_candidate_dispatch
+    )
     _copy_scalar_texture = _copy_scalar_texture
     _swap_powder_apply_textures = _swap_powder_apply_textures
     _barrier_bits = _barrier_bits
     _run_active_tile_indirect = _run_active_tile_indirect
-    _refresh_authoritative_active_scheduler_after_apply = _refresh_authoritative_active_scheduler_after_apply
+    _refresh_authoritative_active_scheduler_after_apply = (
+        _refresh_authoritative_active_scheduler_after_apply
+    )
     _build_powder_reservation_dispatch_args = _build_powder_reservation_dispatch_args
     _run_powder_reservation_indirect = _run_powder_reservation_indirect
     _build_island_reservation_dispatch_args = _build_island_reservation_dispatch_args
@@ -697,7 +827,9 @@ class GPUMotionPipeline(GPUPipelineBase):
     materialize_compact_powder_reservations = materialize_compact_powder_reservations
     _build_powder_reservations = _build_powder_reservations
 
-    _dispatch_index_falling_island_reservation_sources = _dispatch_index_falling_island_reservation_sources
+    _dispatch_index_falling_island_reservation_sources = (
+        _dispatch_index_falling_island_reservation_sources
+    )
     _dispatch_index_falling_island_apply = _dispatch_index_falling_island_apply
     _dispatch_index_falling_island_materialization = _dispatch_index_falling_island_materialization
     apply_falling_island_reservations = apply_falling_island_reservations
@@ -708,7 +840,9 @@ class GPUMotionPipeline(GPUPipelineBase):
     _dispatch_apply_falling_island_materialization = _dispatch_apply_falling_island_materialization
     _dispatch_apply_falling_island_reservations = _dispatch_apply_falling_island_reservations
     plan_uploaded_falling_island_reservations = plan_uploaded_falling_island_reservations
-    plan_uploaded_falling_island_reservations_from_bridge_runtime = plan_uploaded_falling_island_reservations_from_bridge_runtime
+    plan_uploaded_falling_island_reservations_from_bridge_runtime = (
+        plan_uploaded_falling_island_reservations_from_bridge_runtime
+    )
     plan_falling_island_reservations = plan_falling_island_reservations
     upload_falling_island_reservations = upload_falling_island_reservations
     resolve_falling_island_reservations = resolve_falling_island_reservations
@@ -719,7 +853,9 @@ class GPUMotionPipeline(GPUPipelineBase):
 
     label_falling_island_components = label_falling_island_components
     label_falling_island_component_metadata = label_falling_island_component_metadata
-    label_falling_island_component_metadata_texture = label_falling_island_component_metadata_texture
+    label_falling_island_component_metadata_texture = (
+        label_falling_island_component_metadata_texture
+    )
     _summarize_falling_island_label_texture = _summarize_falling_island_label_texture
     relabel_falling_island_components = relabel_falling_island_components
     relabel_falling_island_component_texture = relabel_falling_island_component_texture

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict
-from typing import Any, Callable, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable, Iterable
 
 import numpy as np
 
@@ -56,7 +56,9 @@ def _reaction_table_snapshot_payload(engine: "WorldEngine") -> dict[str, object]
     }
 
 
-def _stable_shadow_payload(engine: "WorldEngine", name: str, snapshot_factory: Callable[[], Any]) -> Any:
+def _stable_shadow_payload(
+    engine: "WorldEngine", name: str, snapshot_factory: Callable[[], Any]
+) -> Any:
     payload = engine.bridge.shadow_tables.get(str(name))
     if payload is not None:
         stable = deepcopy(payload)
@@ -76,7 +78,7 @@ def _set_stable_shadow_payload(engine: "WorldEngine", name: str, payload: Any) -
 
 def _shadow_has_table_payload(engine: "WorldEngine", name: str) -> bool:
     if engine.bridge.shadow_tables.get(str(name)) is not None:
-     return True
+        return True
     return engine._stable_shadow_payloads.get(str(name)) is not None
 
 
@@ -104,7 +106,9 @@ def _merged_reaction_table_payload(
     }
 
 
-def _merged_material_table_payload(engine: "WorldEngine", materials: list[MaterialDef]) -> list[dict[str, Any]]:
+def _merged_material_table_payload(
+    engine: "WorldEngine", materials: list[MaterialDef]
+) -> list[dict[str, Any]]:
     base_payload = _shadow_material_payload(engine)
     merged = {int(item["material_id"]): dict(item) for item in base_payload}
     for material in materials:
@@ -112,7 +116,9 @@ def _merged_material_table_payload(engine: "WorldEngine", materials: list[Materi
     return [merged[material_id] for material_id in sorted(merged)]
 
 
-def _merged_gas_species_table_payload(engine: "WorldEngine", gases: list[GasSpeciesDef]) -> list[dict[str, Any]]:
+def _merged_gas_species_table_payload(
+    engine: "WorldEngine", gases: list[GasSpeciesDef]
+) -> list[dict[str, Any]]:
     base_payload = _shadow_gas_species_payload(engine)
     merged = {int(item["species_id"]): dict(item) for item in base_payload}
     for gas in gases:
@@ -120,7 +126,9 @@ def _merged_gas_species_table_payload(engine: "WorldEngine", gases: list[GasSpec
     return [merged[species_id] for species_id in sorted(merged)]
 
 
-def _merged_light_type_table_payload(engine: "WorldEngine", lights: list[LightTypeDef]) -> list[dict[str, Any]]:
+def _merged_light_type_table_payload(
+    engine: "WorldEngine", lights: list[LightTypeDef]
+) -> list[dict[str, Any]]:
     base_payload = _shadow_light_type_payload(engine)
     merged = {int(item["light_type_id"]): dict(item) for item in base_payload}
     for light in lights:
@@ -128,9 +136,15 @@ def _merged_light_type_table_payload(engine: "WorldEngine", lights: list[LightTy
     return [merged[light_id] for light_id in sorted(merged)]
 
 
-def _merged_material_optics_table_payload(engine: "WorldEngine", optics: list[MaterialOpticsDef]) -> list[dict[str, Any]]:
-    base_payload = _stable_shadow_payload(engine, "optics", engine._material_optics_table_snapshot_payload)
-    merged = {(str(item["material_name"]), str(item["light_type"])): dict(item) for item in base_payload}
+def _merged_material_optics_table_payload(
+    engine: "WorldEngine", optics: list[MaterialOpticsDef]
+) -> list[dict[str, Any]]:
+    base_payload = _stable_shadow_payload(
+        engine, "optics", engine._material_optics_table_snapshot_payload
+    )
+    merged = {
+        (str(item["material_name"]), str(item["light_type"])): dict(item) for item in base_payload
+    }
     for entry in optics:
         merged[(str(entry.material_name), str(entry.light_type))] = asdict(entry)
     return [merged[key] for key in sorted(merged)]
@@ -190,7 +204,9 @@ def _validate_unique_identity_fields(
         seen_names.add(item_name)
 
 
-def _validate_material_table_payload(engine: "WorldEngine", materials_payload: list[dict[str, Any]]) -> None:
+def _validate_material_table_payload(
+    engine: "WorldEngine", materials_payload: list[dict[str, Any]]
+) -> None:
     _validate_unique_identity_fields(
         materials_payload,
         id_field="material_id",
@@ -211,15 +227,20 @@ def _validate_material_table_payload(engine: "WorldEngine", materials_payload: l
             for action_index in reaction_slots:
                 if action_index < -1 or action_index >= action_count:
                     raise IndexError(action_index)
-        is_placeholder = str(item.get("render_group", "")) == "placeholder" or "placeholder" in tuple(
-            str(tag) for tag in item.get("tags", ())
-        )
+        is_placeholder = str(
+            item.get("render_group", "")
+        ) == "placeholder" or "placeholder" in tuple(str(tag) for tag in item.get("tags", ()))
         if item_name == "placeholder_solid" or is_placeholder:
             if bool(item.get("is_structural", False)):
                 raise ValueError("placeholder materials cannot be structural")
             if bool(item.get("is_support_anchor", False)):
                 raise ValueError("placeholder materials cannot be support anchors")
-        for field in ("collapse_generation", "powder_generation", "melt_to_material", "freeze_to_material"):
+        for field in (
+            "collapse_generation",
+            "powder_generation",
+            "melt_to_material",
+            "freeze_to_material",
+        ):
             _validate_named_reference(material_names, item.get(field))
         if gas_names:
             _validate_named_reference(gas_names, item.get("boil_to_gas_species"))
@@ -233,7 +254,8 @@ def _validate_material_table_payload(engine: "WorldEngine", materials_payload: l
                 item
                 for item in materials_payload
                 if "chaos_convert" in tuple(str(tag) for tag in item.get("tags", ()))
-                and int(engine._coerce_enum(Phase, item.get("default_phase", Phase.STATIC_SOLID))) == int(Phase.POWDER)
+                and int(engine._coerce_enum(Phase, item.get("default_phase", Phase.STATIC_SOLID)))
+                == int(Phase.POWDER)
             ]
             if not chaos_convert_candidates:
                 raise ValueError(
@@ -241,7 +263,9 @@ def _validate_material_table_payload(engine: "WorldEngine", materials_payload: l
                 )
 
 
-def _validate_gas_species_payload(engine: "WorldEngine", gases_payload: list[dict[str, Any]]) -> None:
+def _validate_gas_species_payload(
+    engine: "WorldEngine", gases_payload: list[dict[str, Any]]
+) -> None:
     air_entries = [item for item in gases_payload if str(item.get("name", "")) == "air"]
     if len(air_entries) != 1:
         raise ValueError("gas table must contain exactly one air species")
@@ -260,7 +284,9 @@ def _validate_gas_species_payload(engine: "WorldEngine", gases_payload: list[dic
         _validate_named_reference(material_names, item.get("condense_to_material"))
 
 
-def _validate_light_type_payload(engine: "WorldEngine", lights_payload: list[dict[str, Any]]) -> None:
+def _validate_light_type_payload(
+    engine: "WorldEngine", lights_payload: list[dict[str, Any]]
+) -> None:
     _validate_unique_identity_fields(
         lights_payload,
         id_field="light_type_id",
@@ -281,7 +307,9 @@ def _validate_light_type_payload(engine: "WorldEngine", lights_payload: list[dic
         seen_dose_channels.add(dose_channel_id)
 
 
-def _validate_material_optics_payload(engine: "WorldEngine", optics_payload: list[dict[str, Any]]) -> None:
+def _validate_material_optics_payload(
+    engine: "WorldEngine", optics_payload: list[dict[str, Any]]
+) -> None:
     material_names = _payload_name_set(_shadow_material_payload(engine))
     light_names = _payload_name_set(_shadow_light_type_payload(engine))
     for item in optics_payload:
@@ -297,7 +325,9 @@ def _validate_reaction_payload(engine: "WorldEngine", reactions_payload: dict[st
     actions_payload = list(reactions_payload.get("actions", []))
     action_count = len(actions_payload) + 1
     for action in actions_payload:
-        reaction_type = engine._coerce_enum(ReactionType, action.get("reaction_type", ReactionType.NONE))
+        reaction_type = engine._coerce_enum(
+            ReactionType, action.get("reaction_type", ReactionType.NONE)
+        )
         if reaction_type == ReactionType.NONE:
             raise ValueError("reaction action 0 is reserved for ReactionType.NONE")
         duration = int(action.get("duration", 0))
@@ -306,27 +336,40 @@ def _validate_reaction_payload(engine: "WorldEngine", reactions_payload: dict[st
         generation = int(action.get("generation", 0))
         if generation != 0:
             raise ValueError("reaction actions do not support non-zero generation")
-        if bool(action.get("allow_subunit_scale", False)) and reaction_type != ReactionType.CONVERT_MATERIAL:
+        if (
+            bool(action.get("allow_subunit_scale", False))
+            and reaction_type != ReactionType.CONVERT_MATERIAL
+        ):
             raise ValueError("allow_subunit_scale is only supported for convert_material actions")
         target_material = action.get("target_material")
         if target_material == "__random__" and reaction_type != ReactionType.CONVERT_MATERIAL:
-            raise ValueError("target_material=__random__ is only supported for convert_material actions")
+            raise ValueError(
+                "target_material=__random__ is only supported for convert_material actions"
+            )
         if target_material is not None and reaction_type != ReactionType.CONVERT_MATERIAL:
             if reaction_type != ReactionType.HARM:
-                raise ValueError("target_material is only supported for convert_material and harm actions")
+                raise ValueError(
+                    "target_material is only supported for convert_material and harm actions"
+                )
         if action.get("emit_material") is not None and reaction_type != ReactionType.EMIT_MATERIAL:
             raise ValueError("emit_material is only supported for emit_material actions")
         if action.get("light_type") is not None and reaction_type != ReactionType.EMIT_LIGHT:
             raise ValueError("light_type is only supported for emit_light actions")
         if action.get("gas_species") is not None and reaction_type != ReactionType.MODIFY_GAS:
             raise ValueError("gas_species is only supported for modify_gas actions")
-        if float(action.get("delta", 0.0)) != 0.0 and reaction_type != ReactionType.MODIFY_TEMPERATURE:
+        if (
+            float(action.get("delta", 0.0)) != 0.0
+            and reaction_type != ReactionType.MODIFY_TEMPERATURE
+        ):
             raise ValueError("delta is only supported for modify_temperature actions")
         if float(action.get("value", 0.0)) != 0.0 and reaction_type != ReactionType.HARM:
             raise ValueError("value is only supported for harm actions")
         velocity_value = action.get("velocity", (0.0, 0.0))
         velocity_xy = tuple(float(component) for component in velocity_value)
-        if any(abs(component) > 1.0e-6 for component in velocity_xy) and reaction_type != ReactionType.EMIT_MATERIAL:
+        if (
+            any(abs(component) > 1.0e-6 for component in velocity_xy)
+            and reaction_type != ReactionType.EMIT_MATERIAL
+        ):
             raise ValueError("velocity is only supported for emit_material actions")
         if float(action.get("beam_width", 1.0)) != 1.0 and reaction_type != ReactionType.EMIT_LIGHT:
             raise ValueError("beam_width is only supported for emit_light actions")
@@ -349,7 +392,10 @@ def _validate_reaction_payload(engine: "WorldEngine", reactions_payload: dict[st
             raise ValueError("emit_light actions require non-negative range_cells")
         if reaction_type == ReactionType.MODIFY_GAS and action.get("gas_species") is None:
             raise ValueError("modify_gas actions require gas_species")
-        if reaction_type == ReactionType.CONVERT_MATERIAL and float(action.get("harm_per_frame", 0.0)) < 0.0:
+        if (
+            reaction_type == ReactionType.CONVERT_MATERIAL
+            and float(action.get("harm_per_frame", 0.0)) < 0.0
+        ):
             raise ValueError("convert_material actions require non-negative harm_per_frame")
     rules_payload = dict(reactions_payload.get("rules", {}))
     for rule_set in PAIR_REACTION_RULE_SET_NAMES:
@@ -382,7 +428,9 @@ def _validate_reaction_payload(engine: "WorldEngine", reactions_payload: dict[st
             if consume_policy not in valid_consume_policies:
                 raise ValueError(f"invalid consume_policy: {consume_policy}")
             if has_trigger_slot and has_result_action:
-                raise ValueError(f"{rule_set} rule cannot define both trigger_slot_index and result_action")
+                raise ValueError(
+                    f"{rule_set} rule cannot define both trigger_slot_index and result_action"
+                )
             if rule_set in {"gas_gas", "gas_light"} and has_trigger_slot:
                 raise ValueError(f"{rule_set} rules cannot use trigger_slot_index")
     for rule in rules_payload.get("self_rules", []):
@@ -401,7 +449,9 @@ def _validate_reaction_payload(engine: "WorldEngine", reactions_payload: dict[st
             if trigger_slot_index >= 4:
                 raise ValueError("untimed self rules cannot define timer_index")
             if timer_index != trigger_slot_index:
-                raise ValueError("self rule timer_index must match trigger_slot_index for timed slots")
+                raise ValueError(
+                    "self rule timer_index must match trigger_slot_index for timed slots"
+                )
         min_temperature = float(rule.get("min_temperature", float("-inf")))
         max_temperature = float(rule.get("max_temperature", float("inf")))
         if min_temperature > max_temperature:
@@ -422,7 +472,11 @@ def _material_placeholder_mask(engine: "WorldEngine", material_id: np.ndarray) -
     return mask
 
 
-def _set_reaction_rule_list(engine: "WorldEngine", rule_set: str, entries: list[dict[str, Any]] | list[PairReactionRule] | list[SelfReactionRule]) -> None:
+def _set_reaction_rule_list(
+    engine: "WorldEngine",
+    rule_set: str,
+    entries: list[dict[str, Any]] | list[PairReactionRule] | list[SelfReactionRule],
+) -> None:
     normalized = str(rule_set)
     if normalized == "self_rules":
         normalized_entries = [engine._coerce_self_reaction_rule(entry) for entry in entries]
@@ -447,7 +501,9 @@ def _set_reaction_rule_list(engine: "WorldEngine", rule_set: str, entries: list[
     raise KeyError(rule_set)
 
 
-def _set_reaction_rules_payload(engine: "WorldEngine", rules_payload: dict[str, list[dict[str, Any]]]) -> None:
+def _set_reaction_rules_payload(
+    engine: "WorldEngine", rules_payload: dict[str, list[dict[str, Any]]]
+) -> None:
     for rule_set in REACTION_RULE_SET_NAMES:
         _set_reaction_rule_list(engine, str(rule_set), list(rules_payload.get(str(rule_set), [])))
 

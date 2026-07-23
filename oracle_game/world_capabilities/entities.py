@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from oracle_game.world_constants import (
     ENTITY_STATE_PATCHABLE_FIELDS,
 )
-
 
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
@@ -281,7 +280,10 @@ def _capabilities_entities_section(engine: "WorldEngine", ctx) -> dict[str, Any]
                 "paging_updates": {"type": "page_stripe_update[]"},
                 "resolved_targets": {"type": "resolved_target{}", "key": "query_id"},
                 "resolved_change_intents": {"type": "resolved_change_intent{}", "key": "intent_id"},
-                "resolved_carrier_intents": {"type": "resolved_carrier_intent{}", "key": "intent_id"},
+                "resolved_carrier_intents": {
+                    "type": "resolved_carrier_intent{}",
+                    "key": "intent_id",
+                },
                 "resolved_commands": {"type": "world_command[]"},
                 "observation_requests": {"type": "readback_request[]"},
                 "readback_requests": {"type": "readback_request[]"},
@@ -332,7 +334,10 @@ def _capabilities_entities_section(engine: "WorldEngine", ctx) -> dict[str, Any]
                 "paging_updates": {"type": "page_stripe_update[]"},
                 "resolved_targets": {"type": "resolved_target{}", "key": "query_id"},
                 "resolved_change_intents": {"type": "resolved_change_intent{}", "key": "intent_id"},
-                "resolved_carrier_intents": {"type": "resolved_carrier_intent{}", "key": "intent_id"},
+                "resolved_carrier_intents": {
+                    "type": "resolved_carrier_intent{}",
+                    "key": "intent_id",
+                },
                 "resolved_commands": {"type": "world_command[]"},
                 "observation_requests": {"type": "readback_request[]"},
                 "observation_plans": {"type": "observation_plan[]"},

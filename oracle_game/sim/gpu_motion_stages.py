@@ -1,35 +1,34 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
-from oracle_game.sim.gpu_motion import (
-    LOCAL_SIZE
-)
 from oracle_game.sim.gpu_collapse_dirty import (
     COLLAPSE_STRUCTURE_DIRTY_TILE_COUNT_BUFFER,
     COLLAPSE_STRUCTURE_DIRTY_TILE_DISPATCH_ARGS_BUFFER,
     COLLAPSE_STRUCTURE_DIRTY_TILE_LIST_BUFFER,
     COLLAPSE_STRUCTURE_DIRTY_TILE_MASK_BUFFER,
-    _active_scheduler_gpu_authoritative as _collapse_active_scheduler_gpu_authoritative,
     _ensure_material_flags_buffer,
     ensure_collapse_structure_dirty_tile_mask,
     ensure_collapse_structure_dirty_tile_queue,
 )
+from oracle_game.sim.gpu_collapse_dirty import (
+    _active_scheduler_gpu_authoritative as _collapse_active_scheduler_gpu_authoritative,
+)
+from oracle_game.sim.gpu_motion import LOCAL_SIZE
 from oracle_game.types import Phase
 
 
 def can_consume_deferred_heat_core(pipeline, world: "WorldEngine") -> bool:
-    if (
-        not pipeline._formal_gpu_frame(world)
-        or world.bridge.ctx is None
-    ):
+    if not pipeline._formal_gpu_frame(world) or world.bridge.ctx is None:
         return False
-    if not pipeline._bridge_context_active(world) or not _collapse_active_scheduler_gpu_authoritative(world):
+    if not pipeline._bridge_context_active(
+        world
+    ) or not _collapse_active_scheduler_gpu_authoritative(world):
         return False
     return (
         ensure_collapse_structure_dirty_tile_mask(world) is not None
@@ -57,7 +56,9 @@ def _terminal_integrated_handoff(world: "WorldEngine") -> tuple[Any, Any] | None
     return reaction_pipeline, heat_pipeline
 
 
-def _finish_terminal_integrated_handoff(pipeline, reaction_pipeline: Any, heat_pipeline: Any) -> None:
+def _finish_terminal_integrated_handoff(
+    pipeline, reaction_pipeline: Any, heat_pipeline: Any
+) -> None:
     reaction_pipeline._motion_handoff_candidate = None
     heat_pipeline._motion_handoff_candidate = None
     heat_pipeline._deferred_cell_core_frame_id = None
@@ -95,9 +96,7 @@ def _integrate_reaction_handoff(
     program["use_cell_state_texture"].value = cell_state is not None
     program["use_base_flags_texture"].value = base_flags is not None
     program["apply_reaction_meta"].value = bool(apply_reaction_meta)
-    program["clear_reaction_latched"].value = bool(
-        pipeline._reaction_latch_handoff_clear_enabled
-    )
+    program["clear_reaction_latched"].value = bool(pipeline._reaction_latch_handoff_clear_enabled)
     material = candidate.get("material")
     phase = candidate.get("phase")
     sampler_fallback = candidate["temp"]
@@ -213,7 +212,9 @@ def integrate_velocity(
         and handoff.get("cell_state") is None
         and handoff.get("base_flags") is None
     ):
-        raise RuntimeError("deferred heat cell core requires packed cell state or a base flags texture")
+        raise RuntimeError(
+            "deferred heat cell core requires packed cell state or a base flags texture"
+        )
     if deferred_heat_core and not use_reaction_handoff:
         raise RuntimeError("deferred heat cell core requires a same-frame motion handoff candidate")
     with pipeline._profile_pass(world, "integrate_load_bridge_inputs"):

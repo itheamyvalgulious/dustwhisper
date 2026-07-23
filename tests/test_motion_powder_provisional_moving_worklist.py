@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import dataclasses
 import inspect
 
 from oracle_game.sim import gpu_motion_dispatch, gpu_motion_powder, gpu_motion_resources
-from oracle_game.sim.gpu_motion import GPUMotionPipeline, _SHADER_SUBS
+from oracle_game.sim.gpu_motion import _SHADER_SUBS, GPUMotionPipeline, GPUMotionResources
 from oracle_game.sim.shader_loader import shader_source
 
 
@@ -68,10 +69,14 @@ def test_powder_source_indexed_apply_dispatches_only_worklist_indices() -> None:
 def test_powder_moving_count_is_a_separate_four_byte_resource() -> None:
     resources_source = inspect.getsource(gpu_motion_resources._ensure_resources)
     release_source = inspect.getsource(gpu_motion_resources.release)
-    dispatch_source = inspect.getsource(
-        gpu_motion_dispatch._build_powder_reservation_dispatch_args
-    )
+    dispatch_source = inspect.getsource(gpu_motion_dispatch._build_powder_reservation_dispatch_args)
 
     assert "powder_provisional_moving_count=ctx.buffer(reserve=4" in resources_source
-    assert "pipeline.resources.powder_provisional_moving_count" in release_source
+    # release() now traverses every GPUMotionResources dataclass field via
+    # release_resource_fields, so field membership is what guarantees the
+    # buffer is released (covered end-to-end by test_gpu_resource_release.py).
+    assert "release_resource_fields(pipeline.resources)" in release_source
+    assert "powder_provisional_moving_count" in {
+        field.name for field in dataclasses.fields(GPUMotionResources)
+    }
     assert "count_buffer: Any | None = None" in dispatch_source

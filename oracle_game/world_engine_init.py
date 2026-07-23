@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from collections import deque
 import threading
-from typing import Any, TYPE_CHECKING
+from collections import deque
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -13,18 +13,26 @@ from oracle_game.paging import RingPagingWindow
 from oracle_game.rules import RuleBook
 from oracle_game.sim.collapse import CollapseSolver
 from oracle_game.sim.gas import GasSolver
+from oracle_game.sim.gpu_merge import GPUMergePipeline
+from oracle_game.sim.gpu_page_stripes import GPUPageStripePipeline
+from oracle_game.sim.gpu_placeholders import GPUPlaceholderPipeline
+from oracle_game.sim.gpu_world_commands import GPUWorldCommandPipeline
 from oracle_game.sim.heat import HeatSolver
 from oracle_game.sim.liquid import LiquidSolver
 from oracle_game.sim.motion import MotionSolver
 from oracle_game.sim.optics import OpticsSolver
-from oracle_game.sim.gpu_placeholders import GPUPlaceholderPipeline
-from oracle_game.sim.gpu_page_stripes import GPUPageStripePipeline
-from oracle_game.sim.gpu_world_commands import GPUWorldCommandPipeline
 from oracle_game.sim.reactions import ReactionSolver
-from oracle_game.sim.gpu_merge import GPUMergePipeline
 from oracle_game.types import (
-    DebugView, EntityPlaceholder, EntityState, ForceSource, PageStripeUpdate,
-    ReadbackRequest, ReadbackResult, WorldCommand, WorldFrameInput, WorldFrameOutput,
+    DebugView,
+    EntityPlaceholder,
+    EntityState,
+    ForceSource,
+    PageStripeUpdate,
+    ReadbackRequest,
+    ReadbackResult,
+    WorldCommand,
+    WorldFrameInput,
+    WorldFrameOutput,
 )
 from oracle_game.world_constants import GPU_REALTIME_BUDGET_CELL_THRESHOLD
 
@@ -54,7 +62,9 @@ def _init_world_engine(
     engine.gas_cell_size = gas_cell_size
     engine.gas_width = max(1, (width + gas_cell_size - 1) // gas_cell_size)
     engine.gas_height = max(1, (height + gas_cell_size - 1) // gas_cell_size)
-    engine.paging = RingPagingWindow(width, height, active_width or width // 2, active_height or height // 2)
+    engine.paging = RingPagingWindow(
+        width, height, active_width or width // 2, active_height or height // 2
+    )
     engine.active = ActiveRegionTracker(width, height)
     engine.rulebook = RuleBook()
     engine.bridge = (
@@ -63,7 +73,9 @@ def _init_world_engine(
         else GPUBridge(ctx=gpu_context)
     )
     if simulation_backend == "gpu" and not engine._gpu_context_available():
-        raise RuntimeError("GPU world simulation requires a ModernGL 4.3+ context; CPU fallback is disabled")
+        raise RuntimeError(
+            "GPU world simulation requires a ModernGL 4.3+ context; CPU fallback is disabled"
+        )
     engine.page_store = InMemoryPageStore() if page_store is None else page_store
     engine.frame_id = 0
     engine.state_lock = threading.RLock()
@@ -131,7 +143,9 @@ def _init_world_engine(
     engine.collapse_delay_pending = np.zeros((height, width), dtype=np.bool_)
 
     engine.flow_velocity = np.zeros((engine.gas_height, engine.gas_width, 2), dtype=np.float32)
-    engine.ambient_temperature = np.full((engine.gas_height, engine.gas_width), 20.0, dtype=np.float32)
+    engine.ambient_temperature = np.full(
+        (engine.gas_height, engine.gas_width), 20.0, dtype=np.float32
+    )
     engine.pressure_ping = np.zeros((engine.gas_height, engine.gas_width), dtype=np.float32)
     engine.gas_concentration = np.zeros((1, engine.gas_height, engine.gas_width), dtype=np.float32)
     engine.visible_illumination = np.zeros((height, width, 3), dtype=np.float32)

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from oracle_game.sim.gpu_heat import GPUHeatPipeline, _SHADER_SUBS
+from oracle_game.sim.gpu_heat import _SHADER_SUBS, GPUHeatPipeline
 from oracle_game.sim.shader_loader import shader_source
 
 

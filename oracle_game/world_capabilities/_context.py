@@ -6,10 +6,10 @@ builders can stay verbatim-faithful to the original monolithic function.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
-from copy import deepcopy
 from oracle_game.readback_contract import READBACK_ALLOWED_CHANNELS
 from oracle_game.world_constants import (
     BASE_MATERIAL_RUNTIME_ALIASES,
@@ -289,7 +289,15 @@ def build_capabilities_context(engine: "WorldEngine") -> "SimpleNamespace":
     gas_window_fields = ["species", "concentration"]
     pressure_window_fields = ["pressure"]
     velocity_window_fields = ["velocity"]
-    optics_window_fields = ["origin", "size", "gas_origin", "gas_size", "visible_illumination", "cell_dose", "gas_dose"]
+    optics_window_fields = [
+        "origin",
+        "size",
+        "gas_origin",
+        "gas_size",
+        "visible_illumination",
+        "cell_dose",
+        "gas_dose",
+    ]
     visible_illumination_fields = ["illumination"]
     debug_frame_fields = ["view", "origin", "size", "gas_species", "light_type", "frame"]
     bridge_runtime_fields = [
@@ -301,7 +309,15 @@ def build_capabilities_context(engine: "WorldEngine") -> "SimpleNamespace":
         "pending_commands",
     ]
     bridge_resource_catalog_fields = ["typed_tables", "shadow_buffers", "snapshots"]
-    bridge_typed_table_fields = ["name", "shape", "dtype", "structured", "field_names", "row_count", "rows"]
+    bridge_typed_table_fields = [
+        "name",
+        "shape",
+        "dtype",
+        "structured",
+        "field_names",
+        "row_count",
+        "rows",
+    ]
     bridge_typed_table_slice_fields = [
         "name",
         "shape",
@@ -315,7 +331,17 @@ def build_capabilities_context(engine: "WorldEngine") -> "SimpleNamespace":
         "slice_shape",
         "rows",
     ]
-    bridge_shadow_buffer_fields = ["name", "shape", "dtype", "structured", "field_names", "row_count", "rows", "values", "utf8"]
+    bridge_shadow_buffer_fields = [
+        "name",
+        "shape",
+        "dtype",
+        "structured",
+        "field_names",
+        "row_count",
+        "rows",
+        "values",
+        "utf8",
+    ]
     bridge_shadow_buffer_slice_fields = [
         "name",
         "shape",
@@ -364,7 +390,12 @@ def build_capabilities_context(engine: "WorldEngine") -> "SimpleNamespace":
         "values",
         "utf8",
     ]
-    bridge_upload_snapshot_fields = ["frame_meta", "world_commands", "readback_requests", "page_stripes"]
+    bridge_upload_snapshot_fields = [
+        "frame_meta",
+        "world_commands",
+        "readback_requests",
+        "page_stripes",
+    ]
     bridge_readback_stage_fields = ["request_id", "stage"]
     bridge_index_stage_fields = ["index", "stage"]
     world_command_material_alias_fields_by_kind = {
@@ -403,7 +434,14 @@ def build_capabilities_context(engine: "WorldEngine") -> "SimpleNamespace":
     ]
     readback_result_fields = ["frame_id", "request", "payload"]
     readback_poll_fields = ["ready", "status", "result"]
-    readback_plan_fields = ["request", "layout", "nbytes", "gpu_source_count", "cpu_chunk_count", "payload"]
+    readback_plan_fields = [
+        "request",
+        "layout",
+        "nbytes",
+        "gpu_source_count",
+        "cpu_chunk_count",
+        "payload",
+    ]
     observation_plan_fields = ["target", *readback_plan_fields]
     readback_channel_payload_types = {
         "cell": "readback_cell_payload",
@@ -513,7 +551,14 @@ def build_capabilities_context(engine: "WorldEngine") -> "SimpleNamespace":
     ]
     observation_result_fields = ["observer_id", "frame_id", "request", "payload"]
     emitter_runtime_fields = ["persistent_emitters", "queued_emitters"]
-    paging_state_fields = ["origin", "buffer_origin", "active_bounds", "buffer_size", "active_size", "stored_stripes"]
+    paging_state_fields = [
+        "origin",
+        "buffer_origin",
+        "active_bounds",
+        "buffer_size",
+        "active_size",
+        "stored_stripes",
+    ]
     pending_commands_fields = ["pending", "commands"]
     entity_observation_runtime_fields = ["observations", "targets", "requests"]
     entity_observation_consume_result_fields = [
@@ -565,8 +610,22 @@ def build_capabilities_context(engine: "WorldEngine") -> "SimpleNamespace":
     speed_result_fields = ["speed"]
     queued_mutation_result_fields = ["ok", "queued", "pending_commands"]
     control_reset_result_fields = ["ok", "queued", "pending_commands"]
-    material_injector_fields = ["x", "y", "material", "radius", "immediate", *inline_target_query_optional_fields]
-    temperature_injector_fields = ["x", "y", "delta", "radius", "immediate", *inline_target_query_optional_fields]
+    material_injector_fields = [
+        "x",
+        "y",
+        "material",
+        "radius",
+        "immediate",
+        *inline_target_query_optional_fields,
+    ]
+    temperature_injector_fields = [
+        "x",
+        "y",
+        "delta",
+        "radius",
+        "immediate",
+        *inline_target_query_optional_fields,
+    ]
     velocity_injector_fields = [
         "x",
         "y",
@@ -577,8 +636,20 @@ def build_capabilities_context(engine: "WorldEngine") -> "SimpleNamespace":
         "immediate",
         *inline_target_query_optional_fields,
     ]
-    gas_injector_fields = ["x", "y", "species", "amount", "radius", "immediate", *inline_target_query_optional_fields]
-    force_injector_fields = [*force_source_fields, "immediate", *inline_target_query_optional_fields]
+    gas_injector_fields = [
+        "x",
+        "y",
+        "species",
+        "amount",
+        "radius",
+        "immediate",
+        *inline_target_query_optional_fields,
+    ]
+    force_injector_fields = [
+        *force_source_fields,
+        "immediate",
+        *inline_target_query_optional_fields,
+    ]
     light_injector_fields = [*emitter_fields, "immediate", *inline_target_query_optional_fields]
     material_patch_fields = ["name", "fields"]
     gas_patch_fields = ["name", "fields"]
@@ -593,7 +664,12 @@ def build_capabilities_context(engine: "WorldEngine") -> "SimpleNamespace":
     lights_table_fields = ["lights"]
     optics_table_fields = ["optics"]
     reactions_table_fields = ["actions", "rules"]
-    gas_species_runtime_fields = ["species_id", "species", "total_concentration", "active_concentration"]
+    gas_species_runtime_fields = [
+        "species_id",
+        "species",
+        "total_concentration",
+        "active_concentration",
+    ]
     heat_phase_target_fields = ["x", "y", "target_material_id", "target_material"]
     heat_boil_target_fields = ["x", "y", "target_species_id", "target_species"]
     heat_condense_target_fields = [
@@ -795,7 +871,13 @@ def build_capabilities_context(engine: "WorldEngine") -> "SimpleNamespace":
         "pending_displaced_count",
         "pending_displaced_cells",
     ]
-    motion_runtime_fields = ["backend", "powder_reservation_count", "island_reservation_count", "powder_reservations", "island_reservations"]
+    motion_runtime_fields = [
+        "backend",
+        "powder_reservation_count",
+        "island_reservation_count",
+        "powder_reservations",
+        "island_reservations",
+    ]
     cell_core_layout_fields = ["word0", "word1", "word2", "word3", "word4"]
     cell_core_unpack_fields = [
         "material_id",
@@ -858,16 +940,8 @@ def build_capabilities_context(engine: "WorldEngine") -> "SimpleNamespace":
         "queued_commands",
         "placeholder_count",
     ]
-    allowed_gas_species = [
-        str(item["name"])
-        for item in gas_payload
-        if item.get("name")
-    ]
-    allowed_lights = [
-        str(item["name"])
-        for item in light_payload
-        if item.get("name")
-    ]
+    allowed_gas_species = [str(item["name"]) for item in gas_payload if item.get("name")]
+    allowed_lights = [str(item["name"]) for item in light_payload if item.get("name")]
     debug_view_parameterized_views = {
         "gas": {
             "query_fields": ["gas_species"],

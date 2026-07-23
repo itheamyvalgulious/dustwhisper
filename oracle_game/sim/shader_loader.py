@@ -32,11 +32,13 @@ Python::
     prog = build_compute_shader(ctx, "gas/advect_velocity.comp",
                                 {"LOCAL_SIZE": LOCAL_SIZE})
 """
+
 from __future__ import annotations
 
-from pathlib import Path
 import re
-from typing import Any, Any as _Ctx  # moderngl Context
+from pathlib import Path
+from typing import Any  # moderngl Context
+from typing import Any as _Ctx
 
 # ``oracle_game/shaders/`` — sibling of the ``sim`` package.
 SHADER_ROOT: Path = Path(__file__).resolve().parent.parent / "shaders"

@@ -3,8 +3,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from oracle_game.sim.gpu_optics import GPUOpticsPipeline, _SHADER_SUBS
 from oracle_game.sim.gpu_motion import GPUMotionPipeline
+from oracle_game.sim.gpu_optics import _SHADER_SUBS, GPUOpticsPipeline
 from oracle_game.sim.shader_loader import shader_source
 from oracle_game.types import CellFlag
 from oracle_game.world import WorldEngine
@@ -49,7 +49,9 @@ def _capture_tile_seeded_optics(
         if not partial:
             engine.bridge.buffers["reaction_light_emitter"].write(reaction_emitters.tobytes())
             engine.bridge.buffers["reaction_light_emitter_count"].write(reaction_counts.tobytes())
-            engine.bridge.mark_gpu_authoritative("reaction_light_emitter", "reaction_light_emitter_count")
+            engine.bridge.mark_gpu_authoritative(
+                "reaction_light_emitter", "reaction_light_emitter_count"
+            )
 
         pipeline._sparse_tile_seeded_build_enabled = candidate
         pipeline._sparse_tile_local_atomic_max_enabled = local_atomic_max
@@ -77,15 +79,15 @@ def _capture_tile_seeded_optics(
             resources = pipeline.resources
             assert resources is not None
             snapshot = {
-                    "light": engine.bridge.textures["light"].read(),
-                    "visible": engine.bridge.textures["visible_illumination"].read(),
-                    "cell_dose": engine.bridge.buffers["cell_optical_dose"].read(),
-                    "gas_dose": engine.bridge.buffers["gas_optical_dose"].read(),
-                    "cell_core": engine.bridge.buffers["cell_core"].read(),
-                    "guard": engine.bridge.buffers["optics_light_dose_guard"].read(),
-                    "cell_accum": resources.cell_dose_accum.read(),
-                    "gas_accum": resources.gas_dose_accum.read(),
-                    "illum_accum": resources.illum_accum.read(),
+                "light": engine.bridge.textures["light"].read(),
+                "visible": engine.bridge.textures["visible_illumination"].read(),
+                "cell_dose": engine.bridge.buffers["cell_optical_dose"].read(),
+                "gas_dose": engine.bridge.buffers["gas_optical_dose"].read(),
+                "cell_core": engine.bridge.buffers["cell_core"].read(),
+                "guard": engine.bridge.buffers["optics_light_dose_guard"].read(),
+                "cell_accum": resources.cell_dose_accum.read(),
+                "gas_accum": resources.gas_dose_accum.read(),
+                "illum_accum": resources.illum_accum.read(),
             }
             if capture_runtime:
                 snapshot["sparse_runtime"] = resources.sparse_runtime.read()

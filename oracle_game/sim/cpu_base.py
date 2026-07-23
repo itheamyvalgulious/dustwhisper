@@ -10,9 +10,10 @@ Phase 3 will add a ``Solver`` base class here codifying the shared lifecycle
 active-scheduler-authoritative" prologue at the top of each ``step``.  For now
 this module holds the one helper that is provably identical across solvers.
 """
+
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 

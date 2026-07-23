@@ -17,9 +17,8 @@ from oracle_game.sim.gpu_collapse_dirty import (
     ensure_collapse_structure_dirty_tile_queue,
 )
 from oracle_game.sim.gpu_reactions import GPUReactionPipeline
-from oracle_game.types import CellFlag, PairReactionRule, Phase, ReactionAction, ReactionType
+from oracle_game.types import CellFlag, PairReactionRule, ReactionAction, ReactionType
 from oracle_game.world import WorldEngine
-
 
 _BRIDGE_BUFFER_NAMES = (
     "cell_core",
@@ -153,12 +152,16 @@ def _prepare_terminal_world(*, width: int = 67, height: int = 67) -> WorldEngine
 
     rng = np.random.default_rng(7731)
     engine.cell_flags.fill(int(CellFlag.PHASE_LOCKED | CellFlag.REACTION_LATCHED))
-    engine.cell_temperature[:] = rng.uniform(-20.0, 140.0, size=engine.cell_temperature.shape).astype("f4")
+    engine.cell_temperature[:] = rng.uniform(
+        -20.0, 140.0, size=engine.cell_temperature.shape
+    ).astype("f4")
     engine.integrity.fill(50.0)
     engine.timer_pack[:] = rng.integers(0, 5, size=engine.timer_pack.shape, dtype=np.uint8)
     engine.velocity[:] = rng.normal(0.0, 0.75, size=engine.velocity.shape).astype("f4")
     engine.flow_velocity[:] = rng.normal(0.0, 0.1, size=engine.flow_velocity.shape).astype("f4")
-    engine.ambient_temperature[:] = rng.uniform(-30.0, 80.0, size=engine.ambient_temperature.shape).astype("f4")
+    engine.ambient_temperature[:] = rng.uniform(
+        -30.0, 80.0, size=engine.ambient_temperature.shape
+    ).astype("f4")
     engine.gas_concentration.fill(0.0)
     engine.gas_concentration[engine.rulebook.gas_id("poison_gas")].fill(0.6)
     magic_light = engine.rulebook.light_id("magic_light")
@@ -168,9 +171,7 @@ def _prepare_terminal_world(*, width: int = 67, height: int = 67) -> WorldEngine
     engine.active.mark_rect(0, 0, engine.width, engine.height)
     for tile_y in range(engine.active.tile_height):
         for tile_x in range(engine.active.tile_width):
-            engine.active.active_tile_ttl[tile_y][tile_x] = (
-                0 if (tile_x, tile_y) == (1, 1) else 3
-            )
+            engine.active.active_tile_ttl[tile_y][tile_x] = 0 if (tile_x, tile_y) == (1, 1) else 3
     engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
     guard = engine.optics_solver.gpu_pipeline._ensure_light_dose_guard(engine)
     guard.write(np.asarray([1, 0, 0, 0], dtype=np.uint32).tobytes())
@@ -195,7 +196,9 @@ def _prepare_terminal_world(*, width: int = 67, height: int = 67) -> WorldEngine
 
 
 def _read_writable_resource(resource: Any) -> bytes | None:
-    if not callable(getattr(resource, "read", None)) or not callable(getattr(resource, "write", None)):
+    if not callable(getattr(resource, "read", None)) or not callable(
+        getattr(resource, "write", None)
+    ):
         return None
     try:
         return resource.read()
@@ -203,7 +206,9 @@ def _read_writable_resource(resource: Any) -> bytes | None:
         return None
 
 
-def _snapshot_resource_fields(resource_owner: Any) -> tuple[dict[str, tuple[Any, bytes]], dict[str, Any]]:
+def _snapshot_resource_fields(
+    resource_owner: Any,
+) -> tuple[dict[str, tuple[Any, bytes]], dict[str, Any]]:
     gpu_payloads: dict[str, tuple[Any, bytes]] = {}
     metadata: dict[str, Any] = {}
     for field in fields(resource_owner):
@@ -222,13 +227,17 @@ def _restore_resource_fields(
 ) -> None:
     gpu_payloads, metadata = snapshot
     for name, (resource, payload) in gpu_payloads.items():
-        assert getattr(resource_owner, name) is resource, f"checkpointed resource {name} was replaced"
+        assert getattr(resource_owner, name) is resource, (
+            f"checkpointed resource {name} was replaced"
+        )
         resource.write(payload)
     for name, value in metadata.items():
         setattr(resource_owner, name, deepcopy(value))
 
 
-def _snapshot_mapping(mapping: dict[str, Any], names: tuple[str, ...]) -> dict[str, tuple[Any, bytes]]:
+def _snapshot_mapping(
+    mapping: dict[str, Any], names: tuple[str, ...]
+) -> dict[str, tuple[Any, bytes]]:
     snapshot: dict[str, tuple[Any, bytes]] = {}
     for name in names:
         resource = mapping.get(name)
@@ -319,7 +328,9 @@ def _capture_terminal_state(engine: WorldEngine) -> dict[str, object]:
         "bridge.active_meta": engine.bridge.buffers["active_meta"].read(),
         "bridge.active_ttl": engine.bridge.buffers["active_tile_ttl"].read(),
         "bridge.active_chunk": engine.bridge.buffers["active_chunk_mask"].read(),
-        "bridge.dirty_mask": engine.bridge.buffers[COLLAPSE_STRUCTURE_DIRTY_TILE_MASK_BUFFER].read(),
+        "bridge.dirty_mask": engine.bridge.buffers[
+            COLLAPSE_STRUCTURE_DIRTY_TILE_MASK_BUFFER
+        ].read(),
         "bridge.dirty_count": dirty_count_raw,
         "bridge.dirty_dispatch": engine.bridge.buffers[
             COLLAPSE_STRUCTURE_DIRTY_TILE_DISPATCH_ARGS_BUFFER
@@ -337,7 +348,8 @@ def _capture_terminal_state(engine: WorldEngine) -> dict[str, object]:
         ),
         "world.dirty_pending": bool(engine._gpu_collapse_structure_dirty_tiles_pending),
         "world.latch_clear_frame": engine._reaction_latches_handoff_cleared_frame_id,
-        "reaction.handoff_consumed": engine.reaction_solver.gpu_pipeline._motion_handoff_candidate is None,
+        "reaction.handoff_consumed": engine.reaction_solver.gpu_pipeline._motion_handoff_candidate
+        is None,
         "motion.cpu_mirror": bool(motion.last_cpu_mirror_downloaded),
     }
 

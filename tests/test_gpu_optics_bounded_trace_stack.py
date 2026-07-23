@@ -5,10 +5,10 @@ from types import SimpleNamespace
 import numpy as np
 
 from oracle_game.sim.gpu_optics import (
+    _SHADER_SUBS,
     BOUNDED_RAY_STACK,
     BOUNDED_RAY_STACK_MAX_BOUNCE,
     GPUOpticsPipeline,
-    _SHADER_SUBS,
 )
 from oracle_game.sim.shader_loader import shader_source
 

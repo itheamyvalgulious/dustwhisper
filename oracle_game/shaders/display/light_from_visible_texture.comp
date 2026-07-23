@@ -1,0 +1,14 @@
+#version 430
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(rgba32f, binding = 0) writeonly uniform image2D light_tex;
+uniform sampler2D visible_tex;
+uniform int width;
+uniform int height;
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    if (pos.x >= width || pos.y >= height) {
+        return;
+    }
+    vec4 light = texelFetch(visible_tex, pos, 0);
+    imageStore(light_tex, pos, vec4(light.rgb, 1.0));
+}

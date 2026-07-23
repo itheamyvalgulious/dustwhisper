@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 from collections import deque
+from typing import TYPE_CHECKING
 
 import numpy as np
 
+if TYPE_CHECKING:
+    from oracle_game.world import WorldEngine
+
 from oracle_game.gpu import ISLAND_RUNTIME_DTYPE
+from oracle_game.sim.cpu_base import material_table_row
 from oracle_game.sim.gpu_collapse import GPUCollapsePipeline
 from oracle_game.sim.gpu_collapse_dirty import (
     has_pending_collapse_structure_dirty_tiles,
     mark_collapse_structure_dirty_tile_regions_on_gpu,
 )
 from oracle_game.types import CollapseBehavior, FallingIslandRecord, Phase
-from oracle_game.sim.cpu_base import material_table_row
-
 
 COLLAPSE_RUNTIME_MASK_RESOURCES = (
     "collapse_structural_mask",
@@ -29,7 +32,9 @@ COLLAPSE_COMPONENT_SNAPSHOT_RESOURCES = (
     "island_runtime",
     "island_runtime_count",
 )
-COLLAPSE_RUNTIME_SNAPSHOT_RESOURCES = COLLAPSE_RUNTIME_MASK_RESOURCES + COLLAPSE_COMPONENT_SNAPSHOT_RESOURCES
+COLLAPSE_RUNTIME_SNAPSHOT_RESOURCES = (
+    COLLAPSE_RUNTIME_MASK_RESOURCES + COLLAPSE_COMPONENT_SNAPSHOT_RESOURCES
+)
 
 
 class CollapseSolver:
@@ -97,7 +102,9 @@ class CollapseSolver:
             world.collapse_dirty_regions.clear()
             world.collapse_deferred_regions.clear()
             self.last_dirty_region_count_before = int(
-                len(dirty_regions) + len(deferred_regions) + (1 if gpu_dirty_tile_queue_pending else 0)
+                len(dirty_regions)
+                + len(deferred_regions)
+                + (1 if gpu_dirty_tile_queue_pending else 0)
             )
             if dirty_regions or deferred_regions:
                 for region in dirty_regions:
@@ -144,7 +151,9 @@ class CollapseSolver:
             queue_was_pending = has_pending_collapse_structure_dirty_tiles(world)
             if dirty_regions:
                 if not mark_collapse_structure_dirty_tile_regions_on_gpu(world, dirty_regions):
-                    raise RuntimeError("formal incremental collapse failed to enqueue CPU dirty regions")
+                    raise RuntimeError(
+                        "formal incremental collapse failed to enqueue CPU dirty regions"
+                    )
                 world.collapse_dirty_regions.clear()
             if deferred_regions:
                 if not mark_collapse_structure_dirty_tile_regions_on_gpu(
@@ -152,7 +161,9 @@ class CollapseSolver:
                     deferred_regions,
                     deferred=True,
                 ):
-                    raise RuntimeError("formal incremental collapse failed to enqueue deferred regions")
+                    raise RuntimeError(
+                        "formal incremental collapse failed to enqueue deferred regions"
+                    )
                 world.collapse_deferred_regions.clear()
             if not has_pending_collapse_structure_dirty_tiles(world):
                 self.last_backend = "idle"
@@ -209,14 +220,18 @@ class CollapseSolver:
             return
         elif gpu_available:
             structural_world = self.gpu_pipeline.classify_world_structural_mask(world)
-            x0, y0, x1, y1 = self._expand_region_to_component_gpu(world, structural_world, x0, y0, x1, y1)
+            x0, y0, x1, y1 = self._expand_region_to_component_gpu(
+                world, structural_world, x0, y0, x1, y1
+            )
         else:
             world._require_cpu_oracle_backend("collapse")
             structural_world = self._world_structural_mask(world)
             x0, y0, x1, y1 = self._expand_region_to_component(structural_world, x0, y0, x1, y1)
         self.last_solve_region_mask[y0:y1, x0:x1] = True
         if gpu_available:
-            structural, support_seed, behavior_region = self.gpu_pipeline.classify_region(world, x0, y0, x1, y1)
+            structural, support_seed, behavior_region = self.gpu_pipeline.classify_region(
+                world, x0, y0, x1, y1
+            )
         else:
             assert structural_world is not None
             structural = structural_world[y0:y1, x0:x1]
@@ -233,7 +248,9 @@ class CollapseSolver:
         self.last_structural_mask[y0:y1, x0:x1] |= structural
         self.last_support_seed_mask[y0:y1, x0:x1] |= support_seed
         if gpu_available:
-            unsupported = self.gpu_pipeline.solve_region(world, structural, support_seed, x0=x0, y0=y0)
+            unsupported = self.gpu_pipeline.solve_region(
+                world, structural, support_seed, x0=x0, y0=y0
+            )
             self.last_backend = "gpu"
         else:
             supported = self._supported_mask_cpu(structural, support_seed)
@@ -243,21 +260,25 @@ class CollapseSolver:
         self.last_supported_mask[y0:y1, x0:x1] |= supported
         self.last_unsupported_mask[y0:y1, x0:x1] |= unsupported
         if gpu_available:
-            delayed_pending, immune_unsupported, collapse_now = self.gpu_pipeline.resolve_unsupported_outcomes(
-                world,
-                unsupported,
-                behavior_region,
-                x0,
-                y0,
+            delayed_pending, immune_unsupported, collapse_now = (
+                self.gpu_pipeline.resolve_unsupported_outcomes(
+                    world,
+                    unsupported,
+                    behavior_region,
+                    x0,
+                    y0,
+                )
             )
         else:
-            delayed_pending, immune_unsupported, collapse_now = self._resolve_unsupported_outcomes_cpu(
-                world,
-                unsupported,
-                behavior_region,
-                x0,
-                y0,
-        )
+            delayed_pending, immune_unsupported, collapse_now = (
+                self._resolve_unsupported_outcomes_cpu(
+                    world,
+                    unsupported,
+                    behavior_region,
+                    x0,
+                    y0,
+                )
+            )
         self.last_delayed_pending_mask[y0:y1, x0:x1] |= delayed_pending
         self.last_immune_unsupported_mask[y0:y1, x0:x1] |= immune_unsupported
         if gpu_available:
@@ -268,7 +289,9 @@ class CollapseSolver:
                 x0,
                 y0,
             )
-            self._queue_deferred_metadata_region(world, delayed_metadata[0] if delayed_metadata.size else None)
+            self._queue_deferred_metadata_region(
+                world, delayed_metadata[0] if delayed_metadata.size else None
+            )
         elif np.any(delayed_pending):
             self._queue_deferred_mask_region(world, delayed_pending, x0, y0)
         if gpu_available:
@@ -291,9 +314,13 @@ class CollapseSolver:
                 formal_event_region = self._align_formal_dirty_region(world, x0, y0, x1, y1)
             else:
                 formal_event_region = self._expand_formal_dirty_region(world, x0, y0, x1, y1)
-            solve_region = self.gpu_pipeline.expand_region_to_component_bbox(world, *formal_event_region)
+            solve_region = self.gpu_pipeline.expand_region_to_component_bbox(
+                world, *formal_event_region
+            )
             solve_x0, solve_y0, solve_x1, solve_y1 = solve_region
-            resource_region = self._formal_connected_resource_region(world, solve_x0, solve_y0, solve_x1, solve_y1)
+            resource_region = self._formal_connected_resource_region(
+                world, solve_x0, solve_y0, solve_x1, solve_y1
+            )
             mark_x0 = max(0, solve_x0 - 1)
             mark_y0 = max(0, solve_y0 - 1)
             mark_x1 = min(int(world.width), solve_x1 + 1)
@@ -310,7 +337,9 @@ class CollapseSolver:
         motion_pipeline = getattr(getattr(world, "motion_solver", None), "gpu_pipeline", None)
         if motion_pipeline is not None:
             motion_pipeline.last_published_island_runtime_capacity = int(component_capacity)
-        has_delayed_behavior = bool(np.any(world.material_collapse_behavior == int(CollapseBehavior.DELAYED)))
+        has_delayed_behavior = bool(
+            np.any(world.material_collapse_behavior == int(CollapseBehavior.DELAYED))
+        )
 
         if not formal_region_from_deferred and has_delayed_behavior:
             world.collapse_deferred_regions.append((solve_x0, solve_y0, solve_x1, solve_y1))
@@ -394,7 +423,9 @@ class CollapseSolver:
         y1 = y0 + unsupported.shape[0]
         x1 = x0 + unsupported.shape[1]
         pending_region = world.collapse_delay_pending[y0:y1, x0:x1]
-        delayed_pending = unsupported & (behavior_region == int(CollapseBehavior.DELAYED)) & ~pending_region
+        delayed_pending = (
+            unsupported & (behavior_region == int(CollapseBehavior.DELAYED)) & ~pending_region
+        )
         immune_unsupported = unsupported & (behavior_region == int(CollapseBehavior.IMMUNE))
         collapse_now = unsupported & (
             (behavior_region == int(CollapseBehavior.FALLING_ISLAND))
@@ -408,7 +439,9 @@ class CollapseSolver:
         return (
             (material_id != 0)
             & (world.phase != int(Phase.FALLING_ISLAND))
-            & self._material_bool_field(world, material_id, "is_structural", world.material_is_structural)
+            & self._material_bool_field(
+                world, material_id, "is_structural", world.material_is_structural
+            )
         )
 
     def _expand_region_to_component(
@@ -430,13 +463,17 @@ class CollapseSolver:
             if x0 > 0 and np.any(structural_world[y0:y1, x0] & structural_world[y0:y1, x0 - 1]):
                 x0 -= 1
                 changed = True
-            if x1 < structural_world.shape[1] and np.any(structural_world[y0:y1, x1 - 1] & structural_world[y0:y1, x1]):
+            if x1 < structural_world.shape[1] and np.any(
+                structural_world[y0:y1, x1 - 1] & structural_world[y0:y1, x1]
+            ):
                 x1 += 1
                 changed = True
             if y0 > 0 and np.any(structural_world[y0, x0:x1] & structural_world[y0 - 1, x0:x1]):
                 y0 -= 1
                 changed = True
-            if y1 < structural_world.shape[0] and np.any(structural_world[y1 - 1, x0:x1] & structural_world[y1, x0:x1]):
+            if y1 < structural_world.shape[0] and np.any(
+                structural_world[y1 - 1, x0:x1] & structural_world[y1, x0:x1]
+            ):
                 y1 += 1
                 changed = True
             if not changed:
@@ -571,7 +608,12 @@ class CollapseSolver:
                     cx, cy = queue.popleft()
                     component.append((x0 + cx, y0 + cy))
                     for nx, ny in ((cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)):
-                        if nx < 0 or ny < 0 or ny >= unsupported.shape[0] or nx >= unsupported.shape[1]:
+                        if (
+                            nx < 0
+                            or ny < 0
+                            or ny >= unsupported.shape[0]
+                            or nx >= unsupported.shape[1]
+                        ):
                             continue
                         if seen[ny, nx] or not unsupported[ny, nx]:
                             continue
@@ -586,15 +628,19 @@ class CollapseSolver:
         x0: int,
         y0: int,
     ) -> None:
-        component_labels, component_island_ids, component_metadata = self.gpu_pipeline.materialize_component_mask(
-            world,
-            unsupported,
-            x0,
-            y0,
+        component_labels, component_island_ids, component_metadata = (
+            self.gpu_pipeline.materialize_component_mask(
+                world,
+                unsupported,
+                x0,
+                y0,
+            )
         )
         if component_labels.size == 0:
             return
-        self.last_collapsed_cell_mask[y0 : y0 + unsupported.shape[0], x0 : x0 + unsupported.shape[1]] |= unsupported
+        self.last_collapsed_cell_mask[
+            y0 : y0 + unsupported.shape[0], x0 : x0 + unsupported.shape[1]
+        ] |= unsupported
         self._record_gpu_collapsed_components(world, component_island_ids, component_metadata)
 
     def _record_gpu_collapsed_components(
@@ -603,7 +649,9 @@ class CollapseSolver:
         component_island_ids: np.ndarray,
         component_metadata: np.ndarray,
     ) -> None:
-        for island_id, metadata in zip(component_island_ids.tolist(), component_metadata.tolist(), strict=True):
+        for island_id, metadata in zip(
+            component_island_ids.tolist(), component_metadata.tolist(), strict=True
+        ):
             min_x, min_y, max_x, max_y, cell_count = (int(value) for value in metadata)
             if cell_count <= 0:
                 continue
@@ -616,7 +664,11 @@ class CollapseSolver:
                 {
                     "island_id": int(island_id),
                     "bbox": (int(min_x), int(min_y), int(max_x), int(max_y)),
-                    "world_bbox": list(world._buffer_bbox_to_world_bbox((int(min_x), int(min_y), int(max_x), int(max_y)))),
+                    "world_bbox": list(
+                        world._buffer_bbox_to_world_bbox(
+                            (int(min_x), int(min_y), int(max_x), int(max_y))
+                        )
+                    ),
                     "cell_count": int(cell_count),
                 }
             )
@@ -698,7 +750,9 @@ class CollapseSolver:
             material_id = int(world.material_id[y, x])
             collapse_generation_id = self._material_collapse_generation_id(world, material_id)
             if collapse_generation_id > 0:
-                world.set_cell_by_id(x, y, collapse_generation_id, phase=Phase.FALLING_ISLAND, mark_dirty=False)
+                world.set_cell_by_id(
+                    x, y, collapse_generation_id, phase=Phase.FALLING_ISLAND, mark_dirty=False
+                )
             else:
                 world.phase[y, x] = Phase.FALLING_ISLAND
                 world.entity_id[y, x] = 0
@@ -713,7 +767,11 @@ class CollapseSolver:
             {
                 "island_id": int(island_id),
                 "bbox": (int(min_x), int(min_y), int(max_x), int(max_y)),
-                "world_bbox": list(world._buffer_bbox_to_world_bbox((int(min_x), int(min_y), int(max_x), int(max_y)))),
+                "world_bbox": list(
+                    world._buffer_bbox_to_world_bbox(
+                        (int(min_x), int(min_y), int(max_x), int(max_y))
+                    )
+                ),
                 "cell_count": int(len(component)),
             }
         )
@@ -737,7 +795,12 @@ class CollapseSolver:
         valid_mask = (
             (material_ids >= 0)
             & (material_ids < int(material_table.shape[0]))
-            & (material_table["name_hash"][np.clip(material_ids, 0, max(0, int(material_table.shape[0]) - 1))] != 0)
+            & (
+                material_table["name_hash"][
+                    np.clip(material_ids, 0, max(0, int(material_table.shape[0]) - 1))
+                ]
+                != 0
+            )
         )
         if np.any(valid_mask):
             values[valid_mask] = material_table[field][material_ids[valid_mask]] != 0
@@ -757,10 +820,17 @@ class CollapseSolver:
         valid_mask = (
             (material_ids >= 0)
             & (material_ids < int(material_table.shape[0]))
-            & (material_table["name_hash"][np.clip(material_ids, 0, max(0, int(material_table.shape[0]) - 1))] != 0)
+            & (
+                material_table["name_hash"][
+                    np.clip(material_ids, 0, max(0, int(material_table.shape[0]) - 1))
+                ]
+                != 0
+            )
         )
         if np.any(valid_mask):
-            values[valid_mask] = material_table[field][material_ids[valid_mask]].astype(np.int32, copy=False)
+            values[valid_mask] = material_table[field][material_ids[valid_mask]].astype(
+                np.int32, copy=False
+            )
         return values
 
     def _material_collapse_generation_id(self, world: "WorldEngine", material_id: int) -> int:
@@ -833,10 +903,17 @@ class CollapseSolver:
         if not allow_gpu_sync_readback:
             return mask, False, True
         if not bridge.enabled or bridge.ctx is None:
-            raise RuntimeError(f"GPU collapse runtime snapshot requires bridge buffer {resource_name!r}")
+            raise RuntimeError(
+                f"GPU collapse runtime snapshot requires bridge buffer {resource_name!r}"
+            )
         cell_count = int(world.width) * int(world.height)
         raw = bridge.buffers[resource_name].read(size=cell_count * 4)
-        gpu_mask = np.frombuffer(raw, dtype=np.int32, count=cell_count).reshape((world.height, world.width)) != 0
+        gpu_mask = (
+            np.frombuffer(raw, dtype=np.int32, count=cell_count).reshape(
+                (world.height, world.width)
+            )
+            != 0
+        )
         return gpu_mask & self.last_solve_region_mask, True, False
 
     def _gpu_collapsed_components_snapshot(
@@ -857,7 +934,9 @@ class CollapseSolver:
         if collapsed.shape != (world.height, world.width) or not bool(np.any(collapsed)):
             return [], False
         labels = np.frombuffer(
-            bridge.buffers["collapse_component_label"].read(size=cell_count * np.dtype(np.int32).itemsize),
+            bridge.buffers["collapse_component_label"].read(
+                size=cell_count * np.dtype(np.int32).itemsize
+            ),
             dtype=np.int32,
             count=cell_count,
         ).reshape((world.height, world.width))
@@ -884,22 +963,30 @@ class CollapseSolver:
             )
             if runtime_count > 0:
                 runtime_records = np.frombuffer(
-                    bridge.buffers["island_runtime"].read(size=runtime_count * ISLAND_RUNTIME_DTYPE.itemsize),
+                    bridge.buffers["island_runtime"].read(
+                        size=runtime_count * ISLAND_RUNTIME_DTYPE.itemsize
+                    ),
                     dtype=ISLAND_RUNTIME_DTYPE,
                     count=runtime_count,
                 )
                 runtime_island_ids = sorted(
-                    int(value) for value in np.unique(runtime_records["island_id"]) if int(value) > 0
+                    int(value)
+                    for value in np.unique(runtime_records["island_id"])
+                    if int(value) > 0
                 )
 
         components: list[dict[str, int | tuple[int, int, int, int]]] = []
-        labels_in_order = sorted(int(value) for value in np.unique(labels[component_mask]) if int(value) > 0)
+        labels_in_order = sorted(
+            int(value) for value in np.unique(labels[component_mask]) if int(value) > 0
+        )
         for index, label in enumerate(labels_in_order):
             label_mask = component_mask & (labels == int(label))
             ys, xs = np.nonzero(label_mask)
             if ys.size == 0:
                 continue
-            overlapping_ids = sorted(int(value) for value in np.unique(island_ids[label_mask]) if int(value) > 0)
+            overlapping_ids = sorted(
+                int(value) for value in np.unique(island_ids[label_mask]) if int(value) > 0
+            )
             island_id = (
                 overlapping_ids[0]
                 if overlapping_ids
@@ -1003,7 +1090,9 @@ class CollapseSolver:
         collapsed_components = [dict(component) for component in self.last_collapsed_components]
         if world is not None and not collapsed_components:
             if allow_gpu_sync_readback:
-                collapsed_components, did_read = self._gpu_collapsed_components_snapshot(world, collapsed_cell_mask)
+                collapsed_components, did_read = self._gpu_collapsed_components_snapshot(
+                    world, collapsed_cell_mask
+                )
                 sync_readback_performed = sync_readback_performed or did_read
             elif "collapse_component_label" in gpu_authoritative_resources:
                 stale_resources.append("collapse_component_label")

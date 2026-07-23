@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
+from oracle_game.sim.gpu_base import release_resource_fields
 from oracle_game.sim.gpu_liquid import (
     MAX_MATERIALS,
     PASS_LOCAL_SIZE,
@@ -18,53 +19,10 @@ from oracle_game.sim.gpu_liquid import (
 def release(pipeline) -> None:
     if pipeline.resources is None:
         return
-    try:
-        pipeline.resources.bridge_cell_copy_framebuffer.release()
-    except Exception:
-        pass
-    for resource in (
-        pipeline.resources.cell_state_pre,
-        pipeline.resources.cell_state_in,
-        pipeline.resources.cell_state_out,
-        pipeline.resources.island_in,
-        pipeline.resources.island_out,
-        pipeline.resources.entity_in,
-        pipeline.resources.entity_out,
-        pipeline.resources.timer_in,
-        pipeline.resources.timer_out,
-        pipeline.resources.temp_in,
-        pipeline.resources.temp_out,
-        pipeline.resources.integrity_in,
-        pipeline.resources.integrity_out,
-        pipeline.resources.velocity_in,
-        pipeline.resources.velocity_out,
-        pipeline.resources.blocker_mask,
-        pipeline.resources.liquid_flow_intent,
-        pipeline.resources.active_tile_tex,
-        pipeline.resources.active_tile_list,
-        pipeline.resources.active_tile_count,
-        pipeline.resources.active_tile_dispatch_args,
-        pipeline.resources.affected_tile_list,
-        pipeline.resources.affected_tile_count,
-        pipeline.resources.affected_tile_dispatch_args,
-        pipeline.resources.affected_tile_prefetch_dispatch_args,
-        pipeline.resources.affected_tile_flags,
-        pipeline.resources.tile_solve_snapshot,
-        pipeline.resources.tile_snapshot_token,
-        pipeline.resources.tile_snapshot_tile_tokens,
-        pipeline.resources.provenance_in,
-        pipeline.resources.provenance_out,
-        pipeline.resources.placeholder_target_claims,
-        pipeline.resources.displaced_in,
-        pipeline.resources.displaced_out,
-        pipeline.resources.material_params,
-    ):
-        try:
-            resource.release()
-        except Exception:
-            pass
+    # bridge_cell_copy_framebuffer is a dataclass field like the textures and
+    # buffers, so the field traversal below releases it too.
+    release_resource_fields(pipeline.resources)
     pipeline.resources = None
-
 
 
 def _ensure_resources(pipeline, world: "WorldEngine") -> GPULiquidResources:
@@ -92,7 +50,9 @@ def _ensure_resources(pipeline, world: "WorldEngine") -> GPULiquidResources:
     blocker_mask = ctx.texture((world.width, world.height), 1, dtype="u1")
     blocker_mask.write(np.zeros((world.height, world.width), dtype=np.uint8).tobytes())
     liquid_flow_intent = ctx.texture((world.width, world.height), 2, dtype="f4")
-    active_tile_tex = ctx.texture((world.active.tile_width, world.active.tile_height), 1, dtype="f4")
+    active_tile_tex = ctx.texture(
+        (world.active.tile_width, world.active.tile_height), 1, dtype="f4"
+    )
     tile_count = max(1, int(world.active.tile_width * world.active.tile_height))
     active_tile_list = ctx.buffer(reserve=max(8, tile_count * 2 * 4), dynamic=True)
     active_tile_count = ctx.buffer(reserve=4, dynamic=True)
@@ -190,7 +150,6 @@ def _ensure_resources(pipeline, world: "WorldEngine") -> GPULiquidResources:
     return pipeline.resources
 
 
-
 def _active_scheduler_gpu_authoritative(pipeline, world: "WorldEngine") -> bool:
     authoritative = world.bridge.gpu_authoritative_resources
     return (
@@ -198,7 +157,6 @@ def _active_scheduler_gpu_authoritative(pipeline, world: "WorldEngine") -> bool:
         and "active_tile_ttl" in authoritative
         and "active_chunk_mask" in authoritative
     )
-
 
 
 def _refresh_active_scheduler_from_ttl(pipeline, world: "WorldEngine") -> None:
@@ -210,10 +168,10 @@ def _refresh_active_scheduler_from_ttl(pipeline, world: "WorldEngine") -> None:
     bridge.mark_gpu_authoritative("active_meta", "active_tile_ttl", "active_chunk_mask")
 
 
-
-def _upload_active_tile_mask(pipeline, resources: GPULiquidResources, tile_mask: np.ndarray) -> None:
+def _upload_active_tile_mask(
+    pipeline, resources: GPULiquidResources, tile_mask: np.ndarray
+) -> None:
     resources.active_tile_tex.write(np.asarray(tile_mask, dtype="f4").tobytes())
-
 
 
 def _load_authoritative_active_tile_mask(
@@ -240,21 +198,22 @@ def _load_authoritative_active_tile_mask(
     pipeline._sync_compute_writes(bridge.ctx)
 
 
-
 def _active_tile_workgroups_per_tile(pipeline, world: "WorldEngine") -> int:
     axis = max(1, (int(world.active.tile_size) + PASS_LOCAL_SIZE - 1) // PASS_LOCAL_SIZE)
     return axis * axis
 
 
-
-def _next_placeholder_claim_epoch(pipeline, resources: GPULiquidResources, world: "WorldEngine") -> int:
+def _next_placeholder_claim_epoch(
+    pipeline, resources: GPULiquidResources, world: "WorldEngine"
+) -> int:
     pipeline._placeholder_claim_epoch += 1
     if pipeline._placeholder_claim_epoch >= 0x7FFFFFFF:
         cell_count = max(1, int(world.width * world.height))
-        resources.placeholder_target_claims.write(np.zeros((cell_count,), dtype=np.uint32).tobytes())
+        resources.placeholder_target_claims.write(
+            np.zeros((cell_count,), dtype=np.uint32).tobytes()
+        )
         pipeline._placeholder_claim_epoch = 1
     return pipeline._placeholder_claim_epoch
-
 
 
 def _seam_workgroups_per_boundary(pipeline, axis: str, *, canonical: bool = False) -> int:
@@ -265,17 +224,13 @@ def _seam_workgroups_per_boundary(pipeline, axis: str, *, canonical: bool = Fals
         groups_x = max(1, (TILE_SIZE * 2 + PASS_LOCAL_SIZE - 1) // PASS_LOCAL_SIZE)
         groups_y = max(1, (TILE_SIZE + PASS_LOCAL_SIZE - 1) // PASS_LOCAL_SIZE)
     elif axis == "y":
-        if (
-            pipeline._seam_y_shared_snapshot_enabled
-            and pipeline._buoyancy_pass_fusion_enabled
-        ):
+        if pipeline._seam_y_shared_snapshot_enabled and pipeline._buoyancy_pass_fusion_enabled:
             return 1
         groups_x = max(1, (TILE_SIZE + PASS_LOCAL_SIZE - 1) // PASS_LOCAL_SIZE)
         groups_y = 1
     else:
         raise ValueError(f"unknown liquid seam axis: {axis}")
     return groups_x * groups_y
-
 
 
 def _reload_and_compact_active_cell_tiles(
@@ -291,8 +246,9 @@ def _reload_and_compact_active_cell_tiles(
     )
 
 
-
-def _run_active_tile_indirect(pipeline, program: Any, resources: GPULiquidResources, pass_name: str) -> None:
+def _run_active_tile_indirect(
+    pipeline, program: Any, resources: GPULiquidResources, pass_name: str
+) -> None:
     if not hasattr(program, "run_indirect"):
         raise RuntimeError(f"GPU liquid {pass_name} requires ModernGL ComputeShader.run_indirect")
     program.run_indirect(resources.active_tile_dispatch_args)

@@ -5,18 +5,16 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
-    from oracle_game.world import WorldEngine
     from oracle_game.sim.gpu_motion import GPUMotionResources
-
-from oracle_game.types import Phase
+    from oracle_game.world import WorldEngine
 
 from oracle_game.sim.gpu_motion import (
     LOCAL_SIZE,
-    POWDER_RESERVATION_LOCAL_SIZE,
     POWDER_RESERVATION_DTYPE,
+    POWDER_RESERVATION_LOCAL_SIZE,
     POWDER_RESOLVE_BLOCKED,
 )
-
+from oracle_game.types import Phase
 
 _COMPACT_POWDER_RESERVATION_ITEMSIZE = 24
 
@@ -259,7 +257,9 @@ def upload_powder_reservations(pipeline, world: "WorldEngine", reservations: np.
         return
     resources = pipeline._ensure_resources(world)
     pipeline._write_dynamic_buffer(ctx, resources, "powder_reservations", reservations)
-    resources.powder_reservation_count.write(np.array([len(reservations)], dtype=np.int32).tobytes())
+    resources.powder_reservation_count.write(
+        np.array([len(reservations)], dtype=np.int32).tobytes()
+    )
 
 
 def resolve_and_apply_powders(
@@ -293,8 +293,7 @@ def resolve_and_apply_powders(
         source_indexed_apply = _source_indexed_powder_apply_enabled(pipeline, world)
         compact_reservations = _compact_powder_reservation_safe(pipeline, world)
         lazy_compact_expand = bool(
-            compact_reservations
-            and pipeline._powder_compact_reservation_lazy_expand_enabled
+            compact_reservations and pipeline._powder_compact_reservation_lazy_expand_enabled
         )
         provisional_moving_worklist = bool(
             pipeline._powder_provisional_moving_worklist_enabled
@@ -347,9 +346,7 @@ def resolve_and_apply_powders(
                 np.array([0], dtype=np.uint32).tobytes()
             )
         if nontrivial_resolve_worklist:
-            resources.powder_direct_apply_unsafe.write(
-                np.array([0], dtype=np.uint32).tobytes()
-            )
+            resources.powder_direct_apply_unsafe.write(np.array([0], dtype=np.uint32).tobytes())
     if nontrivial_resolve_worklist:
         with pipeline._profile_pass(world, "powder_apply_dispatch_clear"):
             tile_count = int(world.active.tile_width * world.active.tile_height)
@@ -357,7 +354,9 @@ def resolve_and_apply_powders(
             clear_dispatch["tile_count"].value = tile_count
             resources.powder_apply_tile_flags.bind_to_storage_buffer(binding=0)
             resources.island_materialization_candidate_tile_count.bind_to_storage_buffer(binding=1)
-            resources.island_materialization_candidate_dispatch_args.bind_to_storage_buffer(binding=2)
+            resources.island_materialization_candidate_dispatch_args.bind_to_storage_buffer(
+                binding=2
+            )
             clear_dispatch.run((tile_count + 255) // 256, 1, 1)
             ctx.memory_barrier(
                 ctx.SHADER_STORAGE_BARRIER_BIT | getattr(ctx, "COMMAND_BARRIER_BIT", 0)
@@ -414,7 +413,9 @@ def resolve_and_apply_powders(
             resources.active_tile_count.bind_to_storage_buffer(binding=1)
             resources.active_tile_dispatch_args.bind_to_storage_buffer(binding=2)
             clear_dispatch.run((tile_count + 255) // 256, 1, 1)
-            ctx.memory_barrier(ctx.SHADER_STORAGE_BARRIER_BIT | getattr(ctx, "COMMAND_BARRIER_BIT", 0))
+            ctx.memory_barrier(
+                ctx.SHADER_STORAGE_BARRIER_BIT | getattr(ctx, "COMMAND_BARRIER_BIT", 0)
+            )
     with pipeline._profile_pass(world, "powder_resolve"):
         dedup_resolve = False
         if (
@@ -456,7 +457,9 @@ def resolve_and_apply_powders(
             pipeline._powder_precomputed_fallback_blockers_enabled
         )
         resolve["build_apply_dispatch"].value = build_apply_dispatch
-        resolve["apply_workgroups_per_tile"].value = int(pipeline._active_tile_workgroups_per_tile(world))
+        resolve["apply_workgroups_per_tile"].value = int(
+            pipeline._active_tile_workgroups_per_tile(world)
+        )
         use_bridge_blockers = pipeline._bridge_authoritative_cell_blockers(world)
         resolve["use_bridge_authoritative_blockers"].value = bool(use_bridge_blockers)
         (
@@ -487,6 +490,7 @@ def resolve_and_apply_powders(
         resources.active_tile_tex.use(location=3)
         resources.entity_id_tex.use(location=5)
         resources.displaced_tex.use(location=6)
+
         def bind_apply_dispatch_outputs() -> None:
             affected_tile_count.bind_to_storage_buffer(binding=6)
             affected_tile_list.bind_to_storage_buffer(binding=7)
@@ -498,9 +502,7 @@ def resolve_and_apply_powders(
             "powder reservation resolve",
             before_run=bind_apply_dispatch_outputs,
             count_buffer=(
-                resources.powder_direct_apply_unsafe
-                if nontrivial_resolve_worklist
-                else None
+                resources.powder_direct_apply_unsafe if nontrivial_resolve_worklist else None
             ),
         )
         ctx.memory_barrier(ctx.SHADER_STORAGE_BARRIER_BIT | ctx.TEXTURE_FETCH_BARRIER_BIT)
@@ -535,7 +537,9 @@ def resolve_and_apply_powders(
         else:
             pipeline.publish_bridge_powder_reservations(world, world.width * world.height)
         return np.zeros((0,), dtype=POWDER_RESERVATION_DTYPE)
-    reservation_count = int(np.frombuffer(resources.powder_reservation_count.read(size=4), dtype=np.int32, count=1)[0])
+    reservation_count = int(
+        np.frombuffer(resources.powder_reservation_count.read(size=4), dtype=np.int32, count=1)[0]
+    )
     reservation_count = max(0, min(reservation_count, world.width * world.height))
     pipeline._dispatch_index_powder_apply(world, resources)
     pipeline._dispatch_apply_powder_reservations(world, resources, reservation_count)
@@ -620,12 +624,17 @@ def _dispatch_index_powder_apply(
     ctx = world.bridge.ctx
     assert ctx is not None
     cell_count = int(world.width * world.height)
-    pipeline._ensure_dynamic_buffer_capacity(ctx, resources, "powder_target_winner", cell_count * np.dtype(np.int32).itemsize)
-    pipeline._ensure_dynamic_buffer_capacity(ctx, resources, "powder_apply_incoming", cell_count * np.dtype(np.int32).itemsize)
-    pipeline._ensure_dynamic_buffer_capacity(ctx, resources, "powder_apply_outgoing", cell_count * np.dtype(np.int32).itemsize)
+    pipeline._ensure_dynamic_buffer_capacity(
+        ctx, resources, "powder_target_winner", cell_count * np.dtype(np.int32).itemsize
+    )
+    pipeline._ensure_dynamic_buffer_capacity(
+        ctx, resources, "powder_apply_incoming", cell_count * np.dtype(np.int32).itemsize
+    )
+    pipeline._ensure_dynamic_buffer_capacity(
+        ctx, resources, "powder_apply_outgoing", cell_count * np.dtype(np.int32).itemsize
+    )
     epoch_enabled = bool(
-        pipeline._formal_gpu_frame(world)
-        and pipeline._powder_apply_index_epoch_enabled
+        pipeline._formal_gpu_frame(world) and pipeline._powder_apply_index_epoch_enabled
     )
     if epoch_enabled:
         _prepare_powder_apply_epoch(pipeline, world, resources)
@@ -685,7 +694,9 @@ def _dispatch_index_powder_apply(
         ctx.memory_barrier(ctx.SHADER_STORAGE_BARRIER_BIT | ctx.TEXTURE_FETCH_BARRIER_BIT)
 
 
-def _prepare_powder_apply_epoch(pipeline, world: "WorldEngine", resources: GPUMotionResources) -> None:
+def _prepare_powder_apply_epoch(
+    pipeline, world: "WorldEngine", resources: GPUMotionResources
+) -> None:
     """Advance the formal apply stamp without dispatching the full index pass."""
     ctx = world.bridge.ctx
     assert ctx is not None
@@ -724,8 +735,7 @@ def _dispatch_source_indexed_direct_apply(
     with pipeline._profile_pass(world, "powder_source_indexed_direct_apply"):
         if provisional_moving_worklist:
             program_name = (
-                "apply_powder_reservations_source_indexed_direct_"
-                "compact_lazy_moving_worklist"
+                "apply_powder_reservations_source_indexed_direct_compact_lazy_moving_worklist"
             )
         elif lazy_compact_expand:
             program_name = "apply_powder_reservations_source_indexed_direct_compact_lazy"
@@ -769,9 +779,7 @@ def _dispatch_source_indexed_direct_apply(
             "powder source-indexed direct apply",
             before_run=bind_direct_apply_state,
             count_buffer=(
-                resources.powder_provisional_moving_count
-                if provisional_moving_worklist
-                else None
+                resources.powder_provisional_moving_count if provisional_moving_worklist else None
             ),
         )
         pipeline._sync_compute_writes(ctx)
@@ -800,9 +808,7 @@ def _dispatch_apply_powder_reservations(
     ctx = world.bridge.ctx
     assert ctx is not None
     formal_frame = pipeline._formal_gpu_frame(world)
-    epoch_enabled = bool(
-        formal_frame and pipeline._powder_apply_index_epoch_enabled
-    )
+    epoch_enabled = bool(formal_frame and pipeline._powder_apply_index_epoch_enabled)
     use_bridge_inputs = pipeline._bridge_authoritative_powder_inputs(world)
     use_packed_powder_aux = bool(
         formal_frame
@@ -842,9 +848,7 @@ def _dispatch_apply_powder_reservations(
             )
         else:
             program_name = (
-                "apply_powder_reservations"
-                if epoch_enabled
-                else "apply_powder_reservations_legacy"
+                "apply_powder_reservations" if epoch_enabled else "apply_powder_reservations_legacy"
             )
         program = pipeline.programs[program_name]
         program["cell_grid_size"].value = (world.width, world.height)
@@ -853,7 +857,9 @@ def _dispatch_apply_powder_reservations(
         program["active_ttl_reset"].value = int(world.active.active_ttl_reset)
         program_members = getattr(program, "_members", {})
         if "reservation_count" in program_members:
-            program["reservation_count"].value = 0 if reservation_count is None else int(reservation_count)
+            program["reservation_count"].value = (
+                0 if reservation_count is None else int(reservation_count)
+            )
         if "use_reservation_count_buffer" in program_members:
             program["use_reservation_count_buffer"].value = reservation_count is None
         if "use_active_tile_dispatch" in program_members:
@@ -885,7 +891,9 @@ def _dispatch_apply_powder_reservations(
         if use_packed_powder_aux:
             world.bridge.buffers["island_id"].bind_to_storage_buffer(binding=9)
             world.bridge.buffers["entity_id"].bind_to_storage_buffer(binding=10)
-            world.bridge.buffers["placeholder_displaced_material"].bind_to_storage_buffer(binding=11)
+            world.bridge.buffers["placeholder_displaced_material"].bind_to_storage_buffer(
+                binding=11
+            )
             resources.powder_target_winner.bind_to_storage_buffer(binding=12)
         if direct_bridge_outputs:
             resources.powder_source_cell_core_snapshot.bind_to_storage_buffer(binding=13)
@@ -930,14 +938,21 @@ def _dispatch_apply_powder_reservations(
     if not use_packed_powder_aux:
         with pipeline._profile_pass(world, "powder_apply_aux"):
             aux_program = pipeline.programs[
-                "apply_powder_reservation_aux" if epoch_enabled else "apply_powder_reservation_aux_legacy"
+                "apply_powder_reservation_aux"
+                if epoch_enabled
+                else "apply_powder_reservation_aux_legacy"
             ]
             aux_program["cell_grid_size"].value = (world.width, world.height)
-            aux_program["tile_grid_size"].value = (world.active.tile_width, world.active.tile_height)
+            aux_program["tile_grid_size"].value = (
+                world.active.tile_width,
+                world.active.tile_height,
+            )
             aux_program["tile_size"].value = int(world.active.tile_size)
             aux_members = getattr(aux_program, "_members", {})
             if "reservation_count" in aux_members:
-                aux_program["reservation_count"].value = 0 if reservation_count is None else int(reservation_count)
+                aux_program["reservation_count"].value = (
+                    0 if reservation_count is None else int(reservation_count)
+                )
             if "use_reservation_count_buffer" in aux_members:
                 aux_program["use_reservation_count_buffer"].value = reservation_count is None
             if "use_active_tile_dispatch" in aux_members:
@@ -957,7 +972,9 @@ def _dispatch_apply_powder_reservations(
             if use_bridge_inputs:
                 world.bridge.buffers["island_id"].bind_to_storage_buffer(binding=8)
                 world.bridge.buffers["entity_id"].bind_to_storage_buffer(binding=9)
-                world.bridge.buffers["placeholder_displaced_material"].bind_to_storage_buffer(binding=10)
+                world.bridge.buffers["placeholder_displaced_material"].bind_to_storage_buffer(
+                    binding=10
+                )
             resources.island_id_tex.use(location=7)
             resources.entity_id_tex.use(location=8)
             resources.displaced_tex.use(location=9)
@@ -965,15 +982,17 @@ def _dispatch_apply_powder_reservations(
             resources.entity_id_out_tex.bind_to_image(1, read=False, write=True)
             resources.displaced_out_tex.bind_to_image(2, read=False, write=True)
             if formal_frame:
-                pipeline._run_active_tile_indirect(aux_program, resources, "powder reservation aux apply")
+                pipeline._run_active_tile_indirect(
+                    aux_program, resources, "powder reservation aux apply"
+                )
             else:
                 aux_program.run(group_x, group_y, 1)
             pipeline._sync_compute_writes(ctx)
     sparse_powder_bridge_publish = bool(
         formal_frame
-            and use_packed_powder_aux
-            and pipeline._powder_sparse_bridge_publish_enabled
-            and not bool(getattr(world, "phase_c_defer_cell_publish", False))
+        and use_packed_powder_aux
+        and pipeline._powder_sparse_bridge_publish_enabled
+        and not bool(getattr(world, "phase_c_defer_cell_publish", False))
     )
     with pipeline._profile_pass(world, "powder_terminal_cell_publish"):
         pipeline._publish_bridge_outputs(
@@ -985,7 +1004,9 @@ def _dispatch_apply_powder_reservations(
             use_packed_powder_aux=use_packed_powder_aux,
             sparse_powder_bridge_publish=sparse_powder_bridge_publish,
         )
-    pipeline._refresh_authoritative_active_scheduler_after_apply(world, "active_refresh_after_powder")
+    pipeline._refresh_authoritative_active_scheduler_after_apply(
+        world, "active_refresh_after_powder"
+    )
     pipeline.last_cpu_mirror_downloaded = not formal_frame
     if pipeline.last_cpu_mirror_downloaded:
         ctx.finish()
@@ -1069,11 +1090,15 @@ def _powder_direct_apply_is_safe(
     return int(value) == 0
 
 
-def _read_powder_reservations(pipeline, resources: GPUMotionResources, reservation_count: int) -> np.ndarray:
+def _read_powder_reservations(
+    pipeline, resources: GPUMotionResources, reservation_count: int
+) -> np.ndarray:
     if reservation_count <= 0:
         return np.zeros((0,), dtype=POWDER_RESERVATION_DTYPE)
     return np.frombuffer(
-        resources.powder_reservations.read(size=reservation_count * POWDER_RESERVATION_DTYPE.itemsize),
+        resources.powder_reservations.read(
+            size=reservation_count * POWDER_RESERVATION_DTYPE.itemsize
+        ),
         dtype=POWDER_RESERVATION_DTYPE,
         count=reservation_count,
     ).copy()
@@ -1092,7 +1117,9 @@ def materialize_compact_powder_reservations(
         return False
     ctx = bridge.ctx
     if ctx is None or not pipeline._bridge_context_active(world):
-        raise RuntimeError("compact powder reservation materialization requires the bridge GL context")
+        raise RuntimeError(
+            "compact powder reservation materialization requires the bridge GL context"
+        )
     pipeline._ensure_programs(ctx)
     cell_count = int(world.width * world.height)
     if "powder_reservation_standard" not in bridge.gpu_authoritative_resources:
@@ -1109,8 +1136,7 @@ def materialize_compact_powder_reservations(
         standard.bind_to_storage_buffer(binding=2)
         with pipeline._profile_pass(world, "powder_reservation_lazy_expand"):
             program.run(
-                (cell_count + POWDER_RESERVATION_LOCAL_SIZE - 1)
-                // POWDER_RESERVATION_LOCAL_SIZE,
+                (cell_count + POWDER_RESERVATION_LOCAL_SIZE - 1) // POWDER_RESERVATION_LOCAL_SIZE,
                 1,
                 1,
             )
@@ -1157,7 +1183,9 @@ def _build_powder_reservations(
     dt: float,
 ) -> np.ndarray:
     material_table = world.bridge.shadow_typed_tables["material_table"]
-    reservations: list[tuple[tuple[int, int], tuple[int, int], tuple[int, int], tuple[float, float], int]] = []
+    reservations: list[
+        tuple[tuple[int, int], tuple[int, int], tuple[int, int], tuple[float, float], int]
+    ] = []
     for y in range(world.height - 2, -1, -1):
         active_xs = np.flatnonzero(solve_cell_mask[y])
         if active_xs.size == 0:

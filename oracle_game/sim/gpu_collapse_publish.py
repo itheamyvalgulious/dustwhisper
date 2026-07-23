@@ -1,21 +1,20 @@
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 if TYPE_CHECKING:
-    from oracle_game.world import WorldEngine
     from oracle_game.sim.gpu_collapse import GPUCollapseResources
+    from oracle_game.world import WorldEngine
 
 from oracle_game.sim.gpu_collapse import (
     FORMAL_CONNECTED_TILE_COUNT_BUFFER,
     FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER,
     FORMAL_CONNECTED_TILE_LIST_BUFFER,
     FORMAL_CONNECTED_TILE_LOCAL_SIZE,
-    LOCAL_SIZE
+    LOCAL_SIZE,
 )
-
 
 
 def _upload_region_state(
@@ -41,7 +40,9 @@ def _upload_region_state(
     upload_cell_state_from_cpu = not (formal_gpu_frame and "cell_core" in authoritative)
     upload_island_id_from_cpu = not (formal_gpu_frame and "island_id" in authoritative)
     upload_entity_id_from_cpu = not (formal_gpu_frame and "entity_id" in authoritative)
-    upload_displaced_from_cpu = not (formal_gpu_frame and "placeholder_displaced_material" in authoritative)
+    upload_displaced_from_cpu = not (
+        formal_gpu_frame and "placeholder_displaced_material" in authoritative
+    )
     pipeline.last_cpu_cell_state_upload_skipped = not upload_cell_state_from_cpu
     pipeline.last_cpu_island_id_upload_skipped = not upload_island_id_from_cpu
     pipeline.last_cpu_entity_id_upload_skipped = not upload_entity_id_from_cpu
@@ -58,7 +59,9 @@ def _upload_region_state(
     if upload_entity_id_from_cpu:
         resources.entity_id_tex.write(world.entity_id[ys, xs].astype("f4").tobytes())
     if upload_displaced_from_cpu:
-        resources.displaced_tex.write(world.placeholder_displaced_material[ys, xs].astype("f4").tobytes())
+        resources.displaced_tex.write(
+            world.placeholder_displaced_material[ys, xs].astype("f4").tobytes()
+        )
     pipeline._load_authoritative_bridge_region_inputs(world, resources, x0, y0, width, height)
 
 
@@ -76,9 +79,13 @@ def _load_authoritative_bridge_region_inputs(
     bridge = world.bridge
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("GPU collapse pipeline requires bridge GPU resources for authoritative input state")
+        raise RuntimeError(
+            "GPU collapse pipeline requires bridge GPU resources for authoritative input state"
+        )
     if bridge.ctx is not world.bridge.ctx:
-        raise RuntimeError("GPU collapse pipeline cannot consume authoritative bridge state from a separate GL context")
+        raise RuntimeError(
+            "GPU collapse pipeline cannot consume authoritative bridge state from a separate GL context"
+        )
 
     world._require_gpu_authoritative_resources(
         "collapse input",
@@ -148,9 +155,13 @@ def _load_authoritative_bridge_connected_tile_inputs(
     bridge = world.bridge
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("GPU collapse pipeline requires bridge GPU resources for authoritative input state")
+        raise RuntimeError(
+            "GPU collapse pipeline requires bridge GPU resources for authoritative input state"
+        )
     if bridge.ctx is not world.bridge.ctx:
-        raise RuntimeError("GPU collapse pipeline cannot consume authoritative bridge state from a separate GL context")
+        raise RuntimeError(
+            "GPU collapse pipeline cannot consume authoritative bridge state from a separate GL context"
+        )
 
     authoritative = bridge.gpu_authoritative_resources
     copy_cell_core = "cell_core" in authoritative
@@ -176,7 +187,9 @@ def _load_authoritative_bridge_connected_tile_inputs(
     if hydrate_cell_core:
         program = pipeline.programs["load_bridge_connected_tile_cell"]
         if not hasattr(program, "run_indirect"):
-            raise RuntimeError("formal connected bridge cell input load requires ComputeShader.run_indirect")
+            raise RuntimeError(
+                "formal connected bridge cell input load requires ComputeShader.run_indirect"
+            )
         program["cell_grid_size"].value = (int(width), int(height))
         program["region_origin"].value = (int(x0), int(y0))
         program["world_grid_size"].value = (int(world.width), int(world.height))
@@ -199,7 +212,9 @@ def _load_authoritative_bridge_connected_tile_inputs(
     if copy_island_id or copy_entity_id or copy_displaced:
         program = pipeline.programs["load_bridge_connected_tile_cell_aux"]
         if not hasattr(program, "run_indirect"):
-            raise RuntimeError("formal connected bridge aux input load requires ComputeShader.run_indirect")
+            raise RuntimeError(
+                "formal connected bridge aux input load requires ComputeShader.run_indirect"
+            )
         program["cell_grid_size"].value = (int(width), int(height))
         program["region_origin"].value = (int(x0), int(y0))
         program["world_grid_size"].value = (int(world.width), int(world.height))
@@ -237,7 +252,9 @@ def _load_authoritative_bridge_pending_region(
     if "collapse_delay_pending" not in bridge.gpu_authoritative_resources:
         return
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("GPU collapse pipeline requires bridge GPU resources for authoritative pending state")
+        raise RuntimeError(
+            "GPU collapse pipeline requires bridge GPU resources for authoritative pending state"
+        )
     program = pipeline.programs["load_bridge_region_pending"]
     program["region_size"].value = (int(width), int(height))
     program["region_origin"].value = (int(x0), int(y0))
@@ -267,14 +284,18 @@ def _load_authoritative_bridge_connected_tile_pending(
     if "collapse_delay_pending" not in bridge.gpu_authoritative_resources:
         return
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("GPU collapse pipeline requires bridge GPU resources for authoritative pending state")
+        raise RuntimeError(
+            "GPU collapse pipeline requires bridge GPU resources for authoritative pending state"
+        )
     pipeline._ensure_programs(bridge.ctx)
     tile_size = max(1, int(getattr(world.active, "tile_size", FORMAL_CONNECTED_TILE_LOCAL_SIZE)))
     if tile_size > FORMAL_CONNECTED_TILE_LOCAL_SIZE:
         raise RuntimeError("formal connected pending input load requires tile_size <= 32")
     program = pipeline.programs["load_bridge_connected_tile_pending"]
     if not hasattr(program, "run_indirect"):
-        raise RuntimeError("formal connected pending input load requires ComputeShader.run_indirect")
+        raise RuntimeError(
+            "formal connected pending input load requires ComputeShader.run_indirect"
+        )
     program["cell_grid_size"].value = (int(width), int(height))
     program["region_origin"].value = (int(x0), int(y0))
     program["world_grid_size"].value = (int(world.width), int(world.height))
@@ -327,10 +348,14 @@ def _publish_bridge_pending_region_outputs_from_texture(
     bridge = world.bridge
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("GPU collapse pipeline requires bridge GPU resources for authoritative pending output")
+        raise RuntimeError(
+            "GPU collapse pipeline requires bridge GPU resources for authoritative pending output"
+        )
     connected_tiles = tile_mask_name is not None
     program = pipeline.programs[
-        "publish_bridge_region_pending_connected_tiles" if connected_tiles else "publish_bridge_region_pending"
+        "publish_bridge_region_pending_connected_tiles"
+        if connected_tiles
+        else "publish_bridge_region_pending"
     ]
     if connected_tiles and not hasattr(program, "run_indirect"):
         raise RuntimeError("formal connected pending publish requires ComputeShader.run_indirect")
@@ -378,9 +403,15 @@ def _publish_bridge_region_mask(
     bridge = world.bridge
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("GPU collapse pipeline requires bridge GPU resources for authoritative runtime masks")
+        raise RuntimeError(
+            "GPU collapse pipeline requires bridge GPU resources for authoritative runtime masks"
+        )
     connected_tiles = tile_mask_name is not None
-    program = pipeline.programs["publish_bridge_region_mask_connected_tiles" if connected_tiles else "publish_bridge_region_mask"]
+    program = pipeline.programs[
+        "publish_bridge_region_mask_connected_tiles"
+        if connected_tiles
+        else "publish_bridge_region_mask"
+    ]
     if connected_tiles and not hasattr(program, "run_indirect"):
         raise RuntimeError("formal connected mask publish requires ComputeShader.run_indirect")
     program["region_size"].value = (int(width), int(height))
@@ -426,15 +457,22 @@ def _publish_bridge_supported_unsupported_masks_connected_tiles(
     bridge = world.bridge
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("GPU collapse pipeline requires bridge GPU resources for authoritative runtime masks")
-    use_u8 = supported_texture is resources.support_u8_ping or supported_texture is resources.support_u8_pong
+        raise RuntimeError(
+            "GPU collapse pipeline requires bridge GPU resources for authoritative runtime masks"
+        )
+    use_u8 = (
+        supported_texture is resources.support_u8_ping
+        or supported_texture is resources.support_u8_pong
+    )
     program = pipeline.programs[
         "publish_bridge_supported_unsupported_masks_connected_tiles_u8"
         if use_u8
         else "publish_bridge_supported_unsupported_masks_connected_tiles"
     ]
     if not hasattr(program, "run_indirect"):
-        raise RuntimeError("formal connected support mask publish requires ComputeShader.run_indirect")
+        raise RuntimeError(
+            "formal connected support mask publish requires ComputeShader.run_indirect"
+        )
     program["region_size"].value = (int(width), int(height))
     program["region_origin"].value = (int(x0), int(y0))
     program["cell_grid_size"].value = (int(world.width), int(world.height))
@@ -470,7 +508,9 @@ def _publish_bridge_region_labels(
     bridge = world.bridge
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("GPU collapse pipeline requires bridge GPU resources for authoritative component labels")
+        raise RuntimeError(
+            "GPU collapse pipeline requires bridge GPU resources for authoritative component labels"
+        )
     program = pipeline.programs["publish_bridge_region_labels"]
     program["region_size"].value = (int(width), int(height))
     program["region_origin"].value = (int(x0), int(y0))
@@ -499,10 +539,14 @@ def _publish_bridge_region_labels_connected_tiles(
     bridge = world.bridge
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("GPU collapse pipeline requires bridge GPU resources for authoritative component labels")
+        raise RuntimeError(
+            "GPU collapse pipeline requires bridge GPU resources for authoritative component labels"
+        )
     program = pipeline.programs["publish_bridge_region_labels_connected_tiles"]
     if not hasattr(program, "run_indirect"):
-        raise RuntimeError("formal connected component label publish requires ComputeShader.run_indirect")
+        raise RuntimeError(
+            "formal connected component label publish requires ComputeShader.run_indirect"
+        )
     program["cell_grid_size"].value = (int(width), int(height))
     program["region_origin"].value = (int(x0), int(y0))
     program["world_grid_size"].value = (int(world.width), int(world.height))
@@ -510,7 +554,9 @@ def _publish_bridge_region_labels_connected_tiles(
         int(getattr(world.active, "tile_width", 1)),
         int(getattr(world.active, "tile_height", 1)),
     )
-    program["tile_size"].value = int(max(1, int(getattr(world.active, "tile_size", FORMAL_CONNECTED_TILE_LOCAL_SIZE))))
+    program["tile_size"].value = int(
+        max(1, int(getattr(world.active, "tile_size", FORMAL_CONNECTED_TILE_LOCAL_SIZE)))
+    )
     label_texture.use(location=0)
     bridge.buffers["collapse_component_label"].bind_to_storage_buffer(binding=0)
     bridge.buffers["collapse_collapsed_cell_mask"].bind_to_storage_buffer(binding=1)
@@ -535,11 +581,15 @@ def _publish_bridge_region_outputs(
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
         if pipeline._formal_gpu_frame(world):
-            raise RuntimeError("GPU collapse pipeline requires bridge GPU resources for authoritative output state")
+            raise RuntimeError(
+                "GPU collapse pipeline requires bridge GPU resources for authoritative output state"
+            )
         return
     if bridge.ctx is not world.bridge.ctx:
         if pipeline._formal_gpu_frame(world):
-            raise RuntimeError("GPU collapse pipeline cannot publish authoritative state from a separate GL context")
+            raise RuntimeError(
+                "GPU collapse pipeline cannot publish authoritative state from a separate GL context"
+            )
         return
     if "cell_core" not in bridge.gpu_authoritative_resources:
         world._require_gpu_authoritative_resources("collapse output", "cell_core")
@@ -591,9 +641,13 @@ def _publish_bridge_region_outputs_connected_tiles(
     bridge = world.bridge
     bridge.ensure_world_resources(world)
     if not bridge.enabled or bridge.ctx is None:
-        raise RuntimeError("GPU collapse pipeline requires bridge GPU resources for authoritative output state")
+        raise RuntimeError(
+            "GPU collapse pipeline requires bridge GPU resources for authoritative output state"
+        )
     if bridge.ctx is not world.bridge.ctx:
-        raise RuntimeError("GPU collapse pipeline cannot publish authoritative state from a separate GL context")
+        raise RuntimeError(
+            "GPU collapse pipeline cannot publish authoritative state from a separate GL context"
+        )
     if "cell_core" not in bridge.gpu_authoritative_resources:
         world._require_gpu_authoritative_resources("collapse output", "cell_core")
         bridge.sync_world(world)
@@ -612,7 +666,9 @@ def _publish_bridge_region_outputs_connected_tiles(
         int(getattr(world.active, "tile_width", 1)),
         int(getattr(world.active, "tile_height", 1)),
     )
-    program["tile_size"].value = int(max(1, int(getattr(world.active, "tile_size", FORMAL_CONNECTED_TILE_LOCAL_SIZE))))
+    program["tile_size"].value = int(
+        max(1, int(getattr(world.active, "tile_size", FORMAL_CONNECTED_TILE_LOCAL_SIZE)))
+    )
     resources.material_out_tex.use(location=0)
     resources.phase_out_tex.use(location=1)
     resources.cell_flags_out_tex.use(location=2)
@@ -683,8 +739,12 @@ def _download_region_state(
     world.timer_pack[ys, xs] = np.rint(
         np.frombuffer(resources.timer_out_tex.read(), dtype="f4").reshape((height, width, 4))
     ).astype(np.uint8)
-    world.integrity[ys, xs] = np.frombuffer(resources.integrity_out_tex.read(), dtype="f4").reshape((height, width))
-    world.cell_temperature[ys, xs] = np.frombuffer(resources.temp_out_tex.read(), dtype="f4").reshape((height, width))
+    world.integrity[ys, xs] = np.frombuffer(resources.integrity_out_tex.read(), dtype="f4").reshape(
+        (height, width)
+    )
+    world.cell_temperature[ys, xs] = np.frombuffer(
+        resources.temp_out_tex.read(), dtype="f4"
+    ).reshape((height, width))
     world.island_id[ys, xs] = np.rint(
         np.frombuffer(resources.island_id_out_tex.read(), dtype="f4").reshape((height, width))
     ).astype(np.int32)
