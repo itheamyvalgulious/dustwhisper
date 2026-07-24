@@ -8,7 +8,7 @@ if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
 from oracle_game.sim.cpu_base import material_table_row
-from oracle_game.sim.liquid import (
+from oracle_game.sim.liquid_constants import (
     LIQUID_ACTIVITY_EPSILON,
     LIQUID_SOLVER_COLUMNAR,
     LIQUID_SOLVER_TILE_LEVEL,
@@ -20,6 +20,10 @@ from oracle_game.types import Phase
 def step(solver, world: "WorldEngine") -> None:
     solver.reset_runtime_state(world)
     gpu_available = world._gpu_pipeline_available(solver.gpu_pipeline, "liquid")
+    if not gpu_available:
+        # The CPU path is an explicit oracle: gate before any early return so
+        # a non-oracle direct call fails loudly instead of silently idling.
+        world._require_cpu_oracle_backend("liquid")
     formal_gpu_frame = (
         gpu_available
         and getattr(world, "simulation_backend", "") == "gpu"
@@ -93,7 +97,6 @@ def step(solver, world: "WorldEngine") -> None:
         if not formal_gpu_frame:
             solver._mark_pending_placeholder_regions(world)
     else:
-        world._require_cpu_oracle_backend("liquid")
         solver.last_backend = "cpu"
         tile_size = world.active.tile_size
         for tile_x, tile_y in active_tiles:
@@ -201,6 +204,7 @@ def release(solver) -> None:
 
 
 def reset_runtime_state(solver, world: "WorldEngine" | None = None) -> None:
+    solver.last_backend = "idle"
     if world is None:
         solver.last_solve_tile_mask = np.zeros((0, 0), dtype=np.bool_)
         solver.last_post_tile_mask = np.zeros((0, 0), dtype=np.bool_)

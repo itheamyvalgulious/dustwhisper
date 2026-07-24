@@ -7,14 +7,14 @@ import numpy as np
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
-from oracle_game.sim.gpu_motion import (
+from oracle_game.sim.gpu_motion_constants import (
     POWDER_RESOLVE_BLOCKED,
     POWDER_RESOLVE_DDA,
     POWDER_RESOLVE_FALLBACK,
     POWDER_RESOLVE_STALE,
     powder_reservation_dtype,
 )
-from oracle_game.sim.motion import POWDER_SOLVER_SUSPENDED
+from oracle_game.sim.motion_constants import POWDER_SOLVER_SUSPENDED
 from oracle_game.types import Phase
 
 
@@ -182,18 +182,12 @@ def _apply_powder_reservations(
                     elasticity=solver._material_elasticity(world, material_id),
                 )
             continue
-        desired_dx = int(reservation["desired_target_xy"][0]) - x
-        desired_dy = int(reservation["desired_target_xy"][1]) - y
-        if desired_dx != 0 or desired_dy != 0:
-            world.velocity[y, x] = solver._collision_response(
-                world.velocity[y, x],
-                (desired_dx, desired_dy),
-                (0, 0),
-                friction=solver._material_friction(world, material_id),
-                elasticity=solver._material_elasticity(world, material_id),
-            )
-        else:
-            world.velocity[y, x] *= 0.2
+        # Non-moving (fully blocked) reservation: mirror the GPU formal-frame
+        # mainline (apply_powder_reservations_source_indexed_direct.comp), which
+        # leaves the source cell untouched, so the velocity is kept as-is instead
+        # of being zeroed by a collision response (notably at elasticity=0) or
+        # damped. Collision response applies only to reservations that moved.
+        continue
 
 
 def _resolve_powder_reservations(

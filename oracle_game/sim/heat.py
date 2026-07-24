@@ -7,6 +7,7 @@ import numpy as np
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
+from oracle_game.engine_config import DEFAULT_ENGINE_CONFIG, EngineConfig
 from oracle_game.sim.gpu_heat import GPUHeatPipeline, GPUHeatStageTargets
 from oracle_game.sim.utils import (
     cross_average,
@@ -22,9 +23,12 @@ FREEZE_COLD_NEIGHBOR_THRESHOLD = 4
 
 
 class HeatSolver:
-    def __init__(self, ambient_iterations: int = 4) -> None:
+    def __init__(
+        self, ambient_iterations: int = 4, *, engine_config: EngineConfig | None = None
+    ) -> None:
+        self.engine_config = engine_config if engine_config is not None else DEFAULT_ENGINE_CONFIG
         self.ambient_iterations = ambient_iterations
-        self.gpu_pipeline = GPUHeatPipeline()
+        self.gpu_pipeline = GPUHeatPipeline(engine_config=self.engine_config)
         self.last_backend = "idle"
         self.last_solve_tile_mask = np.zeros((0, 0), dtype=np.bool_)
         self.last_solve_cell_mask = np.zeros((0, 0), dtype=np.bool_)
@@ -49,6 +53,10 @@ class HeatSolver:
     def step(self, world: "WorldEngine", dt: float) -> None:
         world.bridge.sync_rule_tables(world)
         gpu_available = world._gpu_pipeline_available(self.gpu_pipeline, "heat")
+        if not gpu_available:
+            # The CPU path is an explicit oracle: gate before any early return so
+            # a non-oracle direct call fails loudly instead of silently idling.
+            world._require_cpu_oracle_backend("heat")
         formal_gpu_frame = (
             gpu_available
             and getattr(world, "simulation_backend", "") == "gpu"
@@ -117,7 +125,6 @@ class HeatSolver:
             )
             self.last_backend = "gpu"
         else:
-            world._require_cpu_oracle_backend("heat")
             self.last_backend = "cpu"
             self._step_cpu_active(world, dt, solve_tile_mask)
             stage_targets = GPUHeatStageTargets(
@@ -598,6 +605,7 @@ class HeatSolver:
     def reset_runtime_state(
         self, world: "WorldEngine" | None = None, *, empty_heat_targets: bool = False
     ) -> None:
+        self.last_backend = "idle"
         if world is None:
             self.last_solve_tile_mask = np.zeros((0, 0), dtype=np.bool_)
             self.last_solve_cell_mask = np.zeros((0, 0), dtype=np.bool_)

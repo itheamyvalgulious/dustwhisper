@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     from oracle_game.types import ForceSource
     from oracle_game.world import WorldEngine
 
+from oracle_game.engine_config import DEFAULT_ENGINE_CONFIG, EngineConfig
 from oracle_game.gpu import typed_gas_id
 from oracle_game.sim.gpu_gas import GPUGasPipeline
 from oracle_game.sim.utils import (
@@ -25,9 +26,14 @@ GAS_ACTIVITY_EPSILON = 1e-4
 
 
 class GasSolver:
-    def __init__(self, pressure_iterations: int = 12) -> None:
+    def __init__(
+        self, pressure_iterations: int = 12, *, engine_config: EngineConfig | None = None
+    ) -> None:
+        self.engine_config = engine_config if engine_config is not None else DEFAULT_ENGINE_CONFIG
         self.pressure_iterations = pressure_iterations
-        self.gpu_pipeline = GPUGasPipeline(pressure_iterations=pressure_iterations)
+        self.gpu_pipeline = GPUGasPipeline(
+            pressure_iterations=pressure_iterations, engine_config=self.engine_config
+        )
         self.last_backend = "idle"
         self.last_solve_tile_mask = np.zeros((0, 0), dtype=np.bool_)
         self.last_solve_gas_mask = np.zeros((0, 0), dtype=np.bool_)
@@ -47,6 +53,10 @@ class GasSolver:
         self.reset_runtime_state(world)
         world.bridge.sync_rule_tables(world)
         gpu_available = world._gpu_pipeline_available(self.gpu_pipeline, "gas")
+        if not gpu_available:
+            # The CPU path is an explicit oracle: gate before any early return so
+            # a non-oracle direct call fails loudly instead of silently idling.
+            world._require_cpu_oracle_backend("gas")
         formal_gpu_frame = (
             gpu_available
             and getattr(world, "simulation_backend", "") == "gpu"
@@ -82,7 +92,6 @@ class GasSolver:
             self.gpu_pipeline.step(world, dt, solve_gas_mask=solve_gas_mask)
             self.last_backend = "gpu"
         else:
-            world._require_cpu_oracle_backend("gas")
             self.last_backend = "cpu"
             self._step_cpu_active(world, dt, solve_gas_mask)
         self.last_force_source_count_after = int(len(world.force_sources))
@@ -354,6 +363,7 @@ class GasSolver:
         self.reset_runtime_state()
 
     def reset_runtime_state(self, world: "WorldEngine" | None = None) -> None:
+        self.last_backend = "idle"
         if world is None:
             self.last_solve_tile_mask = np.zeros((0, 0), dtype=np.bool_)
             self.last_solve_gas_mask = np.zeros((0, 0), dtype=np.bool_)
