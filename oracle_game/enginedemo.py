@@ -135,6 +135,233 @@ DEMO_FRAGMENT_SHADER_SOURCE = """
 """
 
 
+def _demo_pace_frame(demo: Any, frame_start: float, frame_time: float) -> tuple[float, float]:
+    last_present_time = float(getattr(demo, "_last_present_time", 0.0))
+    if last_present_time > 0.0:
+        target_frame_time = 1.0 / 60.0
+        elapsed_since_present = frame_start - last_present_time
+        sleep_time = target_frame_time - elapsed_since_present
+        if sleep_time > 0.0:
+            _time.sleep(sleep_time)
+            frame_start = _time.perf_counter()
+        frame_time = max(0.0, frame_start - last_present_time)
+        demo._last_present_time = frame_start
+    return frame_start, frame_time
+
+
+def _demo_step_simulation(demo: Any, frame_time: float) -> bool:
+    stepped = False
+    steps = 0
+    sim_start = _time.perf_counter()
+    if not demo.state.paused:
+        demo.accumulator += frame_time * max(0.1, demo.state.speed)
+        demo.accumulator = min(demo.accumulator, 2.0 / 60.0)
+        while demo.accumulator >= 1.0 / 60.0 and steps < 1:
+            demo.engine.step(1.0 / 60.0)
+            demo.accumulator -= 1.0 / 60.0
+            steps += 1
+            stepped = True
+    elif demo.state.single_step:
+        demo.engine.step(1.0 / 60.0)
+        demo.state.single_step = False
+        steps = 1
+        stepped = True
+    sim_done = _time.perf_counter()
+    demo.sim_ms = (sim_done - sim_start) * 1000.0
+    demo._record_gpu_steps(steps, sim_done)
+    return stepped
+
+
+def _demo_sync_display_textures(demo: Any, now: float) -> float:
+    gpu_debug_synced = False
+    gas_species_id = -1
+    light_dose_channel = -1
+    if demo.debug_view != DebugView.MATERIAL:
+        if demo.debug_view == DebugView.GAS:
+            gas_species_id = demo.engine._resolve_sanctioned_gas_id(demo.gas_view_species)
+        if (
+            demo.debug_view in {DebugView.LIGHT, DebugView.OPTICS}
+            and demo.optics_view_light is not None
+        ):
+            light_id = demo.engine._resolve_sanctioned_light_id(demo.optics_view_light)
+            dose_channel = (
+                demo.engine._shadow_light_dose_channel(light_id) if light_id >= 0 else None
+            )
+            light_dose_channel = -1 if dose_channel is None else int(dose_channel)
+    sync_start = _time.perf_counter()
+    if demo.debug_view == DebugView.MATERIAL:
+        sync_display = getattr(demo.engine.bridge, "sync_display_textures", None)
+        if callable(sync_display):
+            sync_display(demo.engine)
+    else:
+        gpu_backend = getattr(demo.engine, "simulation_backend", "") == "gpu"
+        sync_debug_display = getattr(demo.engine.bridge, "sync_debug_display_texture", None)
+        if callable(sync_debug_display):
+            gpu_debug_synced = bool(
+                sync_debug_display(
+                    demo.engine,
+                    view=demo.debug_view.value,
+                    gas_species_id=gas_species_id,
+                    light_dose_channel=light_dose_channel,
+                )
+            )
+        allow_cpu_debug_upload = not gpu_backend or not callable(sync_debug_display)
+        if not gpu_debug_synced and allow_cpu_debug_upload:
+            _demo_upload_cpu_debug_frame(demo, now)
+    sync_done = _time.perf_counter()
+    demo.sync_ms = (sync_done - sync_start) * 1000.0
+    return sync_done
+
+
+def _demo_upload_cpu_debug_frame(demo: Any, now: float) -> None:
+    debug_key = (demo.debug_view, demo.gas_view_species, demo.optics_view_light)
+    debug_refresh_due = (
+        getattr(demo, "_debug_frame_cache", None) is None
+        or getattr(demo, "_debug_frame_cache_key", None) != debug_key
+        or now - float(getattr(demo, "_last_debug_texture_upload_time", 0.0))
+        >= DEMO_DEBUG_TEXTURE_REFRESH_SECONDS
+    )
+    if not debug_refresh_due:
+        return
+    debug = demo.engine.debug_frame(
+        demo.debug_view,
+        gas_species=demo.gas_view_species,
+        light_type=demo.optics_view_light,
+    )
+    demo._debug_frame_cache = debug
+    demo._debug_frame_cache_key = debug_key
+    demo._last_debug_texture_upload_time = now
+    try:
+        demo.engine.bridge.sync_world(
+            demo.engine,
+            debug_frame=debug,
+            upload_debug_texture=True,
+        )
+    except TypeError as exc:
+        if "upload_debug_texture" not in str(exc):
+            raise
+        demo.engine.bridge.sync_world(demo.engine, debug_frame=debug)
+
+
+def _demo_draw_frame(demo: Any) -> float:
+    apply_demo_render_uniforms(
+        demo.program,
+        build_demo_render_uniforms(demo.engine, debug_view=demo.debug_view),
+    )
+    demo.engine.bridge.texture("material").use(0)
+    demo.engine.bridge.texture("light").use(1)
+    demo.engine.bridge.texture("debug").use(2)
+    demo.engine.bridge.atlas_texture().use(3)
+    demo.ctx.clear(0.02, 0.03, 0.05)
+    demo.vao.render(mode=demo.ctx.TRIANGLE_STRIP)
+    return _time.perf_counter()
+
+
+def _demo_publish_runtime_state(demo: Any) -> None:
+    demo.engine.demo_runtime_state = {
+        "frame_id": int(demo.engine.frame_id),
+        "debug_view": demo.debug_view.value,
+        "force_debug_texture": demo.debug_view != DebugView.MATERIAL,
+        "visible_size": [int(demo.demo_visible_width), int(demo.demo_visible_height)],
+        "active_size": [
+            int(demo.engine.paging.active_width),
+            int(demo.engine.paging.active_height),
+        ],
+        "buffer_size": [int(demo.engine.width), int(demo.engine.height)],
+        "logical_world_size": [
+            int(demo.demo_logical_world_width),
+            int(demo.demo_logical_world_height),
+        ],
+        "origin": [int(demo.engine.paging.origin_x), int(demo.engine.paging.origin_y)],
+        "buffer_origin": [
+            int(demo.engine.paging.buffer_origin_x),
+            int(demo.engine.paging.buffer_origin_y),
+        ],
+        "cpu_fps": float(getattr(demo, "cpu_fps", 0.0)),
+        "gpu_fps": float(getattr(demo, "gpu_fps", 0.0)),
+        "frame_ms": float(demo.frame_ms),
+        "sim_ms": float(demo.sim_ms),
+        "sync_ms": float(demo.sync_ms),
+        "render_ms": float(demo.render_ms),
+        "backend_report": demo_backend_report(demo.engine),
+    }
+    demo._refresh_status_title()
+    request_demo_redraw(demo.wnd)
+
+
+def _demo_handle_brush_and_view_keys(demo: Any, key: int) -> bool:
+    if (material := demo_material_for_key(key)) is not None:
+        demo.selected_material = material
+    elif (debug_view := demo_debug_view_for_key(key)) is not None:
+        demo.debug_view = debug_view
+        demo._debug_frame_cache = None
+        demo._debug_frame_cache_key = None
+    elif key == ord("["):
+        demo.brush_radius = clamp_demo_brush_radius(demo.brush_radius - 1)
+    elif key == ord("]"):
+        demo.brush_radius = clamp_demo_brush_radius(demo.brush_radius + 1)
+    else:
+        return False
+    return True
+
+
+def _demo_handle_speed_and_step_keys(demo: Any, key: int) -> bool:
+    if key == ord("-"):
+        demo.state.speed = max(0.1, demo.state.speed * 0.8)
+    elif key == ord("="):
+        demo.state.speed = min(8.0, demo.state.speed * 1.25)
+    elif key == ord(" "):
+        demo.state.paused = not demo.state.paused
+    elif key in (ord("N"), ord("n")):
+        demo.state.single_step = True
+    else:
+        return False
+    return True
+
+
+def _demo_handle_cycle_and_reset_keys(demo: Any, key: int) -> bool:
+    if is_demo_optics_cycle_key(key):
+        demo.optics_view_light = cycle_demo_named_choice(
+            demo.optics_view_light,
+            (None, *demo.engine.rulebook.lights_by_name.keys()),
+        )
+    elif is_demo_gas_cycle_key(key):
+        gas_choices = tuple(name for name in demo.engine.gas_name_by_id if name)
+        next_species = cycle_demo_named_choice(demo.gas_view_species, gas_choices)
+        if next_species is not None:
+            demo.gas_view_species = next_species
+    elif is_demo_brush_cycle_key(key):
+        demo.brush_mode = cycle_demo_brush_mode(demo.brush_mode)
+    elif is_demo_controller_toggle_key(key):
+        demo._set_controller_debug_enabled(not demo.controller_debug_enabled)
+    elif is_demo_reset_key(key):
+        demo.engine.reset_world()
+        demo.focus_x, demo.focus_y = demo_default_focus_world(demo.engine.paging)
+        demo.controller_debug_cycle = 0
+        demo.controller_debug_label = None
+        demo.controller_debug_saved_state = demo.engine.serialize_controller_state()[
+            "controller_state"
+        ]
+        demo.controller_debug_dirty = demo.controller_debug_enabled
+    else:
+        return False
+    return True
+
+
+def _demo_handle_focus_move_keys(demo: Any, key: int) -> bool:
+    if key in (ord("W"), ord("w")):
+        demo._move_focus(0, -demo.engine.paging.tile_size)
+    elif key in (ord("S"), ord("s")):
+        demo._move_focus(0, demo.engine.paging.tile_size)
+    elif key in (ord("A"), ord("a")):
+        demo._move_focus(-demo.engine.paging.tile_size, 0)
+    elif key in (ord("D"), ord("d")):
+        demo._move_focus(demo.engine.paging.tile_size, 0)
+    else:
+        return False
+    return True
+
+
 def main() -> None:
     try:
         import moderngl  # noqa: F401
@@ -154,6 +381,15 @@ def main() -> None:
 
         def __init__(self, **kwargs: object) -> None:
             super().__init__(**kwargs)
+            self._init_world_engine()
+            self._init_http_console()
+            self._init_demo_ui_state()
+            self._init_perf_counters()
+            self._build_render_resources()
+            self._prime_render_textures()
+            self._refresh_status_title()
+
+        def _init_world_engine(self) -> None:
             sizing = compute_demo_grid_sizing(self.wnd.width, self.wnd.height)
             self.demo_visible_width = sizing["visible_width"]
             self.demo_visible_height = sizing["visible_height"]
@@ -174,6 +410,8 @@ def main() -> None:
             prewarm_collapse = getattr(self.engine, "prewarm_formal_connected_collapse", None)
             if callable(prewarm_collapse):
                 prewarm_collapse()
+
+        def _init_http_console(self) -> None:
             self.state = EngineRunState()
             try:
                 self.http = EngineHTTPConsole(self.engine, self.state, own_gpu_context=False)
@@ -183,6 +421,8 @@ def main() -> None:
                 self.http = EngineHTTPConsole(self.engine, self.state)
                 setattr(self.http, "own_gpu_context", False)
             self.http.start()
+
+        def _init_demo_ui_state(self) -> None:
             self.brush_radius = 3
             self.selected_material = MATERIAL_KEYS[0]
             self.brush_mode = BRUSH_MODES[0]
@@ -198,6 +438,8 @@ def main() -> None:
             self.controller_debug_dirty = False
             self.controller_debug_label: str | None = None
             self.controller_debug_saved_state: Any = None
+
+        def _init_perf_counters(self) -> None:
             self.cpu_fps = 0.0
             self.gpu_fps = 0.0
             self.frame_ms = 0.0
@@ -213,9 +455,6 @@ def main() -> None:
             self._debug_frame_cache: np.ndarray | None = None
             self._debug_frame_cache_key: tuple[object, ...] | None = None
             self._last_debug_texture_upload_time = 0.0
-            self._build_render_resources()
-            self._prime_render_textures()
-            self._refresh_status_title()
 
         def _bind_gui_gpu_context(self) -> None:
             bridge = self.engine.bridge
@@ -288,159 +527,22 @@ def main() -> None:
 
         def on_render(self, time: float, frame_time: float) -> None:
             frame_start = _time.perf_counter()
-            last_present_time = float(getattr(self, "_last_present_time", 0.0))
-            if last_present_time > 0.0:
-                target_frame_time = 1.0 / 60.0
-                elapsed_since_present = frame_start - last_present_time
-                sleep_time = target_frame_time - elapsed_since_present
-                if sleep_time > 0.0:
-                    _time.sleep(sleep_time)
-                    frame_start = _time.perf_counter()
-                frame_time = max(0.0, frame_start - last_present_time)
-                self._last_present_time = frame_start
+            frame_start, frame_time = _demo_pace_frame(self, frame_start, frame_time)
             bind_gpu_context = getattr(self, "_bind_gui_gpu_context", None)
             if callable(bind_gpu_context):
                 bind_gpu_context()
             now = _time.perf_counter()
             self._record_cpu_frame(now)
             with self.engine.state_lock:
-                stepped = False
-                steps = 0
-                sim_start = _time.perf_counter()
-                if not self.state.paused:
-                    self.accumulator += frame_time * max(0.1, self.state.speed)
-                    self.accumulator = min(self.accumulator, 2.0 / 60.0)
-                    while self.accumulator >= 1.0 / 60.0 and steps < 1:
-                        self.engine.step(1.0 / 60.0)
-                        self.accumulator -= 1.0 / 60.0
-                        steps += 1
-                        stepped = True
-                elif self.state.single_step:
-                    self.engine.step(1.0 / 60.0)
-                    self.state.single_step = False
-                    steps = 1
-                    stepped = True
-                sim_done = _time.perf_counter()
-                self.sim_ms = (sim_done - sim_start) * 1000.0
-                self._record_gpu_steps(steps, sim_done)
-
+                stepped = _demo_step_simulation(self, frame_time)
                 if self.controller_debug_enabled and (self.controller_debug_dirty or stepped):
                     self._run_demo_controller_cycle(apply_turn=stepped)
-
                 self.engine.default_debug_view = self.debug_view
-                debug = None
-                debug_refresh_due = False
-                gpu_debug_synced = False
-                gas_species_id = -1
-                light_dose_channel = -1
-                if self.debug_view != DebugView.MATERIAL:
-                    if self.debug_view == DebugView.GAS:
-                        gas_species_id = self.engine._resolve_sanctioned_gas_id(
-                            self.gas_view_species
-                        )
-                    if (
-                        self.debug_view in {DebugView.LIGHT, DebugView.OPTICS}
-                        and self.optics_view_light is not None
-                    ):
-                        light_id = self.engine._resolve_sanctioned_light_id(self.optics_view_light)
-                        dose_channel = (
-                            self.engine._shadow_light_dose_channel(light_id)
-                            if light_id >= 0
-                            else None
-                        )
-                        light_dose_channel = -1 if dose_channel is None else int(dose_channel)
-                sync_start = _time.perf_counter()
-                if self.debug_view == DebugView.MATERIAL:
-                    sync_display = getattr(self.engine.bridge, "sync_display_textures", None)
-                    if callable(sync_display):
-                        sync_display(self.engine)
-                else:
-                    gpu_backend = getattr(self.engine, "simulation_backend", "") == "gpu"
-                    sync_debug_display = getattr(
-                        self.engine.bridge, "sync_debug_display_texture", None
-                    )
-                    if callable(sync_debug_display):
-                        gpu_debug_synced = bool(
-                            sync_debug_display(
-                                self.engine,
-                                view=self.debug_view.value,
-                                gas_species_id=gas_species_id,
-                                light_dose_channel=light_dose_channel,
-                            )
-                        )
-                    allow_cpu_debug_upload = not gpu_backend or not callable(sync_debug_display)
-                    if not gpu_debug_synced and allow_cpu_debug_upload:
-                        debug_key = (self.debug_view, self.gas_view_species, self.optics_view_light)
-                        debug_refresh_due = (
-                            getattr(self, "_debug_frame_cache", None) is None
-                            or getattr(self, "_debug_frame_cache_key", None) != debug_key
-                            or now - float(getattr(self, "_last_debug_texture_upload_time", 0.0))
-                            >= DEMO_DEBUG_TEXTURE_REFRESH_SECONDS
-                        )
-                        if debug_refresh_due:
-                            debug = self.engine.debug_frame(
-                                self.debug_view,
-                                gas_species=self.gas_view_species,
-                                light_type=self.optics_view_light,
-                            )
-                            self._debug_frame_cache = debug
-                            self._debug_frame_cache_key = debug_key
-                            self._last_debug_texture_upload_time = now
-                            try:
-                                self.engine.bridge.sync_world(
-                                    self.engine,
-                                    debug_frame=debug,
-                                    upload_debug_texture=True,
-                                )
-                            except TypeError as exc:
-                                if "upload_debug_texture" not in str(exc):
-                                    raise
-                                self.engine.bridge.sync_world(self.engine, debug_frame=debug)
-                sync_done = _time.perf_counter()
-                self.sync_ms = (sync_done - sync_start) * 1000.0
-
-                apply_demo_render_uniforms(
-                    self.program,
-                    build_demo_render_uniforms(self.engine, debug_view=self.debug_view),
-                )
-                self.engine.bridge.texture("material").use(0)
-                self.engine.bridge.texture("light").use(1)
-                self.engine.bridge.texture("debug").use(2)
-                self.engine.bridge.atlas_texture().use(3)
-                self.ctx.clear(0.02, 0.03, 0.05)
-                self.vao.render(mode=self.ctx.TRIANGLE_STRIP)
-                render_done = _time.perf_counter()
+                sync_done = _demo_sync_display_textures(self, now)
+                render_done = _demo_draw_frame(self)
                 self.render_ms = (render_done - sync_done) * 1000.0
                 self.frame_ms = (render_done - frame_start) * 1000.0
-                self.engine.demo_runtime_state = {
-                    "frame_id": int(self.engine.frame_id),
-                    "debug_view": self.debug_view.value,
-                    "force_debug_texture": self.debug_view != DebugView.MATERIAL,
-                    "visible_size": [int(self.demo_visible_width), int(self.demo_visible_height)],
-                    "active_size": [
-                        int(self.engine.paging.active_width),
-                        int(self.engine.paging.active_height),
-                    ],
-                    "buffer_size": [int(self.engine.width), int(self.engine.height)],
-                    "logical_world_size": [
-                        int(self.demo_logical_world_width),
-                        int(self.demo_logical_world_height),
-                    ],
-                    "origin": [int(self.engine.paging.origin_x), int(self.engine.paging.origin_y)],
-                    "buffer_origin": [
-                        int(self.engine.paging.buffer_origin_x),
-                        int(self.engine.paging.buffer_origin_y),
-                    ],
-                    "cpu_fps": float(getattr(self, "cpu_fps", 0.0)),
-                    "gpu_fps": float(getattr(self, "gpu_fps", 0.0)),
-                    "frame_ms": float(self.frame_ms),
-                    "sim_ms": float(self.sim_ms),
-                    "sync_ms": float(self.sync_ms),
-                    "render_ms": float(self.render_ms),
-                    "backend_report": demo_backend_report(self.engine),
-                }
-                self._refresh_status_title()
-                request_demo_redraw(self.wnd)
+                _demo_publish_runtime_state(self)
 
         def _record_cpu_frame(self, now: float) -> None:
             sample_time = float(getattr(self, "_cpu_fps_sample_time", now))
@@ -484,55 +586,13 @@ def main() -> None:
             if action == 0:
                 return
             with self.engine.state_lock:
-                if (material := demo_material_for_key(key)) is not None:
-                    self.selected_material = material
-                elif (debug_view := demo_debug_view_for_key(key)) is not None:
-                    self.debug_view = debug_view
-                    self._debug_frame_cache = None
-                    self._debug_frame_cache_key = None
-                elif key == ord("["):
-                    self.brush_radius = clamp_demo_brush_radius(self.brush_radius - 1)
-                elif key == ord("]"):
-                    self.brush_radius = clamp_demo_brush_radius(self.brush_radius + 1)
-                elif key == ord("-"):
-                    self.state.speed = max(0.1, self.state.speed * 0.8)
-                elif key == ord("="):
-                    self.state.speed = min(8.0, self.state.speed * 1.25)
-                elif key == ord(" "):
-                    self.state.paused = not self.state.paused
-                elif key in (ord("N"), ord("n")):
-                    self.state.single_step = True
-                elif is_demo_optics_cycle_key(key):
-                    self.optics_view_light = cycle_demo_named_choice(
-                        self.optics_view_light,
-                        (None, *self.engine.rulebook.lights_by_name.keys()),
-                    )
-                elif is_demo_gas_cycle_key(key):
-                    gas_choices = tuple(name for name in self.engine.gas_name_by_id if name)
-                    next_species = cycle_demo_named_choice(self.gas_view_species, gas_choices)
-                    if next_species is not None:
-                        self.gas_view_species = next_species
-                elif is_demo_brush_cycle_key(key):
-                    self.brush_mode = cycle_demo_brush_mode(self.brush_mode)
-                elif is_demo_controller_toggle_key(key):
-                    self._set_controller_debug_enabled(not self.controller_debug_enabled)
-                elif is_demo_reset_key(key):
-                    self.engine.reset_world()
-                    self.focus_x, self.focus_y = demo_default_focus_world(self.engine.paging)
-                    self.controller_debug_cycle = 0
-                    self.controller_debug_label = None
-                    self.controller_debug_saved_state = self.engine.serialize_controller_state()[
-                        "controller_state"
-                    ]
-                    self.controller_debug_dirty = self.controller_debug_enabled
-                elif key in (ord("W"), ord("w")):
-                    self._move_focus(0, -self.engine.paging.tile_size)
-                elif key in (ord("S"), ord("s")):
-                    self._move_focus(0, self.engine.paging.tile_size)
-                elif key in (ord("A"), ord("a")):
-                    self._move_focus(-self.engine.paging.tile_size, 0)
-                elif key in (ord("D"), ord("d")):
-                    self._move_focus(self.engine.paging.tile_size, 0)
+                if _demo_handle_brush_and_view_keys(self, key):
+                    return
+                if _demo_handle_speed_and_step_keys(self, key):
+                    return
+                if _demo_handle_cycle_and_reset_keys(self, key):
+                    return
+                _demo_handle_focus_move_keys(self, key)
 
         def close(self) -> None:  # pragma: no cover
             self.http.stop()

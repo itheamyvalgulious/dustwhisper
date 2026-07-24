@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from oracle_game.active import ActiveRegionTracker
+from oracle_game.engine_config import EngineConfig
 from oracle_game.gpu import GPUBridge
 from oracle_game.page_store import InMemoryPageStore, PageStore
 from oracle_game.paging import RingPagingWindow
@@ -51,7 +52,14 @@ def _init_world_engine(
     gpu_context: Any | None = None,
     page_store: PageStore | None = None,
     simulation_backend: str = "gpu",
+    engine_config: EngineConfig | None = None,
 ) -> None:
+    # W5/B6 inventory note: every `engine.x = ...` below is instance-state
+    # initialisation (values, arrays, containers, solvers).  None of them binds a
+    # module-level function as a method, so the W3 delegate treatment does not
+    # apply here; the sections below only group the state for readability.
+
+    # --- backend, dimensions, and core services ---
     simulation_backend = str(simulation_backend).lower()
     if simulation_backend not in {"gpu", "cpu"}:
         raise ValueError("simulation_backend must be one of: gpu, cpu")
@@ -77,6 +85,8 @@ def _init_world_engine(
             "GPU world simulation requires a ModernGL 4.3+ context; CPU fallback is disabled"
         )
     engine.page_store = InMemoryPageStore() if page_store is None else page_store
+
+    # --- frame/readback queues, snapshots, and id counters ---
     engine.frame_id = 0
     engine.state_lock = threading.RLock()
     engine.command_queue: deque[WorldCommand] = deque()
@@ -98,6 +108,8 @@ def _init_world_engine(
     }
     engine.controller_state_snapshot: Any = None
     engine.bootstrap_log: list[str] = []
+
+    # --- bridge frame staging and GPU runtime flags ---
     engine.bridge_frame_commands: list[WorldCommand] = []
     engine.bridge_frame_readback_requests: list[ReadbackRequest] = []
     engine.bridge_frame_placeholders: list[EntityPlaceholder] = []
@@ -114,22 +126,29 @@ def _init_world_engine(
     engine.emitters: list[dict[str, object]] = []
     engine._formal_gpu_frame_has_light_dose: bool | None = None
     engine._gpu_optics_outputs_clear = False
+
+    # --- realtime budget and pass profiling knobs ---
     engine.gpu_realtime_budget_enabled = True
     engine.gpu_realtime_budget_cell_threshold = GPU_REALTIME_BUDGET_CELL_THRESHOLD
     engine.profile_passes_enabled = False
     engine.profile_passes_sync = False
     engine.last_pass_profile: dict[str, Any] = {"passes": [], "summary": {}, "skipped_stages": []}
     engine.last_skipped_gpu_stages: list[str] = []
+
+    # --- collapse dirty tracking ---
     engine.formal_collapse_interval_frames = 4
     engine.collapse_dirty_regions: list[tuple[int, int, int, int]] = []
     engine.collapse_deferred_regions: list[tuple[int, int, int, int]] = []
     engine._gpu_collapse_structure_dirty_tiles_pending = False
     engine._gpu_collapse_structure_dirty_tiles_deferred = False
+
+    # --- island/entity runtime ---
     engine.islands: dict[int, object] = {}
     engine.entity_states: dict[int, EntityState] = {}
     engine.entity_placeholders: dict[int, set[tuple[int, int]]] = {}
     engine.next_island_id = 1
 
+    # --- per-cell and gas/optics field arrays ---
     engine.material_id = np.zeros((height, width), dtype=np.int32)
     engine.phase = np.zeros((height, width), dtype=np.uint8)
     engine.cell_flags = np.zeros((height, width), dtype=np.uint8)
@@ -153,6 +172,7 @@ def _init_world_engine(
     engine.gas_optical_dose = np.zeros((1, engine.gas_height, engine.gas_width), dtype=np.float32)
     engine.default_debug_view = DebugView.MATERIAL
 
+    # --- material/gas/light property tables ---
     engine.material_density = np.zeros(1, dtype=np.float32)
     engine.material_base_color = np.zeros((1, 3), dtype=np.float32)
     engine.material_gravity = np.zeros(1, dtype=np.float32)
@@ -199,18 +219,21 @@ def _init_world_engine(
     engine.light_name_by_id: list[str] = [""]
     engine._stable_shadow_payloads: dict[str, Any] = {}
 
-    engine.gas_solver = GasSolver()
-    engine.heat_solver = HeatSolver()
-    engine.collapse_solver = CollapseSolver()
-    engine.motion_solver = MotionSolver()
-    engine.liquid_solver = LiquidSolver()
-    engine.optics_solver = OpticsSolver()
-    engine.reaction_solver = ReactionSolver()
+    # --- solvers and GPU pipelines ---
+    engine.engine_config = engine_config if engine_config is not None else EngineConfig()
+    engine.gas_solver = GasSolver(engine_config=engine.engine_config)
+    engine.heat_solver = HeatSolver(engine_config=engine.engine_config)
+    engine.collapse_solver = CollapseSolver(engine_config=engine.engine_config)
+    engine.motion_solver = MotionSolver(engine_config=engine.engine_config)
+    engine.liquid_solver = LiquidSolver(engine_config=engine.engine_config)
+    engine.optics_solver = OpticsSolver(engine_config=engine.engine_config)
+    engine.reaction_solver = ReactionSolver(engine_config=engine.engine_config)
     engine.merge_pipeline = GPUMergePipeline()
     engine.placeholder_pipeline = GPUPlaceholderPipeline()
     engine.page_stripe_pipeline = GPUPageStripePipeline()
     engine.grid_command_pipeline = GPUWorldCommandPipeline()
 
+    # --- post-construction bootstrap (call order matters) ---
     engine.bootstrap_defaults()
     engine.reset_world()
     engine.bridge.sync_world(engine)
