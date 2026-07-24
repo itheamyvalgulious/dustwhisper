@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+import math
 import threading
 from copy import deepcopy
 from dataclasses import dataclass
 from enum import Enum
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
 import numpy as np
@@ -15,6 +16,10 @@ if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
 from oracle_game.gpu import moderngl
+
+# Largest POST body the console will read.  Every endpoint expects a small JSON
+# command, so anything larger is rejected (413) before the body is read.
+MAX_BODY_BYTES = 1024 * 1024
 
 
 def _json_default(value: object) -> object:
@@ -364,8 +369,10 @@ class EngineHTTPConsole:
             def do_POST(self) -> None:  # noqa: N802
                 with engine.state_lock:
                     parsed = urlparse(self.path)
-                    payload = self._read_json()
                     try:
+                        payload = self._read_json()
+                        if payload is None:
+                            return
                         if console.route_controller_post(self, parsed, payload):
                             return
                         if console.route_inject_post(self, parsed, payload):
@@ -383,17 +390,37 @@ class EngineHTTPConsole:
                         if console.route_control_post(self, parsed, payload):
                             return
                         self._send({"error": "not found"}, status=404)
-                    except (KeyError, TypeError, ValueError) as exc:
+                    # JSON decode / unicode errors are ValueError subclasses;
+                    # OverflowError covers int() on huge floats (e.g. 1e400).
+                    except (KeyError, TypeError, ValueError, OverflowError) as exc:
                         self._send_bad_request(exc)
 
             def log_message(self, format: str, *args: object) -> None:
                 return
 
-            def _read_json(self) -> dict[str, object]:
-                length = int(self.headers.get("Content-Length", "0"))
+            def _read_json(self) -> dict[str, object] | None:
+                raw_length = self.headers.get("Content-Length")
+                if raw_length is None:
+                    self._send({"error": "Content-Length required"}, status=411)
+                    return None
+                try:
+                    length = int(raw_length)
+                except ValueError:
+                    self._send({"error": "invalid Content-Length"}, status=400)
+                    return None
+                if length < 0:
+                    self._send({"error": "invalid Content-Length"}, status=400)
+                    return None
+                if length > MAX_BODY_BYTES:
+                    # Reject on the declared length: the body is never read.
+                    self._send({"error": "request body too large"}, status=413)
+                    return None
                 if length == 0:
                     return {}
-                return json.loads(self.rfile.read(length).decode("utf-8"))
+                parsed = json.loads(self.rfile.read(length).decode("utf-8"))
+                if not isinstance(parsed, dict):
+                    raise ValueError("request body must be a JSON object")
+                return parsed
 
             def _send(self, payload: dict[str, object], status: int = 200) -> None:
                 body = json.dumps(payload, default=_json_default).encode("utf-8")
@@ -433,36 +460,72 @@ class EngineHTTPConsole:
 
         return Handler
 
+    # ------------------------------------------------------------------
+    # Satellite method delegates (W5b: retired the `_x = _x` class grafts).
+    #
+    # Each body resolves the bare function name through this module's global
+    # namespace -- method bodies never see class scope -- i.e. the satellite
+    # route function imported above (or, for the two payload helpers, the
+    # module-level function defined at the top of this file), bound at import
+    # time exactly like the historical grafts.  Monkeypatch semantics are
+    # unchanged: patching the attribute on the class or on an instance
+    # shadows/replaces the delegate, while patching the satellite module's
+    # attribute does NOT affect calls through the console.
+    # ------------------------------------------------------------------
     # Shared payload helpers exposed for bucket modules (avoid circular imports).
-    _controller_turn_kwargs = staticmethod(_controller_turn_kwargs)
-    _target_query_kwargs = staticmethod(_target_query_kwargs)
+    @staticmethod
+    def _controller_turn_kwargs(*args: Any, **kwargs: Any) -> Any:
+        return _controller_turn_kwargs(*args, **kwargs)
+
+    @staticmethod
+    def _target_query_kwargs(*args: Any, **kwargs: Any) -> Any:
+        return _target_query_kwargs(*args, **kwargs)
 
     # Readback / observation endpoints.
-    route_readback_get = route_readback_get
-    route_readback_post = route_readback_post
+    def route_readback_get(self, *args: Any, **kwargs: Any) -> Any:
+        return route_readback_get(self, *args, **kwargs)
+
+    def route_readback_post(self, *args: Any, **kwargs: Any) -> Any:
+        return route_readback_post(self, *args, **kwargs)
 
     # Controller-turn / targets / commands / intents endpoints.
-    route_controller_get = route_controller_get
-    route_controller_post = route_controller_post
+    def route_controller_get(self, *args: Any, **kwargs: Any) -> Any:
+        return route_controller_get(self, *args, **kwargs)
+
+    def route_controller_post(self, *args: Any, **kwargs: Any) -> Any:
+        return route_controller_post(self, *args, **kwargs)
 
     # Table mutation endpoints.
-    route_tables_get = route_tables_get
-    route_tables_post = route_tables_post
+    def route_tables_get(self, *args: Any, **kwargs: Any) -> Any:
+        return route_tables_get(self, *args, **kwargs)
+
+    def route_tables_post(self, *args: Any, **kwargs: Any) -> Any:
+        return route_tables_post(self, *args, **kwargs)
 
     # Frame I/O endpoints.
-    route_frame_get = route_frame_get
-    route_frame_post = route_frame_post
+    def route_frame_get(self, *args: Any, **kwargs: Any) -> Any:
+        return route_frame_get(self, *args, **kwargs)
+
+    def route_frame_post(self, *args: Any, **kwargs: Any) -> Any:
+        return route_frame_post(self, *args, **kwargs)
 
     # Paging / page-store endpoints.
-    route_paging_get = route_paging_get
-    route_paging_post = route_paging_post
+    def route_paging_get(self, *args: Any, **kwargs: Any) -> Any:
+        return route_paging_get(self, *args, **kwargs)
+
+    def route_paging_post(self, *args: Any, **kwargs: Any) -> Any:
+        return route_paging_post(self, *args, **kwargs)
 
     # Entity (non-controller) endpoints.
-    route_entity_get = route_entity_get
-    route_entity_post = route_entity_post
+    def route_entity_get(self, *args: Any, **kwargs: Any) -> Any:
+        return route_entity_get(self, *args, **kwargs)
+
+    def route_entity_post(self, *args: Any, **kwargs: Any) -> Any:
+        return route_entity_post(self, *args, **kwargs)
 
     # Material / inject / force / emitter mutation endpoints.
-    route_inject_post = route_inject_post
+    def route_inject_post(self, *args: Any, **kwargs: Any) -> Any:
+        return route_inject_post(self, *args, **kwargs)
 
     def route_control_get(
         self,
@@ -514,7 +577,10 @@ class EngineHTTPConsole:
             )
             return True
         if path == "/api/control/speed":
-            state.speed = float(payload["speed"])
+            speed = float(payload["speed"])
+            if not math.isfinite(speed) or speed < 0.0:
+                raise ValueError("speed must be a finite, non-negative number")
+            state.speed = speed
             handler._send({"speed": state.speed})
             return True
         if path == "/api/control/reset":
@@ -522,3 +588,47 @@ class EngineHTTPConsole:
             handler._send_queued()
             return True
         return False
+
+    def _geometry_limit(self) -> int:
+        """World-size-derived upper bound for client-supplied geometry."""
+        return max(1, int(self.engine.width), int(self.engine.height))
+
+    def _bounded_int(self, value: object, name: str) -> int:
+        limit = self._geometry_limit()
+        number = int(value)  # type: ignore[arg-type]
+        if number < 0 or number > limit:
+            raise ValueError(f"{name} must be between 0 and {limit}")
+        return number
+
+    def _bounded_float(self, value: object, name: str) -> float:
+        limit = self._geometry_limit()
+        number = float(value)  # type: ignore[arg-type]
+        if not math.isfinite(number) or number < 0.0 or number > float(limit):
+            raise ValueError(f"{name} must be a finite number between 0 and {limit}")
+        return number
+
+    def _bounded_entity_dimensions(self, item: object) -> None:
+        """Reject oversized entity width/height in a single payload mapping.
+
+        ``_sync_entity_placeholders`` and the entity feedback path iterate
+        width x height in Python before bounds-checking, so unbounded
+        dimensions are a CPU denial-of-service even off-world.
+        """
+        if not isinstance(item, dict):
+            return
+        for field_name in ("width", "height"):
+            if field_name in item:
+                self._bounded_int(item[field_name], field_name)
+
+    def _validate_entity_geometry(self, payload: dict[str, object]) -> None:
+        """Bound entity/placeholder dimensions in a frame-style payload."""
+        for key in ("entities", "entity_placeholders"):
+            items = payload.get(key)
+            if isinstance(items, list):
+                for item in items:
+                    self._bounded_entity_dimensions(item)
+        patches = payload.get("patches")
+        if isinstance(patches, list):
+            for patch in patches:
+                if isinstance(patch, dict):
+                    self._bounded_entity_dimensions(patch.get("fields"))

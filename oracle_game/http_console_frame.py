@@ -77,12 +77,14 @@ def route_frame_post(
     engine = console.engine
     path = parsed.path  # type: ignore[attr-defined]
     if path == "/api/frame/preview":
+        console._validate_entity_geometry(payload)
         if console._frame_focus_advances_paging(payload.get("focus_center")):
             console._ensure_gpu_attached()
         preview = engine.preview_frame_input(payload)
         handler._send({"ok": True, "preview": engine.serialize_frame_preview(preview)})
         return True
     if path == "/api/frame/request":
+        console._validate_entity_geometry(payload)
         if console._frame_focus_advances_paging(payload.get("focus_center")):
             console._ensure_gpu_attached()
         queued = engine.request_frame_input(payload)
@@ -97,6 +99,7 @@ def route_frame_post(
         )
         return True
     if path == "/api/frame/submit":
+        console._validate_entity_geometry(payload)
         submission_id = engine.submit_frame_input(payload)
         handler._send(
             {
@@ -108,6 +111,7 @@ def route_frame_post(
         )
         return True
     if path == "/api/frame/cycle":
+        console._validate_entity_geometry(payload)
         if console._frame_focus_advances_paging(payload.get("focus_center")):
             console._ensure_gpu_attached()
         cycle = engine.request_frame_cycle(

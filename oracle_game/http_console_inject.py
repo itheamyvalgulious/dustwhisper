@@ -24,7 +24,7 @@ def route_inject_post(
             None if payload.get("x") is None else int(payload["x"]),
             None if payload.get("y") is None else int(payload["y"]),
             payload["material"],
-            int(payload.get("radius", 2)),
+            console._bounded_int(payload.get("radius", 2), "radius"),
             immediate=immediate,
             **console._target_query_kwargs(payload),
         )
@@ -37,8 +37,8 @@ def route_inject_post(
         engine.write_material_region(
             None if payload.get("x") is None else int(payload["x"]),
             None if payload.get("y") is None else int(payload["y"]),
-            int(payload["width"]),
-            int(payload["height"]),
+            console._bounded_int(payload["width"], "width"),
+            console._bounded_int(payload["height"], "height"),
             payload["material"],
             immediate=immediate,
             **console._target_query_kwargs(payload),
@@ -53,7 +53,7 @@ def route_inject_post(
             None if payload.get("x") is None else int(payload["x"]),
             None if payload.get("y") is None else int(payload["y"]),
             float(payload["delta"]),
-            int(payload.get("radius", 2)),
+            console._bounded_int(payload.get("radius", 2), "radius"),
             immediate=immediate,
             **console._target_query_kwargs(payload),
         )
@@ -67,7 +67,7 @@ def route_inject_post(
             None if payload.get("x") is None else int(payload["x"]),
             None if payload.get("y") is None else int(payload["y"]),
             tuple(payload.get("velocity", [0.0, 0.0])),
-            int(payload.get("radius", 2)),
+            console._bounded_int(payload.get("radius", 2), "radius"),
             carrier=str(payload.get("carrier", "cell")),
             mode=str(payload.get("mode", "add")),
             immediate=immediate,
@@ -84,7 +84,7 @@ def route_inject_post(
             None if payload.get("y") is None else int(payload["y"]),
             payload["species"],
             float(payload["amount"]),
-            int(payload.get("radius", 1)),
+            console._bounded_int(payload.get("radius", 1), "radius"),
             immediate=immediate,
             **console._target_query_kwargs(payload),
         )
@@ -98,7 +98,7 @@ def route_inject_post(
             None if payload.get("x") is None else int(payload["x"]),
             None if payload.get("y") is None else int(payload["y"]),
             tuple(payload.get("direction", [0.0, -1.0])),
-            float(payload.get("radius", 8.0)),
+            console._bounded_float(payload.get("radius", 8.0), "radius"),
             float(payload.get("strength", 2.0)),
             float(payload.get("lifetime", 0.4)),
             immediate=immediate,
@@ -113,7 +113,7 @@ def route_inject_post(
                     "x": float(item["x"]),
                     "y": float(item["y"]),
                     "direction": tuple(item.get("direction", [0.0, -1.0])),
-                    "radius": float(item.get("radius", 8.0)),
+                    "radius": console._bounded_float(item.get("radius", 8.0), "radius"),
                     "strength": float(item.get("strength", 2.0)),
                     "lifetime": float(item.get("lifetime", 0.4)),
                 }
@@ -132,7 +132,7 @@ def route_inject_post(
                     "direction": tuple(item.get("direction", [0.0, 0.0])),
                     "spread": float(item.get("spread", 0.25)),
                     "strength": float(item.get("strength", 1.0)),
-                    "radius": int(item.get("radius", 8)),
+                    "radius": console._bounded_int(item.get("radius", 8), "radius"),
                 }
                 for item in payload.get("emitters", [])
             ]
@@ -148,7 +148,9 @@ def route_inject_post(
             None if payload.get("y") is None else int(payload["y"]),
             payload["light_type"],
             float(payload.get("strength", 1.0)),
-            None if payload.get("radius") is None else int(payload["radius"]),
+            None
+            if payload.get("radius") is None
+            else console._bounded_int(payload["radius"], "radius"),
             direction=tuple(payload.get("direction", [0.0, 0.0])),
             spread=float(payload.get("spread", 0.25)),
             immediate=immediate,

@@ -39,16 +39,23 @@ def route_entity_post(
     engine = console.engine
     path = parsed.path  # type: ignore[attr-defined]
     if path == "/api/entity/placeholders":
+        for item in payload.get("placeholders", []):
+            console._bounded_entity_dimensions(item)
         engine.sync_entity_placeholders(
             [EntityPlaceholder(**item) for item in payload.get("placeholders", [])]
         )
         handler._send_queued()
         return True
     if path == "/api/entity/states/set":
+        for item in payload.get("entities", []):
+            console._bounded_entity_dimensions(item)
         engine.sync_entity_states(payload.get("entities", []))
         handler._send_queued()
         return True
     if path == "/api/entity/states/patch":
+        for patch in payload.get("patches", []):
+            if isinstance(patch, dict):
+                console._bounded_entity_dimensions(patch.get("fields"))
         engine.patch_entity_states(payload.get("patches", []))
         handler._send_queued()
         return True
