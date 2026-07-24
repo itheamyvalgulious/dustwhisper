@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 
+from oracle_game.sim import gpu_liquid_solve as liquid_solve
 from oracle_game.sim.gpu_liquid import _SHADER_SUBS, GPULiquidPipeline
 from oracle_game.sim.shader_loader import shader_source
 
@@ -91,7 +92,7 @@ def test_candidate_buoyancy_requires_matching_gpu_tile_token() -> None:
 def test_candidate_token_is_gpu_generated_and_specializations_are_isolated() -> None:
     token_source = shader_source("liquid/advance_tile_snapshot_token.comp", _SHADER_SUBS)
     ensure_source = inspect.getsource(GPULiquidPipeline._ensure_programs)
-    run_source = inspect.getsource(GPULiquidPipeline._run_tile_solve)
+    run_source = inspect.getsource(liquid_solve._run_tile_solve)
     validation_source = shader_source("liquid/validate_tile_snapshot_coverage.comp", _SHADER_SUBS)
     assert "token.x += 1u" in token_source
     assert "tile_snapshot_state[4] = 1u" in token_source

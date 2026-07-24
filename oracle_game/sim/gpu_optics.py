@@ -8,6 +8,7 @@ import numpy as np
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
+from oracle_game.engine_config import DEFAULT_ENGINE_CONFIG, EngineConfig
 from oracle_game.gpu import typed_light_id
 from oracle_game.sim.gpu_base import GPUPipelineBase, release_resource_fields
 from oracle_game.sim.shader_loader import build_compute_shader
@@ -92,28 +93,39 @@ class GPUOpticsResources:
 
 
 class GPUOpticsPipeline(GPUPipelineBase):
-    def __init__(self) -> None:
+    def __init__(self, *, engine_config: EngineConfig | None = None) -> None:
+        self.engine_config = engine_config if engine_config is not None else DEFAULT_ENGINE_CONFIG
         self.resources: GPUOpticsResources | None = None
         self.programs: dict[str, Any] = {}
         self.last_cpu_mirror_downloaded = False
         self.last_cpu_active_upload_skipped = False
         self.last_reaction_latch_clear_fused = False
-        self.last_liquid_active_snapshot_used = False
-        self._direct_bridge_visible_publish_enabled = True
-        self._direct_visual_accumulator_compose_enabled = True
-        self._sparse_optics_worklists_enabled = True
-        self._sparse_gas_visible_scan_fusion_enabled = True
-        self._sparse_tile_seeded_build_enabled = True
+        self._direct_bridge_visible_publish_enabled = (
+            self.engine_config.direct_bridge_visible_publish_enabled
+        )
+        self._direct_visual_accumulator_compose_enabled = (
+            self.engine_config.direct_visual_accumulator_compose_enabled
+        )
+        self._sparse_optics_worklists_enabled = self.engine_config.sparse_optics_worklists_enabled
+        self._sparse_gas_visible_scan_fusion_enabled = (
+            self.engine_config.sparse_gas_visible_scan_fusion_enabled
+        )
+        self._sparse_tile_seeded_build_enabled = self.engine_config.sparse_tile_seeded_build_enabled
         # Experimental: aggregate indirect dispatch maxima per tile workgroup
         # instead of issuing one contended global atomicMax per sparse entry.
-        self._sparse_tile_local_atomic_max_enabled = False
-        self._sparse_gas_owner_warp_compaction_enabled = True
+        self._sparse_tile_local_atomic_max_enabled = (
+            self.engine_config.sparse_tile_local_atomic_max_enabled
+        )
+        self._sparse_gas_owner_warp_compaction_enabled = (
+            self.engine_config.sparse_gas_owner_warp_compaction_enabled
+        )
         self._sparse_gas_owner_warp_compaction_supported = False
-        self.last_sparse_gas_owner_warp_compaction_used = False
-        self._bounded_trace_stack_enabled = True
+        self._bounded_trace_stack_enabled = self.engine_config.bounded_trace_stack_enabled
         # Experimental: full-active trace variants hard-code both activity
         # predicates, so their private mask textures have no consumers.
-        self._full_active_mask_hydration_elision_enabled = True
+        self._full_active_mask_hydration_elision_enabled = (
+            self.engine_config.full_active_mask_hydration_elision_enabled
+        )
         self.last_full_active_mask_hydration_elision_used = False
         self.last_pass_profile: dict[str, Any] = {"passes": [], "summary": {}}
 
@@ -136,9 +148,7 @@ class GPUOpticsPipeline(GPUPipelineBase):
         if ctx is None:
             raise RuntimeError("GPU optics pipeline requires a valid ModernGL context")
         self.last_reaction_latch_clear_fused = False
-        self.last_liquid_active_snapshot_used = False
         self.last_full_active_mask_hydration_elision_used = False
-        self.last_sparse_gas_owner_warp_compaction_used = False
         self.reset_pass_profile()
         if solve_cell_mask is None:
             solve_cell_mask = np.ones((world.height, world.width), dtype=np.bool_)
@@ -392,23 +402,11 @@ class GPUOpticsPipeline(GPUPipelineBase):
             _SHADER_SUBS,
             includes=["optics/_active_common.comp"],
         )
-        self.programs["load_active_cell_snapshot"] = build_compute_shader(
-            ctx,
-            "optics/load_active_cell.comp",
-            {**_SHADER_SUBS, "ACTIVE_TILE_SNAPSHOT": 1},
-            includes=["optics/_active_common.comp"],
-        )
         tile_seed_subs = {**_SHADER_SUBS, "TILE_SEEDED_BUILD": 1}
         self.programs["load_active_gas"] = build_compute_shader(
             ctx,
             "optics/load_active_gas.comp",
             _SHADER_SUBS,
-            includes=["optics/_active_common.comp"],
-        )
-        self.programs["load_active_gas_snapshot"] = build_compute_shader(
-            ctx,
-            "optics/load_active_gas.comp",
-            {**_SHADER_SUBS, "ACTIVE_TILE_SNAPSHOT": 1},
             includes=["optics/_active_common.comp"],
         )
         self.programs["trace_emitters"] = build_compute_shader(
@@ -849,7 +847,6 @@ class GPUOpticsPipeline(GPUPipelineBase):
             if use_owner_warp_compaction
             else cell_program
         )
-        self.last_sparse_gas_owner_warp_compaction_used = use_owner_warp_compaction
         cell_tile_grid = (
             (world.width + LOCAL_SIZE - 1) // LOCAL_SIZE,
             (world.height + LOCAL_SIZE - 1) // LOCAL_SIZE,
@@ -1015,7 +1012,6 @@ class GPUOpticsPipeline(GPUPipelineBase):
             == int(getattr(world, "frame_id", 0))
         ):
             active_tile_snapshot = liquid_resources.active_tile_tex
-        self.last_liquid_active_snapshot_used = active_tile_snapshot is not None
         for name, texture, width, height in (
             ("load_active_cell", resources.active_cell_tex, world.width, world.height),
             ("load_active_gas", resources.active_gas_tex, world.gas_width, world.gas_height),

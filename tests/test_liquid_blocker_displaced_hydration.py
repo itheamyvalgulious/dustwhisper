@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import inspect
 
+from oracle_game.sim import gpu_liquid_bridge as liquid_bridge
+from oracle_game.sim import gpu_liquid_solve as liquid_solve
 from oracle_game.sim.gpu_liquid import _SHADER_SUBS, GPULiquidPipeline
 from oracle_game.sim.shader_loader import shader_source
 
@@ -15,7 +17,7 @@ def test_buoyancy_blocker_displaced_hydration_is_default_enabled() -> None:
 
 
 def test_candidate_has_strict_snapshot_cleanup_gate_and_canonical_fallback() -> None:
-    step_source = inspect.getsource(GPULiquidPipeline.step)
+    step_source = inspect.getsource(liquid_bridge.step)
     required_gates = (
         "_buoyancy_cleanup_split_fusion_frame_enabled",
         "_buoyancy_snapshot_pre_state_frame_enabled",
@@ -25,19 +27,18 @@ def test_candidate_has_strict_snapshot_cleanup_gate_and_canonical_fallback() -> 
         "_compact_tile_solve_snapshot_enabled",
         "_bridge_aux_cleanup_fusion_enabled",
         "_placeholder_lazy_roles_enabled",
-        "not pipeline._bridge_aux_residency_enabled",
     )
     assert all(gate in step_source for gate in required_gates)
     assert '"cell_core"' in step_source
     assert '"island_id"' in step_source
     assert '"entity_id"' in step_source
     assert '"placeholder_displaced_material"' in step_source
-    assert "or pipeline._buoyancy_blocker_displaced_hydration_frame_enabled" in step_source
+    assert "pipeline._buoyancy_blocker_displaced_hydration_frame_enabled" in step_source
 
 
 def test_loader_and_tile_solve_share_blocker_hydration_gate() -> None:
-    load_source = inspect.getsource(GPULiquidPipeline._load_authoritative_bridge_inputs)
-    tile_source = inspect.getsource(GPULiquidPipeline._run_tile_solve)
+    load_source = inspect.getsource(liquid_bridge._load_authoritative_bridge_inputs)
+    tile_source = inspect.getsource(liquid_solve._run_tile_solve)
     assert "pipeline._blocker_displaced_hydration_frame_enabled" in load_source
     assert "pipeline._blocker_displaced_hydration_frame_enabled" in tile_source
     assert "load_bridge_blocker_displaced" in load_source
@@ -72,7 +73,7 @@ def test_snapshot_pre_blocker_specializations_preserve_pre_state_encoding() -> N
 
 def test_restore_reads_bridge_identities_but_keeps_displaced_texture() -> None:
     ensure_source = inspect.getsource(GPULiquidPipeline._ensure_programs)
-    cleanup_source = inspect.getsource(GPULiquidPipeline._run_cleanup_runtime)
+    cleanup_source = inspect.getsource(liquid_solve._run_cleanup_runtime)
     shader = shader_source(
         "liquid/cleanup_runtime.comp",
         {

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import inspect
 
+from oracle_game.sim import gpu_liquid_bridge as liquid_bridge
+from oracle_game.sim import gpu_liquid_solve as liquid_solve
 from oracle_game.sim.gpu_liquid import _SHADER_SUBS, GPULiquidPipeline
 from oracle_game.sim.shader_loader import shader_source
 
@@ -44,8 +46,8 @@ def test_placeholder_cleanup_restores_only_affected_active_tiles() -> None:
 
 
 def test_split_schedule_keeps_cleanup_out_of_terminal_flow() -> None:
-    step_source = inspect.getsource(GPULiquidPipeline.step)
-    cleanup_source = inspect.getsource(GPULiquidPipeline._run_cleanup_runtime)
+    step_source = inspect.getsource(liquid_bridge.step)
+    cleanup_source = inspect.getsource(liquid_solve._run_cleanup_runtime)
     assert '"buoyancy_fused_provenance_cleanup"' in step_source
     assert '"liquid_cleanup_placeholder_affected"' in step_source
     assert "affected_tile_dispatch=True" in step_source

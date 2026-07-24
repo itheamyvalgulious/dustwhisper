@@ -10,6 +10,7 @@ import numpy as np
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
+from oracle_game.engine_config import DEFAULT_ENGINE_CONFIG, EngineConfig
 from oracle_game.gpu import LIGHT_RENDER_STYLE_IDS
 from oracle_game.sim.gpu_optics import GPUOpticsPipeline
 from oracle_game.sim.utils import expand_bool_mask, tile_mask_to_cell_mask, tile_mask_to_gas_mask
@@ -73,11 +74,14 @@ class _OpticsRuntime(NamedTuple):
 
 
 class OpticsSolver:
-    def __init__(self) -> None:
-        self.gpu_pipeline = GPUOpticsPipeline()
+    def __init__(self, *, engine_config: EngineConfig | None = None) -> None:
+        self.engine_config = engine_config if engine_config is not None else DEFAULT_ENGINE_CONFIG
+        self.gpu_pipeline = GPUOpticsPipeline(engine_config=self.engine_config)
         self.last_backend = "idle"
         self.last_pass_profile: dict[str, Any] = {"passes": [], "summary": {}}
-        self._formal_full_active_mask_reuse_enabled = True
+        self._formal_full_active_mask_reuse_enabled = (
+            self.engine_config.formal_full_active_mask_reuse_enabled
+        )
         # Keep solve-mask construction canonical; this narrower candidate only
         # aliases formal changed masks after the GPU pass, avoiding three
         # full-resolution CPU copies without changing the authoritative mask.
@@ -85,7 +89,9 @@ class OpticsSolver:
         # those arrays as the changed-mask views instead of copying each full
         # resolution mask three times; non-formal/partial paths retain the
         # copy helper below.
-        self._formal_changed_mask_alias_enabled = True
+        self._formal_changed_mask_alias_enabled = (
+            self.engine_config.formal_changed_mask_alias_enabled
+        )
         self._formal_full_active_mask_cache_signature: tuple[int, ...] | None = None
         self._formal_full_active_mask_cache: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
         self.reset_runtime_state()

@@ -7,13 +7,12 @@ import numpy as np
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
-from oracle_game.sim.gpu_reactions import (
+from oracle_game.sim.gpu_reactions_resources import (
     _SHADER_SUBS,
     CONSUME_POLICY_BOTH,
     CONSUME_POLICY_NONE,
     CONSUME_POLICY_RHS,
     FLOW_SOURCE_GENERATION_BINDING,
-    FORMAL_GPU_EMPTY_DEFERRED_BATCH,
     LOCAL_SIZE,
     MATERIAL_LIGHT_PACKED_HEADER_OFFSET,
     MATERIAL_PAIR_PACKED_HEADER_OFFSET,
@@ -42,9 +41,6 @@ def run_timed_actions(
 ) -> GPUDeferredActionBatch | None:
     if not pipeline.available(world):
         return None
-    pipeline._timed_self_same_dispatch_pending = False
-    pipeline.last_timed_self_same_dispatch_used = False
-    pipeline.last_timed_sparse_inplace_used = False
     world.bridge.sync_rule_tables(world)
     action_table = world.bridge.shadow_typed_tables["reaction_action_table"]
     material_table = world.bridge.shadow_typed_tables["material_table"]
@@ -55,50 +51,11 @@ def run_timed_actions(
         compiled = pipeline._compile_action_buffers_cached(world, action_table, used_indices)
     if compiled is None:
         return None
-    combined_self_rule_count = 0
-    combined_candidate = False
-    if (
-        pipeline._formal_gpu_frame(world)
-        and pipeline._active_scheduler_gpu_authoritative(world)
-        and getattr(pipeline, "_timed_self_same_dispatch_enabled", False)
-    ):
-        self_rule_table = world.bridge.shadow_typed_tables["self_rule_table"]
-        combined_self_rule_count = min(MAX_SELF_RULES, int(self_rule_table.shape[0]))
-        if combined_self_rule_count > 0:
-            with pipeline._profile_pass(world, "timed_self_compile_actions"):
-                self_used_indices = pipeline._cached_used_action_indices_for_self_rules(
-                    world,
-                    self_rule_table,
-                    material_table,
-                )
-                combined_used_indices = set(used_indices or ()) | set(self_used_indices or ())
-                combined_compiled = pipeline._compile_action_buffers_cached(
-                    world,
-                    action_table,
-                    combined_used_indices,
-                )
-            combined_candidate = bool(
-                combined_compiled is not None
-                and not pipeline._compiled_actions_include_emit_material(compiled)
-                and not pipeline._compiled_actions_include_emit_material(combined_compiled)
-                and not pipeline._compiled_actions_include_flow_sources(compiled)
-                and not pipeline._compiled_actions_include_flow_sources(combined_compiled)
-                and not (
-                    pipeline._compiled_actions_include_emit_light(compiled)
-                    and pipeline._compiled_actions_include_emit_light(combined_compiled)
-                )
-            )
-            if combined_candidate:
-                assert combined_compiled is not None
-                compiled = combined_compiled
     pipeline._ensure_programs(world.bridge.ctx)
     resources = pipeline._ensure_resources(world)
     with pipeline._profile_pass(world, "timed_upload_state"):
         pipeline._upload_state(world, resources, reaction_group="timed", compiled_actions=compiled)
-    use_expanded_active_tile_mask = bool(
-        pipeline._can_use_expanded_active_tile_mask(world)
-        and (combined_candidate or not getattr(pipeline, "_timed_sparse_inplace_enabled", False))
-    )
+    use_expanded_active_tile_mask = bool(pipeline._can_use_expanded_active_tile_mask(world))
     upload_cell_mask, upload_gas_mask = pipeline._active_masks_for_cell_reaction_upload(
         world,
         solve_cell_mask,
@@ -118,7 +75,7 @@ def run_timed_actions(
         pipeline._upload_local_metadata(
             world,
             resources,
-            include_self_rules=combined_candidate,
+            include_self_rules=False,
         )
         resources.action_i.write(compiled[0].tobytes())
         resources.action_f.write(compiled[1].tobytes())
@@ -130,67 +87,6 @@ def run_timed_actions(
         world.gas_concentration.shape[0],
     )
     may_have_flow_sources = pipeline._compiled_actions_include_flow_sources(compiled)
-    if combined_candidate:
-        advance_velocity_role = pipeline._run_timed_self_combined_action_pass(
-            world,
-            resources,
-            self_rule_count=combined_self_rule_count,
-            modify_gas_layer_mask=modify_gas_layer_mask,
-            modifies_gas=modifies_gas,
-            use_expanded_active_tile_mask=use_expanded_active_tile_mask,
-        )
-        with pipeline._profile_pass(world, "timed_self_publish_cell_state"):
-            pipeline._download_cell_state(
-                world,
-                resources,
-                direct_core_outputs=True,
-                advance_velocity_role=advance_velocity_role,
-                packed_local_cell_meta=True,
-            )
-        pipeline._timed_self_same_dispatch_pending = True
-        pipeline.last_timed_self_same_dispatch_used = True
-        with pipeline._profile_pass(world, "timed_self_publish_deferred"):
-            return pipeline._download_deferred_batch(world, resources)
-    sparse_inplace = bool(
-        formal_gpu_frame and getattr(pipeline, "_timed_sparse_inplace_enabled", False)
-    )
-    if sparse_inplace and pipeline._timed_sparse_positive_count_enabled:
-        pipeline._prepare_timed_candidate_worklist(world, resources)
-        pipeline._timed_candidate_count_cpu = 1
-        pipeline._run_local_cell_action_pass(
-            world,
-            resources,
-            "timed_apply",
-            apply_material_side_effects=emits_material,
-            apply_gas_side_effects=modifies_gas,
-            modify_gas_layer_mask=modify_gas_layer_mask,
-            may_have_flow_sources=may_have_flow_sources,
-            flow_source_layers=16,
-            timed_sparse_inplace=True,
-        )
-        if pipeline._formal_segment_batch_active():
-            pipeline._mark_formal_bridge_publish_pending(world, resources, "cell")
-        pipeline.last_timed_sparse_inplace_used = True
-        with pipeline._profile_pass(world, "timed_publish_deferred"):
-            return pipeline._download_deferred_batch(world, resources)
-    if sparse_inplace:
-        sparse_completed = pipeline._run_timed_candidate_action_pass(
-            world,
-            resources,
-            apply_material_side_effects=emits_material,
-            apply_gas_side_effects=modifies_gas,
-            modify_gas_layer_mask=modify_gas_layer_mask,
-            may_have_flow_sources=may_have_flow_sources,
-            flow_source_layers=16,
-            inplace=True,
-        )
-        if sparse_completed and pipeline._formal_segment_batch_active():
-            pipeline._accumulate_timed_candidate_segment_cell_transient_state(world, resources)
-            pipeline._mark_formal_bridge_publish_pending(world, resources, "cell")
-        if sparse_completed:
-            pipeline.last_timed_sparse_inplace_used = True
-            with pipeline._profile_pass(world, "timed_publish_deferred"):
-                return pipeline._download_deferred_batch(world, resources)
     advance_velocity_role = pipeline._run_local_cell_action_pass(
         world,
         resources,
@@ -341,10 +237,6 @@ def run_self_actions(
 ) -> GPUDeferredActionBatch | None:
     if not pipeline.available(world):
         return None
-    if pipeline._timed_self_same_dispatch_pending:
-        pipeline._timed_self_same_dispatch_pending = False
-        return FORMAL_GPU_EMPTY_DEFERRED_BATCH
-    pipeline.last_self_sparse_inplace_used = False
     world.bridge.sync_rule_tables(world)
     rule_table = world.bridge.shadow_typed_tables["self_rule_table"]
     self_rule_count = min(MAX_SELF_RULES, int(rule_table.shape[0]))
@@ -372,15 +264,7 @@ def run_self_actions(
             compiled_actions=compiled,
             flow_source_layers=flow_source_layers,
         )
-    sparse_inplace = bool(
-        pipeline._formal_gpu_frame(world)
-        and pipeline._formal_segment_batch_active()
-        and getattr(pipeline, "_self_sparse_inplace_enabled", False)
-        and pipeline._active_scheduler_gpu_authoritative(world)
-    )
-    use_expanded_active_tile_mask = bool(
-        pipeline._can_use_expanded_active_tile_mask(world) and not sparse_inplace
-    )
+    use_expanded_active_tile_mask = bool(pipeline._can_use_expanded_active_tile_mask(world))
     upload_cell_mask, upload_gas_mask = pipeline._active_masks_for_cell_reaction_upload(
         world,
         solve_cell_mask,
@@ -404,31 +288,6 @@ def run_self_actions(
         not pipeline._formal_gpu_frame(world)
         or pipeline._self_rules_require_deferred_hi_outputs(rule_table, material_table, compiled)
     )
-    if sparse_inplace:
-        pipeline._prepare_self_candidate_worklist(world, resources)
-        pipeline._run_local_cell_action_pass(
-            world,
-            resources,
-            "self_apply",
-            self_rule_count=self_rule_count,
-            apply_material_side_effects=emits_material,
-            apply_gas_side_effects=pipeline._compiled_actions_include_modify_gas(compiled),
-            modify_gas_layer_mask=pipeline._compiled_modify_gas_layer_mask(
-                compiled, world.gas_concentration.shape[0]
-            ),
-            may_have_flow_sources=pipeline._compiled_actions_include_flow_sources(compiled),
-            flow_source_layers=flow_source_layers,
-            write_deferred_hi_outputs=write_deferred_hi_outputs,
-            fused_gas_output_safe=False,
-            inplace=True,
-            candidate_dispatch=True,
-        )
-        if not pipeline.last_timed_self_cell_flag_meta_used:
-            pipeline._accumulate_timed_candidate_segment_cell_transient_state(world, resources)
-        pipeline._mark_formal_bridge_publish_pending(world, resources, "cell")
-        pipeline.last_self_sparse_inplace_used = True
-        with pipeline._profile_pass(world, "self_publish_deferred"):
-            return pipeline._download_deferred_batch(world, resources)
     advance_velocity_role = pipeline._run_local_cell_action_pass(
         world,
         resources,

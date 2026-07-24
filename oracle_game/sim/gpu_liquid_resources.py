@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -8,12 +9,53 @@ if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
 from oracle_game.sim.gpu_base import release_resource_fields
-from oracle_game.sim.gpu_liquid import (
-    MAX_MATERIALS,
-    PASS_LOCAL_SIZE,
-    TILE_SIZE,
-    GPULiquidResources,
-)
+
+TILE_SIZE = 32
+TILE_LOCAL_SIZE = TILE_SIZE
+PASS_LOCAL_SIZE = 8
+MAX_MATERIALS = 256
+
+
+@dataclass(slots=True)
+class GPULiquidResources:
+    signature: tuple[int, int, int, int]
+    cell_state_pre: Any
+    cell_state_in: Any
+    cell_state_out: Any
+    island_in: Any
+    island_out: Any
+    entity_in: Any
+    entity_out: Any
+    timer_in: Any
+    timer_out: Any
+    temp_in: Any
+    temp_out: Any
+    integrity_in: Any
+    integrity_out: Any
+    velocity_in: Any
+    velocity_out: Any
+    blocker_mask: Any
+    liquid_flow_intent: Any
+    active_tile_tex: Any
+    active_tile_list: Any
+    active_tile_count: Any
+    active_tile_dispatch_args: Any
+    affected_tile_list: Any
+    affected_tile_count: Any
+    affected_tile_dispatch_args: Any
+    affected_tile_prefetch_dispatch_args: Any
+    affected_tile_flags: Any
+    tile_solve_snapshot: Any
+    tile_snapshot_token: Any
+    tile_snapshot_tile_tokens: Any
+    provenance_in: Any
+    provenance_out: Any
+    placeholder_target_claims: Any
+    displaced_in: Any
+    displaced_out: Any
+    bridge_cell_copy_framebuffer: Any
+    material_params: Any
+    material_params_signature: tuple[int, int] | None = None
 
 
 def release(pipeline) -> None:

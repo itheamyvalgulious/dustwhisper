@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 
+from oracle_game.sim import gpu_reactions_cell_pass, gpu_reactions_side_effects
 from oracle_game.sim.gpu_reactions import _SHADER_SUBS, GPUReactionPipeline
 from oracle_game.sim.shader_loader import shader_source
 
@@ -39,16 +40,21 @@ def test_timed_emit_target_producer_reuses_canonical_apply_and_args_builder() ->
     assert 'self.programs["timed_apply_packed_emit_targets"]' in program_source
     assert 'self.programs["timed_apply_packed_emit_targets_cell_flag_meta"]' in program_source
 
-    pass_source = inspect.getsource(GPUReactionPipeline._run_local_cell_action_pass)
-    assert "pipeline._timed_emit_target_producer_enabled" in pass_source
-    assert "pipeline._clear_packed_timed_material_target_worklist(" in pass_source
-    assert "resources.timed_candidate_count.bind_to_storage_buffer(binding=3)" in pass_source
-    assert "pipeline._sync_storage_and_indirect_writes(world.bridge.ctx)" in pass_source
-    assert "pipeline._run_produced_packed_timed_material_side_effect_pass(" in pass_source
-    assert "pipeline._run_packed_timed_material_side_effect_pass(" in pass_source
+    dispatch_source = inspect.getsource(gpu_reactions_cell_pass._derive_local_cell_dispatch_plan)
+    clear_source = inspect.getsource(gpu_reactions_cell_pass._clear_local_cell_action_worklists)
+    bind_source = inspect.getsource(gpu_reactions_cell_pass._bind_local_cell_action_inputs)
+    side_effect_source = inspect.getsource(
+        gpu_reactions_cell_pass._run_local_cell_material_side_effects
+    )
+    assert "pipeline._timed_emit_target_producer_enabled" in dispatch_source
+    assert "pipeline._clear_packed_timed_material_target_worklist(" in clear_source
+    assert "resources.timed_candidate_count.bind_to_storage_buffer(binding=3)" in bind_source
+    assert "pipeline._sync_storage_and_indirect_writes(world.bridge.ctx)" in clear_source
+    assert "pipeline._run_produced_packed_timed_material_side_effect_pass(" in side_effect_source
+    assert "pipeline._run_packed_timed_material_side_effect_pass(" in side_effect_source
 
     producer_apply = inspect.getsource(
-        GPUReactionPipeline._run_produced_packed_timed_material_side_effect_pass
+        gpu_reactions_side_effects._run_produced_packed_timed_material_side_effect_pass
     )
     assert 'pipeline.programs["build_packed_material_target_dispatch"]' in producer_apply
     assert "resources.timed_candidate_count.bind_to_storage_buffer(binding=0)" in producer_apply

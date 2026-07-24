@@ -14,7 +14,7 @@ def test_heat_sparse_bridge_residency_gates_aux_domain() -> None:
     source = Path("oracle_game/sim/gpu_heat_stages.py").read_text()
 
     assert "sparse_bridge_aux_residency = bool(" in source
-    assert "or sparse_bridge_aux_residency" in source
+    assert "bridge_aux_residency = bool(\n        sparse_bridge_aux_residency" in source
     assert "and pipeline._terminal_inplace_sparse_write_enabled" in source
     assert "and bridge_aux_residency" in source
 

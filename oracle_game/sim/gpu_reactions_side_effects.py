@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
-from oracle_game.sim.gpu_reactions import (
+from oracle_game.sim.gpu_reactions_resources import (
     FLOW_SOURCE_GENERATION_BINDING,
     FLOW_SOURCE_LAYERS,
     LOCAL_SIZE,

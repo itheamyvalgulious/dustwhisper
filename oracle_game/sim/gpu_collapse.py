@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass  # noqa: F401  # facade re-export, grafting/monkeypatch contract
 from typing import Any
 
 import numpy as np
 
+from oracle_game.engine_config import DEFAULT_ENGINE_CONFIG, EngineConfig
 from oracle_game.gpu import (
     ISLAND_RUNTIME_DTYPE,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
 )
@@ -15,14 +16,44 @@ from oracle_game.sim.gpu_collapse_dirty import (
     ensure_collapse_structure_dirty_tile_queue,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
     get_collapse_structure_dirty_tile_bounds,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
 )
+from oracle_game.sim.gpu_collapse_resources import (
+    FORMAL_CONNECTED_CELL_FRONTIER_TILE_COUNT_BUFFER,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    FORMAL_CONNECTED_CELL_FRONTIER_TILE_DISPATCH_ARGS_BUFFER,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    FORMAL_CONNECTED_CELL_FRONTIER_TILE_FLAGS_BUFFER,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    FORMAL_CONNECTED_CELL_FRONTIER_TILE_LIST_BUFFER,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_COUNT_BUFFER,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_DISPATCH_ARGS_BUFFER,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_FLAGS_BUFFER,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_LIST_BUFFER,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    FORMAL_CONNECTED_DIRTY_JUMP_ROUNDS,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    FORMAL_CONNECTED_FRONTIER_BUFFER,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    FORMAL_CONNECTED_FRONTIER_SCRATCH_BUFFER,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    FORMAL_CONNECTED_PROCESSED_BUFFER,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    FORMAL_CONNECTED_TILE_COUNT_BUFFER,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    FORMAL_CONNECTED_TILE_FRONTIER_BUFFER,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    FORMAL_CONNECTED_TILE_FRONTIER_COUNT_BUFFER,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    FORMAL_CONNECTED_TILE_FRONTIER_DISPATCH_ARGS_BUFFER,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    FORMAL_CONNECTED_TILE_FRONTIER_LIST_BUFFER,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    FORMAL_CONNECTED_TILE_LIST_BUFFER,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    FORMAL_CONNECTED_TILE_LOCAL_SIZE,
+    FORMAL_CONNECTED_TILE_REFINE_PASS_COUNT,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    FORMAL_CONNECTED_TILE_SCRATCH_BUFFER,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    FORMAL_CONNECTED_TILE_SCRATCH_COUNT_BUFFER,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    FORMAL_CONNECTED_TILE_SCRATCH_DISPATCH_ARGS_BUFFER,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    FORMAL_CONNECTED_TILE_SCRATCH_LIST_BUFFER,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    FORMAL_CONNECTED_TILE_SEED_BUFFER,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    FORMAL_DEFERRED_REGION_REQUEST_BUFFER,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    FORMAL_DEFERRED_REGION_REQUEST_CAPACITY,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    FORMAL_DEFERRED_REGION_REQUEST_COUNT_BUFFER,  # noqa: F401  # facade re-export, grafting/monkeypatch contract
+    LOCAL_SIZE,
+    GPUCollapseResources,
+)
 from oracle_game.sim.shader_loader import build_compute_shader
 from oracle_game.types import (  # noqa: F401  # facade re-export, grafting/monkeypatch contract
     CollapseBehavior,
     Phase,
 )
-
-LOCAL_SIZE = 8
-FORMAL_CONNECTED_TILE_LOCAL_SIZE = 32
 
 # Substitution table for every ``{{NAME}}`` marker used by the external
 # ``shaders/collapse/*.comp`` files.  Compound f-string interpolations (e.g.
@@ -54,97 +85,6 @@ _SHADER_SUBS: dict[str, Any] = {
     "SUPPORT_JFA_NV32_ROW_HYDRATE": 0,
     "SUPPORT_JFA_EXTENSIONS": "",
 }
-FORMAL_DEFERRED_REGION_REQUEST_CAPACITY = 256
-FORMAL_DEFERRED_REGION_REQUEST_COUNT_BUFFER = "collapse_deferred_region_request_count"
-FORMAL_DEFERRED_REGION_REQUEST_BUFFER = "collapse_deferred_region_requests"
-FORMAL_CONNECTED_FRONTIER_BUFFER = "collapse_connected_frontier_mask"
-FORMAL_CONNECTED_FRONTIER_SCRATCH_BUFFER = "collapse_connected_frontier_scratch_mask"
-FORMAL_CONNECTED_PROCESSED_BUFFER = "collapse_connected_processed_mask"
-FORMAL_CONNECTED_TILE_SEED_BUFFER = "collapse_connected_tile_seed_mask"
-FORMAL_CONNECTED_TILE_FRONTIER_BUFFER = "collapse_connected_tile_frontier_mask"
-FORMAL_CONNECTED_TILE_SCRATCH_BUFFER = "collapse_connected_tile_scratch_mask"
-FORMAL_CONNECTED_TILE_LIST_BUFFER = "collapse_connected_tile_list"
-FORMAL_CONNECTED_TILE_COUNT_BUFFER = "collapse_connected_tile_count"
-FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER = "collapse_connected_tile_dispatch_args"
-FORMAL_CONNECTED_TILE_FRONTIER_LIST_BUFFER = "collapse_connected_tile_frontier_list"
-FORMAL_CONNECTED_TILE_FRONTIER_COUNT_BUFFER = "collapse_connected_tile_frontier_count"
-FORMAL_CONNECTED_TILE_FRONTIER_DISPATCH_ARGS_BUFFER = (
-    "collapse_connected_tile_frontier_dispatch_args"
-)
-FORMAL_CONNECTED_TILE_SCRATCH_LIST_BUFFER = "collapse_connected_tile_scratch_list"
-FORMAL_CONNECTED_TILE_SCRATCH_COUNT_BUFFER = "collapse_connected_tile_scratch_count"
-FORMAL_CONNECTED_TILE_SCRATCH_DISPATCH_ARGS_BUFFER = "collapse_connected_tile_scratch_dispatch_args"
-FORMAL_CONNECTED_CELL_FRONTIER_TILE_LIST_BUFFER = "collapse_connected_cell_frontier_tile_list"
-FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_LIST_BUFFER = (
-    "collapse_connected_cell_frontier_tile_scratch_list"
-)
-FORMAL_CONNECTED_CELL_FRONTIER_TILE_FLAGS_BUFFER = "collapse_connected_cell_frontier_tile_flags"
-FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_FLAGS_BUFFER = (
-    "collapse_connected_cell_frontier_tile_scratch_flags"
-)
-FORMAL_CONNECTED_CELL_FRONTIER_TILE_COUNT_BUFFER = "collapse_connected_cell_frontier_tile_count"
-FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_COUNT_BUFFER = (
-    "collapse_connected_cell_frontier_tile_scratch_count"
-)
-FORMAL_CONNECTED_CELL_FRONTIER_TILE_DISPATCH_ARGS_BUFFER = (
-    "collapse_connected_cell_frontier_tile_dispatch_args"
-)
-FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_DISPATCH_ARGS_BUFFER = (
-    "collapse_connected_cell_frontier_tile_scratch_dispatch_args"
-)
-FORMAL_CONNECTED_TILE_REFINE_PASS_COUNT = 2
-FORMAL_CONNECTED_DIRTY_JUMP_ROUNDS = 4
-
-
-@dataclass(slots=True)
-class GPUCollapseResources:
-    signature: tuple[int, int]
-    structural_tex: Any
-    support_ping: Any
-    support_pong: Any
-    support_u8_ping: Any | None
-    support_u8_pong: Any | None
-    material_tex: Any
-    material_out_tex: Any
-    phase_tex: Any
-    phase_out_tex: Any
-    pending_tex: Any
-    cell_flags_tex: Any
-    cell_flags_out_tex: Any
-    timer_tex: Any
-    timer_out_tex: Any
-    integrity_tex: Any
-    integrity_out_tex: Any
-    temp_tex: Any
-    temp_out_tex: Any
-    island_id_tex: Any
-    island_id_out_tex: Any
-    entity_id_tex: Any
-    entity_id_out_tex: Any
-    displaced_tex: Any
-    displaced_out_tex: Any
-    change_flag: Any
-    component_labels: Any
-    component_island_ids: Any
-    component_metadata: Any
-    component_flags: Any
-    component_invalid: Any
-    component_count: Any
-    component_dispatch_args: Any
-    region_flags: Any
-    support_tile_union_roots: Any | None
-    support_tile_union_parent: Any | None
-    support_tile_union_seeded: Any | None
-    support_tile_union_edges: Any | None
-    support_tile_union_edge_count: Any | None
-    connected_tile_row_masks: Any
-    connected_tile_column_masks: Any
-    material_structural: Any
-    material_support_anchor: Any
-    material_collapse_behavior: Any
-    material_collapse_generation: Any
-    material_base_integrity: Any
-    material_spawn_temperature: Any
 
 
 from oracle_game.sim.gpu_collapse_formal import (
@@ -327,7 +267,8 @@ class GPUCollapsePipeline(GPUPipelineBase):
     FORMAL_EXPAND_RIGHT = 4
     FORMAL_EXPAND_BOTTOM = 8
 
-    def __init__(self) -> None:
+    def __init__(self, *, engine_config: EngineConfig | None = None) -> None:
+        self.engine_config = engine_config if engine_config is not None else DEFAULT_ENGINE_CONFIG
         self.resources: GPUCollapseResources | None = None
         self.programs: dict[str, Any] = {}
         self.last_cpu_mirror_downloaded = False
@@ -338,54 +279,100 @@ class GPUCollapsePipeline(GPUPipelineBase):
         self.last_pass_profile: dict[str, Any] = {"passes": [], "summary": {}}
         self._last_formal_connected_tile_mask_name: str | None = None
         self._formal_connected_cell_frontier_generation = 0
-        self._persistent_dense_tile_worklist_enabled = True
+        self._persistent_dense_tile_worklist_enabled = (
+            self.engine_config.persistent_dense_tile_worklist_enabled
+        )
         self._persistent_dense_tile_worklist_signature: tuple[int, ...] | None = None
         self.persistent_dense_tile_worklist_hits = 0
         self.persistent_dense_tile_worklist_rebuilds = 0
         self.persistent_dense_tile_worklist_invalidations = 0
-        self._support_outcome_publish_fusion_enabled = True
-        self._classification_mask_publish_fusion_enabled = True
-        self._classification_bridge_hydration_fusion_enabled = True
-        self._label_seed_materialize_axis_fusion_enabled = True
-        self._support_tile_union_enabled = False
-        self._support_tile_union_atomic_union_enabled = False
-        self._support_jfa_image_barrier_elision_enabled = False
+        self._support_outcome_publish_fusion_enabled = (
+            self.engine_config.support_outcome_publish_fusion_enabled
+        )
+        self._classification_mask_publish_fusion_enabled = (
+            self.engine_config.classification_mask_publish_fusion_enabled
+        )
+        self._classification_bridge_hydration_fusion_enabled = (
+            self.engine_config.classification_bridge_hydration_fusion_enabled
+        )
+        self._label_seed_materialize_axis_fusion_enabled = (
+            self.engine_config.label_seed_materialize_axis_fusion_enabled
+        )
+        self._support_tile_union_enabled = self.engine_config.support_tile_union_enabled
+        self._support_tile_union_atomic_union_enabled = (
+            self.engine_config.support_tile_union_atomic_union_enabled
+        )
         # Experimental: write each support tile row-major so a warp stores a
         # contiguous image row instead of issuing a vertical-stride store.
         # Keep the canonical traversal available until frame-level A/B proves
         # a stable win on the target GPU.
-        self._support_jfa_row_major_output_enabled = True
-        self._incremental_support_jfa_u8_enabled = True
-        self._support_jfa_u8_propagated_source_mask_elision_enabled = True
+        self._support_jfa_row_major_output_enabled = (
+            self.engine_config.support_jfa_row_major_output_enabled
+        )
+        self._incremental_support_jfa_u8_enabled = (
+            self.engine_config.incremental_support_jfa_u8_enabled
+        )
+        self._support_jfa_u8_propagated_source_mask_elision_enabled = (
+            self.engine_config.support_jfa_u8_propagated_source_mask_elision_enabled
+        )
         # A 32-lane NV warp hydrates one structural tile row per lane and
         # ballots support texels into row masks. Other devices keep the
         # canonical scalar row scan.
-        self._support_jfa_nv32_row_hydrate_enabled = True
+        self._support_jfa_nv32_row_hydrate_enabled = (
+            self.engine_config.support_jfa_nv32_row_hydrate_enabled
+        )
         self._support_jfa_nv32_row_hydrate_supported = False
-        self._incremental_classification_support_axis_u8_fusion_enabled = True
-        self._outcome_label_tile_union_enabled = True
-        self._incremental_collapse_pipeline_enabled = True
-        self._incremental_jfa_four_frame_balance_enabled = True
+        self._incremental_classification_support_axis_u8_fusion_enabled = (
+            self.engine_config.incremental_classification_support_axis_u8_fusion_enabled
+        )
+        self._outcome_label_tile_union_enabled = self.engine_config.outcome_label_tile_union_enabled
+        self._incremental_collapse_pipeline_enabled = (
+            self.engine_config.incremental_collapse_pipeline_enabled
+        )
+        self._incremental_jfa_four_frame_balance_enabled = (
+            self.engine_config.incremental_jfa_four_frame_balance_enabled
+        )
         # Balance the coarse support and terminal label work across the four
         # epoch phases so the worst frame does not carry both peaks.
-        self._incremental_phase_peak_v3_balance_enabled = True
-        self._incremental_support_outcome_publish_fusion_enabled = False
-        self._incremental_direct_immune_publish_enabled = True
-        self._incremental_direct_delayed_publish_enabled = True
-        self._incremental_packed_cell_snapshot_enabled = False
-        self._incremental_materialize_metadata_fusion_enabled = True
-        self._incremental_materialize_filter_fusion_enabled = True
-        self._incremental_label_union_materialize_validation_fusion_enabled = True
+        self._incremental_phase_peak_v3_balance_enabled = (
+            self.engine_config.incremental_phase_peak_v3_balance_enabled
+        )
+        self._incremental_support_outcome_publish_fusion_enabled = (
+            self.engine_config.incremental_support_outcome_publish_fusion_enabled
+        )
+        self._incremental_direct_immune_publish_enabled = (
+            self.engine_config.incremental_direct_immune_publish_enabled
+        )
+        self._incremental_direct_delayed_publish_enabled = (
+            self.engine_config.incremental_direct_delayed_publish_enabled
+        )
+        self._incremental_materialize_metadata_fusion_enabled = (
+            self.engine_config.incremental_materialize_metadata_fusion_enabled
+        )
+        self._incremental_materialize_filter_fusion_enabled = (
+            self.engine_config.incremental_materialize_filter_fusion_enabled
+        )
+        self._incremental_label_union_materialize_validation_fusion_enabled = (
+            self.engine_config.incremental_label_union_materialize_validation_fusion_enabled
+        )
         # Incremental validation normally clears one uint per possible label.
         # A generation token makes prior invalid marks semantically stale.
-        self._incremental_component_invalid_generation_enabled = True
+        self._incremental_component_invalid_generation_enabled = (
+            self.engine_config.incremental_component_invalid_generation_enabled
+        )
         self._component_invalid_generation = 0
-        self._incremental_component_flag_generation_enabled = True
+        self._incremental_component_flag_generation_enabled = (
+            self.engine_config.incremental_component_flag_generation_enabled
+        )
         self._active_component_flag_generation = 0
         # Initialize label-union tile roots in the outcome resolve workgroup
         # while preserving the canonical outcome texture for other consumers.
-        self._incremental_outcome_label_local_fusion_enabled = True
-        self._runtime_admission_stride_dispatch_enabled = True
+        self._incremental_outcome_label_local_fusion_enabled = (
+            self.engine_config.incremental_outcome_label_local_fusion_enabled
+        )
+        self._runtime_admission_stride_dispatch_enabled = (
+            self.engine_config.runtime_admission_stride_dispatch_enabled
+        )
         self._formal_dirty_epoch: Any | None = None
         self._pending_formal_runtime_admission: Any | None = None
         self.incremental_collapse_epoch_sequence = 0
@@ -1217,212 +1204,505 @@ class GPUCollapsePipeline(GPUPipelineBase):
             ctx, "collapse/publish_bridge_region_labels_connected_tiles.comp", _SHADER_SUBS
         )
 
-    _ensure_resources = _ensure_resources
-    _ensure_formal_connected_u8_support_textures = _ensure_formal_connected_u8_support_textures
-    _write_dynamic_buffer = _write_dynamic_buffer
-    _materialize_material_params = _materialize_material_params
-    _classification_material_params = _classification_material_params
+    # ------------------------------------------------------------------
+    # Satellite method delegates (W3: retired the `_x = _x` class grafts).
+    #
+    # Each body resolves the bare function name through this module's global
+    # namespace -- method bodies never see class scope -- i.e. the satellite
+    # function imported at the top of this file, bound at import time exactly
+    # like the historical grafts.  Monkeypatch semantics are unchanged:
+    # patching the attribute on the class or on an instance shadows/replaces
+    # the delegate, while patching the satellite module's attribute does NOT
+    # affect calls through the pipeline.
+    # ------------------------------------------------------------------
 
-    _upload_region_state = _upload_region_state
-    _load_authoritative_bridge_region_inputs = _load_authoritative_bridge_region_inputs
-    _load_authoritative_bridge_connected_tile_inputs = (
-        _load_authoritative_bridge_connected_tile_inputs
-    )
-    _load_authoritative_bridge_pending_region = _load_authoritative_bridge_pending_region
-    _load_authoritative_bridge_connected_tile_pending = (
-        _load_authoritative_bridge_connected_tile_pending
-    )
-    _publish_bridge_pending_region_outputs = _publish_bridge_pending_region_outputs
-    _publish_bridge_pending_region_outputs_from_texture = (
-        _publish_bridge_pending_region_outputs_from_texture
-    )
-    _publish_bridge_region_mask = _publish_bridge_region_mask
-    _publish_bridge_supported_unsupported_masks_connected_tiles = (
-        _publish_bridge_supported_unsupported_masks_connected_tiles
-    )
-    _publish_bridge_region_labels = _publish_bridge_region_labels
-    _publish_bridge_region_labels_connected_tiles = _publish_bridge_region_labels_connected_tiles
-    _publish_bridge_region_outputs = _publish_bridge_region_outputs
-    _publish_bridge_region_outputs_connected_tiles = _publish_bridge_region_outputs_connected_tiles
-    _barrier_bits = _barrier_bits
-    _download_region_state = _download_region_state
+    def _ensure_resources(self, *args: Any, **kwargs: Any) -> Any:
+        return _ensure_resources(self, *args, **kwargs)
 
-    prewarm_formal_connected_resources = prewarm_formal_connected_resources
-    _formal_jfa_jumps = staticmethod(_formal_jfa_jumps)
-    _formal_jfa_profile_jump_bands = staticmethod(_formal_jfa_profile_jump_bands)
-    _formal_support_unit_pass_count = staticmethod(_formal_support_unit_pass_count)
-    _formal_label_unit_pass_count = staticmethod(_formal_label_unit_pass_count)
-    _formal_support_refine_round_count = staticmethod(_formal_support_refine_round_count)
-    _formal_label_refine_round_count = staticmethod(_formal_label_refine_round_count)
-    _run_formal_support_refine_passes = _run_formal_support_refine_passes
-    seed_structural_region_texture = seed_structural_region_texture
-    connected_structural_region_texture = connected_structural_region_texture
-    copy_mask_texture = copy_mask_texture
-    _copy_mask_texture_connected_tiles = _copy_mask_texture_connected_tiles
-    _ensure_formal_connected_axis_mask_buffers = _ensure_formal_connected_axis_mask_buffers
-    _build_formal_connected_axis_masks = _build_formal_connected_axis_masks
-    detect_connected_internal_boundary_flags = detect_connected_internal_boundary_flags
-    _ensure_formal_deferred_region_request_buffers = _ensure_formal_deferred_region_request_buffers
-    _ensure_formal_connected_frontier_buffers = _ensure_formal_connected_frontier_buffers
-    _ensure_formal_connected_frontier_buffers_impl = _ensure_formal_connected_frontier_buffers_impl
-    _invalidate_persistent_dense_tile_worklist = _invalidate_persistent_dense_tile_worklist
-    _persistent_dense_tile_worklist_signature_for = _persistent_dense_tile_worklist_signature
-    _seed_formal_texture_region_tile_worklist = _seed_formal_texture_region_tile_worklist
-    _clear_formal_connected_cell_buffer_names = _clear_formal_connected_cell_buffer_names
-    _clear_formal_connected_tile_mask_buffers = _clear_formal_connected_tile_mask_buffers
-    _clear_formal_connected_tile_worklist = _clear_formal_connected_tile_worklist
-    _clear_formal_connected_tile_worklists = _clear_formal_connected_tile_worklists
-    _clear_formal_connected_cell_buffer_connected_tiles = (
-        _clear_formal_connected_cell_buffer_connected_tiles
-    )
-    reset_formal_connected_frontier = reset_formal_connected_frontier
-    clear_formal_connected_frontier_buffer = clear_formal_connected_frontier_buffer
-    clear_formal_deferred_region_requests = clear_formal_deferred_region_requests
-    execute_formal_connected_expansion = execute_formal_connected_expansion
-    execute_formal_connected_dirty_tile_queue = execute_formal_connected_dirty_tile_queue
-    advance_formal_connected_dirty_tile_queue = advance_formal_connected_dirty_tile_queue
-    advance_formal_runtime_admission = advance_formal_runtime_admission
-    has_active_formal_dirty_epoch = has_active_formal_dirty_epoch
-    _validate_and_collect_formal_dirty_epoch_labels = (
-        _validate_and_collect_formal_dirty_epoch_labels
-    )
+    def _ensure_formal_connected_u8_support_textures(self, *args: Any, **kwargs: Any) -> Any:
+        return _ensure_formal_connected_u8_support_textures(self, *args, **kwargs)
 
-    solve_formal_connected_region_textures = solve_formal_connected_region_textures
-    _solve_formal_connected_dirty_tile_textures = _solve_formal_connected_dirty_tile_textures
-    _solve_formal_connected_tile_textures = _solve_formal_connected_tile_textures
-    _prepare_formal_connected_tile_resources = _prepare_formal_connected_tile_resources
-    _prepare_formal_connected_tile_resources_without_input_upload = (
-        _prepare_formal_connected_tile_resources_without_input_upload
-    )
-    _prepare_formal_connected_tile_resources_impl = _prepare_formal_connected_tile_resources_impl
-    _clamp_formal_connected_region = _clamp_formal_connected_region
-    _formal_connected_dirty_tile_queue_resource_region = (
-        _formal_connected_dirty_tile_queue_resource_region
-    )
-    _formal_connected_dirty_tile_resource_region_from_tile_bounds = (
-        _formal_connected_dirty_tile_resource_region_from_tile_bounds
-    )
-    _formal_connected_resource_region_from_bbox = _formal_connected_resource_region_from_bbox
-    _local_formal_connected_rect = staticmethod(_local_formal_connected_rect)
-    _classify_formal_connected_tile_textures = _classify_formal_connected_tile_textures
-    _solve_formal_connected_frontier_texture = _solve_formal_connected_frontier_texture
-    _solve_formal_connected_dirty_cell_frontier_texture = (
-        _solve_formal_connected_dirty_cell_frontier_texture
-    )
-    _formal_connected_expansion_pass_count = _formal_connected_expansion_pass_count
-    _formal_connected_tile_jump_schedule = _formal_connected_tile_jump_schedule
-    _formal_connected_tile_refine_pass_count = _formal_connected_tile_refine_pass_count
-    _formal_connected_tile_support_frontier_pass_count = (
-        _formal_connected_tile_support_frontier_pass_count
-    )
-    _formal_connected_component_label_frontier_pass_count = (
-        _formal_connected_component_label_frontier_pass_count
-    )
-    _formal_connected_dirty_tile_jump_schedule = _formal_connected_dirty_tile_jump_schedule
-    _formal_connected_dirty_jump_schedule = staticmethod(_formal_connected_dirty_jump_schedule)
-    _formal_connected_cell_jump_schedule = staticmethod(_formal_connected_cell_jump_schedule)
-    _next_formal_connected_cell_frontier_generation = (
-        _next_formal_connected_cell_frontier_generation
-    )
-    _filter_formal_connected_eligibility = _filter_formal_connected_eligibility
-    connected_structural_frontier_texture = connected_structural_frontier_texture
-    drain_formal_deferred_region_requests = drain_formal_deferred_region_requests
-    enqueue_connected_internal_boundary_deferred_regions = (
-        enqueue_connected_internal_boundary_deferred_regions
-    )
-    exclude_internal_boundary_connected_texture_to_frontier = (
-        exclude_internal_boundary_connected_texture_to_frontier
-    )
-    exclude_internal_boundary_connected_texture = exclude_internal_boundary_connected_texture
+    def _write_dynamic_buffer(self, *args: Any, **kwargs: Any) -> Any:
+        return _write_dynamic_buffer(self, *args, **kwargs)
 
-    _solve_formal_connected_tile_frontier = _solve_formal_connected_tile_frontier
-    _solve_formal_connected_dirty_tile_frontier = _solve_formal_connected_dirty_tile_frontier
-    _compact_formal_connected_tile_mask = _compact_formal_connected_tile_mask
-    _seed_formal_connected_tile_frontier = _seed_formal_connected_tile_frontier
-    _seed_formal_connected_tile_frontier_from_dirty_queue = (
-        _seed_formal_connected_tile_frontier_from_dirty_queue
-    )
-    _expand_formal_connected_tile_frontier = _expand_formal_connected_tile_frontier
-    _clear_formal_connected_cell_frontier_tiles = _clear_formal_connected_cell_frontier_tiles
-    _accumulate_formal_connected_cell_frontier_tiles = (
-        _accumulate_formal_connected_cell_frontier_tiles
-    )
-    _seed_formal_connected_cell_frontier = _seed_formal_connected_cell_frontier
-    _seed_formal_connected_cell_frontier_from_dirty_queue = (
-        _seed_formal_connected_cell_frontier_from_dirty_queue
-    )
-    _expand_formal_connected_cell_frontier = _expand_formal_connected_cell_frontier
-    _copy_formal_connected_buffer_to_texture = _copy_formal_connected_buffer_to_texture
-    _solve_formal_connected_tile_support_textures = _solve_formal_connected_tile_support_textures
-    _begin_formal_connected_tile_support = _begin_formal_connected_tile_support
-    _run_formal_connected_tile_support_slice = _run_formal_connected_tile_support_slice
-    _seed_formal_connected_tile_support_frontier = _seed_formal_connected_tile_support_frontier
-    _expand_formal_connected_tile_support_frontier = _expand_formal_connected_tile_support_frontier
-    _run_formal_connected_tile_support_pass = _run_formal_connected_tile_support_pass
-    _run_formal_connected_tile_support_refine_passes = (
-        _run_formal_connected_tile_support_refine_passes
-    )
+    def _materialize_material_params(self, *args: Any, **kwargs: Any) -> Any:
+        return _materialize_material_params(self, *args, **kwargs)
 
-    label_component_mask = label_component_mask
-    materialize_component_mask = materialize_component_mask
-    materialize_component_texture = materialize_component_texture
-    materialize_component_texture_formal = materialize_component_texture_formal
-    _reserve_formal_component_island_ids = _reserve_formal_component_island_ids
-    _ensure_component_work_buffers = _ensure_component_work_buffers
-    _collect_component_labels_gpu = _collect_component_labels_gpu
-    _clear_component_label_flags_connected_tiles = _clear_component_label_flags_connected_tiles
-    _build_component_dispatch_args = _build_component_dispatch_args
-    _prepare_formal_component_list_and_metadata = _prepare_formal_component_list_and_metadata
-    _summarize_formal_component_metadata = _summarize_formal_component_metadata
-    _materialize_compact_labeled_component_texture = _materialize_compact_labeled_component_texture
-    _publish_compact_component_island_runtime = _publish_compact_component_island_runtime
-    _materialize_dense_labeled_component_texture = _materialize_dense_labeled_component_texture
-    _summarize_dense_component_metadata = _summarize_dense_component_metadata
-    _publish_dense_component_island_runtime = _publish_dense_component_island_runtime
-    _label_component_mask_texture = _label_component_mask_texture
-    collect_component_labels = collect_component_labels
-    summarize_labeled_components = summarize_labeled_components
-    summarize_labeled_component_texture = summarize_labeled_component_texture
-    materialize_labeled_components = materialize_labeled_components
+    def _classification_material_params(self, *args: Any, **kwargs: Any) -> Any:
+        return _classification_material_params(self, *args, **kwargs)
 
-    _label_component_texture = _label_component_texture
-    _label_component_texture_connected_tiles_from_texture_init = (
-        _label_component_texture_connected_tiles_from_texture_init
-    )
-    _label_component_texture_connected_tiles = _label_component_texture_connected_tiles
-    _begin_formal_connected_component_labeling = _begin_formal_connected_component_labeling
-    _run_formal_connected_component_label_slice = _run_formal_connected_component_label_slice
-    _publish_formal_connected_component_labels = _publish_formal_connected_component_labels
-    _ensure_formal_connected_component_label_union_buffers = (
-        _ensure_formal_connected_component_label_union_buffers
-    )
-    _begin_formal_connected_component_label_union = _begin_formal_connected_component_label_union
-    _run_formal_connected_component_label_union_slice = (
-        _run_formal_connected_component_label_union_slice
-    )
-    _materialize_formal_connected_component_label_union = (
-        _materialize_formal_connected_component_label_union
-    )
-    _seed_formal_component_labels_and_axis_masks = _seed_formal_component_labels_and_axis_masks
-    _seed_formal_component_label_frontier = _seed_formal_component_label_frontier
-    _expand_formal_component_label_frontier = _expand_formal_component_label_frontier
-    _run_formal_connected_component_label_pass = _run_formal_connected_component_label_pass
-    _run_formal_connected_component_label_refine_passes = (
-        _run_formal_connected_component_label_refine_passes
-    )
-    _copy_formal_component_label_buffer_to_texture = _copy_formal_component_label_buffer_to_texture
-    _run_formal_label_refine_passes = _run_formal_label_refine_passes
-    materialize_labeled_component_texture = materialize_labeled_component_texture
+    def _upload_region_state(self, *args: Any, **kwargs: Any) -> Any:
+        return _upload_region_state(self, *args, **kwargs)
 
-    solve_region = solve_region
-    solve_region_textures = solve_region_textures
-    classify_world_structural_mask = classify_world_structural_mask
-    expand_region_to_component_bbox = expand_region_to_component_bbox
-    _expand_formal_region_to_component_bbox = _expand_formal_region_to_component_bbox
-    classify_region = classify_region
-    classify_region_textures = classify_region_textures
-    resolve_unsupported_outcomes = resolve_unsupported_outcomes
-    resolve_unsupported_outcome_textures = resolve_unsupported_outcome_textures
-    resolve_supported_outcome_textures = resolve_supported_outcome_textures
-    _run_pass = _run_pass
-    release = release
+    def _load_authoritative_bridge_region_inputs(self, *args: Any, **kwargs: Any) -> Any:
+        return _load_authoritative_bridge_region_inputs(self, *args, **kwargs)
+
+    def _load_authoritative_bridge_connected_tile_inputs(self, *args: Any, **kwargs: Any) -> Any:
+        return _load_authoritative_bridge_connected_tile_inputs(self, *args, **kwargs)
+
+    def _load_authoritative_bridge_pending_region(self, *args: Any, **kwargs: Any) -> Any:
+        return _load_authoritative_bridge_pending_region(self, *args, **kwargs)
+
+    def _load_authoritative_bridge_connected_tile_pending(self, *args: Any, **kwargs: Any) -> Any:
+        return _load_authoritative_bridge_connected_tile_pending(self, *args, **kwargs)
+
+    def _publish_bridge_pending_region_outputs(self, *args: Any, **kwargs: Any) -> Any:
+        return _publish_bridge_pending_region_outputs(self, *args, **kwargs)
+
+    def _publish_bridge_pending_region_outputs_from_texture(self, *args: Any, **kwargs: Any) -> Any:
+        return _publish_bridge_pending_region_outputs_from_texture(self, *args, **kwargs)
+
+    def _publish_bridge_region_mask(self, *args: Any, **kwargs: Any) -> Any:
+        return _publish_bridge_region_mask(self, *args, **kwargs)
+
+    def _publish_bridge_supported_unsupported_masks_connected_tiles(
+        self, *args: Any, **kwargs: Any
+    ) -> Any:
+        return _publish_bridge_supported_unsupported_masks_connected_tiles(self, *args, **kwargs)
+
+    def _publish_bridge_region_labels(self, *args: Any, **kwargs: Any) -> Any:
+        return _publish_bridge_region_labels(self, *args, **kwargs)
+
+    def _publish_bridge_region_labels_connected_tiles(self, *args: Any, **kwargs: Any) -> Any:
+        return _publish_bridge_region_labels_connected_tiles(self, *args, **kwargs)
+
+    def _publish_bridge_region_outputs(self, *args: Any, **kwargs: Any) -> Any:
+        return _publish_bridge_region_outputs(self, *args, **kwargs)
+
+    def _publish_bridge_region_outputs_connected_tiles(self, *args: Any, **kwargs: Any) -> Any:
+        return _publish_bridge_region_outputs_connected_tiles(self, *args, **kwargs)
+
+    def _barrier_bits(self, *args: Any, **kwargs: Any) -> Any:
+        return _barrier_bits(self, *args, **kwargs)
+
+    def _download_region_state(self, *args: Any, **kwargs: Any) -> Any:
+        return _download_region_state(self, *args, **kwargs)
+
+    def prewarm_formal_connected_resources(self, *args: Any, **kwargs: Any) -> Any:
+        return prewarm_formal_connected_resources(self, *args, **kwargs)
+
+    @staticmethod
+    def _formal_jfa_jumps(*args: Any, **kwargs: Any) -> Any:
+        return _formal_jfa_jumps(*args, **kwargs)
+
+    @staticmethod
+    def _formal_jfa_profile_jump_bands(*args: Any, **kwargs: Any) -> Any:
+        return _formal_jfa_profile_jump_bands(*args, **kwargs)
+
+    @staticmethod
+    def _formal_support_unit_pass_count(*args: Any, **kwargs: Any) -> Any:
+        return _formal_support_unit_pass_count(*args, **kwargs)
+
+    @staticmethod
+    def _formal_label_unit_pass_count(*args: Any, **kwargs: Any) -> Any:
+        return _formal_label_unit_pass_count(*args, **kwargs)
+
+    @staticmethod
+    def _formal_support_refine_round_count(*args: Any, **kwargs: Any) -> Any:
+        return _formal_support_refine_round_count(*args, **kwargs)
+
+    @staticmethod
+    def _formal_label_refine_round_count(*args: Any, **kwargs: Any) -> Any:
+        return _formal_label_refine_round_count(*args, **kwargs)
+
+    def _run_formal_support_refine_passes(self, *args: Any, **kwargs: Any) -> Any:
+        return _run_formal_support_refine_passes(self, *args, **kwargs)
+
+    def seed_structural_region_texture(self, *args: Any, **kwargs: Any) -> Any:
+        return seed_structural_region_texture(self, *args, **kwargs)
+
+    def connected_structural_region_texture(self, *args: Any, **kwargs: Any) -> Any:
+        return connected_structural_region_texture(self, *args, **kwargs)
+
+    def copy_mask_texture(self, *args: Any, **kwargs: Any) -> Any:
+        return copy_mask_texture(self, *args, **kwargs)
+
+    def _copy_mask_texture_connected_tiles(self, *args: Any, **kwargs: Any) -> Any:
+        return _copy_mask_texture_connected_tiles(self, *args, **kwargs)
+
+    def _ensure_formal_connected_axis_mask_buffers(self, *args: Any, **kwargs: Any) -> Any:
+        return _ensure_formal_connected_axis_mask_buffers(self, *args, **kwargs)
+
+    def _build_formal_connected_axis_masks(self, *args: Any, **kwargs: Any) -> Any:
+        return _build_formal_connected_axis_masks(self, *args, **kwargs)
+
+    def detect_connected_internal_boundary_flags(self, *args: Any, **kwargs: Any) -> Any:
+        return detect_connected_internal_boundary_flags(self, *args, **kwargs)
+
+    def _ensure_formal_deferred_region_request_buffers(self, *args: Any, **kwargs: Any) -> Any:
+        return _ensure_formal_deferred_region_request_buffers(self, *args, **kwargs)
+
+    def _ensure_formal_connected_frontier_buffers(self, *args: Any, **kwargs: Any) -> Any:
+        return _ensure_formal_connected_frontier_buffers(self, *args, **kwargs)
+
+    def _ensure_formal_connected_frontier_buffers_impl(self, *args: Any, **kwargs: Any) -> Any:
+        return _ensure_formal_connected_frontier_buffers_impl(self, *args, **kwargs)
+
+    def _invalidate_persistent_dense_tile_worklist(self, *args: Any, **kwargs: Any) -> Any:
+        return _invalidate_persistent_dense_tile_worklist(self, *args, **kwargs)
+
+    def _persistent_dense_tile_worklist_signature_for(self, *args: Any, **kwargs: Any) -> Any:
+        return _persistent_dense_tile_worklist_signature(self, *args, **kwargs)
+
+    def _seed_formal_texture_region_tile_worklist(self, *args: Any, **kwargs: Any) -> Any:
+        return _seed_formal_texture_region_tile_worklist(self, *args, **kwargs)
+
+    def _clear_formal_connected_cell_buffer_names(self, *args: Any, **kwargs: Any) -> Any:
+        return _clear_formal_connected_cell_buffer_names(self, *args, **kwargs)
+
+    def _clear_formal_connected_tile_mask_buffers(self, *args: Any, **kwargs: Any) -> Any:
+        return _clear_formal_connected_tile_mask_buffers(self, *args, **kwargs)
+
+    def _clear_formal_connected_tile_worklist(self, *args: Any, **kwargs: Any) -> Any:
+        return _clear_formal_connected_tile_worklist(self, *args, **kwargs)
+
+    def _clear_formal_connected_tile_worklists(self, *args: Any, **kwargs: Any) -> Any:
+        return _clear_formal_connected_tile_worklists(self, *args, **kwargs)
+
+    def _clear_formal_connected_cell_buffer_connected_tiles(self, *args: Any, **kwargs: Any) -> Any:
+        return _clear_formal_connected_cell_buffer_connected_tiles(self, *args, **kwargs)
+
+    def reset_formal_connected_frontier(self, *args: Any, **kwargs: Any) -> Any:
+        return reset_formal_connected_frontier(self, *args, **kwargs)
+
+    def clear_formal_connected_frontier_buffer(self, *args: Any, **kwargs: Any) -> Any:
+        return clear_formal_connected_frontier_buffer(self, *args, **kwargs)
+
+    def clear_formal_deferred_region_requests(self, *args: Any, **kwargs: Any) -> Any:
+        return clear_formal_deferred_region_requests(self, *args, **kwargs)
+
+    def execute_formal_connected_expansion(self, *args: Any, **kwargs: Any) -> Any:
+        return execute_formal_connected_expansion(self, *args, **kwargs)
+
+    def execute_formal_connected_dirty_tile_queue(self, *args: Any, **kwargs: Any) -> Any:
+        return execute_formal_connected_dirty_tile_queue(self, *args, **kwargs)
+
+    def advance_formal_connected_dirty_tile_queue(self, *args: Any, **kwargs: Any) -> Any:
+        return advance_formal_connected_dirty_tile_queue(self, *args, **kwargs)
+
+    def advance_formal_runtime_admission(self, *args: Any, **kwargs: Any) -> Any:
+        return advance_formal_runtime_admission(self, *args, **kwargs)
+
+    def has_active_formal_dirty_epoch(self, *args: Any, **kwargs: Any) -> Any:
+        return has_active_formal_dirty_epoch(self, *args, **kwargs)
+
+    def _validate_and_collect_formal_dirty_epoch_labels(self, *args: Any, **kwargs: Any) -> Any:
+        return _validate_and_collect_formal_dirty_epoch_labels(self, *args, **kwargs)
+
+    def solve_formal_connected_region_textures(self, *args: Any, **kwargs: Any) -> Any:
+        return solve_formal_connected_region_textures(self, *args, **kwargs)
+
+    def _solve_formal_connected_dirty_tile_textures(self, *args: Any, **kwargs: Any) -> Any:
+        return _solve_formal_connected_dirty_tile_textures(self, *args, **kwargs)
+
+    def _solve_formal_connected_tile_textures(self, *args: Any, **kwargs: Any) -> Any:
+        return _solve_formal_connected_tile_textures(self, *args, **kwargs)
+
+    def _prepare_formal_connected_tile_resources(self, *args: Any, **kwargs: Any) -> Any:
+        return _prepare_formal_connected_tile_resources(self, *args, **kwargs)
+
+    def _prepare_formal_connected_tile_resources_without_input_upload(
+        self, *args: Any, **kwargs: Any
+    ) -> Any:
+        return _prepare_formal_connected_tile_resources_without_input_upload(self, *args, **kwargs)
+
+    def _prepare_formal_connected_tile_resources_impl(self, *args: Any, **kwargs: Any) -> Any:
+        return _prepare_formal_connected_tile_resources_impl(self, *args, **kwargs)
+
+    def _clamp_formal_connected_region(self, *args: Any, **kwargs: Any) -> Any:
+        return _clamp_formal_connected_region(self, *args, **kwargs)
+
+    def _formal_connected_dirty_tile_queue_resource_region(self, *args: Any, **kwargs: Any) -> Any:
+        return _formal_connected_dirty_tile_queue_resource_region(self, *args, **kwargs)
+
+    def _formal_connected_dirty_tile_resource_region_from_tile_bounds(
+        self, *args: Any, **kwargs: Any
+    ) -> Any:
+        return _formal_connected_dirty_tile_resource_region_from_tile_bounds(self, *args, **kwargs)
+
+    def _formal_connected_resource_region_from_bbox(self, *args: Any, **kwargs: Any) -> Any:
+        return _formal_connected_resource_region_from_bbox(self, *args, **kwargs)
+
+    @staticmethod
+    def _local_formal_connected_rect(*args: Any, **kwargs: Any) -> Any:
+        return _local_formal_connected_rect(*args, **kwargs)
+
+    def _classify_formal_connected_tile_textures(self, *args: Any, **kwargs: Any) -> Any:
+        return _classify_formal_connected_tile_textures(self, *args, **kwargs)
+
+    def _solve_formal_connected_frontier_texture(self, *args: Any, **kwargs: Any) -> Any:
+        return _solve_formal_connected_frontier_texture(self, *args, **kwargs)
+
+    def _solve_formal_connected_dirty_cell_frontier_texture(self, *args: Any, **kwargs: Any) -> Any:
+        return _solve_formal_connected_dirty_cell_frontier_texture(self, *args, **kwargs)
+
+    def _formal_connected_expansion_pass_count(self, *args: Any, **kwargs: Any) -> Any:
+        return _formal_connected_expansion_pass_count(self, *args, **kwargs)
+
+    def _formal_connected_tile_jump_schedule(self, *args: Any, **kwargs: Any) -> Any:
+        return _formal_connected_tile_jump_schedule(self, *args, **kwargs)
+
+    def _formal_connected_tile_refine_pass_count(self, *args: Any, **kwargs: Any) -> Any:
+        return _formal_connected_tile_refine_pass_count(self, *args, **kwargs)
+
+    def _formal_connected_tile_support_frontier_pass_count(self, *args: Any, **kwargs: Any) -> Any:
+        return _formal_connected_tile_support_frontier_pass_count(self, *args, **kwargs)
+
+    def _formal_connected_component_label_frontier_pass_count(
+        self, *args: Any, **kwargs: Any
+    ) -> Any:
+        return _formal_connected_component_label_frontier_pass_count(self, *args, **kwargs)
+
+    def _formal_connected_dirty_tile_jump_schedule(self, *args: Any, **kwargs: Any) -> Any:
+        return _formal_connected_dirty_tile_jump_schedule(self, *args, **kwargs)
+
+    @staticmethod
+    def _formal_connected_dirty_jump_schedule(*args: Any, **kwargs: Any) -> Any:
+        return _formal_connected_dirty_jump_schedule(*args, **kwargs)
+
+    @staticmethod
+    def _formal_connected_cell_jump_schedule(*args: Any, **kwargs: Any) -> Any:
+        return _formal_connected_cell_jump_schedule(*args, **kwargs)
+
+    def _next_formal_connected_cell_frontier_generation(self, *args: Any, **kwargs: Any) -> Any:
+        return _next_formal_connected_cell_frontier_generation(self, *args, **kwargs)
+
+    def _filter_formal_connected_eligibility(self, *args: Any, **kwargs: Any) -> Any:
+        return _filter_formal_connected_eligibility(self, *args, **kwargs)
+
+    def connected_structural_frontier_texture(self, *args: Any, **kwargs: Any) -> Any:
+        return connected_structural_frontier_texture(self, *args, **kwargs)
+
+    def drain_formal_deferred_region_requests(self, *args: Any, **kwargs: Any) -> Any:
+        return drain_formal_deferred_region_requests(self, *args, **kwargs)
+
+    def enqueue_connected_internal_boundary_deferred_regions(
+        self, *args: Any, **kwargs: Any
+    ) -> Any:
+        return enqueue_connected_internal_boundary_deferred_regions(self, *args, **kwargs)
+
+    def exclude_internal_boundary_connected_texture_to_frontier(
+        self, *args: Any, **kwargs: Any
+    ) -> Any:
+        return exclude_internal_boundary_connected_texture_to_frontier(self, *args, **kwargs)
+
+    def exclude_internal_boundary_connected_texture(self, *args: Any, **kwargs: Any) -> Any:
+        return exclude_internal_boundary_connected_texture(self, *args, **kwargs)
+
+    def _solve_formal_connected_tile_frontier(self, *args: Any, **kwargs: Any) -> Any:
+        return _solve_formal_connected_tile_frontier(self, *args, **kwargs)
+
+    def _solve_formal_connected_dirty_tile_frontier(self, *args: Any, **kwargs: Any) -> Any:
+        return _solve_formal_connected_dirty_tile_frontier(self, *args, **kwargs)
+
+    def _compact_formal_connected_tile_mask(self, *args: Any, **kwargs: Any) -> Any:
+        return _compact_formal_connected_tile_mask(self, *args, **kwargs)
+
+    def _seed_formal_connected_tile_frontier(self, *args: Any, **kwargs: Any) -> Any:
+        return _seed_formal_connected_tile_frontier(self, *args, **kwargs)
+
+    def _seed_formal_connected_tile_frontier_from_dirty_queue(
+        self, *args: Any, **kwargs: Any
+    ) -> Any:
+        return _seed_formal_connected_tile_frontier_from_dirty_queue(self, *args, **kwargs)
+
+    def _expand_formal_connected_tile_frontier(self, *args: Any, **kwargs: Any) -> Any:
+        return _expand_formal_connected_tile_frontier(self, *args, **kwargs)
+
+    def _clear_formal_connected_cell_frontier_tiles(self, *args: Any, **kwargs: Any) -> Any:
+        return _clear_formal_connected_cell_frontier_tiles(self, *args, **kwargs)
+
+    def _accumulate_formal_connected_cell_frontier_tiles(self, *args: Any, **kwargs: Any) -> Any:
+        return _accumulate_formal_connected_cell_frontier_tiles(self, *args, **kwargs)
+
+    def _seed_formal_connected_cell_frontier(self, *args: Any, **kwargs: Any) -> Any:
+        return _seed_formal_connected_cell_frontier(self, *args, **kwargs)
+
+    def _seed_formal_connected_cell_frontier_from_dirty_queue(
+        self, *args: Any, **kwargs: Any
+    ) -> Any:
+        return _seed_formal_connected_cell_frontier_from_dirty_queue(self, *args, **kwargs)
+
+    def _expand_formal_connected_cell_frontier(self, *args: Any, **kwargs: Any) -> Any:
+        return _expand_formal_connected_cell_frontier(self, *args, **kwargs)
+
+    def _copy_formal_connected_buffer_to_texture(self, *args: Any, **kwargs: Any) -> Any:
+        return _copy_formal_connected_buffer_to_texture(self, *args, **kwargs)
+
+    def _solve_formal_connected_tile_support_textures(self, *args: Any, **kwargs: Any) -> Any:
+        return _solve_formal_connected_tile_support_textures(self, *args, **kwargs)
+
+    def _begin_formal_connected_tile_support(self, *args: Any, **kwargs: Any) -> Any:
+        return _begin_formal_connected_tile_support(self, *args, **kwargs)
+
+    def _run_formal_connected_tile_support_slice(self, *args: Any, **kwargs: Any) -> Any:
+        return _run_formal_connected_tile_support_slice(self, *args, **kwargs)
+
+    def _seed_formal_connected_tile_support_frontier(self, *args: Any, **kwargs: Any) -> Any:
+        return _seed_formal_connected_tile_support_frontier(self, *args, **kwargs)
+
+    def _expand_formal_connected_tile_support_frontier(self, *args: Any, **kwargs: Any) -> Any:
+        return _expand_formal_connected_tile_support_frontier(self, *args, **kwargs)
+
+    def _run_formal_connected_tile_support_pass(self, *args: Any, **kwargs: Any) -> Any:
+        return _run_formal_connected_tile_support_pass(self, *args, **kwargs)
+
+    def _run_formal_connected_tile_support_refine_passes(self, *args: Any, **kwargs: Any) -> Any:
+        return _run_formal_connected_tile_support_refine_passes(self, *args, **kwargs)
+
+    def label_component_mask(self, *args: Any, **kwargs: Any) -> Any:
+        return label_component_mask(self, *args, **kwargs)
+
+    def materialize_component_mask(self, *args: Any, **kwargs: Any) -> Any:
+        return materialize_component_mask(self, *args, **kwargs)
+
+    def materialize_component_texture(self, *args: Any, **kwargs: Any) -> Any:
+        return materialize_component_texture(self, *args, **kwargs)
+
+    def materialize_component_texture_formal(self, *args: Any, **kwargs: Any) -> Any:
+        return materialize_component_texture_formal(self, *args, **kwargs)
+
+    def _reserve_formal_component_island_ids(self, *args: Any, **kwargs: Any) -> Any:
+        return _reserve_formal_component_island_ids(self, *args, **kwargs)
+
+    def _ensure_component_work_buffers(self, *args: Any, **kwargs: Any) -> Any:
+        return _ensure_component_work_buffers(self, *args, **kwargs)
+
+    def _collect_component_labels_gpu(self, *args: Any, **kwargs: Any) -> Any:
+        return _collect_component_labels_gpu(self, *args, **kwargs)
+
+    def _clear_component_label_flags_connected_tiles(self, *args: Any, **kwargs: Any) -> Any:
+        return _clear_component_label_flags_connected_tiles(self, *args, **kwargs)
+
+    def _build_component_dispatch_args(self, *args: Any, **kwargs: Any) -> Any:
+        return _build_component_dispatch_args(self, *args, **kwargs)
+
+    def _prepare_formal_component_list_and_metadata(self, *args: Any, **kwargs: Any) -> Any:
+        return _prepare_formal_component_list_and_metadata(self, *args, **kwargs)
+
+    def _summarize_formal_component_metadata(self, *args: Any, **kwargs: Any) -> Any:
+        return _summarize_formal_component_metadata(self, *args, **kwargs)
+
+    def _materialize_compact_labeled_component_texture(self, *args: Any, **kwargs: Any) -> Any:
+        return _materialize_compact_labeled_component_texture(self, *args, **kwargs)
+
+    def _publish_compact_component_island_runtime(self, *args: Any, **kwargs: Any) -> Any:
+        return _publish_compact_component_island_runtime(self, *args, **kwargs)
+
+    def _materialize_dense_labeled_component_texture(self, *args: Any, **kwargs: Any) -> Any:
+        return _materialize_dense_labeled_component_texture(self, *args, **kwargs)
+
+    def _summarize_dense_component_metadata(self, *args: Any, **kwargs: Any) -> Any:
+        return _summarize_dense_component_metadata(self, *args, **kwargs)
+
+    def _publish_dense_component_island_runtime(self, *args: Any, **kwargs: Any) -> Any:
+        return _publish_dense_component_island_runtime(self, *args, **kwargs)
+
+    def _label_component_mask_texture(self, *args: Any, **kwargs: Any) -> Any:
+        return _label_component_mask_texture(self, *args, **kwargs)
+
+    def collect_component_labels(self, *args: Any, **kwargs: Any) -> Any:
+        return collect_component_labels(self, *args, **kwargs)
+
+    def summarize_labeled_components(self, *args: Any, **kwargs: Any) -> Any:
+        return summarize_labeled_components(self, *args, **kwargs)
+
+    def summarize_labeled_component_texture(self, *args: Any, **kwargs: Any) -> Any:
+        return summarize_labeled_component_texture(self, *args, **kwargs)
+
+    def materialize_labeled_components(self, *args: Any, **kwargs: Any) -> Any:
+        return materialize_labeled_components(self, *args, **kwargs)
+
+    def _label_component_texture(self, *args: Any, **kwargs: Any) -> Any:
+        return _label_component_texture(self, *args, **kwargs)
+
+    def _label_component_texture_connected_tiles_from_texture_init(
+        self, *args: Any, **kwargs: Any
+    ) -> Any:
+        return _label_component_texture_connected_tiles_from_texture_init(self, *args, **kwargs)
+
+    def _label_component_texture_connected_tiles(self, *args: Any, **kwargs: Any) -> Any:
+        return _label_component_texture_connected_tiles(self, *args, **kwargs)
+
+    def _begin_formal_connected_component_labeling(self, *args: Any, **kwargs: Any) -> Any:
+        return _begin_formal_connected_component_labeling(self, *args, **kwargs)
+
+    def _run_formal_connected_component_label_slice(self, *args: Any, **kwargs: Any) -> Any:
+        return _run_formal_connected_component_label_slice(self, *args, **kwargs)
+
+    def _publish_formal_connected_component_labels(self, *args: Any, **kwargs: Any) -> Any:
+        return _publish_formal_connected_component_labels(self, *args, **kwargs)
+
+    def _ensure_formal_connected_component_label_union_buffers(
+        self, *args: Any, **kwargs: Any
+    ) -> Any:
+        return _ensure_formal_connected_component_label_union_buffers(self, *args, **kwargs)
+
+    def _begin_formal_connected_component_label_union(self, *args: Any, **kwargs: Any) -> Any:
+        return _begin_formal_connected_component_label_union(self, *args, **kwargs)
+
+    def _run_formal_connected_component_label_union_slice(self, *args: Any, **kwargs: Any) -> Any:
+        return _run_formal_connected_component_label_union_slice(self, *args, **kwargs)
+
+    def _materialize_formal_connected_component_label_union(self, *args: Any, **kwargs: Any) -> Any:
+        return _materialize_formal_connected_component_label_union(self, *args, **kwargs)
+
+    def _seed_formal_component_labels_and_axis_masks(self, *args: Any, **kwargs: Any) -> Any:
+        return _seed_formal_component_labels_and_axis_masks(self, *args, **kwargs)
+
+    def _seed_formal_component_label_frontier(self, *args: Any, **kwargs: Any) -> Any:
+        return _seed_formal_component_label_frontier(self, *args, **kwargs)
+
+    def _expand_formal_component_label_frontier(self, *args: Any, **kwargs: Any) -> Any:
+        return _expand_formal_component_label_frontier(self, *args, **kwargs)
+
+    def _run_formal_connected_component_label_pass(self, *args: Any, **kwargs: Any) -> Any:
+        return _run_formal_connected_component_label_pass(self, *args, **kwargs)
+
+    def _run_formal_connected_component_label_refine_passes(self, *args: Any, **kwargs: Any) -> Any:
+        return _run_formal_connected_component_label_refine_passes(self, *args, **kwargs)
+
+    def _copy_formal_component_label_buffer_to_texture(self, *args: Any, **kwargs: Any) -> Any:
+        return _copy_formal_component_label_buffer_to_texture(self, *args, **kwargs)
+
+    def _run_formal_label_refine_passes(self, *args: Any, **kwargs: Any) -> Any:
+        return _run_formal_label_refine_passes(self, *args, **kwargs)
+
+    def materialize_labeled_component_texture(self, *args: Any, **kwargs: Any) -> Any:
+        return materialize_labeled_component_texture(self, *args, **kwargs)
+
+    def solve_region(self, *args: Any, **kwargs: Any) -> Any:
+        return solve_region(self, *args, **kwargs)
+
+    def solve_region_textures(self, *args: Any, **kwargs: Any) -> Any:
+        return solve_region_textures(self, *args, **kwargs)
+
+    def classify_world_structural_mask(self, *args: Any, **kwargs: Any) -> Any:
+        return classify_world_structural_mask(self, *args, **kwargs)
+
+    def expand_region_to_component_bbox(self, *args: Any, **kwargs: Any) -> Any:
+        return expand_region_to_component_bbox(self, *args, **kwargs)
+
+    def _expand_formal_region_to_component_bbox(self, *args: Any, **kwargs: Any) -> Any:
+        return _expand_formal_region_to_component_bbox(self, *args, **kwargs)
+
+    def classify_region(self, *args: Any, **kwargs: Any) -> Any:
+        return classify_region(self, *args, **kwargs)
+
+    def classify_region_textures(self, *args: Any, **kwargs: Any) -> Any:
+        return classify_region_textures(self, *args, **kwargs)
+
+    def resolve_unsupported_outcomes(self, *args: Any, **kwargs: Any) -> Any:
+        return resolve_unsupported_outcomes(self, *args, **kwargs)
+
+    def resolve_unsupported_outcome_textures(self, *args: Any, **kwargs: Any) -> Any:
+        return resolve_unsupported_outcome_textures(self, *args, **kwargs)
+
+    def resolve_supported_outcome_textures(self, *args: Any, **kwargs: Any) -> Any:
+        return resolve_supported_outcome_textures(self, *args, **kwargs)
+
+    def _run_pass(self, *args: Any, **kwargs: Any) -> Any:
+        return _run_pass(self, *args, **kwargs)
+
+    def release(self, *args: Any, **kwargs: Any) -> Any:
+        return release(self, *args, **kwargs)

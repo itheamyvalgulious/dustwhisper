@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 
+from oracle_game.sim import gpu_liquid_solve as liquid_solve
 from oracle_game.sim.gpu_liquid import _SHADER_SUBS, GPULiquidPipeline
 from oracle_game.sim.shader_loader import shader_source
 
@@ -30,6 +31,6 @@ def test_liquid_cleanup_local16_specialization_covers_sixteen_by_sixteen_cells()
 
 
 def test_liquid_cleanup_local16_retargets_to_four_groups_per_tile() -> None:
-    source = inspect.getsource(GPULiquidPipeline._run_cleanup_runtime)
+    source = inspect.getsource(liquid_solve._run_cleanup_runtime)
     assert '"cleanup_runtime_bridge_aux16"' in source
     assert 'retarget_program["workgroups_per_tile"].value = 4' in source

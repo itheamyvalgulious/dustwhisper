@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 
@@ -16,15 +16,12 @@ from oracle_game.sim.gpu_collapse_dirty import (
     ensure_collapse_structure_dirty_tile_mask,
     ensure_collapse_structure_dirty_tile_queue,
 )
-from oracle_game.sim.gpu_reactions import (
+from oracle_game.sim.gpu_reactions_resources import (
     FLOW_SOURCE_LAYERS,
     LOCAL_SIZE,
     MAX_ACTIONS,
     MAX_MATERIALS,
     MAX_RULES,
-    SELF_FUSED_FLOW_SOURCE_BINDING,
-    SELF_FUSED_FLOW_SOURCE_GENERATION_BINDING,
-    SELF_FUSED_GAS_DELTA_BINDING,
     GPUDeferredActionBatch,
     GPUReactionMaterialPairPlan,
     GPUReactionResources,
@@ -816,25 +813,55 @@ def _run_material_pair_fused_pass(
         return pipeline._download_deferred_batch(world, resources)
 
 
-def _run_local_cell_action_pass(
+class _LocalCellDispatchPlan(NamedTuple):
+    """Per-call inputs and dispatch-shaping decisions for the local cell action pass.
+
+    Derived once per call by ``_derive_local_cell_dispatch_plan`` so the phase
+    helpers below share a single source of truth instead of re-deriving the
+    same boolean chains.
+    """
+
+    program_name: str
+    candidate_dispatch: bool
+    timed_sparse_inplace: bool
+    apply_material_side_effects: bool
+    apply_gas_side_effects: bool
+    may_have_flow_sources: bool
+    flow_source_layers: int
+    use_expanded_active_tile_mask: bool
+    direct_core_outputs: bool
+    packed_local_deferred_outputs: bool
+    use_packed_timed_emit_target_producer: bool
+    use_self_gas_candidates: bool
+    use_direct_self_rule_spans: bool
+
+
+class _LocalCellOutputPlan(NamedTuple):
+    """Output/side-effect decisions for the local cell action pass."""
+
+    direct_action_gas_delta: bool
+    modify_gas_layer_mask: int
+    write_deferred_hi_outputs: bool
+    use_packed_self_emit_targets: bool
+    material_side_effect_copies_velocity: bool
+    resident_velocity_role: bool
+    sparse_velocity_side_effects: bool
+
+
+def _derive_local_cell_dispatch_plan(
     pipeline,
     world: "WorldEngine",
     resources: GPUReactionResources,
     program_name: str,
     *,
-    self_rule_count: int = 0,
-    apply_material_side_effects: bool = False,
-    apply_gas_side_effects: bool = False,
-    modify_gas_layer_mask: int | None = None,
-    may_have_flow_sources: bool = True,
-    flow_source_layers: int = FLOW_SOURCE_LAYERS,
-    write_deferred_hi_outputs: bool | None = None,
-    fused_gas_output_safe: bool = False,
-    inplace: bool = False,
-    candidate_dispatch: bool = False,
-    timed_sparse_inplace: bool = False,
-    use_expanded_active_tile_mask: bool = False,
-) -> bool:
+    candidate_dispatch: bool,
+    timed_sparse_inplace: bool,
+    apply_material_side_effects: bool,
+    apply_gas_side_effects: bool,
+    may_have_flow_sources: bool,
+    flow_source_layers: int,
+    use_expanded_active_tile_mask: bool,
+) -> _LocalCellDispatchPlan:
     use_expanded_active_tile_mask = bool(
         use_expanded_active_tile_mask
         and not candidate_dispatch
@@ -854,25 +881,11 @@ def _run_local_cell_action_pass(
         and pipeline._packed_timed_emit_target_worklist_enabled
         and pipeline._timed_emit_target_producer_enabled
     )
-    cell_flag_meta = bool(
-        pipeline._formal_segment_batch_active() and pipeline._timed_self_cell_flag_meta_enabled
-    )
-    pipeline.last_timed_self_cell_flag_meta_used = cell_flag_meta
-    use_self_gas_fused = bool(
-        program_name == "self_apply"
-        and not candidate_dispatch
-        and packed_local_deferred_outputs
-        and apply_gas_side_effects
-        and pipeline._self_apply_fused_gas_output_enabled
-        and pipeline._formal_segment_batch_active()
-        and pipeline._formal_segment_batch_key is not None
-    )
     use_self_gas_candidates = bool(
         program_name == "self_apply"
         and not candidate_dispatch
         and packed_local_deferred_outputs
         and apply_gas_side_effects
-        and not use_self_gas_fused
         and pipeline._formal_segment_batch_active()
         and pipeline._formal_segment_batch_key is not None
         and pipeline._self_gas_candidate_worklist_enabled
@@ -880,118 +893,98 @@ def _run_local_cell_action_pass(
     use_direct_self_rule_spans = bool(
         program_name == "self_apply"
         and packed_local_deferred_outputs
-        and not use_self_gas_fused
         and getattr(pipeline, "_self_rule_direct_action_spans_enabled", False)
         and getattr(resources, "self_rule_span_direct_actions", False)
         and pipeline._self_rule_material_spans_enabled
     )
-    use_self_cached_cell_state = bool(
-        program_name == "self_apply"
-        and packed_local_deferred_outputs
-        and not candidate_dispatch
-        and getattr(pipeline, "_self_apply_cached_cell_state_enabled", False)
+    return _LocalCellDispatchPlan(
+        program_name=program_name,
+        candidate_dispatch=candidate_dispatch,
+        timed_sparse_inplace=timed_sparse_inplace,
+        apply_material_side_effects=apply_material_side_effects,
+        apply_gas_side_effects=apply_gas_side_effects,
+        may_have_flow_sources=may_have_flow_sources,
+        flow_source_layers=flow_source_layers,
+        use_expanded_active_tile_mask=use_expanded_active_tile_mask,
+        direct_core_outputs=direct_core_outputs,
+        packed_local_deferred_outputs=packed_local_deferred_outputs,
+        use_packed_timed_emit_target_producer=use_packed_timed_emit_target_producer,
+        use_self_gas_candidates=use_self_gas_candidates,
+        use_direct_self_rule_spans=use_direct_self_rule_spans,
     )
-    program_key = f"{program_name}_packed" if packed_local_deferred_outputs else program_name
-    if use_packed_timed_emit_target_producer:
-        program_key = "timed_apply_packed_emit_targets"
-    if use_direct_self_rule_spans:
-        program_key = "self_apply_packed_direct_spans"
-    if use_self_gas_fused:
-        program_key = "self_apply_packed_fused_gas"
-    if cell_flag_meta:
-        program_key = f"{program_key}_cell_flag_meta"
-    if use_self_cached_cell_state:
-        program_key = f"{program_key}_cached_cell_state"
-    if timed_sparse_inplace:
-        program_key = "timed_apply_packed_sparse_inplace"
-    if candidate_dispatch:
-        sparse_suffix = "_sparse"
-        if use_direct_self_rule_spans:
-            sparse_suffix += "_direct_spans"
-        if cell_flag_meta:
-            sparse_suffix += "_cell_flag_meta"
-        program_key = f"self_apply_packed{sparse_suffix}"
-    pipeline.last_self_rule_direct_action_spans_used = use_direct_self_rule_spans
-    pipeline.last_self_apply_cached_cell_state_used = use_self_cached_cell_state
-    program = pipeline.programs[program_key]
-    pipeline._set_uniform_if_present(program, "cell_grid_size", (world.width, world.height))
-    pipeline._set_uniform_if_present(program, "rule_count", 0)
-    pipeline._set_uniform_if_present(
-        program,
-        "use_expanded_active_tile_mask",
-        use_expanded_active_tile_mask,
-    )
-    pipeline._set_uniform_if_present(program, "gas_cell_size", world.gas_cell_size)
-    pipeline._set_uniform_if_present(program, "gas_count", world.gas_concentration.shape[0])
-    pipeline._set_uniform_if_present(
-        program, "random_target_count", int(pipeline.random_target_count)
-    )
-    pipeline._set_uniform_if_present(program, "self_rule_count", int(self_rule_count))
-    pipeline._set_uniform_if_present(
-        program,
-        "use_self_rule_material_spans",
-        bool(pipeline._self_rule_material_spans_enabled),
-    )
-    pipeline._set_uniform_if_present(program, "gas_grid_size", (world.gas_width, world.gas_height))
+
+
+def _derive_local_cell_output_plan(
+    pipeline,
+    world: "WorldEngine",
+    program_name: str,
+    *,
+    dispatch: _LocalCellDispatchPlan,
+    modify_gas_layer_mask: int | None,
+    write_deferred_hi_outputs: bool | None,
+) -> _LocalCellOutputPlan:
     direct_action_gas_delta = (
-        direct_core_outputs
+        dispatch.direct_core_outputs
         and program_name == "timed_apply"
-        and apply_gas_side_effects
+        and dispatch.apply_gas_side_effects
         and pipeline._formal_segment_batch_active()
         and pipeline._formal_segment_batch_key is not None
     )
     if modify_gas_layer_mask is None:
         modify_gas_layer_mask = (1 << min(31, int(world.gas_concentration.shape[0]))) - 1
-    pipeline._set_uniform_if_present(program, "write_deferred_outputs", True)
     if write_deferred_hi_outputs is None:
         write_deferred_hi_outputs = bool(
-            not (program_name == "timed_apply" and direct_core_outputs)
+            not (program_name == "timed_apply" and dispatch.direct_core_outputs)
         )
     else:
         write_deferred_hi_outputs = bool(write_deferred_hi_outputs)
     use_packed_self_emit_targets = bool(
         program_name == "self_apply"
-        and not candidate_dispatch
-        and direct_core_outputs
-        and packed_local_deferred_outputs
-        and apply_material_side_effects
+        and not dispatch.candidate_dispatch
+        and dispatch.direct_core_outputs
+        and dispatch.packed_local_deferred_outputs
+        and dispatch.apply_material_side_effects
         and pipeline._packed_self_emit_target_worklist_enabled
     )
-    pipeline._set_uniform_if_present(program, "direct_gas_delta_enabled", direct_action_gas_delta)
-    pipeline._set_uniform_if_present(
-        program, "direct_modify_gas_layer_mask", int(modify_gas_layer_mask)
+    material_side_effect_copies_velocity = bool(
+        dispatch.direct_core_outputs and dispatch.apply_material_side_effects
     )
-    pipeline._set_uniform_if_present(
-        program, "write_deferred_hi_outputs", write_deferred_hi_outputs
+    resident_velocity_role = bool(
+        dispatch.direct_core_outputs and pipeline._formal_before_motion_cell_roles_active()
     )
-    pipeline._set_uniform_if_present(
-        program, "collect_self_emit_targets", use_packed_self_emit_targets
+    sparse_velocity_side_effects = bool(
+        material_side_effect_copies_velocity and resident_velocity_role
     )
-    pipeline._set_uniform_if_present(
-        program, "collect_self_gas_candidates", use_self_gas_candidates
+    return _LocalCellOutputPlan(
+        direct_action_gas_delta=direct_action_gas_delta,
+        modify_gas_layer_mask=modify_gas_layer_mask,
+        write_deferred_hi_outputs=write_deferred_hi_outputs,
+        use_packed_self_emit_targets=use_packed_self_emit_targets,
+        material_side_effect_copies_velocity=material_side_effect_copies_velocity,
+        resident_velocity_role=resident_velocity_role,
+        sparse_velocity_side_effects=sparse_velocity_side_effects,
     )
-    pipeline._set_uniform_if_present(
-        program,
-        "self_fused_flow_sources_enabled",
-        bool(use_self_gas_fused and may_have_flow_sources),
-    )
-    if direct_action_gas_delta:
+
+
+def _clear_local_cell_action_worklists(
+    pipeline,
+    world: "WorldEngine",
+    resources: GPUReactionResources,
+    dispatch: _LocalCellDispatchPlan,
+    outputs: _LocalCellOutputPlan,
+) -> None:
+    if outputs.direct_action_gas_delta:
         assert pipeline._formal_segment_batch_key is not None
         pipeline._clear_formal_segment_gas_delta(
             world, resources, pipeline._formal_segment_batch_key
         )
-    elif use_self_gas_fused:
-        assert pipeline._formal_segment_batch_key is not None
-        pipeline._clear_formal_segment_gas_delta(
-            world, resources, pipeline._formal_segment_batch_key
-        )
-    if use_packed_timed_emit_target_producer:
+    if dispatch.use_packed_timed_emit_target_producer:
         pipeline._clear_packed_timed_material_target_worklist(
             world,
             resources,
-            preserve_timed_candidates=timed_sparse_inplace,
+            preserve_timed_candidates=dispatch.timed_sparse_inplace,
         )
-    if use_packed_self_emit_targets or use_self_gas_candidates:
+    if outputs.use_packed_self_emit_targets or dispatch.use_self_gas_candidates:
         clear_program = pipeline.programs["clear_timed_candidate_worklist"]
         resources.timed_candidate_count.bind_to_storage_buffer(binding=0)
         resources.timed_candidate_dispatch_args.bind_to_storage_buffer(binding=1)
@@ -999,6 +992,14 @@ def _run_local_cell_action_pass(
         with pipeline._profile_pass(world, "packed_self_material_targets_clear"):
             clear_program.run(1, 1, 1)
             pipeline._sync_storage_and_indirect_writes(world.bridge.ctx)
+
+
+def _bind_local_cell_action_inputs(
+    pipeline,
+    resources: GPUReactionResources,
+    dispatch: _LocalCellDispatchPlan,
+    outputs: _LocalCellOutputPlan,
+) -> None:
     cell_state_in, _phase_in, temp_in, integrity_in, velocity_in, timer_in = (
         pipeline._current_cell_textures(resources)
     )
@@ -1024,30 +1025,28 @@ def _run_local_cell_action_pass(
     resources.action_meta.bind_to_storage_buffer(binding=10)
     resources.random_targets.bind_to_storage_buffer(binding=11)
     (
-        resources.self_rule_span_i if use_direct_self_rule_spans else resources.self_rule_i
+        resources.self_rule_span_i if dispatch.use_direct_self_rule_spans else resources.self_rule_i
     ).bind_to_storage_buffer(binding=12)
     resources.self_rule_f.bind_to_storage_buffer(binding=13)
     resources.light_emitter_buffer.bind_to_storage_buffer(binding=14)
     resources.light_emitter_count.bind_to_storage_buffer(binding=15)
-    if direct_action_gas_delta:
+    if outputs.direct_action_gas_delta:
         resources.gas_delta_buffer.bind_to_storage_buffer(binding=13)
-    if use_self_gas_fused:
-        resources.gas_delta_buffer.bind_to_storage_buffer(binding=SELF_FUSED_GAS_DELTA_BINDING)
-    if use_packed_self_emit_targets or use_self_gas_candidates:
+    if outputs.use_packed_self_emit_targets or dispatch.use_self_gas_candidates:
         resources.timed_candidate_count.bind_to_storage_buffer(binding=3)
         resources.timed_material_target_list.bind_to_storage_buffer(binding=4)
         resources.timed_material_target_marks.bind_to_storage_buffer(binding=5)
-    if use_packed_timed_emit_target_producer or timed_sparse_inplace:
+    if dispatch.use_packed_timed_emit_target_producer or dispatch.timed_sparse_inplace:
         resources.timed_candidate_count.bind_to_storage_buffer(binding=3)
         resources.timed_material_target_list.bind_to_storage_buffer(binding=4)
         resources.timed_material_target_marks.bind_to_storage_buffer(binding=5)
-    if candidate_dispatch:
+    if dispatch.candidate_dispatch:
         resources.timed_candidate_count.bind_to_storage_buffer(binding=3)
         resources.timed_candidate_list.bind_to_storage_buffer(binding=4)
         resources.timed_candidate_marks.bind_to_storage_buffer(binding=5)
-    if timed_sparse_inplace:
+    if dispatch.timed_sparse_inplace:
         resources.timed_candidate_list.bind_to_storage_buffer(binding=12)
-    if candidate_dispatch or timed_sparse_inplace:
+    if dispatch.candidate_dispatch or dispatch.timed_sparse_inplace:
         cell_state_out, _phase_out, temp_out, integrity_out, _velocity_out, timer_out = (
             pipeline._current_cell_textures(resources)
         )
@@ -1055,7 +1054,7 @@ def _run_local_cell_action_pass(
         temp_out.bind_to_image(2, read=False, write=True)
         integrity_out.bind_to_image(3, read=False, write=True)
         timer_out.bind_to_image(4, read=False, write=True)
-        if packed_local_deferred_outputs:
+        if dispatch.packed_local_deferred_outputs:
             resources.local_deferred_packed_out.bind_to_image(5, read=False, write=True)
         else:
             resources.local_deferred_lo_out.bind_to_image(5, read=False, write=True)
@@ -1064,25 +1063,23 @@ def _run_local_cell_action_pass(
     else:
         pipeline._bind_local_cell_action_output_images(
             resources,
-            direct_core_outputs=direct_core_outputs,
-            packed_local_deferred_outputs=packed_local_deferred_outputs,
+            direct_core_outputs=dispatch.direct_core_outputs,
+            packed_local_deferred_outputs=dispatch.packed_local_deferred_outputs,
         )
-    if use_self_gas_fused:
-        resources.flow_source_tex.bind_to_image(
-            SELF_FUSED_FLOW_SOURCE_BINDING,
-            read=False,
-            write=True,
-        )
-        pipeline._bind_flow_source_generation_output(
-            world,
-            resources,
-            program,
-            binding=SELF_FUSED_FLOW_SOURCE_GENERATION_BINDING,
-        )
-    group_x = (world.width + LOCAL_SIZE - 1) // LOCAL_SIZE
-    group_y = (world.height + LOCAL_SIZE - 1) // LOCAL_SIZE
-    with pipeline._profile_pass(world, f"{program_name}_shader"):
-        if candidate_dispatch or timed_sparse_inplace:
+
+
+def _dispatch_local_cell_action_shader(
+    pipeline,
+    world: "WorldEngine",
+    resources: GPUReactionResources,
+    program,
+    dispatch: _LocalCellDispatchPlan,
+    outputs: _LocalCellOutputPlan,
+    group_x: int,
+    group_y: int,
+) -> None:
+    with pipeline._profile_pass(world, f"{dispatch.program_name}_shader"):
+        if dispatch.candidate_dispatch or dispatch.timed_sparse_inplace:
             if not hasattr(program, "run_indirect"):
                 raise RuntimeError("formal sparse cell action requires indirect dispatch")
             program.run_indirect(resources.timed_candidate_dispatch_args)
@@ -1090,14 +1087,24 @@ def _run_local_cell_action_pass(
             program.run(group_x, group_y, 1)
         pipeline._sync_compute_writes(world.bridge.ctx)
         if (
-            use_packed_timed_emit_target_producer
-            or use_packed_self_emit_targets
-            or use_self_gas_candidates
+            dispatch.use_packed_timed_emit_target_producer
+            or outputs.use_packed_self_emit_targets
+            or dispatch.use_self_gas_candidates
         ):
             pipeline._sync_storage_and_indirect_writes(world.bridge.ctx)
-    if program_name in {"timed_apply", "self_apply"}:
+
+
+def _build_packed_local_action_targets(
+    pipeline,
+    world: "WorldEngine",
+    resources: GPUReactionResources,
+    dispatch: _LocalCellDispatchPlan,
+    outputs: _LocalCellOutputPlan,
+    cell_flag_meta: bool,
+) -> None:
+    if dispatch.program_name in {"timed_apply", "self_apply"}:
         pipeline._record_formal_segment_cell_meta_in_flags(cell_flag_meta)
-    if use_packed_self_emit_targets or use_self_gas_candidates:
+    if outputs.use_packed_self_emit_targets or dispatch.use_self_gas_candidates:
         dispatch_program = pipeline.programs["build_packed_material_target_dispatch"]
         resources.timed_candidate_count.bind_to_storage_buffer(binding=0)
         resources.timed_material_target_dispatch_args.bind_to_storage_buffer(binding=1)
@@ -1105,13 +1112,245 @@ def _run_local_cell_action_pass(
         with pipeline._profile_pass(world, "packed_self_material_targets_dispatch"):
             dispatch_program.run(1, 1, 1)
             pipeline._sync_storage_and_indirect_writes(world.bridge.ctx)
-    material_side_effect_copies_velocity = bool(direct_core_outputs and apply_material_side_effects)
-    resident_velocity_role = bool(
-        direct_core_outputs and pipeline._formal_before_motion_cell_roles_active()
+
+
+def _run_local_cell_material_side_effects(
+    pipeline,
+    world: "WorldEngine",
+    resources: GPUReactionResources,
+    dispatch: _LocalCellDispatchPlan,
+    outputs: _LocalCellOutputPlan,
+    group_x: int,
+    group_y: int,
+) -> None:
+    program_name = dispatch.program_name
+    candidate_dispatch = dispatch.candidate_dispatch
+    if not dispatch.apply_material_side_effects:
+        return
+    with pipeline._profile_pass(world, f"{program_name}_material_side_effects"):
+        if candidate_dispatch:
+            pipeline._run_timed_candidate_material_side_effect_pass(world, resources, inplace=True)
+        else:
+            copy_velocity_passthrough = bool(
+                outputs.material_side_effect_copies_velocity
+                and not outputs.sparse_velocity_side_effects
+            )
+            use_packed_timed_emit_targets = bool(
+                program_name == "timed_apply"
+                and dispatch.direct_core_outputs
+                and dispatch.packed_local_deferred_outputs
+                and pipeline._packed_timed_emit_target_worklist_enabled
+            )
+        if not candidate_dispatch and dispatch.use_packed_timed_emit_target_producer:
+            pipeline._run_produced_packed_timed_material_side_effect_pass(
+                world,
+                resources,
+                copy_velocity_passthrough=copy_velocity_passthrough,
+                velocity_in_place=outputs.sparse_velocity_side_effects,
+                core_in_place=dispatch.timed_sparse_inplace,
+            )
+        elif not candidate_dispatch and use_packed_timed_emit_targets:
+            pipeline._run_packed_timed_material_side_effect_pass(
+                world,
+                resources,
+                copy_velocity_passthrough=copy_velocity_passthrough,
+                velocity_in_place=outputs.sparse_velocity_side_effects,
+            )
+        elif not candidate_dispatch and outputs.use_packed_self_emit_targets:
+            if copy_velocity_passthrough:
+                with pipeline._profile_pass(world, "packed_self_material_velocity_copy"):
+                    pipeline._copy_current_velocity_to_next_role(
+                        world,
+                        resources,
+                        group_x,
+                        group_y,
+                    )
+            pipeline._run_packed_material_target_apply_pass(
+                world,
+                resources,
+                velocity_in_place=outputs.sparse_velocity_side_effects,
+                deferred_hi_valid=outputs.write_deferred_hi_outputs,
+                profile_name="packed_self_material_targets_apply",
+            )
+        elif not candidate_dispatch:
+            pipeline._run_cell_material_side_effect_pass(
+                world,
+                resources,
+                direct_core_outputs=dispatch.direct_core_outputs,
+                copy_velocity_passthrough=copy_velocity_passthrough,
+                velocity_in_place=outputs.sparse_velocity_side_effects,
+                inplace=candidate_dispatch,
+                deferred_hi_valid=outputs.write_deferred_hi_outputs,
+                packed_local_deferred_outputs=dispatch.packed_local_deferred_outputs,
+            )
+
+
+def _run_local_cell_gas_side_effects(
+    pipeline,
+    world: "WorldEngine",
+    resources: GPUReactionResources,
+    dispatch: _LocalCellDispatchPlan,
+    outputs: _LocalCellOutputPlan,
+) -> None:
+    program_name = dispatch.program_name
+    if not dispatch.apply_gas_side_effects:
+        return
+    with pipeline._profile_pass(world, f"{program_name}_gas_side_effects"):
+        if dispatch.candidate_dispatch:
+            pipeline._run_timed_candidate_gas_side_effect_pass(
+                world,
+                resources,
+                modify_gas_layer_mask=outputs.modify_gas_layer_mask,
+                may_have_flow_sources=dispatch.may_have_flow_sources,
+            )
+        elif dispatch.use_self_gas_candidates:
+            pipeline._run_self_candidate_gas_side_effect_pass(
+                world,
+                resources,
+                may_have_flow_sources=dispatch.may_have_flow_sources,
+                modify_gas_layer_mask=outputs.modify_gas_layer_mask,
+                flow_source_layers=dispatch.flow_source_layers,
+            )
+        else:
+            pipeline._run_cell_gas_side_effect_pass(
+                world,
+                resources,
+                may_have_flow_sources=dispatch.may_have_flow_sources,
+                modify_gas_layer_mask=outputs.modify_gas_layer_mask,
+                direct_core_outputs=dispatch.direct_core_outputs,
+                action_gas_delta_already_applied=outputs.direct_action_gas_delta,
+                flow_source_layers=dispatch.flow_source_layers,
+                deferred_hi_valid=outputs.write_deferred_hi_outputs,
+                packed_local_deferred_outputs=dispatch.packed_local_deferred_outputs,
+                use_expanded_active_tile_mask=dispatch.use_expanded_active_tile_mask,
+            )
+
+
+def _run_local_cell_action_pass(
+    pipeline,
+    world: "WorldEngine",
+    resources: GPUReactionResources,
+    program_name: str,
+    *,
+    self_rule_count: int = 0,
+    apply_material_side_effects: bool = False,
+    apply_gas_side_effects: bool = False,
+    modify_gas_layer_mask: int | None = None,
+    may_have_flow_sources: bool = True,
+    flow_source_layers: int = FLOW_SOURCE_LAYERS,
+    write_deferred_hi_outputs: bool | None = None,
+    fused_gas_output_safe: bool = False,
+    inplace: bool = False,
+    candidate_dispatch: bool = False,
+    timed_sparse_inplace: bool = False,
+    use_expanded_active_tile_mask: bool = False,
+) -> bool:
+    cell_flag_meta = bool(
+        pipeline._formal_segment_batch_active() and pipeline._timed_self_cell_flag_meta_enabled
     )
-    sparse_velocity_side_effects = bool(
-        material_side_effect_copies_velocity and resident_velocity_role
+    pipeline.last_timed_self_cell_flag_meta_used = cell_flag_meta
+    dispatch = _derive_local_cell_dispatch_plan(
+        pipeline,
+        world,
+        resources,
+        program_name,
+        candidate_dispatch=candidate_dispatch,
+        timed_sparse_inplace=timed_sparse_inplace,
+        apply_material_side_effects=apply_material_side_effects,
+        apply_gas_side_effects=apply_gas_side_effects,
+        may_have_flow_sources=may_have_flow_sources,
+        flow_source_layers=flow_source_layers,
+        use_expanded_active_tile_mask=use_expanded_active_tile_mask,
     )
+    outputs = _derive_local_cell_output_plan(
+        pipeline,
+        world,
+        program_name,
+        dispatch=dispatch,
+        modify_gas_layer_mask=modify_gas_layer_mask,
+        write_deferred_hi_outputs=write_deferred_hi_outputs,
+    )
+    # Unpack the derived decisions under their historical local names; the
+    # program-key selection and uniform upload below mirror the original
+    # monolithic pass.
+    use_expanded_active_tile_mask = dispatch.use_expanded_active_tile_mask
+    direct_core_outputs = dispatch.direct_core_outputs
+    packed_local_deferred_outputs = dispatch.packed_local_deferred_outputs
+    use_packed_timed_emit_target_producer = dispatch.use_packed_timed_emit_target_producer
+    use_self_gas_candidates = dispatch.use_self_gas_candidates
+    use_direct_self_rule_spans = dispatch.use_direct_self_rule_spans
+    use_packed_self_emit_targets = outputs.use_packed_self_emit_targets
+    direct_action_gas_delta = outputs.direct_action_gas_delta
+    modify_gas_layer_mask = outputs.modify_gas_layer_mask
+    write_deferred_hi_outputs = outputs.write_deferred_hi_outputs
+    program_key = f"{program_name}_packed" if packed_local_deferred_outputs else program_name
+    if use_packed_timed_emit_target_producer:
+        program_key = "timed_apply_packed_emit_targets"
+    if use_direct_self_rule_spans:
+        program_key = "self_apply_packed_direct_spans"
+    if cell_flag_meta:
+        program_key = f"{program_key}_cell_flag_meta"
+    if timed_sparse_inplace:
+        program_key = "timed_apply_packed_sparse_inplace"
+    if candidate_dispatch:
+        sparse_suffix = "_sparse"
+        if use_direct_self_rule_spans:
+            sparse_suffix += "_direct_spans"
+        if cell_flag_meta:
+            sparse_suffix += "_cell_flag_meta"
+        program_key = f"self_apply_packed{sparse_suffix}"
+    program = pipeline.programs[program_key]
+    pipeline._set_uniform_if_present(program, "cell_grid_size", (world.width, world.height))
+    pipeline._set_uniform_if_present(program, "rule_count", 0)
+    pipeline._set_uniform_if_present(
+        program,
+        "use_expanded_active_tile_mask",
+        use_expanded_active_tile_mask,
+    )
+    pipeline._set_uniform_if_present(program, "gas_cell_size", world.gas_cell_size)
+    pipeline._set_uniform_if_present(program, "gas_count", world.gas_concentration.shape[0])
+    pipeline._set_uniform_if_present(
+        program, "random_target_count", int(pipeline.random_target_count)
+    )
+    pipeline._set_uniform_if_present(program, "self_rule_count", int(self_rule_count))
+    pipeline._set_uniform_if_present(
+        program,
+        "use_self_rule_material_spans",
+        bool(pipeline._self_rule_material_spans_enabled),
+    )
+    pipeline._set_uniform_if_present(program, "gas_grid_size", (world.gas_width, world.gas_height))
+    pipeline._set_uniform_if_present(program, "write_deferred_outputs", True)
+    pipeline._set_uniform_if_present(program, "direct_gas_delta_enabled", direct_action_gas_delta)
+    pipeline._set_uniform_if_present(
+        program, "direct_modify_gas_layer_mask", int(modify_gas_layer_mask)
+    )
+    pipeline._set_uniform_if_present(
+        program, "write_deferred_hi_outputs", write_deferred_hi_outputs
+    )
+    pipeline._set_uniform_if_present(
+        program, "collect_self_emit_targets", use_packed_self_emit_targets
+    )
+    pipeline._set_uniform_if_present(
+        program, "collect_self_gas_candidates", use_self_gas_candidates
+    )
+    pipeline._set_uniform_if_present(
+        program,
+        "self_fused_flow_sources_enabled",
+        False,
+    )
+    _clear_local_cell_action_worklists(pipeline, world, resources, dispatch, outputs)
+    _bind_local_cell_action_inputs(pipeline, resources, dispatch, outputs)
+    group_x = (world.width + LOCAL_SIZE - 1) // LOCAL_SIZE
+    group_y = (world.height + LOCAL_SIZE - 1) // LOCAL_SIZE
+    _dispatch_local_cell_action_shader(
+        pipeline, world, resources, program, dispatch, outputs, group_x, group_y
+    )
+    _build_packed_local_action_targets(
+        pipeline, world, resources, dispatch, outputs, cell_flag_meta
+    )
+    material_side_effect_copies_velocity = outputs.material_side_effect_copies_velocity
+    resident_velocity_role = outputs.resident_velocity_role
+    sparse_velocity_side_effects = outputs.sparse_velocity_side_effects
     if direct_core_outputs:
         if not material_side_effect_copies_velocity and not resident_velocity_role:
             with pipeline._profile_pass(world, f"{program_name}_velocity_copy"):
@@ -1124,103 +1363,10 @@ def _run_local_cell_action_pass(
                 group_x,
                 group_y,
             )
-    if apply_material_side_effects:
-        with pipeline._profile_pass(world, f"{program_name}_material_side_effects"):
-            if candidate_dispatch:
-                pipeline._run_timed_candidate_material_side_effect_pass(
-                    world, resources, inplace=True
-                )
-            else:
-                copy_velocity_passthrough = bool(
-                    material_side_effect_copies_velocity and not sparse_velocity_side_effects
-                )
-                use_packed_timed_emit_targets = bool(
-                    program_name == "timed_apply"
-                    and direct_core_outputs
-                    and packed_local_deferred_outputs
-                    and pipeline._packed_timed_emit_target_worklist_enabled
-                )
-            if not candidate_dispatch and use_packed_timed_emit_target_producer:
-                pipeline._run_produced_packed_timed_material_side_effect_pass(
-                    world,
-                    resources,
-                    copy_velocity_passthrough=copy_velocity_passthrough,
-                    velocity_in_place=sparse_velocity_side_effects,
-                    core_in_place=timed_sparse_inplace,
-                )
-            elif not candidate_dispatch and use_packed_timed_emit_targets:
-                pipeline._run_packed_timed_material_side_effect_pass(
-                    world,
-                    resources,
-                    copy_velocity_passthrough=copy_velocity_passthrough,
-                    velocity_in_place=sparse_velocity_side_effects,
-                )
-            elif not candidate_dispatch and use_packed_self_emit_targets:
-                if copy_velocity_passthrough:
-                    with pipeline._profile_pass(world, "packed_self_material_velocity_copy"):
-                        pipeline._copy_current_velocity_to_next_role(
-                            world,
-                            resources,
-                            group_x,
-                            group_y,
-                        )
-                pipeline._run_packed_material_target_apply_pass(
-                    world,
-                    resources,
-                    velocity_in_place=sparse_velocity_side_effects,
-                    deferred_hi_valid=write_deferred_hi_outputs,
-                    profile_name="packed_self_material_targets_apply",
-                )
-            elif not candidate_dispatch:
-                pipeline._run_cell_material_side_effect_pass(
-                    world,
-                    resources,
-                    direct_core_outputs=direct_core_outputs,
-                    copy_velocity_passthrough=copy_velocity_passthrough,
-                    velocity_in_place=sparse_velocity_side_effects,
-                    inplace=candidate_dispatch,
-                    deferred_hi_valid=write_deferred_hi_outputs,
-                    packed_local_deferred_outputs=packed_local_deferred_outputs,
-                )
-    if apply_gas_side_effects:
-        with pipeline._profile_pass(world, f"{program_name}_gas_side_effects"):
-            if candidate_dispatch:
-                pipeline._run_timed_candidate_gas_side_effect_pass(
-                    world,
-                    resources,
-                    modify_gas_layer_mask=modify_gas_layer_mask,
-                    may_have_flow_sources=may_have_flow_sources,
-                )
-            elif use_self_gas_fused:
-                if may_have_flow_sources:
-                    with pipeline._profile_pass(world, "self_fused_gas_flow_sources"):
-                        pipeline._append_flow_sources_from_gpu(
-                            world,
-                            resources,
-                            may_have_flow_sources=True,
-                            flow_source_layers=flow_source_layers,
-                        )
-            elif use_self_gas_candidates:
-                pipeline._run_self_candidate_gas_side_effect_pass(
-                    world,
-                    resources,
-                    may_have_flow_sources=may_have_flow_sources,
-                    modify_gas_layer_mask=modify_gas_layer_mask,
-                    flow_source_layers=flow_source_layers,
-                )
-            else:
-                pipeline._run_cell_gas_side_effect_pass(
-                    world,
-                    resources,
-                    may_have_flow_sources=may_have_flow_sources,
-                    modify_gas_layer_mask=modify_gas_layer_mask,
-                    direct_core_outputs=direct_core_outputs,
-                    action_gas_delta_already_applied=direct_action_gas_delta,
-                    flow_source_layers=flow_source_layers,
-                    deferred_hi_valid=write_deferred_hi_outputs,
-                    packed_local_deferred_outputs=packed_local_deferred_outputs,
-                    use_expanded_active_tile_mask=use_expanded_active_tile_mask,
-                )
+    _run_local_cell_material_side_effects(
+        pipeline, world, resources, dispatch, outputs, group_x, group_y
+    )
+    _run_local_cell_gas_side_effects(pipeline, world, resources, dispatch, outputs)
     return bool(
         material_side_effect_copies_velocity
         and resident_velocity_role
@@ -1249,11 +1395,7 @@ def _run_timed_candidate_action_pass(
     pipeline._timed_candidate_count_cpu = int(
         np.frombuffer(resources.timed_candidate_count.read(size=4), dtype=np.uint32, count=1)[0]
     )
-    if (
-        inplace
-        and pipeline._timed_candidate_count_cpu > 0
-        and not pipeline._timed_sparse_positive_count_enabled
-    ):
+    if inplace and pipeline._timed_candidate_count_cpu > 0:
         # Leave the canonical path untouched for frames with live timers; the
         # candidate side-effect pipelines have different output ownership.
         return False
@@ -1364,28 +1506,6 @@ def _prepare_timed_candidate_worklist(
     resources.timed_material_target_dispatch_args.bind_to_storage_buffer(binding=2)
     with pipeline._profile_pass(world, "timed_candidates_clear"):
         setup_program.run(1, 1, 1)
-        pipeline._sync_storage_and_indirect_writes(ctx)
-    if not pipeline._timed_sparse_positive_count_enabled:
-        return
-    compact_program = pipeline.programs["compact_timed_candidates"]
-    compact_program["cell_grid_size"].value = (world.width, world.height)
-    cell_state, _phase, _temp, _integrity, _velocity, timer = pipeline._current_cell_textures(
-        resources
-    )
-    cell_state.use(location=0)
-    timer.use(location=1)
-    resources.active_cell_tex.use(location=2)
-    resources.material_slots_lo.bind_to_storage_buffer(binding=0)
-    resources.timed_candidate_count.bind_to_storage_buffer(binding=1)
-    resources.timed_candidate_list.bind_to_storage_buffer(binding=2)
-    resources.timed_candidate_dispatch_args.bind_to_storage_buffer(binding=3)
-    resources.timed_candidate_marks.bind_to_storage_buffer(binding=4)
-    with pipeline._profile_pass(world, "timed_candidates_compact"):
-        compact_program.run(
-            (world.width + LOCAL_SIZE - 1) // LOCAL_SIZE,
-            (world.height + LOCAL_SIZE - 1) // LOCAL_SIZE,
-            1,
-        )
         pipeline._sync_storage_and_indirect_writes(ctx)
 
 

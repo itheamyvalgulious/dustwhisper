@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import inspect
 
+from oracle_game.sim import gpu_liquid_bridge as liquid_bridge
+from oracle_game.sim import gpu_liquid_solve as liquid_solve
 from oracle_game.sim.gpu_liquid import _SHADER_SUBS, GPULiquidPipeline
 from oracle_game.sim.shader_loader import shader_source
 
@@ -65,8 +67,8 @@ def test_state_elided_buoyancy_decodes_dense_metadata_and_keeps_fallback() -> No
 
 
 def test_state_elision_program_selection_is_frame_gated() -> None:
-    step_source = inspect.getsource(GPULiquidPipeline.step)
-    tile_source = inspect.getsource(GPULiquidPipeline._run_tile_solve)
+    step_source = inspect.getsource(liquid_bridge.step)
+    tile_source = inspect.getsource(liquid_solve._run_tile_solve)
     ensure_source = inspect.getsource(GPULiquidPipeline._ensure_programs)
     assert "pipeline._buoyancy_snapshot_pre_state_frame_enabled" in step_source
     assert "pipeline._tile_snapshot_state_elision_frame_enabled" in step_source

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 
+from oracle_game.sim import gpu_heat_stages as heat_stages
 from oracle_game.sim.gpu_heat import _SHADER_SUBS, GPUHeatPipeline
 from oracle_game.sim.shader_loader import shader_source
 
@@ -13,7 +14,7 @@ def test_heat_terminal_nv32_ballot_is_default_on_and_strictly_gated() -> None:
     assert pipeline.last_terminal_nv32_ballot_gas_reduction_used is False
 
     ensure_source = inspect.getsource(GPUHeatPipeline._ensure_programs)
-    run_source = inspect.getsource(GPUHeatPipeline._run_apply_terminal4x6)
+    run_source = inspect.getsource(heat_stages._run_apply_terminal4x6)
     assert '"GL_NV_gpu_shader5"' in ensure_source
     assert '"GL_NV_shader_thread_group"' in ensure_source
     assert "terminal_warp_size == 32" in ensure_source

@@ -5,10 +5,10 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 if TYPE_CHECKING:
-    from oracle_game.sim.gpu_motion import GPUMotionResources
+    from oracle_game.sim.gpu_motion_resources import GPUMotionResources
     from oracle_game.world import WorldEngine
 
-from oracle_game.sim.gpu_motion import (
+from oracle_game.sim.gpu_motion_constants import (
     ACTIVE_TILE_WORKGROUP_AXIS,
     ACTIVE_TILE_WORKGROUPS_PER_TILE,
     FALLING_ISLAND_RESERVATION_DTYPE,

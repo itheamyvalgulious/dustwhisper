@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 
+from oracle_game.sim import gpu_heat_stages as heat_stages
 from oracle_game.sim.gpu_heat import _SHADER_SUBS, GPUHeatPipeline
 from oracle_game.sim.shader_loader import shader_source
 
@@ -11,7 +12,7 @@ def test_heat_condense_apply_gas4x6_is_default_enabled() -> None:
 
 
 def test_heat_condense_apply_gas4x6_keeps_strict_dispatch_gate() -> None:
-    source = inspect.getsource(GPUHeatPipeline.step)
+    source = inspect.getsource(heat_stages.step)
     assert "_condense_apply_gas4x6_fusion_enabled" in source
     assert "int(world.gas_cell_size) == 4" in source
     assert "int(world.gas_concentration.shape[0]) == 6" in source

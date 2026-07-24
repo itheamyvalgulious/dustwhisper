@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import inspect
 
+from oracle_game.sim import gpu_liquid_bridge as liquid_bridge
 from oracle_game.sim.gpu_liquid import _SHADER_SUBS, GPULiquidPipeline
 from oracle_game.sim.shader_loader import shader_source
 
 
 def test_provenance_cleanup_terminal_fusion_is_default_off() -> None:
     pipeline = GPULiquidPipeline()
-    assert pipeline._provenance_cleanup_terminal_fusion_enabled is False
-    assert pipeline._provenance_cleanup_terminal_fusion_frame_enabled is False
     assert pipeline.last_provenance_cleanup_terminal_fusion_used is False
 
 
@@ -55,12 +54,8 @@ def test_terminal_blocker_mask_preserves_tile_blocking_predicate() -> None:
 
 
 def test_provenance_cleanup_terminal_has_strict_frame_gate() -> None:
-    step_source = inspect.getsource(GPULiquidPipeline.step)
-    load_source = inspect.getsource(GPULiquidPipeline._load_authoritative_bridge_inputs)
-    flow_source = inspect.getsource(GPULiquidPipeline._run_liquid_intent_pass)
-    assert "_provenance_cleanup_terminal_fusion_frame_enabled" in step_source
+    step_source = inspect.getsource(liquid_bridge.step)
+    load_source = inspect.getsource(liquid_bridge._load_authoritative_bridge_inputs)
     assert "_provenance_terminal_frame_enabled" in step_source
     assert "_blocker_displaced_hydration_frame_enabled" in load_source
-    assert "_provenance_cleanup_terminal_fusion_frame_enabled" in step_source
-    assert "liquid_flow_intent_shared_halo_provenance_cleanup_bridge_aux" in flow_source
     assert "load_bridge_blocker_displaced" in load_source

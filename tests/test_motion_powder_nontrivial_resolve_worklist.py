@@ -22,11 +22,9 @@ def test_powder_nontrivial_resolve_worklist_is_default_on_and_strictly_gated() -
 
 
 def test_powder_nontrivial_worklist_scratch_roles_are_source_indexed_only() -> None:
-    source_gate = inspect.getsource(gpu_motion_powder._source_indexed_powder_apply_enabled)
     direct_safety = inspect.getsource(gpu_motion_powder._powder_direct_apply_is_safe)
     generate = inspect.getsource(gpu_motion_powder._run_generate_powder_reservations)
 
-    assert "not pipeline._powder_direct_bridge_apply_enabled" in source_gate
     assert "resources.powder_direct_apply_unsafe" in direct_safety
     assert "resources.powder_apply_outgoing" in direct_safety
     assert "resources.powder_direct_apply_unsafe.bind_to_storage_buffer(binding=7)" in generate

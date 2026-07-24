@@ -5,10 +5,11 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 if TYPE_CHECKING:
-    from oracle_game.sim.gpu_collapse import GPUCollapseResources
+    from oracle_game.sim.gpu_collapse_resources import GPUCollapseResources
     from oracle_game.world import WorldEngine
 
-from oracle_game.sim.gpu_collapse import (
+from oracle_game.sim.gpu_collapse_dirty import ensure_collapse_structure_dirty_tile_queue
+from oracle_game.sim.gpu_collapse_resources import (
     FORMAL_CONNECTED_CELL_FRONTIER_TILE_COUNT_BUFFER,
     FORMAL_CONNECTED_CELL_FRONTIER_TILE_DISPATCH_ARGS_BUFFER,
     FORMAL_CONNECTED_CELL_FRONTIER_TILE_FLAGS_BUFFER,
@@ -27,7 +28,6 @@ from oracle_game.sim.gpu_collapse import (
     FORMAL_CONNECTED_TILE_SCRATCH_DISPATCH_ARGS_BUFFER,
     FORMAL_CONNECTED_TILE_SCRATCH_LIST_BUFFER,
 )
-from oracle_game.sim.gpu_collapse_dirty import ensure_collapse_structure_dirty_tile_queue
 from oracle_game.types import Phase
 
 
@@ -1190,13 +1190,7 @@ def _run_formal_connected_tile_support_pass(
     resources.connected_tile_row_masks.bind_to_storage_buffer(binding=3)
     resources.connected_tile_column_masks.bind_to_storage_buffer(binding=4)
     program.run_indirect(bridge.buffers[FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER])
-    if pipeline._support_jfa_image_barrier_elision_enabled:
-        # The next JFA pass samples ``current`` as a texture and writes a
-        # different ping-pong image.  Image-access ordering is therefore not
-        # needed; texture-fetch + storage ordering covers the actual hazards.
-        ctx.memory_barrier(ctx.TEXTURE_FETCH_BARRIER_BIT | ctx.SHADER_STORAGE_BARRIER_BIT)
-    else:
-        pipeline._sync_compute_writes(ctx)
+    pipeline._sync_compute_writes(ctx)
     bridge.mark_gpu_authoritative(
         tile_mask_name,
         FORMAL_CONNECTED_TILE_COUNT_BUFFER,

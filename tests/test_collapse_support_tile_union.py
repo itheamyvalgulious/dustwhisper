@@ -140,7 +140,6 @@ def test_support_tile_union_is_default_off_and_lazy() -> None:
         resources = pipeline._ensure_resources(engine.bridge.ctx, engine.width, engine.height)
         assert pipeline._support_tile_union_enabled is False
         assert pipeline._support_tile_union_atomic_union_enabled is False
-        assert pipeline._support_jfa_image_barrier_elision_enabled is False
         assert resources.support_tile_union_roots is None
         assert resources.support_tile_union_parent is None
         assert resources.support_tile_union_seeded is None

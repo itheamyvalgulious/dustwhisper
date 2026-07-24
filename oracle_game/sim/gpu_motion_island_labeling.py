@@ -7,8 +7,8 @@ import numpy as np
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
-from oracle_game.sim.gpu_motion import LOCAL_SIZE
 from oracle_game.sim.gpu_motion_bridge import _pack_cell_state_texture
+from oracle_game.sim.gpu_motion_constants import LOCAL_SIZE
 from oracle_game.types import Phase
 
 

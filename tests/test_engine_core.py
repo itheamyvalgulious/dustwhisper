@@ -99,6 +99,32 @@ from oracle_game.paging import RingPagingWindow
 from oracle_game.readback import PBOReadbackRing
 from oracle_game.readback_contract import READBACK_ALLOWED_CHANNELS
 from oracle_game.sim import gpu_collapse_dirty as collapse_dirty
+from oracle_game.sim import gpu_collapse_formal as collapse_formal
+from oracle_game.sim import gpu_collapse_formal_solve as collapse_formal_solve
+from oracle_game.sim import gpu_collapse_frontier as collapse_frontier
+from oracle_game.sim import gpu_collapse_labeling_formal as collapse_labeling_formal
+from oracle_game.sim import gpu_collapse_publish as collapse_publish
+from oracle_game.sim import gpu_collapse_resources as collapse_resources
+from oracle_game.sim import gpu_collapse_stages as collapse_stages
+from oracle_game.sim import gpu_heat_resources as heat_resources
+from oracle_game.sim import gpu_heat_stages as heat_stages
+from oracle_game.sim import gpu_liquid_bridge as liquid_bridge
+from oracle_game.sim import gpu_liquid_solve as liquid_solve
+from oracle_game.sim import (
+    gpu_motion_bridge,
+    gpu_motion_dispatch,
+    gpu_motion_island,
+    gpu_motion_powder,
+    gpu_motion_stages,
+    gpu_reactions_bridge,
+    gpu_reactions_cell_pass,
+    gpu_reactions_pairings,
+    gpu_reactions_resources,
+    gpu_reactions_rules,
+    gpu_reactions_segments,
+    gpu_reactions_side_effects,
+    gpu_reactions_transient,
+)
 from oracle_game.sim.gpu_collapse import (
     _SHADER_SUBS as COLLAPSE_SHADER_SUBS,
 )
@@ -29548,7 +29574,7 @@ def test_formal_gpu_gas_uses_bridge_authoritative_inputs_without_cpu_mirror_uplo
 
 
 def test_gpu_heat_apply_condense_cells_reuses_target_velocity_output() -> None:
-    run_source = inspect.getsource(GPUHeatPipeline._run_apply_condense_cells)
+    run_source = inspect.getsource(heat_stages._run_apply_condense_cells)
     main_shader_source = shader_source("heat/apply_condense_cells.comp")
 
     assert '"apply_condense_cells.aux"' not in run_source
@@ -29573,9 +29599,9 @@ def test_gpu_heat_apply_condense_cells_reuses_target_velocity_output() -> None:
 
 
 def test_gpu_heat_formal_cell_core_hydration_is_fused_into_cell_heat() -> None:
-    step_source = inspect.getsource(GPUHeatPipeline.step)
-    loader_source = inspect.getsource(GPUHeatPipeline._load_authoritative_bridge_inputs)
-    cell_heat_source = inspect.getsource(GPUHeatPipeline._run_cell_heat)
+    step_source = inspect.getsource(heat_stages.step)
+    loader_source = inspect.getsource(heat_stages._load_authoritative_bridge_inputs)
+    cell_heat_source = inspect.getsource(heat_stages._run_cell_heat)
     shader = shader_source("heat/cell_heat_bridge.comp")
 
     assert "deferred_cell_core = pipeline._load_authoritative_bridge_inputs" in step_source
@@ -29614,9 +29640,9 @@ def test_gpu_heat_formal_cell_core_hydration_is_fused_into_cell_heat() -> None:
 
 
 def test_gpu_heat_timer_textures_keep_packed_bridge_words() -> None:
-    resource_source = inspect.getsource(GPUHeatPipeline._ensure_resources)
-    upload_source = inspect.getsource(GPUHeatPipeline._upload_inputs)
-    download_source = inspect.getsource(GPUHeatPipeline._download_outputs)
+    resource_source = inspect.getsource(heat_resources._ensure_resources)
+    upload_source = inspect.getsource(heat_resources._upload_inputs)
+    download_source = inspect.getsource(heat_stages._download_outputs)
     assert 'timer_tex = ctx.texture((world.width, world.height), 1, dtype="u4")' in resource_source
     assert (
         'timer_out_tex = ctx.texture((world.width, world.height), 1, dtype="u4")' in resource_source
@@ -29786,7 +29812,7 @@ def test_gpu_heat_ambient_exchange_feedback4_matches_legacy_passes_exactly(
 
 def test_gpu_heat_ambient_exchange_feedback4_is_default_on_and_strictly_gated() -> None:
     pipeline = GPUHeatPipeline()
-    step_source = inspect.getsource(GPUHeatPipeline.step)
+    step_source = inspect.getsource(heat_stages.step)
     shader = shader_source("heat/ambient_exchange_feedback4.comp")
 
     assert pipeline._ambient_exchange_feedback4_enabled is True
@@ -39358,22 +39384,22 @@ def test_gpu_reaction_timed_action_compile_uses_only_timer_slots() -> None:
 
 def test_gpu_reaction_action_compile_paths_use_generation_caches_source() -> None:
     assert "_cached_used_action_indices_for_material_slots" in inspect.getsource(
-        GPUReactionPipeline.run_timed_actions
+        gpu_reactions_pairings.run_timed_actions
     )
     assert "_cached_used_action_indices_for_self_rules" in inspect.getsource(
-        GPUReactionPipeline.run_self_actions
+        gpu_reactions_pairings.run_self_actions
     )
     assert "_cached_used_action_indices_for_pair_rules" in inspect.getsource(
-        GPUReactionPipeline.run_material_material
+        gpu_reactions_pairings.run_material_material
     )
     assert "_cached_used_action_indices_for_pair_rules" in inspect.getsource(
-        GPUReactionPipeline.run_material_gas
+        gpu_reactions_pairings.run_material_gas
     )
     assert "_cached_used_action_indices_for_pair_rules" in inspect.getsource(
-        GPUReactionPipeline.run_material_light
+        gpu_reactions_pairings.run_material_light
     )
     assert "_compile_action_buffers_cached" in inspect.getsource(
-        GPUReactionPipeline._compile_action_buffers_cached
+        gpu_reactions_rules._compile_action_buffers_cached
     )
 
 
@@ -43648,7 +43674,11 @@ def test_gpu_liquid_tile_solver_warp_direct_vertical_mapping_is_gated_and_arbitr
     tile_solve_source = shader_source("liquid/tile_solve.comp")
 
     assert pipeline._tile_warp_direct_vertical_mapping_enabled is True
-    assert "self._tile_warp_direct_vertical_mapping_enabled = True" in init_source
+    assert (
+        "self._tile_warp_direct_vertical_mapping_enabled = (\n"
+        "            self.engine_config.tile_warp_direct_vertical_mapping_enabled\n"
+        "        )"
+    ) in init_source
     assert 'tile_solve_subs["TILE_WARP_DIRECT_VERTICAL_MAPPING"]' in programs_source
     assert "self._tile_warp_direct_vertical_mapping_enabled" in programs_source
     assert (
@@ -43683,7 +43713,7 @@ def test_gpu_liquid_tile_solver_warp_direct_vertical_mapping_is_gated_and_arbitr
 def test_gpu_liquid_tile_solver_provenance_row_stream_is_enabled_and_warp_gated() -> None:
     pipeline = GPULiquidPipeline()
     programs_source = inspect.getsource(GPULiquidPipeline._ensure_programs)
-    tile_run_source = inspect.getsource(GPULiquidPipeline._run_tile_solve)
+    tile_run_source = inspect.getsource(liquid_solve._run_tile_solve)
     tile_solve_source = shader_source("liquid/tile_solve.comp")
 
     assert pipeline._tile_warp_provenance_row_stream_enabled is True
@@ -44688,7 +44718,7 @@ def test_formal_gpu_liquid_uses_bridge_authoritative_inputs_without_cpu_mirror_s
 
 
 def test_gpu_liquid_bridge_input_load_batches_copy_barrier() -> None:
-    source = inspect.getsource(GPULiquidPipeline._load_authoritative_bridge_inputs)
+    source = inspect.getsource(liquid_bridge._load_authoritative_bridge_inputs)
     sync_marker = "pipeline._sync_compute_writes(bridge.ctx)"
     sync_index = source.index(sync_marker)
     fused_profile_names = (
@@ -44715,8 +44745,8 @@ def test_gpu_liquid_bridge_input_load_batches_copy_barrier() -> None:
 
 
 def test_gpu_liquid_reuses_bridge_active_tiles_for_tile_solve_source() -> None:
-    step_source = inspect.getsource(GPULiquidPipeline.step)
-    loader_source = inspect.getsource(GPULiquidPipeline._load_authoritative_bridge_inputs)
+    step_source = inspect.getsource(liquid_bridge.step)
+    loader_source = inspect.getsource(liquid_bridge._load_authoritative_bridge_inputs)
 
     assert "next_workgroups_per_tile=1" in step_source
     assert "if not active_tiles_ready_for_solve:" in step_source
@@ -44726,10 +44756,8 @@ def test_gpu_liquid_reuses_bridge_active_tiles_for_tile_solve_source() -> None:
 
 
 def test_gpu_liquid_pre_motion_bridge_input_load_uses_flow_intent_subset() -> None:
-    prepare_source = inspect.getsource(GPULiquidPipeline.prepare_motion_flow_intent)
-    loader_source = inspect.getsource(
-        GPULiquidPipeline._load_authoritative_bridge_flow_intent_inputs
-    )
+    prepare_source = inspect.getsource(liquid_bridge.prepare_motion_flow_intent)
+    loader_source = inspect.getsource(liquid_bridge._load_authoritative_bridge_flow_intent_inputs)
     load_shader_source = shader_source("liquid/load_bridge_flow_intent_inputs.comp")
 
     assert "_load_authoritative_bridge_flow_intent_inputs" in prepare_source
@@ -44754,20 +44782,21 @@ def test_gpu_liquid_pre_motion_bridge_input_load_uses_flow_intent_subset() -> No
 def test_gpu_liquid_copy_core_state_omits_displaced_payload_for_pre_placeholder_copies() -> None:
     full_copy_shader = shader_source("liquid/copy_with_pending.comp")
     core_copy_shader = shader_source("liquid/copy_core_state.comp")
-    core_copy_source = inspect.getsource(GPULiquidPipeline._run_copy_core_state)
-    step_source = inspect.getsource(GPULiquidPipeline.step)
-    tile_copy_source = step_source[
-        step_source.index('"liquid_copy_tile_solve"') : step_source.index(
+    core_copy_source = inspect.getsource(liquid_solve._run_copy_core_state)
+    seam_source = inspect.getsource(liquid_bridge._run_seam_stages)
+    placeholder_source = inspect.getsource(liquid_bridge._run_placeholder_stages)
+    tile_copy_source = seam_source[
+        seam_source.index('"liquid_copy_tile_solve"') : seam_source.index(
             '"liquid_build_seam_x_boundaries"'
         )
     ]
-    seam_copy_source = step_source[
-        step_source.index('"liquid_copy_seam_x"') : step_source.index(
+    seam_copy_source = seam_source[
+        seam_source.index('"liquid_copy_seam_x"') : seam_source.index(
             '"liquid_build_seam_y_boundaries"'
         )
     ]
-    placeholder_copy_source = step_source[
-        step_source.index('"liquid_copy_for_placeholder"') : step_source.index(
+    placeholder_copy_source = placeholder_source[
+        placeholder_source.index('"liquid_copy_for_placeholder"') : placeholder_source.index(
             '"liquid_placeholder_displacement"'
         )
     ]
@@ -47072,12 +47101,12 @@ def test_gpu_material_pair_main_shaders_use_lhs_candidate_masks() -> None:
     assert "for (int rule_index = 0; rule_index < rule_count; ++rule_index)" not in mm_main_scan
     assert "for (int rule_index = 0; rule_index < rule_count; ++rule_index)" not in material_gas
     assert "for (int rule_index = 0; rule_index < rule_count; ++rule_index)" not in material_light
-    run_material_light_source = inspect.getsource(GPUReactionPipeline.run_material_light)
+    run_material_light_source = inspect.getsource(gpu_reactions_pairings.run_material_light)
     formal_material_light_source = inspect.getsource(
-        GPUReactionPipeline._run_formal_guarded_material_light
+        gpu_reactions_pairings._run_formal_guarded_material_light
     )
-    run_cell_pass_source = inspect.getsource(GPUReactionPipeline._run_cell_pass)
-    word_count_source = inspect.getsource(GPUReactionPipeline._rule_candidate_word_count)
+    run_cell_pass_source = inspect.getsource(gpu_reactions_cell_pass._run_cell_pass)
+    word_count_source = inspect.getsource(gpu_reactions_rules._rule_candidate_word_count)
     assert 'material_tag_field="light_tag_mask"' in run_material_light_source
     assert "lhs_rule_candidate_masks=lhs_candidate_masks" in run_material_light_source
     assert (
@@ -47128,7 +47157,7 @@ def test_formal_gpu_gas_skips_only_fully_overwritten_zero_initialization() -> No
 
 
 def test_gpu_material_material_rhs_consume_noop_guard_source() -> None:
-    run_cell_pass_source = inspect.getsource(GPUReactionPipeline._run_cell_pass)
+    run_cell_pass_source = inspect.getsource(gpu_reactions_cell_pass._run_cell_pass)
 
     assert (
         "has_rhs_consume = pipeline._compiled_rules_include_rhs_consume(rule_tags)"
@@ -47203,9 +47232,9 @@ def test_gpu_reaction_load_bridge_cell_main_shader_omits_aux_unpack_fields() -> 
 
 
 def test_gpu_reaction_formal_bridge_cell_load_role_specialization_is_bounded() -> None:
-    upload_source = inspect.getsource(GPUReactionPipeline._upload_state)
-    loader_source = inspect.getsource(GPUReactionPipeline._load_authoritative_bridge_inputs)
-    helper_source = inspect.getsource(GPUReactionPipeline._bridge_cell_core_read_role_only_load)
+    upload_source = inspect.getsource(gpu_reactions_transient._upload_state)
+    loader_source = inspect.getsource(gpu_reactions_bridge._load_authoritative_bridge_inputs)
+    helper_source = inspect.getsource(gpu_reactions_segments._bridge_cell_core_read_role_only_load)
 
     assert "reaction_group=reaction_group" in upload_source
     assert "load_bridge_cell_role" in loader_source
@@ -47217,7 +47246,7 @@ def test_gpu_reaction_formal_bridge_cell_load_role_specialization_is_bounded() -
     assert "DIRECT_CORE_OUTPUT_REACTION_GROUPS" in helper_source
 
     for direct_group in ("timed", "self", "material_material", "material_gas", "material_light"):
-        assert direct_group in inspect.getsource(GPUReactionPipeline._reaction_state_segment)
+        assert direct_group in inspect.getsource(gpu_reactions_segments._reaction_state_segment)
     assert "gas_gas" not in helper_source
     assert "gas_light" not in helper_source
 
@@ -54734,8 +54763,8 @@ def test_gpu_collapse_formal_dirty_component_connected_to_external_anchor_does_n
 def test_gpu_collapse_formal_connected_executor_source_does_not_use_horizontal_search_band() -> (
     None
 ):
-    source = inspect.getsource(GPUCollapsePipeline.execute_formal_connected_expansion)
-    tile_source = inspect.getsource(GPUCollapsePipeline._solve_formal_connected_tile_textures)
+    source = inspect.getsource(collapse_formal.execute_formal_connected_expansion)
+    tile_source = inspect.getsource(collapse_formal_solve._solve_formal_connected_tile_textures)
     assert "_formal_horizontal_search_region" not in source
     assert "_execute_formal_connected_search_region" not in source
     assert "_formal_connected_region_layers" not in source
@@ -55011,7 +55040,7 @@ def test_gpu_collapse_incremental_epoch_runs_all_jfa_rounds_and_preserves_next_d
 
 
 def test_gpu_collapse_formal_outcome_without_publish_does_not_finish_gpu_queue() -> None:
-    source = inspect.getsource(GPUCollapsePipeline.resolve_supported_outcome_textures)
+    source = inspect.getsource(collapse_stages.resolve_supported_outcome_textures)
 
     assert "elif not pipeline._formal_gpu_frame(world):" in source
     assert source.count("ctx.finish()") == 1
@@ -55116,7 +55145,7 @@ def test_gpu_collapse_formal_dirty_tile_queue_prepares_without_region_upload_or_
     assert ("resolve", "tile_mask", "structural", True) in calls
 
     solve_source = inspect.getsource(
-        GPUCollapsePipeline._solve_formal_connected_dirty_tile_textures
+        collapse_formal_solve._solve_formal_connected_dirty_tile_textures
     )
     producer_source = inspect.getsource(
         collapse_dirty.mark_collapse_structure_dirty_tiles_from_bridge_cell_core
@@ -55145,18 +55174,14 @@ def test_gpu_collapse_formal_dirty_connected_frontier_sources_use_jump_schedule_
     None
 ):
     solve_source = inspect.getsource(
-        GPUCollapsePipeline._solve_formal_connected_dirty_tile_textures
+        collapse_formal_solve._solve_formal_connected_dirty_tile_textures
     )
-    tile_source = inspect.getsource(GPUCollapsePipeline._solve_formal_connected_dirty_tile_frontier)
+    tile_source = inspect.getsource(collapse_frontier._solve_formal_connected_dirty_tile_frontier)
     cell_source = inspect.getsource(
-        GPUCollapsePipeline._solve_formal_connected_dirty_cell_frontier_texture
+        collapse_formal_solve._solve_formal_connected_dirty_cell_frontier_texture
     )
-    tile_expand_source = inspect.getsource(
-        GPUCollapsePipeline._expand_formal_connected_tile_frontier
-    )
-    cell_expand_source = inspect.getsource(
-        GPUCollapsePipeline._expand_formal_connected_cell_frontier
-    )
+    tile_expand_source = inspect.getsource(collapse_frontier._expand_formal_connected_tile_frontier)
+    cell_expand_source = inspect.getsource(collapse_frontier._expand_formal_connected_cell_frontier)
 
     for source in (solve_source, tile_source, cell_source):
         assert "_formal_connected_expansion_pass_count" not in source
@@ -55187,22 +55212,18 @@ def test_gpu_collapse_formal_dirty_connected_frontier_sources_use_jump_schedule_
 def test_gpu_collapse_formal_connected_frontier_sources_use_jump_schedule_not_diameter_flood() -> (
     None
 ):
-    tile_source = inspect.getsource(GPUCollapsePipeline._solve_formal_connected_tile_frontier)
-    cell_source = inspect.getsource(GPUCollapsePipeline._solve_formal_connected_frontier_texture)
-    tile_expand_source = inspect.getsource(
-        GPUCollapsePipeline._expand_formal_connected_tile_frontier
-    )
-    cell_expand_source = inspect.getsource(
-        GPUCollapsePipeline._expand_formal_connected_cell_frontier
-    )
+    tile_source = inspect.getsource(collapse_frontier._solve_formal_connected_tile_frontier)
+    cell_source = inspect.getsource(collapse_formal_solve._solve_formal_connected_frontier_texture)
+    tile_expand_source = inspect.getsource(collapse_frontier._expand_formal_connected_tile_frontier)
+    cell_expand_source = inspect.getsource(collapse_frontier._expand_formal_connected_cell_frontier)
     tile_schedule_source = inspect.getsource(
-        GPUCollapsePipeline._formal_connected_tile_jump_schedule
+        collapse_formal_solve._formal_connected_tile_jump_schedule
     )
     cell_schedule_source = inspect.getsource(
-        GPUCollapsePipeline._formal_connected_cell_jump_schedule
+        collapse_formal_solve._formal_connected_cell_jump_schedule
     )
     expansion_count_source = inspect.getsource(
-        GPUCollapsePipeline._formal_connected_expansion_pass_count
+        collapse_formal_solve._formal_connected_expansion_pass_count
     )
     pipeline = GPUCollapsePipeline()
     tiny_world = SimpleNamespace(active=SimpleNamespace(tile_width=2, tile_height=2))
@@ -55462,7 +55483,7 @@ def test_gpu_collapse_formal_connected_prewarm_does_not_upload_cpu_state(
         ("frontier", fake_world),
         ("finish", fake_ctx),
     ]
-    source = inspect.getsource(GPUCollapsePipeline.prewarm_formal_connected_resources)
+    source = inspect.getsource(collapse_formal.prewarm_formal_connected_resources)
     assert "_upload_region_state" not in source
     assert ".read(" not in source
 
@@ -55563,7 +55584,7 @@ def test_gpu_collapse_formal_connected_solve_reuses_prepared_classified_resource
     assert ("classify", resources, "tile_mask", 4, 5, 8, 6) in calls
     assert ("support", resources, 4, 5, 8, 6, "tile_mask", False) in calls
     assert ("resolve", resources, "supported", 4, 5, 8, 6, "structural", True) in calls
-    source = inspect.getsource(GPUCollapsePipeline._solve_formal_connected_tile_textures)
+    source = inspect.getsource(collapse_formal_solve._solve_formal_connected_tile_textures)
     assert source.count("_prepare_formal_connected_tile_resources(") == 1
     assert source.count("_seed_formal_texture_region_tile_worklist(") == 1
     assert source.count("_classify_formal_connected_tile_textures(") == 1
@@ -55686,7 +55707,7 @@ def test_gpu_collapse_formal_edge_anchor_survives_bounded_resource_without_cpu_b
 
 
 def test_gpu_collapse_formal_cell_frontier_source_uses_indirect_tile_list() -> None:
-    source = inspect.getsource(GPUCollapsePipeline._expand_formal_connected_cell_frontier)
+    source = inspect.getsource(collapse_frontier._expand_formal_connected_cell_frontier)
     assert "run_indirect" in source
     assert "current_frontier" in source
     assert ".run(tile_width, tile_height, 1)" not in source
@@ -55694,16 +55715,14 @@ def test_gpu_collapse_formal_cell_frontier_source_uses_indirect_tile_list() -> N
 
 def test_gpu_collapse_formal_cell_frontier_loop_ping_pongs_cell_worklist_sources() -> None:
     connected_source = inspect.getsource(
-        GPUCollapsePipeline._solve_formal_connected_frontier_texture
+        collapse_formal_solve._solve_formal_connected_frontier_texture
     )
     dirty_source = inspect.getsource(
-        GPUCollapsePipeline._solve_formal_connected_dirty_cell_frontier_texture
+        collapse_formal_solve._solve_formal_connected_dirty_cell_frontier_texture
     )
-    cell_expand_source = inspect.getsource(
-        GPUCollapsePipeline._expand_formal_connected_cell_frontier
-    )
+    cell_expand_source = inspect.getsource(collapse_frontier._expand_formal_connected_cell_frontier)
     accumulate_source = inspect.getsource(
-        GPUCollapsePipeline._accumulate_formal_connected_cell_frontier_tiles
+        collapse_frontier._accumulate_formal_connected_cell_frontier_tiles
     )
     expand_shader_source = shader_source(
         "collapse/expand_formal_connected_cells_by_tile.comp",
@@ -56920,17 +56939,17 @@ def _gpu_collapse_program_sources() -> dict[str, str]:
 
 def test_gpu_collapse_formal_connected_support_uses_texture_jfa_hot_path() -> None:
     solve_source = inspect.getsource(
-        GPUCollapsePipeline._solve_formal_connected_tile_support_textures
+        collapse_frontier._solve_formal_connected_tile_support_textures
     )
-    begin_source = inspect.getsource(GPUCollapsePipeline._begin_formal_connected_tile_support)
-    slice_source = inspect.getsource(GPUCollapsePipeline._run_formal_connected_tile_support_slice)
-    pass_source = inspect.getsource(GPUCollapsePipeline._run_formal_connected_tile_support_pass)
+    begin_source = inspect.getsource(collapse_frontier._begin_formal_connected_tile_support)
+    slice_source = inspect.getsource(collapse_frontier._run_formal_connected_tile_support_slice)
+    pass_source = inspect.getsource(collapse_frontier._run_formal_connected_tile_support_pass)
     refine_source = inspect.getsource(
-        GPUCollapsePipeline._run_formal_connected_tile_support_refine_passes
+        collapse_frontier._run_formal_connected_tile_support_refine_passes
     )
-    mask_source = inspect.getsource(GPUCollapsePipeline._build_formal_connected_axis_masks)
-    resource_source = inspect.getsource(GPUCollapsePipeline._ensure_resources)
-    release_source = inspect.getsource(GPUCollapsePipeline.release)
+    mask_source = inspect.getsource(collapse_formal._build_formal_connected_axis_masks)
+    resource_source = inspect.getsource(collapse_resources._ensure_resources)
+    release_source = inspect.getsource(collapse_stages.release)
     support_source = solve_source + begin_source + slice_source
     hot_path_source = support_source + pass_source + refine_source + mask_source
 
@@ -56983,7 +57002,7 @@ def test_gpu_collapse_support_row_shader_preserves_bounded_jump_closure() -> Non
 
 def test_gpu_collapse_support_row_shader_reuses_axis_masks_as_structural_authority() -> None:
     source = shader_source("collapse/propagate_formal_connected_tile_rows.comp")
-    solve_source = inspect.getsource(GPUCollapsePipeline._begin_formal_connected_tile_support)
+    solve_source = inspect.getsource(collapse_frontier._begin_formal_connected_tile_support)
 
     assert "_build_formal_connected_axis_masks" in solve_source
     assert "resources.structural_tex" in solve_source
@@ -56999,10 +57018,10 @@ def test_gpu_collapse_formal_connected_support_publish_fuses_supported_and_unsup
     None
 ):
     solve_source = inspect.getsource(
-        GPUCollapsePipeline._solve_formal_connected_tile_support_textures
+        collapse_frontier._solve_formal_connected_tile_support_textures
     )
     helper_source = inspect.getsource(
-        GPUCollapsePipeline._publish_bridge_supported_unsupported_masks_connected_tiles
+        collapse_publish._publish_bridge_supported_unsupported_masks_connected_tiles
     )
     program_source = inspect.getsource(GPUCollapsePipeline._ensure_programs)
     publish_shader_source = shader_source(
@@ -57291,14 +57310,14 @@ def test_gpu_collapse_formal_connected_jump_closure_uses_workgroup_uniform_chang
             assert "int candidate = label_global(cell + ivec2(0, 1));" in case_source
 
     connected_frontier_source = inspect.getsource(
-        GPUCollapsePipeline._solve_formal_connected_frontier_texture
+        collapse_formal_solve._solve_formal_connected_frontier_texture
     )
     dirty_frontier_source = inspect.getsource(
-        GPUCollapsePipeline._solve_formal_connected_dirty_cell_frontier_texture
+        collapse_formal_solve._solve_formal_connected_dirty_cell_frontier_texture
     )
     support_source = inspect.getsource(
-        GPUCollapsePipeline._begin_formal_connected_tile_support
-    ) + inspect.getsource(GPUCollapsePipeline._run_formal_connected_tile_support_slice)
+        collapse_frontier._begin_formal_connected_tile_support
+    ) + inspect.getsource(collapse_frontier._run_formal_connected_tile_support_slice)
     assert "_formal_connected_cell_jump_schedule" in connected_frontier_source
     assert "_formal_connected_dirty_jump_schedule" in dirty_frontier_source
     assert "_formal_jfa_jumps" in support_source
@@ -57311,7 +57330,7 @@ def test_gpu_collapse_formal_connected_refine_count_is_bounded_not_tile_grid_dia
     pipeline = GPUCollapsePipeline()
     tiny_world = SimpleNamespace(active=SimpleNamespace(tile_width=1, tile_height=1))
     huge_world = SimpleNamespace(active=SimpleNamespace(tile_width=4096, tile_height=2048))
-    source = inspect.getsource(GPUCollapsePipeline._formal_connected_tile_refine_pass_count)
+    source = inspect.getsource(collapse_formal_solve._formal_connected_tile_refine_pass_count)
 
     assert (
         pipeline._formal_connected_tile_refine_pass_count(tiny_world)
@@ -57334,10 +57353,12 @@ def test_gpu_collapse_formal_support_and_label_refine_counts_are_bounded_not_reg
     tiny_region = (1, 1)
     huge_region = (4096, 2048)
     huge_diameter = sum(huge_region)
-    support_count_source = inspect.getsource(GPUCollapsePipeline._formal_support_unit_pass_count)
-    label_count_source = inspect.getsource(GPUCollapsePipeline._formal_label_unit_pass_count)
-    support_refine_source = inspect.getsource(GPUCollapsePipeline._run_formal_support_refine_passes)
-    label_refine_source = inspect.getsource(GPUCollapsePipeline._run_formal_label_refine_passes)
+    support_count_source = inspect.getsource(collapse_formal._formal_support_unit_pass_count)
+    label_count_source = inspect.getsource(collapse_formal._formal_label_unit_pass_count)
+    support_refine_source = inspect.getsource(collapse_formal._run_formal_support_refine_passes)
+    label_refine_source = inspect.getsource(
+        collapse_labeling_formal._run_formal_label_refine_passes
+    )
 
     tiny_support_count = pipeline._formal_support_unit_pass_count(*tiny_region)
     huge_support_count = pipeline._formal_support_unit_pass_count(*huge_region)
@@ -60720,8 +60741,8 @@ def test_gpu_motion_integrate_velocity_publishes_bridge_in_active_integrate_disp
 
 
 def test_gpu_motion_integrate_bridge_loader_uses_minimal_authoritative_inputs() -> None:
-    integrate_source = inspect.getsource(GPUMotionPipeline.integrate_velocity)
-    loader_source = inspect.getsource(GPUMotionPipeline._load_authoritative_integrate_inputs)
+    integrate_source = inspect.getsource(gpu_motion_stages.integrate_velocity)
+    loader_source = inspect.getsource(gpu_motion_bridge._load_authoritative_integrate_inputs)
     integrate_shader_source = shader_source("motion/load_bridge_integrate_inputs.comp")
 
     assert "_load_authoritative_integrate_inputs" in integrate_source
@@ -60770,10 +60791,10 @@ def test_gpu_motion_integrate_bridge_loader_uses_minimal_authoritative_inputs() 
 
 
 def test_gpu_motion_powder_bridge_reloads_skip_unused_gas_inputs() -> None:
-    loader_source = inspect.getsource(GPUMotionPipeline._load_authoritative_bridge_inputs)
-    powder_step_source = inspect.getsource(GPUMotionPipeline.step)
-    powder_resolve_source = inspect.getsource(GPUMotionPipeline.resolve_and_apply_powders)
-    powder_apply_source = inspect.getsource(GPUMotionPipeline._dispatch_apply_powder_reservations)
+    loader_source = inspect.getsource(gpu_motion_bridge._load_authoritative_bridge_inputs)
+    powder_step_source = inspect.getsource(gpu_motion_stages.step)
+    powder_resolve_source = inspect.getsource(gpu_motion_powder.resolve_and_apply_powders)
+    powder_apply_source = inspect.getsource(gpu_motion_powder._dispatch_apply_powder_reservations)
 
     assert "load_gas_inputs: bool = True" in loader_source
     assert 'copy_flow = bool(load_gas_inputs and "flow_velocity" in authoritative)' in loader_source
@@ -60787,7 +60808,7 @@ def test_gpu_motion_powder_bridge_reloads_skip_unused_gas_inputs() -> None:
 
 def test_gpu_motion_powder_resolve_reuses_generation_source_validation() -> None:
     resolve_source = shader_source("motion/resolve_powder_reservations.comp")
-    host_source = inspect.getsource(GPUMotionPipeline.resolve_and_apply_powders)
+    host_source = inspect.getsource(gpu_motion_powder.resolve_and_apply_powders)
 
     assert "uniform bool generated_sources_prevalidated;" in resolve_source
     assert "if (generated_sources_prevalidated)" in resolve_source
@@ -60868,8 +60889,8 @@ def test_gpu_motion_powder_direct_bridge_preserves_post_island_authoritative_sta
 
 
 def test_gpu_motion_integrate_shader_reads_authoritative_bridge_directly() -> None:
-    integrate_source = inspect.getsource(GPUMotionPipeline.integrate_velocity)
-    loader_source = inspect.getsource(GPUMotionPipeline._load_authoritative_integrate_inputs)
+    integrate_source = inspect.getsource(gpu_motion_stages.integrate_velocity)
+    loader_source = inspect.getsource(gpu_motion_bridge._load_authoritative_integrate_inputs)
     source = shader_source("motion/integrate_velocity.comp")
 
     assert "uniform bool use_bridge_inputs;" in source
@@ -61389,7 +61410,7 @@ def test_gpu_liquid_formal_seam_prefetch_reads_inactive_neighbor_bridge_state(
 def test_gpu_liquid_seam_prefetch_skips_only_fully_active_tile_grid() -> None:
     load_source = shader_source("liquid/prefetch_seam_boundary_bridge_inputs.comp")
     aux_source = shader_source("liquid/prefetch_seam_boundary_bridge_aux_inputs.comp")
-    host_source = inspect.getsource(GPULiquidPipeline._prefetch_seam_boundary_bridge_inputs)
+    host_source = inspect.getsource(liquid_solve._prefetch_seam_boundary_bridge_inputs)
 
     for source in (load_source, aux_source):
         assert "uniform uint total_tile_count;" in source
@@ -61836,8 +61857,8 @@ def test_gpu_motion_sparse_powder_bridge_publish_is_two_frame_byte_exact() -> No
 
 
 def test_gpu_motion_sparse_powder_bridge_publish_is_default_and_formal_packed_only() -> None:
-    apply_source = inspect.getsource(GPUMotionPipeline._dispatch_apply_powder_reservations)
-    publish_source = inspect.getsource(GPUMotionPipeline._publish_bridge_outputs)
+    apply_source = inspect.getsource(gpu_motion_powder._dispatch_apply_powder_reservations)
+    publish_source = inspect.getsource(gpu_motion_bridge._publish_bridge_outputs)
     shader = shader_source("motion/publish_bridge_cell.comp", MOTION_SHADER_SUBS)
 
     assert GPUMotionPipeline()._powder_sparse_bridge_publish_enabled is True
@@ -62932,18 +62953,18 @@ def test_gpu_motion_falling_island_index_clear_is_split_by_usage() -> None:
     assert "FALLING_ISLAND_INDEX_CLEAR_MATERIALIZATION" in clear_source
     assert "FALLING_ISLAND_INDEX_CLEAR_SOURCE" in clear_source
     assert "clear_flags=FALLING_ISLAND_INDEX_CLEAR_SOURCE" in inspect.getsource(
-        GPUMotionPipeline._dispatch_index_falling_island_reservation_sources,
+        gpu_motion_island._dispatch_index_falling_island_reservation_sources,
     )
     assert "clear_flags=FALLING_ISLAND_INDEX_CLEAR_APPLY" in inspect.getsource(
-        GPUMotionPipeline._dispatch_index_falling_island_apply,
+        gpu_motion_island._dispatch_index_falling_island_apply,
     )
     assert "clear_flags=FALLING_ISLAND_INDEX_CLEAR_MATERIALIZATION" in inspect.getsource(
-        GPUMotionPipeline._dispatch_index_falling_island_materialization,
+        gpu_motion_island._dispatch_index_falling_island_materialization,
     )
 
 
 def test_gpu_motion_formal_falling_island_index_clear_uses_reservation_domain() -> None:
-    clear_method = inspect.getsource(GPUMotionPipeline._clear_falling_island_index)
+    clear_method = inspect.getsource(gpu_motion_dispatch._clear_falling_island_index)
 
     assert 'pipeline.programs["clear_falling_island_index_for_reservations"]' in clear_method
     assert 'pipeline.programs["clear_falling_island_index_for_active_tiles"]' not in clear_method
@@ -62951,9 +62972,9 @@ def test_gpu_motion_formal_falling_island_index_clear_uses_reservation_domain() 
     assert "reservation_capacity=reservation_count" in clear_method
     assert "invocations_per_group=1" in clear_method
     for method in (
-        GPUMotionPipeline._dispatch_index_falling_island_reservation_sources,
-        GPUMotionPipeline._dispatch_index_falling_island_apply,
-        GPUMotionPipeline._dispatch_index_falling_island_materialization,
+        gpu_motion_island._dispatch_index_falling_island_reservation_sources,
+        gpu_motion_island._dispatch_index_falling_island_apply,
+        gpu_motion_island._dispatch_index_falling_island_materialization,
     ):
         assert "reservation_count=int(reservation_count)" in inspect.getsource(method)
 
@@ -62983,7 +63004,7 @@ def test_gpu_motion_falling_island_pack_and_publish_are_not_capacity_overdispatc
     runtime_dispatch_source = shader_source("motion/build_island_runtime_dispatch.comp")
     reservation_dispatch_source = shader_source("motion/build_powder_reservation_dispatch.comp")
     bridge_runtime_plan = inspect.getsource(
-        GPUMotionPipeline.plan_uploaded_falling_island_reservations_from_bridge_runtime
+        gpu_motion_island.plan_uploaded_falling_island_reservations_from_bridge_runtime
     )
     formal_start = bridge_runtime_plan.index("if formal_frame:")
     formal_end = bridge_runtime_plan.index(
@@ -62991,8 +63012,8 @@ def test_gpu_motion_falling_island_pack_and_publish_are_not_capacity_overdispatc
     )
     formal_block = bridge_runtime_plan[formal_start:formal_end]
     staged_block = bridge_runtime_plan[formal_end:]
-    uploaded_plan = inspect.getsource(GPUMotionPipeline.plan_uploaded_falling_island_reservations)
-    publish_method = inspect.getsource(GPUMotionPipeline.publish_bridge_falling_island_reservations)
+    uploaded_plan = inspect.getsource(gpu_motion_island.plan_uploaded_falling_island_reservations)
+    publish_method = inspect.getsource(gpu_motion_bridge.publish_bridge_falling_island_reservations)
 
     assert f"layout(local_size_x={MOTION_SHADER_SUBS['LOCAL_SIZE']}" in fused_source
     assert "layout(std430, binding=0) readonly buffer BridgeIslandRuntimeWords" in fused_source
@@ -63342,15 +63363,15 @@ def test_gpu_motion_minimal_materialization_hydration_is_byte_exact(mode: int) -
 
 def test_gpu_motion_minimal_materialization_hydration_is_default_and_formal_direct_only() -> None:
     materialization_source = inspect.getsource(
-        GPUMotionPipeline._dispatch_apply_falling_island_materialization
+        gpu_motion_island._dispatch_apply_falling_island_materialization
     )
     reservation_source = inspect.getsource(
-        GPUMotionPipeline._dispatch_apply_falling_island_reservations
+        gpu_motion_island._dispatch_apply_falling_island_reservations
     )
     uploaded_apply_source = inspect.getsource(
-        GPUMotionPipeline.apply_uploaded_falling_island_reservations
+        gpu_motion_island.apply_uploaded_falling_island_reservations
     )
-    load_source = inspect.getsource(GPUMotionPipeline._load_authoritative_materialization_inputs)
+    load_source = inspect.getsource(gpu_motion_bridge._load_authoritative_materialization_inputs)
     shader = shader_source("motion/load_bridge_materialization_inputs.comp")
 
     assert GPUMotionPipeline()._falling_island_materialization_minimal_hydration_enabled is True
@@ -64463,7 +64484,7 @@ def test_gpu_reaction_timer_textures_store_packed_u8x4_words() -> None:
     ]
     assert np.array_equal(unpack_u8x4(packed), timer)
 
-    resource_source = inspect.getsource(GPUReactionPipeline._ensure_resources)
+    resource_source = inspect.getsource(gpu_reactions_resources._ensure_resources)
     assert "timer_ping=uint_tex((world.width, world.height))" in resource_source
     assert "timer_pong=uint_tex((world.width, world.height))" in resource_source
     assert "local_timer_out=uint_tex((world.width, world.height))" in resource_source
@@ -64577,10 +64598,10 @@ def test_gpu_reaction_self_flow_layers_follow_packed_deferred_positions() -> Non
 
 
 def test_gpu_reaction_velocity_copy_elision_is_bounded_to_resident_formal_roles() -> None:
-    cell_pass_source = inspect.getsource(GPUReactionPipeline._run_cell_pass)
-    local_pass_source = inspect.getsource(GPUReactionPipeline._run_local_cell_action_pass)
-    download_source = inspect.getsource(GPUReactionPipeline._download_cell_state)
-    flush_source = inspect.getsource(GPUReactionPipeline.flush_formal_reaction_segment)
+    cell_pass_source = inspect.getsource(gpu_reactions_cell_pass._run_cell_pass)
+    local_pass_source = inspect.getsource(gpu_reactions_cell_pass._run_local_cell_action_pass)
+    download_source = inspect.getsource(gpu_reactions_bridge._download_cell_state)
+    flush_source = inspect.getsource(gpu_reactions_segments.flush_formal_reaction_segment)
 
     assert "pipeline._formal_before_motion_cell_roles_active()" in cell_pass_source
     assert (
@@ -64593,7 +64614,9 @@ def test_gpu_reaction_velocity_copy_elision_is_bounded_to_resident_formal_roles(
     )
     assert "sparse_velocity_side_effects" in cell_pass_source
     assert "sparse_velocity_side_effects" in local_pass_source
-    side_effect_source = inspect.getsource(GPUReactionPipeline._run_cell_material_side_effect_pass)
+    side_effect_source = inspect.getsource(
+        gpu_reactions_side_effects._run_cell_material_side_effect_pass
+    )
     assert "velocity_in_place" in side_effect_source
     material_side_effect_shader = shader_source("reactions/cell_material_side_effects.comp")
     assert "coherent uniform image2D velocity_inout_img" in material_side_effect_shader
@@ -64626,21 +64649,32 @@ def test_gpu_reaction_direct_pair_shaders_guard_deferred_outputs() -> None:
         assert "uniform bool deferred_hi_valid;" in source
         assert "if (!deferred_hi_valid)" in source
 
-    cell_pass_source = inspect.getsource(GPUReactionPipeline._run_cell_pass)
-    local_pass_source = inspect.getsource(GPUReactionPipeline._run_local_cell_action_pass)
+    cell_pass_source = inspect.getsource(gpu_reactions_cell_pass._run_cell_pass)
+    local_pass_source = inspect.getsource(gpu_reactions_cell_pass._run_local_cell_action_pass)
+    output_plan_source = inspect.getsource(gpu_reactions_cell_pass._derive_local_cell_output_plan)
+    material_side_effect_source = inspect.getsource(
+        gpu_reactions_cell_pass._run_local_cell_material_side_effects
+    )
+    gas_side_effect_source = inspect.getsource(
+        gpu_reactions_cell_pass._run_local_cell_gas_side_effects
+    )
     assert "_compiled_actions_require_deferred_outputs" in cell_pass_source
     assert '"write_deferred_outputs", write_deferred_outputs' in cell_pass_source
     assert '"write_deferred_outputs", True' in local_pass_source
-    assert 'program_name == "timed_apply" and direct_core_outputs' in local_pass_source
+    assert 'program_name == "timed_apply" and dispatch.direct_core_outputs' in output_plan_source
     assert '"write_deferred_hi_outputs", write_deferred_hi_outputs' in local_pass_source
-    assert "deferred_hi_valid=write_deferred_hi_outputs" in local_pass_source
+    assert "deferred_hi_valid=outputs.write_deferred_hi_outputs" in material_side_effect_source
+    assert "deferred_hi_valid=outputs.write_deferred_hi_outputs" in gas_side_effect_source
 
 
 def test_gpu_reaction_formal_local_actions_pack_unit_scale_deferred_outputs() -> None:
     packed_source = shader_source("reactions/_local_action_output_packed.comp")
     material_side_effect_source = shader_source("reactions/cell_material_side_effects.comp")
     gas_scatter_source = shader_source("reactions/scatter_cell_gas_action_delta.comp")
-    local_pass_source = inspect.getsource(GPUReactionPipeline._run_local_cell_action_pass)
+    local_pass_source = inspect.getsource(gpu_reactions_cell_pass._run_local_cell_action_pass)
+    dispatch_plan_source = inspect.getsource(
+        gpu_reactions_cell_pass._derive_local_cell_dispatch_plan
+    )
 
     assert MAX_ACTIONS <= 128
     assert (
@@ -64670,25 +64704,36 @@ def test_gpu_reaction_formal_local_actions_pack_unit_scale_deferred_outputs() ->
         'program_key = f"{program_name}_packed" if packed_local_deferred_outputs else program_name'
         in local_pass_source
     )
-    assert "packed_local_deferred_outputs=packed_local_deferred_outputs" in local_pass_source
+    assert "packed_local_deferred_outputs=packed_local_deferred_outputs" in dispatch_plan_source
 
 
 def test_gpu_reaction_formal_packed_self_emit_targets_are_producer_compacted() -> None:
     init_source = inspect.getsource(GPUReactionPipeline.__init__)
-    local_pass_source = inspect.getsource(GPUReactionPipeline._run_local_cell_action_pass)
+    local_pass_source = inspect.getsource(gpu_reactions_cell_pass._run_local_cell_action_pass)
+    dispatch_plan_source = inspect.getsource(
+        gpu_reactions_cell_pass._derive_local_cell_dispatch_plan
+    )
+    clear_source = inspect.getsource(gpu_reactions_cell_pass._clear_local_cell_action_worklists)
+    build_targets_source = inspect.getsource(
+        gpu_reactions_cell_pass._build_packed_local_action_targets
+    )
     packed_apply_source = inspect.getsource(
-        GPUReactionPipeline._run_packed_material_target_apply_pass
+        gpu_reactions_side_effects._run_packed_material_target_apply_pass
     )
     self_source = shader_source("reactions/self_apply.comp")
     packed_target_source = shader_source("reactions/_self_emit_target_output.comp")
     packed_apply_shader = shader_source("reactions/cell_material_side_effects_packed_targets.comp")
 
-    assert "self._packed_self_emit_target_worklist_enabled = True" in init_source
-    assert 'program_name == "self_apply"' in local_pass_source
+    assert (
+        "self._packed_self_emit_target_worklist_enabled = (\n"
+        "            self.engine_config.packed_self_emit_target_worklist_enabled\n"
+        "        )"
+    ) in init_source
+    assert 'program_name == "self_apply"' in dispatch_plan_source
     assert "collect_self_emit_targets" in local_pass_source
-    assert "packed_self_material_targets_clear" in local_pass_source
-    assert "build_packed_material_target_dispatch" in local_pass_source
-    assert "pipeline._sync_storage_and_indirect_writes" in local_pass_source
+    assert "packed_self_material_targets_clear" in clear_source
+    assert "build_packed_material_target_dispatch" in build_targets_source
+    assert "pipeline._sync_storage_and_indirect_writes" in build_targets_source
     assert "compact_packed_self" not in local_pass_source
     assert "collect_self_emit_material_targets(" in self_source
     assert "atomicExchange(packed_material_target_marks" in packed_target_source
@@ -64778,8 +64823,10 @@ def test_gpu_reaction_authoritative_lhs_candidate_masks_specialize_and_encode_ta
     assert pipeline._authoritative_lhs_candidate_masks_enabled is True
 
     program_source = inspect.getsource(GPUReactionPipeline._ensure_programs)
-    cell_pass_source = inspect.getsource(GPUReactionPipeline._run_cell_pass)
-    guarded_light_source = inspect.getsource(GPUReactionPipeline._run_formal_guarded_material_light)
+    cell_pass_source = inspect.getsource(gpu_reactions_cell_pass._run_cell_pass)
+    guarded_light_source = inspect.getsource(
+        gpu_reactions_pairings._run_formal_guarded_material_light
+    )
     for program_name in ("material_material", "material_gas", "material_light"):
         assert f'self.programs["{program_name}_authoritative_lhs"]' in program_source
     assert "pipeline._authoritative_lhs_candidate_masks_enabled" in cell_pass_source

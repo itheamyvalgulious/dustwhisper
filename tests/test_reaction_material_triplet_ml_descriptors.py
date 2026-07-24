@@ -4,6 +4,7 @@ import inspect
 
 import numpy as np
 
+from oracle_game.sim import gpu_reactions_cell_pass, gpu_reactions_pairings
 from oracle_game.sim.gpu_reactions import (
     MATERIAL_LIGHT_PACKED_DESCRIPTOR_OFFSET,
     MATERIAL_LIGHT_PACKED_HEADER_OFFSET,
@@ -106,8 +107,8 @@ def test_material_triplet_packed_descriptors_keep_strict_fallback() -> None:
                 is None
             ), field
 
-        source = inspect.getsource(GPUReactionPipeline._compile_material_pair_plan)
-        shader = inspect.getsource(GPUReactionPipeline._run_material_pair_fused_pass)
+        source = inspect.getsource(gpu_reactions_pairings._compile_material_pair_plan)
+        shader = inspect.getsource(gpu_reactions_cell_pass._run_material_pair_fused_pass)
         assert "_compile_material_light_packed_descriptors_cached" in source
         assert "material_light_packed_descriptors is not None" in shader
         assert MATERIAL_LIGHT_PACKED_HEADER_OFFSET == MAX_RULES * 2 + 1

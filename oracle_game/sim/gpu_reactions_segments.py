@@ -7,7 +7,7 @@ import numpy as np
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
-from oracle_game.sim.gpu_reactions import (
+from oracle_game.sim.gpu_reactions_resources import (
     _SHADER_SUBS,
     DIRECT_CORE_OUTPUT_REACTION_GROUPS,
     LIGHT_DOSE_GUARD_BUFFER,
@@ -402,7 +402,6 @@ def begin_formal_reaction_segment(pipeline, world: "WorldEngine", segment: str) 
     pipeline._clear_formal_external_cell_state()
     pipeline._phase_c_rxn_candidate = None
     pipeline._motion_handoff_candidate = None
-    pipeline.last_terminal_gas_publish_fusion_used = False
     return True
 
 
@@ -612,7 +611,6 @@ def _flush_formal_segment_gas_delta(
         )
         if pipeline._formal_pending_bridge_publish_key == segment_key:
             pipeline._formal_pending_bridge_publish.discard("gas")
-        pipeline.last_terminal_gas_publish_fusion_used = True
     pipeline._formal_pending_gas_delta_key = None
     return True
 

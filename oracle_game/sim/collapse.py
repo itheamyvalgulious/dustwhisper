@@ -8,6 +8,7 @@ import numpy as np
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
+from oracle_game.engine_config import DEFAULT_ENGINE_CONFIG, EngineConfig
 from oracle_game.gpu import ISLAND_RUNTIME_DTYPE
 from oracle_game.sim.cpu_base import material_table_row
 from oracle_game.sim.gpu_collapse import GPUCollapsePipeline
@@ -38,8 +39,9 @@ COLLAPSE_RUNTIME_SNAPSHOT_RESOURCES = (
 
 
 class CollapseSolver:
-    def __init__(self) -> None:
-        self.gpu_pipeline = GPUCollapsePipeline()
+    def __init__(self, *, engine_config: EngineConfig | None = None) -> None:
+        self.engine_config = engine_config if engine_config is not None else DEFAULT_ENGINE_CONFIG
+        self.gpu_pipeline = GPUCollapsePipeline(engine_config=self.engine_config)
         self.last_backend = "idle"
         self.reset_runtime_state()
 

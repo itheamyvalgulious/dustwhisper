@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 
+from oracle_game.sim import gpu_heat_stages as heat_stages
 from oracle_game.sim.gpu_heat import _SHADER_SUBS, GPUHeatPipeline
 from oracle_game.sim.shader_loader import shader_source
 
@@ -13,8 +14,8 @@ def test_heat_lazy_action_inputs_is_default_disabled() -> None:
 
 
 def test_heat_lazy_action_inputs_has_strict_sparse_resident_gate() -> None:
-    source = inspect.getsource(GPUHeatPipeline.step)
-    terminal_source = inspect.getsource(GPUHeatPipeline._run_apply_terminal4x6)
+    source = inspect.getsource(heat_stages.step)
+    terminal_source = inspect.getsource(heat_stages._run_apply_terminal4x6)
 
     assert "terminal_lazy_action_inputs = bool(" in source
     assert "pipeline._terminal_sparse_resident_specialization_enabled" in source

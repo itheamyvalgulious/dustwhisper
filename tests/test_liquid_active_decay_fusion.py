@@ -10,8 +10,6 @@ from oracle_game.world_frame_pipeline import _step_once_impl
 
 def test_liquid_active_decay_fusion_is_default_off() -> None:
     pipeline = GPULiquidPipeline()
-    assert pipeline._flow_active_decay_fusion_enabled is False
-    assert pipeline._flow_active_decay_fusion_frame_enabled is False
     assert pipeline.last_flow_active_decay_fusion_used is False
 
 

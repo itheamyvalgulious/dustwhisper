@@ -8,14 +8,14 @@ if TYPE_CHECKING:
     from oracle_game.types import FallingIslandRecord
     from oracle_game.world import WorldEngine
 
-from oracle_game.sim.gpu_motion import (
+from oracle_game.sim.gpu_motion_constants import (
     ISLAND_RESOLVE_BLOCKED,
     ISLAND_RESOLVE_DIRECT,
     ISLAND_RESOLVE_RERESOLVED,
     ISLAND_RESOLVE_STALE,
     falling_island_reservation_dtype,
 )
-from oracle_game.sim.motion import (
+from oracle_game.sim.motion_constants import (
     FALLING_ISLAND_BREAK_STABLE,
     MAX_ISLAND_DDA_STEP,
     _IslandComponentEntry,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 
+from oracle_game.sim import gpu_heat_stages as heat_stages
 from oracle_game.sim.gpu_heat import _SHADER_SUBS, GPUHeatPipeline
 from oracle_game.sim.shader_loader import shader_source
 
@@ -14,9 +15,9 @@ def test_heat_packed_phase_boil_targets_is_default_enabled() -> None:
 
 
 def test_heat_packed_phase_boil_targets_has_strict_lazy_static_table_gate() -> None:
-    step_source = inspect.getsource(GPUHeatPipeline.step)
-    target_source = inspect.getsource(GPUHeatPipeline._run_phase_boil_targets)
-    terminal_source = inspect.getsource(GPUHeatPipeline._run_apply_terminal4x6)
+    step_source = inspect.getsource(heat_stages.step)
+    target_source = inspect.getsource(heat_stages._run_phase_boil_targets)
+    terminal_source = inspect.getsource(heat_stages._run_apply_terminal4x6)
 
     assert "and terminal_lazy_action_inputs" in step_source
     assert 'table_generations.get("materials", 0)' in step_source

@@ -5,11 +5,11 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 if TYPE_CHECKING:
-    from oracle_game.sim.gpu_collapse import GPUCollapseResources
+    from oracle_game.sim.gpu_collapse_resources import GPUCollapseResources
     from oracle_game.world import WorldEngine
 
 from oracle_game.gpu import ISLAND_RUNTIME_DTYPE
-from oracle_game.sim.gpu_collapse import (
+from oracle_game.sim.gpu_collapse_resources import (
     FORMAL_CONNECTED_TILE_COUNT_BUFFER,
     FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER,
     FORMAL_CONNECTED_TILE_LIST_BUFFER,

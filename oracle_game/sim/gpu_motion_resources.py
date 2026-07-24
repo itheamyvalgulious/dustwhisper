@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -7,14 +8,73 @@ import numpy as np
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
-# GPUMotionResources is imported at runtime (not just TYPE_CHECKING) because
-# _ensure_resources constructs it. It is defined in the facade before the
-# bucket import block, so the partial-init resolves this without a cycle.
 from oracle_game.sim.gpu_base import release_resource_fields
-from oracle_game.sim.gpu_motion import (
-    MAX_MATERIALS,
-    GPUMotionResources,
-)
+from oracle_game.sim.gpu_motion_constants import MAX_MATERIALS
+
+
+@dataclass(slots=True)
+class GPUMotionResources:
+    signature: tuple[int, ...]
+    cell_state_tex: Any
+    cell_state_out_tex: Any
+    velocity_tex: Any
+    velocity_out_tex: Any
+    temp_tex: Any
+    temp_out_tex: Any
+    timer_tex: Any
+    timer_out_tex: Any
+    integrity_tex: Any
+    integrity_out_tex: Any
+    flow_tex: Any
+    ambient_tex: Any
+    island_id_tex: Any
+    island_id_out_tex: Any
+    entity_id_tex: Any
+    entity_id_out_tex: Any
+    displaced_tex: Any
+    displaced_out_tex: Any
+    active_tile_tex: Any
+    active_tile_list: Any
+    active_tile_count: Any
+    active_tile_dispatch_args: Any
+    island_materialization_candidate_tile_list: Any
+    island_materialization_candidate_tile_count: Any
+    island_materialization_candidate_dispatch_args: Any
+    powder_apply_tile_flags: Any
+    powder_target_tex: Any
+    powder_target_winner: Any
+    powder_apply_incoming: Any
+    powder_apply_outgoing: Any
+    powder_apply_epoch: Any
+    powder_direct_apply_unsafe: Any
+    powder_source_cell_core_snapshot: Any
+    powder_source_aux_snapshot: Any
+    powder_reservations: Any
+    powder_compact_reservations: Any
+    powder_reservation_count: Any
+    powder_provisional_moving_count: Any
+    powder_reservation_dispatch_args: Any
+    island_reservations: Any
+    island_reservation_count: Any
+    island_runtime_dispatch_args: Any
+    island_apply_incoming: Any
+    island_apply_outgoing: Any
+    island_materialization_index: Any
+    island_reservation_source_index: Any
+    island_ids: Any
+    island_bboxes: Any
+    island_motion: Any
+    island_shift_results: Any
+    component_label_ping: Any
+    component_label_pong: Any
+    component_labels: Any
+    component_island_ids: Any
+    component_metadata: Any
+    component_change_flag: Any
+    material_params: Any
+    material_contact_params: Any
+    material_falling_params: Any
+    material_params_signature: tuple[int, int] | None = None
 
 
 def release(pipeline) -> None:

@@ -2,32 +2,20 @@ from __future__ import annotations
 
 import inspect
 
+from oracle_game.sim import gpu_reactions_cell_pass
 from oracle_game.sim.gpu_reactions import _SHADER_SUBS, GPUReactionPipeline
 from oracle_game.sim.shader_loader import shader_source
 
 
 def test_reaction_self_cached_cell_state_candidate_is_bounded_and_default_off() -> None:
     pipeline = GPUReactionPipeline()
-    assert pipeline._self_apply_cached_cell_state_enabled is False
     assert pipeline.last_self_apply_cached_cell_state_used is False
     assert _SHADER_SUBS["SELF_CACHE_CELL_STATE"] == 0
 
-    ensure_programs = inspect.getsource(GPUReactionPipeline._ensure_programs)
-    for program_key in (
-        "self_apply_packed_cached_cell_state",
-        "self_apply_packed_cell_flag_meta_cached_cell_state",
-        "self_apply_packed_direct_spans_cached_cell_state",
-        "self_apply_packed_direct_spans_cell_flag_meta_cached_cell_state",
-        "self_apply_packed_fused_gas_cached_cell_state",
-        "self_apply_packed_fused_gas_cell_flag_meta_cached_cell_state",
-    ):
-        assert program_key in ensure_programs
-
-    local_pass = inspect.getsource(GPUReactionPipeline._run_local_cell_action_pass)
+    local_pass = inspect.getsource(gpu_reactions_cell_pass._derive_local_cell_dispatch_plan)
     assert 'program_name == "self_apply"' in local_pass
     assert "and packed_local_deferred_outputs" in local_pass
     assert "and not candidate_dispatch" in local_pass
-    assert 'program_key = f"{program_key}_cached_cell_state"' in local_pass
 
 
 def test_reaction_self_cached_cell_state_preserves_packed_flags_and_meta_order() -> None:

@@ -8,10 +8,13 @@ if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
 # tile_mask_to_cell_mask / tile_mask_to_gas_mask are referenced through the
-# facade module (imported below) so tests that monkeypatch
-# oracle_game.sim.reactions.tile_mask_to_*_mask can intercept these calls.
-import oracle_game.sim.reactions as _reactions_facade
-from oracle_game.sim.reactions import REACTION_ACTIVITY_EPSILON, GPUAuthoritativeFullSolveMask
+# facade module (imported lazily inside ``_solve_masks``) so tests that
+# monkeypatch oracle_game.sim.reactions.tile_mask_to_*_mask can intercept these
+# calls. The lazy import keeps this module importable without the facade cycle.
+from oracle_game.sim.reactions_constants import (
+    REACTION_ACTIVITY_EPSILON,
+    GPUAuthoritativeFullSolveMask,
+)
 from oracle_game.sim.utils import expand_bool_mask
 
 
@@ -22,6 +25,8 @@ def _solve_masks(
     seed_timer_cells: bool,
     stage: str | None = None,
 ):
+    import oracle_game.sim.reactions as _reactions_facade
+
     formal_gpu_frame = solver._formal_gpu_frame(world)
     active_scheduler_gpu_authoritative = solver._active_scheduler_gpu_authoritative(world)
     if formal_gpu_frame and not active_scheduler_gpu_authoritative:

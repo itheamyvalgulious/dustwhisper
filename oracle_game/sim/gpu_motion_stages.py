@@ -19,7 +19,7 @@ from oracle_game.sim.gpu_collapse_dirty import (
 from oracle_game.sim.gpu_collapse_dirty import (
     _active_scheduler_gpu_authoritative as _collapse_active_scheduler_gpu_authoritative,
 )
-from oracle_game.sim.gpu_motion import LOCAL_SIZE
+from oracle_game.sim.gpu_motion_constants import LOCAL_SIZE
 from oracle_game.types import Phase
 
 

@@ -5,11 +5,11 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 if TYPE_CHECKING:
-    from oracle_game.sim.gpu_motion import GPUMotionResources
+    from oracle_game.sim.gpu_motion_resources import GPUMotionResources
     from oracle_game.world import WorldEngine
 
 from oracle_game.gpu import ISLAND_RUNTIME_DTYPE, pack_island_runtime_upload
-from oracle_game.sim.gpu_motion import (
+from oracle_game.sim.gpu_motion_constants import (
     FALLING_ISLAND_RESERVATION_DTYPE,
     LOCAL_SIZE,
     MAX_MATERIALS,

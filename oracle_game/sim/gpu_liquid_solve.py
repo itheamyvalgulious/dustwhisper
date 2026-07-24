@@ -3,11 +3,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from oracle_game.sim.gpu_liquid import GPULiquidResources
+    from oracle_game.sim.gpu_liquid_resources import GPULiquidResources
     from oracle_game.world import WorldEngine
 
 from oracle_game.gpu import typed_material_id
-from oracle_game.sim.gpu_liquid import (
+from oracle_game.sim.gpu_liquid_resources import (
     PASS_LOCAL_SIZE,
 )
 from oracle_game.types import Phase
@@ -158,8 +158,6 @@ def _prefetch_seam_boundary_bridge_inputs(
     program.run_indirect(prefetch_dispatch_args)
     pipeline._sync_compute_writes(bridge.ctx)
 
-    if pipeline._bridge_aux_residency_enabled:
-        return
     aux_program = pipeline.programs["prefetch_seam_boundary_bridge_aux_inputs"]
     if not hasattr(aux_program, "run_indirect"):
         raise RuntimeError(
@@ -225,18 +223,7 @@ def _build_placeholder_dirty_affected_tile_dispatch(
         program.run((dirty_rect_count + 63) // 64, 1, 1)
         pipeline._sync_compute_writes(ctx)
 
-    direct_bridge_aux_inputs = bool(
-        pipeline._formal_gpu_frame(world)
-        and pipeline._bridge_aux_residency_enabled
-        and {"entity_id", "placeholder_displaced_material"}.issubset(
-            world.bridge.gpu_authoritative_resources
-        )
-    )
-    pending_program = pipeline.programs[
-        "compact_placeholder_active_pending_affected_tiles_bridge_aux"
-        if direct_bridge_aux_inputs
-        else "compact_placeholder_active_pending_affected_tiles"
-    ]
+    pending_program = pipeline.programs["compact_placeholder_active_pending_affected_tiles"]
     if not hasattr(pending_program, "run_indirect"):
         raise RuntimeError(
             "GPU liquid placeholder pending compaction requires ModernGL ComputeShader.run_indirect"
@@ -262,8 +249,6 @@ def _build_placeholder_dirty_affected_tile_dispatch(
     resources.affected_tile_list.bind_to_storage_buffer(binding=3)
     resources.affected_tile_dispatch_args.bind_to_storage_buffer(binding=4)
     resources.affected_tile_flags.bind_to_storage_buffer(binding=5)
-    if direct_bridge_aux_inputs:
-        world.bridge.buffers["placeholder_displaced_material"].bind_to_storage_buffer(binding=6)
     pending_program.run_indirect(resources.active_tile_dispatch_args)
     pipeline._sync_compute_writes(ctx)
 
@@ -328,13 +313,6 @@ def _run_tile_solve(pipeline, world: "WorldEngine", resources: GPULiquidResource
         and pipeline._tile_solve_bridge_hydration_fusion_enabled
         and "cell_core" in world.bridge.gpu_authoritative_resources
     )
-    direct_bridge_aux_inputs = bool(
-        direct_bridge_inputs
-        and pipeline._bridge_aux_residency_enabled
-        and {"entity_id", "placeholder_displaced_material"}.issubset(
-            world.bridge.gpu_authoritative_resources
-        )
-    )
     snapshot_output = bool(
         direct_bridge_inputs
         and pipeline._tile_solve_snapshot_output_fusion_enabled
@@ -357,37 +335,20 @@ def _run_tile_solve(pipeline, world: "WorldEngine", resources: GPULiquidResource
         program_name = (
             "tile_solve_bridge_snapshot_row_stream_provenance_blocker"
             if blocker_mask_input
-            else "tile_solve_bridge_snapshot_row_stream_provenance_kind_cache_aux"
-            if provenance_output
-            and direct_bridge_aux_inputs
-            and pipeline._tile_solve_liquid_kind_cache_enabled
-            else "tile_solve_bridge_snapshot_row_stream_provenance_kind_cache"
-            if provenance_output and pipeline._tile_solve_liquid_kind_cache_enabled
-            else "tile_solve_bridge_snapshot_row_stream_provenance_aux"
-            if provenance_output and direct_bridge_aux_inputs
             else "tile_solve_bridge_snapshot_row_stream_provenance"
             if provenance_output
-            else "tile_solve_bridge_snapshot_row_stream_aux"
-            if direct_bridge_aux_inputs
             else "tile_solve_bridge_snapshot_row_stream"
         )
     elif snapshot_output:
         program_name = (
             "tile_solve_bridge_snapshot_provenance_blocker"
             if blocker_mask_input
-            else "tile_solve_bridge_snapshot_provenance_aux"
-            if provenance_output and direct_bridge_aux_inputs
             else "tile_solve_bridge_snapshot_provenance"
             if provenance_output
-            else "tile_solve_bridge_snapshot_aux"
-            if direct_bridge_aux_inputs
             else "tile_solve_bridge_snapshot"
         )
     else:
-        if direct_bridge_aux_inputs:
-            program_name = "tile_solve_bridge_aux"
-        else:
-            program_name = "tile_solve_bridge" if direct_bridge_inputs else "tile_solve"
+        program_name = "tile_solve_bridge" if direct_bridge_inputs else "tile_solve"
     snapshot_pre_state = bool(pipeline._buoyancy_snapshot_pre_state_frame_enabled)
     if snapshot_pre_state:
         candidate_names = {
@@ -431,9 +392,6 @@ def _run_tile_solve(pipeline, world: "WorldEngine", resources: GPULiquidResource
     resources.active_tile_list.bind_to_storage_buffer(binding=3)
     if direct_bridge_inputs:
         world.bridge.buffers["cell_core"].bind_to_storage_buffer(binding=4)
-    if direct_bridge_aux_inputs:
-        world.bridge.buffers["entity_id"].bind_to_storage_buffer(binding=6)
-        world.bridge.buffers["placeholder_displaced_material"].bind_to_storage_buffer(binding=7)
     if snapshot_output:
         resources.tile_solve_snapshot.bind_to_storage_buffer(binding=5)
     if provenance_output:
@@ -532,8 +490,6 @@ def _run_seam_pass(
         if "_provenance" in program_name:
             resources.provenance_in.bind_to_storage_buffer(binding=8)
     elif program_name in {
-        "seam_x_bridge_aux",
-        "seam_y_bridge_aux",
         "seam_y_shared_snapshot_aux",
         "seam_y_shared_snapshot_provenance_aux",
     }:
@@ -689,22 +645,9 @@ def _run_copy_for_placeholder(
     ctx = world.bridge.ctx
     assert ctx is not None
     active_tile_indirect = pipeline._formal_gpu_frame(world)
-    direct_bridge_aux_inputs = bool(
-        pipeline._formal_gpu_frame(world)
-        and pipeline._bridge_aux_residency_enabled
-        and {"entity_id", "placeholder_displaced_material"}.issubset(
-            world.bridge.gpu_authoritative_resources
-        )
-    )
     provenance_output = bool(active_tile_indirect and pipeline._provenance_terminal_frame_enabled)
     program = pipeline.programs[
-        "copy_with_pending_provenance_bridge_aux"
-        if provenance_output and direct_bridge_aux_inputs
-        else "copy_with_pending_provenance"
-        if provenance_output
-        else "copy_with_pending_bridge_aux"
-        if direct_bridge_aux_inputs
-        else "copy_with_pending"
+        "copy_with_pending_provenance" if provenance_output else "copy_with_pending"
     ]
     program["cell_grid_size"].value = (world.width, world.height)
     program["tile_grid_size"].value = (world.active.tile_width, world.active.tile_height)
@@ -718,8 +661,6 @@ def _run_copy_for_placeholder(
     read_resources[4].use(location=6)
     displaced_in.use(location=7)
     resources.active_tile_tex.use(location=8)
-    if direct_bridge_aux_inputs:
-        world.bridge.buffers["placeholder_displaced_material"].bind_to_storage_buffer(binding=6)
     if provenance_output:
         resources.provenance_in.bind_to_storage_buffer(binding=8)
         resources.provenance_out.bind_to_storage_buffer(binding=9)
@@ -766,24 +707,11 @@ def _run_placeholder_displacement(
     *,
     affected_dispatch_prepared: bool = False,
 ) -> None:
-    direct_bridge_aux_inputs = bool(
-        pipeline._formal_gpu_frame(world)
-        and pipeline._bridge_aux_residency_enabled
-        and {"entity_id", "placeholder_displaced_material"}.issubset(
-            world.bridge.gpu_authoritative_resources
-        )
-    )
     provenance_output = bool(
         pipeline._formal_gpu_frame(world) and pipeline._provenance_terminal_frame_enabled
     )
     program = pipeline.programs[
-        "placeholder_displace_provenance_bridge_aux"
-        if provenance_output and direct_bridge_aux_inputs
-        else "placeholder_displace_provenance"
-        if provenance_output
-        else "placeholder_displace_bridge_aux"
-        if direct_bridge_aux_inputs
-        else "placeholder_displace"
+        "placeholder_displace_provenance" if provenance_output else "placeholder_displace"
     ]
     ctx = world.bridge.ctx
     assert ctx is not None
@@ -815,8 +743,6 @@ def _run_placeholder_displacement(
     read_resources[4].use(location=6)
     resources.active_tile_tex.use(location=7)
     displaced_in.use(location=8)
-    if direct_bridge_aux_inputs:
-        world.bridge.buffers["placeholder_displaced_material"].bind_to_storage_buffer(binding=6)
     if provenance_output:
         resources.provenance_in.bind_to_storage_buffer(binding=8)
         resources.provenance_out.bind_to_storage_buffer(binding=9)
@@ -864,26 +790,8 @@ def _run_cleanup_runtime(
     direct_bridge_aux_outputs = bool(
         direct_bridge_inputs and pipeline._bridge_aux_cleanup_fusion_enabled
     )
-    direct_bridge_aux_inputs = bool(
-        direct_bridge_inputs
-        and pipeline._bridge_aux_residency_enabled
-        and {"island_id", "entity_id", "placeholder_displaced_material"}.issubset(
-            world.bridge.gpu_authoritative_resources
-        )
-    )
-    direct_bridge_island_input = bool(
-        direct_bridge_inputs
-        and pipeline._cleanup_bridge_island_residency_enabled
-        and pipeline._bridge_aux_cleanup_fusion_enabled
-        and not direct_bridge_aux_inputs
-        and "island_id" in world.bridge.gpu_authoritative_resources
-    )
     program_name = (
-        "cleanup_runtime_bridge_aux_resident"
-        if direct_bridge_aux_inputs and direct_bridge_aux_outputs
-        else "cleanup_runtime_bridge_aux_island"
-        if direct_bridge_island_input and direct_bridge_aux_outputs
-        else "cleanup_runtime_bridge_aux"
+        "cleanup_runtime_bridge_aux"
         if direct_bridge_aux_outputs
         else "cleanup_runtime_bridge"
         if direct_bridge_inputs
@@ -902,18 +810,13 @@ def _run_cleanup_runtime(
         and program_name
         in {
             "cleanup_runtime_bridge_aux",
-            "cleanup_runtime_bridge_aux_island",
             "cleanup_runtime_bridge_aux_restore16",
             "cleanup_runtime_bridge_aux_restore_bridge_ids16",
         }
         and pipeline._formal_gpu_frame(world)
     )
     if cleanup_local16 and not restore_bridge_aux_values:
-        program_name = (
-            "cleanup_runtime_bridge_aux_island16"
-            if program_name == "cleanup_runtime_bridge_aux_island"
-            else "cleanup_runtime_bridge_aux16"
-        )
+        program_name = "cleanup_runtime_bridge_aux16"
     program = pipeline.programs[program_name]
     ctx = world.bridge.ctx
     assert ctx is not None
@@ -956,15 +859,8 @@ def _run_cleanup_runtime(
         world.bridge.buffers["island_id"].bind_to_storage_buffer(binding=5)
         world.bridge.buffers["entity_id"].bind_to_storage_buffer(binding=6)
         world.bridge.buffers["placeholder_displaced_material"].bind_to_storage_buffer(binding=7)
-        if direct_bridge_island_input:
-            resources.island_in.bind_to_image(3, read=False, write=True)
-        else:
-            resources.island_in.bind_to_image(0, read=False, write=True)
+        resources.island_in.bind_to_image(0, read=False, write=True)
         resources.entity_in.bind_to_image(1, read=False, write=True)
-    if direct_bridge_aux_inputs and not direct_bridge_aux_outputs:
-        world.bridge.buffers["island_id"].bind_to_storage_buffer(binding=5)
-        world.bridge.buffers["entity_id"].bind_to_storage_buffer(binding=6)
-        world.bridge.buffers["placeholder_displaced_material"].bind_to_storage_buffer(binding=7)
     else:
         resources.island_out.bind_to_image(0, read=False, write=True)
         resources.entity_out.bind_to_image(1, read=False, write=True)

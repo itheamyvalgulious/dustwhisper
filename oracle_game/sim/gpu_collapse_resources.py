@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -7,10 +8,100 @@ import numpy as np
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
-from oracle_game.sim.gpu_collapse import (
-    FORMAL_CONNECTED_TILE_LOCAL_SIZE,
-    GPUCollapseResources,
+LOCAL_SIZE = 8
+FORMAL_CONNECTED_TILE_LOCAL_SIZE = 32
+
+FORMAL_DEFERRED_REGION_REQUEST_CAPACITY = 256
+FORMAL_DEFERRED_REGION_REQUEST_COUNT_BUFFER = "collapse_deferred_region_request_count"
+FORMAL_DEFERRED_REGION_REQUEST_BUFFER = "collapse_deferred_region_requests"
+FORMAL_CONNECTED_FRONTIER_BUFFER = "collapse_connected_frontier_mask"
+FORMAL_CONNECTED_FRONTIER_SCRATCH_BUFFER = "collapse_connected_frontier_scratch_mask"
+FORMAL_CONNECTED_PROCESSED_BUFFER = "collapse_connected_processed_mask"
+FORMAL_CONNECTED_TILE_SEED_BUFFER = "collapse_connected_tile_seed_mask"
+FORMAL_CONNECTED_TILE_FRONTIER_BUFFER = "collapse_connected_tile_frontier_mask"
+FORMAL_CONNECTED_TILE_SCRATCH_BUFFER = "collapse_connected_tile_scratch_mask"
+FORMAL_CONNECTED_TILE_LIST_BUFFER = "collapse_connected_tile_list"
+FORMAL_CONNECTED_TILE_COUNT_BUFFER = "collapse_connected_tile_count"
+FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER = "collapse_connected_tile_dispatch_args"
+FORMAL_CONNECTED_TILE_FRONTIER_LIST_BUFFER = "collapse_connected_tile_frontier_list"
+FORMAL_CONNECTED_TILE_FRONTIER_COUNT_BUFFER = "collapse_connected_tile_frontier_count"
+FORMAL_CONNECTED_TILE_FRONTIER_DISPATCH_ARGS_BUFFER = (
+    "collapse_connected_tile_frontier_dispatch_args"
 )
+FORMAL_CONNECTED_TILE_SCRATCH_LIST_BUFFER = "collapse_connected_tile_scratch_list"
+FORMAL_CONNECTED_TILE_SCRATCH_COUNT_BUFFER = "collapse_connected_tile_scratch_count"
+FORMAL_CONNECTED_TILE_SCRATCH_DISPATCH_ARGS_BUFFER = "collapse_connected_tile_scratch_dispatch_args"
+FORMAL_CONNECTED_CELL_FRONTIER_TILE_LIST_BUFFER = "collapse_connected_cell_frontier_tile_list"
+FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_LIST_BUFFER = (
+    "collapse_connected_cell_frontier_tile_scratch_list"
+)
+FORMAL_CONNECTED_CELL_FRONTIER_TILE_FLAGS_BUFFER = "collapse_connected_cell_frontier_tile_flags"
+FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_FLAGS_BUFFER = (
+    "collapse_connected_cell_frontier_tile_scratch_flags"
+)
+FORMAL_CONNECTED_CELL_FRONTIER_TILE_COUNT_BUFFER = "collapse_connected_cell_frontier_tile_count"
+FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_COUNT_BUFFER = (
+    "collapse_connected_cell_frontier_tile_scratch_count"
+)
+FORMAL_CONNECTED_CELL_FRONTIER_TILE_DISPATCH_ARGS_BUFFER = (
+    "collapse_connected_cell_frontier_tile_dispatch_args"
+)
+FORMAL_CONNECTED_CELL_FRONTIER_TILE_SCRATCH_DISPATCH_ARGS_BUFFER = (
+    "collapse_connected_cell_frontier_tile_scratch_dispatch_args"
+)
+FORMAL_CONNECTED_TILE_REFINE_PASS_COUNT = 2
+FORMAL_CONNECTED_DIRTY_JUMP_ROUNDS = 4
+
+
+@dataclass(slots=True)
+class GPUCollapseResources:
+    signature: tuple[int, int]
+    structural_tex: Any
+    support_ping: Any
+    support_pong: Any
+    support_u8_ping: Any | None
+    support_u8_pong: Any | None
+    material_tex: Any
+    material_out_tex: Any
+    phase_tex: Any
+    phase_out_tex: Any
+    pending_tex: Any
+    cell_flags_tex: Any
+    cell_flags_out_tex: Any
+    timer_tex: Any
+    timer_out_tex: Any
+    integrity_tex: Any
+    integrity_out_tex: Any
+    temp_tex: Any
+    temp_out_tex: Any
+    island_id_tex: Any
+    island_id_out_tex: Any
+    entity_id_tex: Any
+    entity_id_out_tex: Any
+    displaced_tex: Any
+    displaced_out_tex: Any
+    change_flag: Any
+    component_labels: Any
+    component_island_ids: Any
+    component_metadata: Any
+    component_flags: Any
+    component_invalid: Any
+    component_count: Any
+    component_dispatch_args: Any
+    region_flags: Any
+    support_tile_union_roots: Any | None
+    support_tile_union_parent: Any | None
+    support_tile_union_seeded: Any | None
+    support_tile_union_edges: Any | None
+    support_tile_union_edge_count: Any | None
+    connected_tile_row_masks: Any
+    connected_tile_column_masks: Any
+    material_structural: Any
+    material_support_anchor: Any
+    material_collapse_behavior: Any
+    material_collapse_generation: Any
+    material_base_integrity: Any
+    material_spawn_temperature: Any
 
 
 def _ensure_resources(pipeline, ctx: Any, width: int, height: int) -> GPUCollapseResources:

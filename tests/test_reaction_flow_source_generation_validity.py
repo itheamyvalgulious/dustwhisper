@@ -144,9 +144,9 @@ def test_flow_source_generation_binding_is_shared_by_all_writer_dispatches() -> 
             inspect.getsource(gpu_reactions_side_effects),
         )
     )
-    # One fused self producer, three gas pair/light producers, and four cell
-    # action/side-effect producers all use the shared generation lifecycle.
-    assert callsites.count("pipeline._bind_flow_source_generation_output(") == 8
+    # Three gas pair/light producers and four cell action/side-effect
+    # producers all use the shared generation lifecycle.
+    assert callsites.count("pipeline._bind_flow_source_generation_output(") == 7
 
 
 def test_sparse_self_and_timed_paths_propagate_exact_flow_source_lifecycle() -> None:
@@ -155,7 +155,7 @@ def test_sparse_self_and_timed_paths_propagate_exact_flow_source_lifecycle() -> 
         self_source.count(
             "may_have_flow_sources=pipeline._compiled_actions_include_flow_sources(compiled)"
         )
-        == 2
+        == 1
     )
 
     timed_source = inspect.getsource(run_timed_actions)

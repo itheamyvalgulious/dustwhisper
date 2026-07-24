@@ -7,7 +7,7 @@ import numpy as np
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
-from oracle_game.sim.reactions import REACTION_STAGE_NAMES
+from oracle_game.sim.reactions_constants import REACTION_STAGE_NAMES
 from oracle_game.types import CellFlag
 
 

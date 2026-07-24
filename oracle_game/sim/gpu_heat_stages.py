@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 
@@ -18,7 +18,7 @@ from oracle_game.sim.gpu_collapse_dirty import (
     ensure_collapse_structure_dirty_tile_queue,
     mark_collapse_structure_dirty_tiles_from_bridge_cell_core,
 )
-from oracle_game.sim.gpu_heat import (
+from oracle_game.sim.gpu_heat_resources import (
     FREEZE_COLD_NEIGHBOR_THRESHOLD,
     LOCAL_SIZE,
     MAX_GAS_SPECIES,
@@ -47,85 +47,21 @@ def step(
     pipeline._terminal_bridge_aux_dirty_frame_id = None
     pipeline._terminal_phase_fusion_frame_id = None
     pipeline._terminal_dirty_publish_frame_id = None
-    pipeline._deferred_dirty_publish_handoff_frame_id = None
-    pipeline._heat_gas_bridge_residency_frame_id = None
-    pipeline.last_terminal_bridge_aux_residency_used = False
     pipeline.last_terminal_dirty_workgroup_aggregation_used = False
     pipeline.last_terminal4x6_workgroup16x8_used = False
     pipeline.last_terminal_sparse_resident_specialization_used = False
-    pipeline.last_terminal_lazy_action_inputs_used = False
     pipeline.last_packed_phase_boil_targets_used = False
-    pipeline.last_terminal_hierarchical_row_summary_used = False
     pipeline.last_terminal_nv32_ballot_gas_reduction_used = False
     pipeline.last_heat_sparse_bridge_residency_used = False
-    pipeline.last_heat_gas_bridge_residency_used = False
-    pipeline.last_terminal_bridge_gas_residency_used = False
-    pipeline.last_cell_heat_bridge_diffuse4_fusion_used = False
     with pipeline._profile_pass(world, "upload_inputs"):
         pipeline._upload_inputs(world, resources, solve_tile_mask)
     group_x = (world.width + LOCAL_SIZE - 1) // LOCAL_SIZE
     group_y = (world.height + LOCAL_SIZE - 1) // LOCAL_SIZE
     gas_group_x = (world.gas_width + LOCAL_SIZE - 1) // LOCAL_SIZE
     gas_group_y = (world.gas_height + LOCAL_SIZE - 1) // LOCAL_SIZE
-    cell_heat_bridge_diffuse4_candidate = bool(
-        pipeline._cell_heat_bridge_diffuse4_fusion_enabled
-        and pipeline._cell_heat_bridge_exchange_feedback4_fusion_enabled
-        and pipeline._ambient_exchange_feedback4_enabled
-        and pipeline._formal_gpu_frame(world)
-        and int(world.gas_cell_size) == 4
-        and int(ambient_iterations) == 4
-        and {"cell_core", "ambient_temperature"}.issubset(world.bridge.gpu_authoritative_resources)
-    )
-    heat_gas_bridge_residency = bool(
-        (
-            pipeline._heat_gas_bridge_residency_enabled
-            or getattr(pipeline, "_terminal_bridge_gas_residency_enabled", False)
-        )
-        and pipeline._terminal4x6_fusion_enabled
-        and pipeline._condense_apply_gas4x6_fusion_enabled
-        and pipeline._formal_gpu_frame(world)
-        and int(world.gas_cell_size) == 4
-        and int(world.gas_concentration.shape[0]) == 6
-        and int(world.gas_width) == (int(world.width) + 3) // 4
-        and int(world.gas_height) == (int(world.height) + 3) // 4
-        and int(ambient_iterations) > 0
-        and int(ambient_iterations) % 2 == 0
-        and {"ambient_temperature", "gas_concentration"}.issubset(
-            world.bridge.gpu_authoritative_resources
-        )
-        and not cell_heat_bridge_diffuse4_candidate
-    )
-    pipeline.last_heat_gas_bridge_residency_used = heat_gas_bridge_residency
-    pipeline.last_terminal_bridge_gas_residency_used = heat_gas_bridge_residency
-    sparse_bridge_aux_residency = bool(
-        pipeline._heat_sparse_bridge_residency_enabled
-        and not pipeline._terminal4x6_workgroup16x8_enabled
-        and not pipeline._terminal_phase_fusion_enabled
-        and pipeline._terminal_dirty_publish_fusion_enabled
-        and pipeline._terminal_dirty_workgroup_aggregation_enabled
-        and pipeline._terminal_inplace_sparse_write_enabled
-    )
-    bridge_aux_residency = bool(
-        (pipeline._terminal_bridge_aux_residency_enabled or sparse_bridge_aux_residency)
-        and pipeline._terminal4x6_fusion_enabled
-        and pipeline._condense_apply_gas4x6_fusion_enabled
-        and pipeline._terminal_bridge_aux_dirty_fusion_enabled
-        and pipeline._formal_gpu_frame(world)
-        and int(world.gas_cell_size) == 4
-        and int(world.gas_concentration.shape[0]) == 6
-        and int(world.gas_width) == (int(world.width) + 3) // 4
-        and int(world.gas_height) == (int(world.height) + 3) // 4
-        and bool(getattr(world, "heat_motion_handoff_active", False))
-        and not bool(getattr(world, "phase_c_defer_cell_publish", False))
-        and {"island_id", "entity_id", "placeholder_displaced_material"}.issubset(
-            world.bridge.gpu_authoritative_resources
-        )
-        and _active_scheduler_gpu_authoritative(world)
-    )
-    pipeline.last_heat_sparse_bridge_residency_used = bool(
-        sparse_bridge_aux_residency and bridge_aux_residency
-    )
-    pipeline.last_terminal_bridge_aux_residency_used = bridge_aux_residency
+    cell_heat_bridge_diffuse4_candidate = False
+    heat_gas_bridge_residency = False
+    bridge_aux_residency = _resolve_bridge_aux_residency(pipeline, world)
     with pipeline._profile_pass(world, "load_bridge_inputs"):
         deferred_cell_core = pipeline._load_authoritative_bridge_inputs(
             world,
@@ -148,23 +84,16 @@ def step(
         and deferred_cell_core
         and pipeline._cell_heat_bridge_exchange_feedback4_fusion_enabled
     )
-    fuse_cell_heat_bridge_diffuse4 = bool(
-        cell_heat_bridge_diffuse4_candidate and fuse_cell_heat_exchange_feedback
-    )
-    pipeline.last_cell_heat_bridge_diffuse4_fusion_used = fuse_cell_heat_bridge_diffuse4
-    if fuse_cell_heat_bridge_diffuse4:
-        with pipeline._profile_pass(world, "ambient_diffuse_fused_into_cell_heat"):
-            pass
-    else:
-        with pipeline._profile_pass(world, "ambient_diffuse"):
-            pipeline._run_ambient_diffuse(
-                world,
-                resources,
-                gas_group_x,
-                gas_group_y,
-                iterations=ambient_iterations,
-                bridge_ambient_resident=heat_gas_bridge_residency,
-            )
+    fuse_cell_heat_bridge_diffuse4 = False
+    with pipeline._profile_pass(world, "ambient_diffuse"):
+        pipeline._run_ambient_diffuse(
+            world,
+            resources,
+            gas_group_x,
+            gas_group_y,
+            iterations=ambient_iterations,
+            bridge_ambient_resident=heat_gas_bridge_residency,
+        )
     with pipeline._profile_pass(world, "cell_heat"):
         pipeline._run_cell_heat(
             world,
@@ -192,95 +121,33 @@ def step(
         and int(world.gas_cell_size) == 4
         and int(world.gas_concentration.shape[0]) == 6
     )
-    fuse_terminal4x6 = bool(
-        pipeline._terminal4x6_fusion_enabled
-        and fuse_condense_apply_gas
-        and int(world.gas_width) == (int(world.width) + 3) // 4
-        and int(world.gas_height) == (int(world.height) + 3) // 4
+    terminal_plan = _resolve_terminal_fusion_plan(
+        pipeline,
+        world,
+        fuse_condense_apply_gas=fuse_condense_apply_gas,
+        deferred_cell_core=deferred_cell_core,
+        bridge_aux_residency=bridge_aux_residency,
     )
-    terminal_prepared_dirty_resources = None
-    if (
-        fuse_terminal4x6
-        and (
-            pipeline._terminal_phase_fusion_enabled
-            or pipeline._terminal_dirty_publish_fusion_enabled
-        )
-        and deferred_cell_core
-        and bool(getattr(world, "heat_motion_handoff_active", False))
-        and not bool(getattr(world, "phase_c_defer_cell_publish", False))
-        and {
-            "island_id",
-            "entity_id",
-            "placeholder_displaced_material",
-        }.issubset(world.bridge.gpu_authoritative_resources)
-        and _active_scheduler_gpu_authoritative(world)
-    ):
-        dirty_buffer = ensure_collapse_structure_dirty_tile_mask(world)
-        dirty_queue = ensure_collapse_structure_dirty_tile_queue(world)
-        if dirty_buffer is not None and dirty_queue is not None:
-            material_flags_buffer, material_count = _ensure_material_flags_buffer(world)
-            dirty_count, dirty_list, dirty_dispatch_args = dirty_queue
-            terminal_prepared_dirty_resources = (
-                dirty_buffer,
-                dirty_count,
-                dirty_list,
-                dirty_dispatch_args,
-                material_flags_buffer,
-                material_count,
-            )
-    terminal_phase_fusion = bool(
-        terminal_prepared_dirty_resources is not None and pipeline._terminal_phase_fusion_enabled
-    )
-    terminal_dirty_publish_fusion = bool(
-        terminal_prepared_dirty_resources is not None
-        and pipeline._terminal_dirty_publish_fusion_enabled
-    )
-    terminal_dirty_workgroup_aggregation = bool(
-        terminal_dirty_publish_fusion
-        and pipeline._terminal_dirty_workgroup_aggregation_enabled
-        and int(world.active.tile_size) >= 8
-        and int(world.active.tile_size) % 8 == 0
-    )
-    pipeline.last_terminal_dirty_workgroup_aggregation_used = terminal_dirty_workgroup_aggregation
-    terminal_bridge_aux_dirty = bool(terminal_phase_fusion or terminal_dirty_publish_fusion)
-    if (
-        not terminal_bridge_aux_dirty
-        and fuse_terminal4x6
-        and pipeline._terminal_bridge_aux_dirty_fusion_enabled
-        and bool(getattr(world, "heat_motion_handoff_active", False))
-        and not bool(getattr(world, "phase_c_defer_cell_publish", False))
-        and {"island_id", "entity_id", "placeholder_displaced_material"}.issubset(
-            world.bridge.gpu_authoritative_resources
-        )
-        and _active_scheduler_gpu_authoritative(world)
-    ):
-        terminal_bridge_aux_dirty = True
+    terminal_phase_fusion = terminal_plan.phase_fusion
+    terminal_dirty_publish_fusion = terminal_plan.dirty_publish_fusion
+    terminal_dirty_workgroup_aggregation = terminal_plan.dirty_workgroup_aggregation
+    terminal_bridge_aux_dirty = terminal_plan.bridge_aux_dirty
     terminal_lazy_action_inputs = bool(
-        pipeline._terminal_lazy_action_inputs_enabled
-        and pipeline._terminal_sparse_resident_specialization_enabled
-        and pipeline._formal_gpu_frame(world)
-        and fuse_terminal4x6
+        pipeline._terminal_sparse_resident_specialization_enabled
+        and terminal_plan.lazy_action_base
         and bridge_aux_residency
-        and terminal_bridge_aux_dirty
         and terminal_dirty_publish_fusion
         and terminal_dirty_workgroup_aggregation
         and not terminal_phase_fusion
         and not heat_gas_bridge_residency
-        and not pipeline._terminal4x6_workgroup16x8_enabled
-        and pipeline._terminal_inplace_sparse_write_enabled
-        and pipeline._terminal_split_target_active_reuse_enabled
-        and pipeline._terminal_dead_condense_target_store_elision_enabled
     )
     current_table_signature = (
         int(world.bridge.table_generations.get("materials", 0)),
         int(world.bridge.table_generations.get("reactions", 0)),
     )
-    if (
-        pipeline._packed_phase_boil_targets_enabled
-        and terminal_lazy_action_inputs
-        and pipeline._packed_phase_boil_table_signature is None
-    ):
-        pipeline._packed_phase_boil_table_signature = current_table_signature
+    _update_packed_phase_boil_signature(
+        pipeline, terminal_lazy_action_inputs, current_table_signature
+    )
     packed_phase_boil_targets = bool(
         pipeline._packed_phase_boil_targets_enabled
         and terminal_lazy_action_inputs
@@ -297,13 +164,13 @@ def step(
                 resources,
                 group_x,
                 group_y,
-                clear_terminal_aux=fuse_terminal4x6,
+                clear_terminal_aux=terminal_plan.fuse_terminal4x6,
                 publish_bridge_aux=terminal_bridge_aux_dirty,
-                skip_private_aux_writes=(bridge_aux_residency and terminal_bridge_aux_dirty),
+                skip_private_aux_writes=terminal_plan.bridge_aux_resident_writes,
                 lazy_action_inputs=terminal_lazy_action_inputs,
                 packed_phase_boil_targets=packed_phase_boil_targets,
             )
-    if fuse_terminal4x6:
+    if terminal_plan.fuse_terminal4x6:
         with pipeline._profile_pass(world, "apply_terminal4x6"):
             pipeline._run_apply_terminal4x6(
                 world,
@@ -311,10 +178,8 @@ def step(
                 resources,
                 bridge_aux_dirty=terminal_bridge_aux_dirty,
                 fuse_phase_boil=terminal_phase_fusion,
-                dirty_publish_resources=(
-                    terminal_prepared_dirty_resources if terminal_dirty_publish_fusion else None
-                ),
-                bridge_aux_resident=(bridge_aux_residency and terminal_bridge_aux_dirty),
+                dirty_publish_resources=terminal_plan.apply_dirty_publish_resources,
+                bridge_aux_resident=terminal_plan.bridge_aux_resident_writes,
                 aggregate_dirty_tiles=terminal_dirty_workgroup_aggregation,
                 bridge_gas_resident=heat_gas_bridge_residency,
                 packed_phase_boil_targets=packed_phase_boil_targets,
@@ -345,13 +210,191 @@ def step(
             gas_group_x,
             gas_group_y,
             skip_cell=terminal_dirty_publish_fusion,
-            prepared_dirty_resources=(
-                terminal_prepared_dirty_resources
-                if terminal_phase_fusion and not terminal_dirty_publish_fusion
-                else None
-            ),
+            prepared_dirty_resources=terminal_plan.publish_prepared_dirty_resources,
             skip_gas=heat_gas_bridge_residency,
         )
+    return _finish_frame(pipeline, world, ctx, resources)
+
+
+class _TerminalFusionPlan(NamedTuple):
+    """Frame-resolved terminal4x6 fusion dispatch record for :func:`step`."""
+
+    fuse_terminal4x6: bool
+    phase_fusion: bool
+    dirty_publish_fusion: bool
+    dirty_workgroup_aggregation: bool
+    bridge_aux_dirty: bool
+    lazy_action_base: bool
+    bridge_aux_resident_writes: bool
+    apply_dirty_publish_resources: tuple | None
+    publish_prepared_dirty_resources: tuple | None
+
+
+def _resolve_bridge_aux_residency(pipeline, world: "WorldEngine") -> bool:
+    sparse_bridge_aux_residency = bool(
+        pipeline._heat_sparse_bridge_residency_enabled
+        and not pipeline._terminal4x6_workgroup16x8_enabled
+        and not pipeline._terminal_phase_fusion_enabled
+        and pipeline._terminal_dirty_publish_fusion_enabled
+        and pipeline._terminal_dirty_workgroup_aggregation_enabled
+        and pipeline._terminal_inplace_sparse_write_enabled
+    )
+    bridge_aux_residency = bool(
+        sparse_bridge_aux_residency
+        and pipeline._terminal4x6_fusion_enabled
+        and pipeline._condense_apply_gas4x6_fusion_enabled
+        and pipeline._terminal_bridge_aux_dirty_fusion_enabled
+        and pipeline._formal_gpu_frame(world)
+        and int(world.gas_cell_size) == 4
+        and int(world.gas_concentration.shape[0]) == 6
+        and int(world.gas_width) == (int(world.width) + 3) // 4
+        and int(world.gas_height) == (int(world.height) + 3) // 4
+        and bool(getattr(world, "heat_motion_handoff_active", False))
+        and not bool(getattr(world, "phase_c_defer_cell_publish", False))
+        and {"island_id", "entity_id", "placeholder_displaced_material"}.issubset(
+            world.bridge.gpu_authoritative_resources
+        )
+        and _active_scheduler_gpu_authoritative(world)
+    )
+    pipeline.last_heat_sparse_bridge_residency_used = bool(
+        sparse_bridge_aux_residency and bridge_aux_residency
+    )
+    return bridge_aux_residency
+
+
+def _prepare_terminal_dirty_resources(
+    pipeline,
+    world: "WorldEngine",
+    fuse_terminal4x6: bool,
+    deferred_cell_core: bool,
+) -> tuple | None:
+    if not (
+        fuse_terminal4x6
+        and (
+            pipeline._terminal_phase_fusion_enabled
+            or pipeline._terminal_dirty_publish_fusion_enabled
+        )
+        and deferred_cell_core
+        and bool(getattr(world, "heat_motion_handoff_active", False))
+        and not bool(getattr(world, "phase_c_defer_cell_publish", False))
+        and {
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+        }.issubset(world.bridge.gpu_authoritative_resources)
+        and _active_scheduler_gpu_authoritative(world)
+    ):
+        return None
+    dirty_buffer = ensure_collapse_structure_dirty_tile_mask(world)
+    dirty_queue = ensure_collapse_structure_dirty_tile_queue(world)
+    if dirty_buffer is None or dirty_queue is None:
+        return None
+    material_flags_buffer, material_count = _ensure_material_flags_buffer(world)
+    dirty_count, dirty_list, dirty_dispatch_args = dirty_queue
+    return (
+        dirty_buffer,
+        dirty_count,
+        dirty_list,
+        dirty_dispatch_args,
+        material_flags_buffer,
+        material_count,
+    )
+
+
+def _resolve_terminal_fusion_plan(
+    pipeline,
+    world: "WorldEngine",
+    *,
+    fuse_condense_apply_gas: bool,
+    deferred_cell_core: bool,
+    bridge_aux_residency: bool,
+) -> _TerminalFusionPlan:
+    fuse_terminal4x6 = bool(
+        pipeline._terminal4x6_fusion_enabled
+        and fuse_condense_apply_gas
+        and int(world.gas_width) == (int(world.width) + 3) // 4
+        and int(world.gas_height) == (int(world.height) + 3) // 4
+    )
+    terminal_prepared_dirty_resources = _prepare_terminal_dirty_resources(
+        pipeline, world, fuse_terminal4x6, deferred_cell_core
+    )
+    terminal_phase_fusion = bool(
+        terminal_prepared_dirty_resources is not None and pipeline._terminal_phase_fusion_enabled
+    )
+    terminal_dirty_publish_fusion = bool(
+        terminal_prepared_dirty_resources is not None
+        and pipeline._terminal_dirty_publish_fusion_enabled
+    )
+    terminal_dirty_workgroup_aggregation = bool(
+        terminal_dirty_publish_fusion
+        and pipeline._terminal_dirty_workgroup_aggregation_enabled
+        and int(world.active.tile_size) >= 8
+        and int(world.active.tile_size) % 8 == 0
+    )
+    pipeline.last_terminal_dirty_workgroup_aggregation_used = terminal_dirty_workgroup_aggregation
+    terminal_bridge_aux_dirty = bool(terminal_phase_fusion or terminal_dirty_publish_fusion)
+    if (
+        not terminal_bridge_aux_dirty
+        and fuse_terminal4x6
+        and pipeline._terminal_bridge_aux_dirty_fusion_enabled
+        and bool(getattr(world, "heat_motion_handoff_active", False))
+        and not bool(getattr(world, "phase_c_defer_cell_publish", False))
+        and {"island_id", "entity_id", "placeholder_displaced_material"}.issubset(
+            world.bridge.gpu_authoritative_resources
+        )
+        and _active_scheduler_gpu_authoritative(world)
+    ):
+        terminal_bridge_aux_dirty = True
+    lazy_action_base = all(
+        (
+            pipeline._terminal_lazy_action_inputs_enabled,
+            pipeline._formal_gpu_frame(world),
+            fuse_terminal4x6,
+            terminal_bridge_aux_dirty,
+            not pipeline._terminal4x6_workgroup16x8_enabled,
+            pipeline._terminal_inplace_sparse_write_enabled,
+            pipeline._terminal_split_target_active_reuse_enabled,
+            pipeline._terminal_dead_condense_target_store_elision_enabled,
+        )
+    )
+    return _TerminalFusionPlan(
+        fuse_terminal4x6=fuse_terminal4x6,
+        phase_fusion=terminal_phase_fusion,
+        dirty_publish_fusion=terminal_dirty_publish_fusion,
+        dirty_workgroup_aggregation=terminal_dirty_workgroup_aggregation,
+        bridge_aux_dirty=terminal_bridge_aux_dirty,
+        lazy_action_base=lazy_action_base,
+        bridge_aux_resident_writes=bridge_aux_residency and terminal_bridge_aux_dirty,
+        apply_dirty_publish_resources=(
+            terminal_prepared_dirty_resources if terminal_dirty_publish_fusion else None
+        ),
+        publish_prepared_dirty_resources=(
+            terminal_prepared_dirty_resources
+            if terminal_phase_fusion and not terminal_dirty_publish_fusion
+            else None
+        ),
+    )
+
+
+def _update_packed_phase_boil_signature(
+    pipeline,
+    terminal_lazy_action_inputs: bool,
+    current_table_signature: tuple,
+) -> None:
+    if (
+        pipeline._packed_phase_boil_targets_enabled
+        and terminal_lazy_action_inputs
+        and pipeline._packed_phase_boil_table_signature is None
+    ):
+        pipeline._packed_phase_boil_table_signature = current_table_signature
+
+
+def _finish_frame(
+    pipeline,
+    world: "WorldEngine",
+    ctx,
+    resources: GPUHeatResources,
+) -> GPUHeatStageTargets:
     pipeline._last_formal_output_frame_id = (
         int(getattr(world, "frame_id", 0)) if pipeline._formal_gpu_frame(world) else None
     )
@@ -971,7 +1014,6 @@ def _run_apply_terminal4x6(
     lazy_action_inputs = bool(
         sparse_resident_specialized and pipeline._terminal_lazy_action_inputs_enabled
     )
-    pipeline.last_terminal_lazy_action_inputs_used = lazy_action_inputs
     if packed_phase_boil_targets and not lazy_action_inputs:
         raise RuntimeError("packed heat targets require the sparse lazy terminal")
     hierarchical_row_summary = bool(
@@ -983,9 +1025,6 @@ def _run_apply_terminal4x6(
         hierarchical_row_summary
         and pipeline._terminal_nv32_ballot_gas_reduction_enabled
         and pipeline._terminal_nv32_ballot_supported
-    )
-    pipeline.last_terminal_hierarchical_row_summary_used = bool(
-        hierarchical_row_summary and not nv32_ballot_gas_reduction
     )
     pipeline.last_terminal_nv32_ballot_gas_reduction_used = nv32_ballot_gas_reduction
     if nv32_ballot_gas_reduction:
@@ -1156,8 +1195,6 @@ def _run_apply_terminal4x6(
             COLLAPSE_STRUCTURE_DIRTY_TILE_LIST_BUFFER,
             COLLAPSE_STRUCTURE_DIRTY_TILE_DISPATCH_ARGS_BUFFER,
         )
-    if bridge_gas_resident:
-        pipeline._heat_gas_bridge_residency_frame_id = int(getattr(world, "frame_id", 0))
 
 
 def _run_apply_condense_cells(
@@ -1340,16 +1377,7 @@ def _publish_bridge_outputs(
         and getattr(world, "heat_motion_handoff_active", False)
         and not getattr(world, "phase_c_defer_cell_publish", False)
     )
-    motion_pipeline = getattr(getattr(world, "motion_solver", None), "gpu_pipeline", None)
-    can_consume_deferred = getattr(motion_pipeline, "can_consume_deferred_heat_core", None)
-    defer_dirty_publish_to_handoff = bool(
-        not skip_cell
-        and pipeline._deferred_dirty_publish_handoff_enabled
-        and defer_cell_core
-        and callable(can_consume_deferred)
-        and can_consume_deferred(world)
-    )
-    skip_cell_publish = bool(skip_cell or defer_dirty_publish_to_handoff)
+    skip_cell_publish = bool(skip_cell)
     terminal_bridge_aux_dirty = bool(
         pipeline._terminal_bridge_aux_dirty_frame_id == int(getattr(world, "frame_id", 0))
     )
@@ -1460,9 +1488,6 @@ def _publish_bridge_outputs(
                 dirty_dispatch_args.bind_to_storage_buffer(binding=8)
             if defer_cell_core or not bool(getattr(world, "phase_c_defer_cell_publish", False)):
                 cell_program.run(group_x, group_y, 1)
-    elif defer_dirty_publish_to_handoff:
-        with pipeline._profile_pass(world, "publish_bridge_outputs.cell_deferred_to_handoff"):
-            pipeline._deferred_dirty_publish_handoff_frame_id = int(getattr(world, "frame_id", 0))
 
     if not skip_gas:
         with pipeline._profile_pass(world, "publish_bridge_outputs.gas"):

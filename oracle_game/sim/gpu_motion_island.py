@@ -5,11 +5,12 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
-    from oracle_game.sim.gpu_motion import GPUMotionResources
+    from oracle_game.sim.gpu_motion_resources import GPUMotionResources
     from oracle_game.world import WorldEngine
 
 from oracle_game.gpu import pack_island_runtime_upload
-from oracle_game.sim.gpu_motion import (
+from oracle_game.sim.gpu_motion_bridge import _pack_cell_state_texture
+from oracle_game.sim.gpu_motion_constants import (
     FALLING_ISLAND_INDEX_CLEAR_APPLY,
     FALLING_ISLAND_INDEX_CLEAR_MATERIALIZATION,
     FALLING_ISLAND_INDEX_CLEAR_SOURCE,
@@ -18,7 +19,6 @@ from oracle_game.sim.gpu_motion import (
     ISLAND_RESOLVE_STALE,
     LOCAL_SIZE,
 )
-from oracle_game.sim.gpu_motion_bridge import _pack_cell_state_texture
 from oracle_game.types import Phase
 
 

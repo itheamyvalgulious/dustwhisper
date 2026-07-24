@@ -7,7 +7,7 @@ import numpy as np
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
-from oracle_game.sim.gpu_motion import (
+from oracle_game.sim.gpu_motion_constants import (
     falling_island_reservation_dtype,
     powder_reservation_dtype,
 )

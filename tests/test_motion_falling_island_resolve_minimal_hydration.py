@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 
+from oracle_game.sim import gpu_motion_island
 from oracle_game.sim.gpu_motion import GPUMotionPipeline
 
 
@@ -10,7 +11,7 @@ def test_falling_island_resolve_minimal_hydration_is_default_enabled() -> None:
 
 
 def test_falling_island_resolve_minimal_hydration_has_strict_gate_and_fallback() -> None:
-    source = inspect.getsource(GPUMotionPipeline._dispatch_resolve_falling_island_reservations)
+    source = inspect.getsource(gpu_motion_island._dispatch_resolve_falling_island_reservations)
 
     assert "formal_frame" in source
     assert "pipeline._falling_island_resolve_minimal_hydration_enabled" in source

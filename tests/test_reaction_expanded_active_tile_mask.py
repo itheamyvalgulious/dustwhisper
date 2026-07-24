@@ -59,10 +59,8 @@ def test_reaction_expanded_active_tile_gate_is_formal_tile32_and_sparse_falls_ba
     assert pipeline._can_use_expanded_active_tile_mask(world) is False
 
     timed_source = inspect.getsource(gpu_reactions_pairings.run_timed_actions)
-    self_source = inspect.getsource(gpu_reactions_pairings.run_self_actions)
     triplet_source = inspect.getsource(gpu_reactions_cell_pass._run_material_pair_fused_pass)
-    assert 'not getattr(pipeline, "_timed_sparse_inplace_enabled", False)' in timed_source
-    assert "and not sparse_inplace" in self_source
+    assert "use_expanded_active_tile_mask" in timed_source
     assert "terminal_handoff" in triplet_source
     assert "use_expanded_tile_mask=use_expanded_active_tile_mask" in triplet_source
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 
+from oracle_game.sim import gpu_motion_powder
 from oracle_game.sim.gpu_motion import _SHADER_SUBS, GPUMotionPipeline
 from oracle_game.sim.shader_loader import shader_source
 
@@ -39,7 +40,7 @@ def test_powder_trivial_blocked_classification_keeps_resolve_fallbacks() -> None
     assert 'self.programs["resolve_powder_reservations_compact_trivial_blocked"]' in program_source
     assert '"resolve_powder_reservations_compact_tile_dedup_trivial_blocked"' in program_source
 
-    host_source = inspect.getsource(GPUMotionPipeline.resolve_and_apply_powders)
+    host_source = inspect.getsource(gpu_motion_powder.resolve_and_apply_powders)
     assert "if compact_reservations:" in host_source
     assert "pipeline._powder_trivial_blocked_classification_enabled" in host_source
     assert 'resolve_name += "_trivial_blocked"' in host_source

@@ -7,7 +7,7 @@ import numpy as np
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
-from oracle_game.sim.gpu_reactions import (
+from oracle_game.sim.gpu_reactions_resources import (
     ACTION_FLAG_ALLOW_SUBUNIT_SCALE,
     ACTION_FLAG_RANDOM_TARGET,
     CONSUME_POLICY_BOTH,

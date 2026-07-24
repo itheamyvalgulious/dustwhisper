@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import inspect
 
+from oracle_game.sim import gpu_liquid_bridge as liquid_bridge
+from oracle_game.sim import gpu_liquid_solve as liquid_solve
 from oracle_game.sim.gpu_liquid import _SHADER_SUBS, GPULiquidPipeline
 from oracle_game.sim.shader_loader import shader_source
 
@@ -33,10 +35,12 @@ def test_liquid_seam_y_shared_snapshot_loads_both_rows_before_writes() -> None:
 
 
 def test_liquid_step_keeps_shared_snapshot_control_fallback_and_role_handoff() -> None:
-    source = inspect.getsource(GPULiquidPipeline.step)
-    buoyancy_source = inspect.getsource(GPULiquidPipeline._run_buoyancy_pass)
+    source = inspect.getsource(liquid_bridge.step)
+    seam_source = inspect.getsource(liquid_bridge._run_seam_stages)
+    bridge_buoyancy_source = inspect.getsource(liquid_bridge._run_buoyancy_stages)
+    buoyancy_source = inspect.getsource(liquid_solve._run_buoyancy_pass)
     assert "seam_y_shared_snapshot" in source
-    assert "if not seam_y_shared_snapshot" in source
-    assert "liquid_copy_seam_x" in source
-    assert "sink_fallback_resources=(" in source
+    assert "if not seam_y_shared_snapshot" in seam_source
+    assert "liquid_copy_seam_x" in seam_source
+    assert "sink_fallback_resources=(" in bridge_buoyancy_source
     assert "fallback_resources" in buoyancy_source

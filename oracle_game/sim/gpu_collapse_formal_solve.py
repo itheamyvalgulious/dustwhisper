@@ -5,10 +5,16 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 if TYPE_CHECKING:
-    from oracle_game.sim.gpu_collapse import GPUCollapseResources
+    from oracle_game.sim.gpu_collapse_resources import GPUCollapseResources
     from oracle_game.world import WorldEngine
 
-from oracle_game.sim.gpu_collapse import (
+from oracle_game.sim.gpu_collapse_dirty import get_collapse_structure_dirty_tile_bounds
+
+# _formal_jfa_jumps is a @staticmethod moved to gpu_collapse_formal; call its
+# module function directly (the facade class isn't importable here — it's
+# defined after this bucket is imported).
+from oracle_game.sim.gpu_collapse_formal import _formal_jfa_jumps
+from oracle_game.sim.gpu_collapse_resources import (
     FORMAL_CONNECTED_CELL_FRONTIER_TILE_COUNT_BUFFER,
     FORMAL_CONNECTED_CELL_FRONTIER_TILE_DISPATCH_ARGS_BUFFER,
     FORMAL_CONNECTED_CELL_FRONTIER_TILE_FLAGS_BUFFER,
@@ -29,12 +35,6 @@ from oracle_game.sim.gpu_collapse import (
     FORMAL_DEFERRED_REGION_REQUEST_COUNT_BUFFER,
     LOCAL_SIZE,
 )
-from oracle_game.sim.gpu_collapse_dirty import get_collapse_structure_dirty_tile_bounds
-
-# _formal_jfa_jumps is a @staticmethod moved to gpu_collapse_formal; call its
-# module function directly (the facade class isn't importable here — it's
-# defined after this bucket is imported).
-from oracle_game.sim.gpu_collapse_formal import _formal_jfa_jumps
 from oracle_game.types import Phase
 
 

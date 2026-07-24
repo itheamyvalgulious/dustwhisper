@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 
+from oracle_game.sim import gpu_heat_stages as heat_stages
 from oracle_game.sim.gpu_heat import _SHADER_SUBS, GPUHeatPipeline
 from oracle_game.sim.shader_loader import shader_source
 
@@ -23,7 +24,7 @@ def test_terminal_hierarchical_row_summary_is_default_on_and_isolated() -> None:
     assert "for (int cell_lane = 0; cell_lane < 16; ++cell_lane)" in canonical
 
     ensure_source = inspect.getsource(GPUHeatPipeline._ensure_programs)
-    run_source = inspect.getsource(GPUHeatPipeline._run_apply_terminal4x6)
+    run_source = inspect.getsource(heat_stages._run_apply_terminal4x6)
     assert '"apply_terminal4x6_sparse_resident_packed_lazy_row_summary"' in ensure_source
     assert "and pipeline._terminal_hierarchical_row_summary_enabled" in run_source
     assert (

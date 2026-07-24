@@ -2,16 +2,15 @@ from __future__ import annotations
 
 import inspect
 
+from oracle_game.sim import gpu_liquid_bridge as liquid_bridge
 from oracle_game.sim.gpu_liquid import _SHADER_SUBS, GPULiquidPipeline
 from oracle_game.sim.shader_loader import shader_source
 
 
 def test_liquid_hotpass_candidate_defaults() -> None:
     pipeline = GPULiquidPipeline()
-    assert pipeline._flow_intent_active_mask_cache_enabled is False
     assert pipeline._flow_intent_provenance_shared_meta_cache_enabled is True
     assert pipeline._flow_intent_provenance_lazy_aux_enabled is True
-    assert pipeline._tile_solve_liquid_kind_cache_enabled is False
 
 
 def test_liquid_provenance_active_mask_cache_is_specialized() -> None:
@@ -68,7 +67,7 @@ def test_liquid_terminal_provenance_shared_meta_cache_reuses_halo_resolution() -
     assert "terminal_velocity_at(gid, terminal_provenance, primary_role)" in source
     assert "store_terminal_core_resolved(" in source
     assert "terminal_provenance" in source
-    dispatch_source = inspect.getsource(GPULiquidPipeline._run_liquid_intent_pass)
+    dispatch_source = inspect.getsource(liquid_bridge._run_liquid_intent_pass)
     assert '"liquid_flow_intent_shared_halo_provenance_shared_meta"' in dispatch_source
     assert "_flow_intent_provenance_shared_meta_cache_enabled" in dispatch_source
 
@@ -107,7 +106,7 @@ def test_liquid_terminal_lazy_aux_reads_only_reachable_empty_candidates() -> Non
     assert "#if !PROVENANCE_LAZY_AUX\nshared float shared_entity" in source
     assert "float(bridge_entity_id[cell_index]) < 0.5" in source
     assert "float(bridge_displaced[cell_index]) < 0.5" in source
-    dispatch_source = inspect.getsource(GPULiquidPipeline._run_liquid_intent_pass)
+    dispatch_source = inspect.getsource(liquid_bridge._run_liquid_intent_pass)
     assert '"liquid_flow_intent_shared_halo_provenance_shared_meta_lazy_aux"' in dispatch_source
 
 

@@ -5,6 +5,7 @@ import inspect
 import numpy as np
 import pytest
 
+from oracle_game.sim import gpu_reactions_cell_pass
 from oracle_game.sim.gpu_reactions import _SHADER_SUBS, GPUReactionPipeline
 from oracle_game.sim.shader_loader import shader_source
 from oracle_game.types import CellFlag, ReactionAction, ReactionType, SelfReactionRule
@@ -28,7 +29,7 @@ def test_timed_self_packed_metadata_is_enabled_and_compiled_into_cell_flags() ->
     store = source.index("imageStore(cell_state_out_img")
     assert reset < latch < store
 
-    local_pass = inspect.getsource(GPUReactionPipeline._run_local_cell_action_pass)
+    local_pass = inspect.getsource(gpu_reactions_cell_pass._run_local_cell_action_pass)
     assert "pipeline._timed_self_cell_flag_meta_enabled" in local_pass
     assert 'program_key = f"{program_key}_cell_flag_meta"' in local_pass
 

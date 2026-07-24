@@ -9,7 +9,7 @@ from oracle_game.sim.gpu_collapse_dirty import clear_collapse_structure_dirty_ti
 from oracle_game.types import Phase
 
 if TYPE_CHECKING:
-    from oracle_game.sim.gpu_collapse import GPUCollapseResources
+    from oracle_game.sim.gpu_collapse_resources import GPUCollapseResources
     from oracle_game.world import WorldEngine
 
 
@@ -158,13 +158,7 @@ def _begin_formal_dirty_epoch(pipeline, world: WorldEngine) -> FormalDirtyCollap
         if not pending_gpu_authoritative:
             pending = world.collapse_delay_pending[y0 : y0 + height, x0 : x0 + width]
             resources.pending_tex.write(np.asarray(pending, dtype=np.float32).tobytes())
-    packed_cell_snapshot = bool(
-        pending_gpu_authoritative
-        and pipeline._incremental_packed_cell_snapshot_enabled
-        and pipeline._formal_gpu_frame(world)
-        and pipeline._classification_bridge_hydration_fusion_enabled
-        and "cell_core" in world.bridge.gpu_authoritative_resources
-    )
+    packed_cell_snapshot = False
     fuse_classification_support_axis_u8 = bool(
         pipeline._incremental_classification_support_axis_u8_fusion_enabled
         and pipeline._incremental_support_jfa_u8_enabled
@@ -490,7 +484,7 @@ def _publish_epoch_masks(
     publish_delayed: bool,
     publish_immune: bool,
 ) -> None:
-    from oracle_game.sim.gpu_collapse import (
+    from oracle_game.sim.gpu_collapse_resources import (
         FORMAL_CONNECTED_TILE_COUNT_BUFFER,
         FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER,
         FORMAL_CONNECTED_TILE_LIST_BUFFER,
@@ -544,7 +538,7 @@ def _validate_and_collect_formal_dirty_epoch_labels(
     packed_cell_snapshot: bool = False,
     materialize_label_union: bool = False,
 ) -> tuple[Any, int]:
-    from oracle_game.sim.gpu_collapse import (
+    from oracle_game.sim.gpu_collapse_resources import (
         FORMAL_CONNECTED_TILE_COUNT_BUFFER,
         FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER,
         FORMAL_CONNECTED_TILE_LIST_BUFFER,
@@ -687,7 +681,7 @@ def _materialize_formal_dirty_epoch_direct(
     island_id_base: int,
     component_capacity: int,
 ) -> None:
-    from oracle_game.sim.gpu_collapse import (
+    from oracle_game.sim.gpu_collapse_resources import (
         FORMAL_CONNECTED_TILE_COUNT_BUFFER,
         FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER,
         FORMAL_CONNECTED_TILE_LIST_BUFFER,

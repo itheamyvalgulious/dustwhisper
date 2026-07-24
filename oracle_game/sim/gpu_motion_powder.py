@@ -5,10 +5,10 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
-    from oracle_game.sim.gpu_motion import GPUMotionResources
+    from oracle_game.sim.gpu_motion_resources import GPUMotionResources
     from oracle_game.world import WorldEngine
 
-from oracle_game.sim.gpu_motion import (
+from oracle_game.sim.gpu_motion_constants import (
     LOCAL_SIZE,
     POWDER_RESERVATION_DTYPE,
     POWDER_RESERVATION_LOCAL_SIZE,
@@ -23,7 +23,6 @@ def _source_indexed_powder_apply_enabled(pipeline, world: "WorldEngine") -> bool
     return bool(
         pipeline._formal_gpu_frame(world)
         and pipeline._powder_source_indexed_direct_apply_enabled
-        and not pipeline._powder_direct_bridge_apply_enabled
         and pipeline._bridge_authoritative_powder_inputs(world)
         and pipeline._bridge_context_active(world)
         and not bool(getattr(world, "phase_c_defer_cell_publish", False))
@@ -450,9 +449,7 @@ def resolve_and_apply_powders(
         resolve["phase_liquid"].value = int(Phase.LIQUID)
         resolve["phase_falling_island"].value = int(Phase.FALLING_ISLAND)
         resolve["generated_sources_prevalidated"].value = True
-        resolve["reuse_generated_reserved_path"].value = bool(
-            pipeline._powder_generated_path_reuse_enabled
-        )
+        resolve["reuse_generated_reserved_path"].value = False
         resolve["use_precomputed_fallback_blockers"].value = bool(
             pipeline._powder_precomputed_fallback_blockers_enabled
         )
@@ -606,10 +603,10 @@ def apply_powder_reservations(pipeline, world: "WorldEngine", reservations: np.n
         resources,
         int(len(reservations)),
         # Keep the historical texture+terminal path for normal uploaded
-        # reservations. The packed indices are only needed by the opt-in
+        # reservations. The packed indices were only needed by the removed
         # direct bridge candidate (and are otherwise an observable aux format
         # change for callers that use this API).
-        allow_aux_index_scratch=bool(pipeline._powder_direct_bridge_apply_enabled),
+        allow_aux_index_scratch=False,
     )
     return True
 
@@ -830,26 +827,10 @@ def _dispatch_apply_powder_reservations(
             use_existing_active_tile_dispatch=formal_frame,
             load_gas_inputs=False,
         )
-    direct_bridge_outputs = bool(
-        formal_frame
-        and use_packed_powder_aux
-        and pipeline._powder_direct_bridge_apply_enabled
-        and pipeline._bridge_context_active(world)
-        and not bool(getattr(world, "phase_c_defer_cell_publish", False))
-    )
-    if direct_bridge_outputs:
-        _snapshot_powder_direct_apply_sources(pipeline, world, resources)
     with pipeline._profile_pass(world, "powder_apply_main"):
-        if direct_bridge_outputs:
-            program_name = (
-                "apply_powder_reservations_bridge"
-                if epoch_enabled
-                else "apply_powder_reservations_bridge_legacy"
-            )
-        else:
-            program_name = (
-                "apply_powder_reservations" if epoch_enabled else "apply_powder_reservations_legacy"
-            )
+        program_name = (
+            "apply_powder_reservations" if epoch_enabled else "apply_powder_reservations_legacy"
+        )
         program = pipeline.programs[program_name]
         program["cell_grid_size"].value = (world.width, world.height)
         program["tile_grid_size"].value = (world.active.tile_width, world.active.tile_height)
@@ -895,9 +876,6 @@ def _dispatch_apply_powder_reservations(
                 binding=11
             )
             resources.powder_target_winner.bind_to_storage_buffer(binding=12)
-        if direct_bridge_outputs:
-            resources.powder_source_cell_core_snapshot.bind_to_storage_buffer(binding=13)
-            resources.powder_source_aux_snapshot.bind_to_storage_buffer(binding=14)
         resources.cell_state_tex.use(location=0)
         resources.velocity_tex.use(location=3)
         resources.temp_tex.use(location=4)
@@ -906,34 +884,16 @@ def _dispatch_apply_powder_reservations(
         resources.island_id_tex.use(location=7)
         resources.entity_id_tex.use(location=8)
         resources.displaced_tex.use(location=9)
-        if direct_bridge_outputs:
-            world.bridge.textures["material"].bind_to_image(1, read=False, write=True)
-        if not direct_bridge_outputs:
-            resources.cell_state_out_tex.bind_to_image(0, read=False, write=True)
-            resources.velocity_out_tex.bind_to_image(3, read=False, write=True)
-            resources.temp_out_tex.bind_to_image(4, read=False, write=True)
-            resources.timer_out_tex.bind_to_image(5, read=False, write=True)
-            resources.integrity_out_tex.bind_to_image(6, read=False, write=True)
+        resources.cell_state_out_tex.bind_to_image(0, read=False, write=True)
+        resources.velocity_out_tex.bind_to_image(3, read=False, write=True)
+        resources.temp_out_tex.bind_to_image(4, read=False, write=True)
+        resources.timer_out_tex.bind_to_image(5, read=False, write=True)
+        resources.integrity_out_tex.bind_to_image(6, read=False, write=True)
         if formal_frame:
             pipeline._run_active_tile_indirect(program, resources, "powder reservation apply")
         else:
             program.run(group_x, group_y, 1)
         pipeline._sync_compute_writes(ctx)
-
-    if direct_bridge_outputs:
-        world.bridge.mark_gpu_authoritative(
-            "cell_core",
-            "material",
-            "island_id",
-            "entity_id",
-            "placeholder_displaced_material",
-        )
-        pipeline._refresh_authoritative_active_scheduler_after_apply(
-            world,
-            "active_refresh_after_powder",
-        )
-        pipeline.last_cpu_mirror_downloaded = False
-        return
 
     if not use_packed_powder_aux:
         with pipeline._profile_pass(world, "powder_apply_aux"):
@@ -1011,47 +971,6 @@ def _dispatch_apply_powder_reservations(
     if pipeline.last_cpu_mirror_downloaded:
         ctx.finish()
         pipeline._download_powder_apply_state(world, resources)
-
-
-def _snapshot_powder_direct_apply_sources(
-    pipeline,
-    world: "WorldEngine",
-    resources: GPUMotionResources,
-) -> None:
-    """Freeze bridge payloads before the direct apply overwrites source cells."""
-    ctx = world.bridge.ctx
-    assert ctx is not None
-    cell_count = int(world.width * world.height)
-    core_bytes = cell_count * 5 * np.dtype(np.uint32).itemsize
-    aux_bytes = cell_count * np.dtype(np.int32).itemsize
-    pipeline._ensure_dynamic_buffer_capacity(
-        ctx,
-        resources,
-        "powder_source_cell_core_snapshot",
-        core_bytes,
-    )
-    pipeline._ensure_dynamic_buffer_capacity(
-        ctx,
-        resources,
-        "powder_source_aux_snapshot",
-        aux_bytes * 3,
-    )
-    with pipeline._profile_pass(world, "powder_direct_source_snapshot"):
-        ctx.copy_buffer(
-            resources.powder_source_cell_core_snapshot,
-            world.bridge.buffers["cell_core"],
-            size=core_bytes,
-        )
-        for aux_index, resource_name in enumerate(
-            ("island_id", "entity_id", "placeholder_displaced_material")
-        ):
-            ctx.copy_buffer(
-                resources.powder_source_aux_snapshot,
-                world.bridge.buffers[resource_name],
-                size=aux_bytes,
-                write_offset=aux_index * aux_bytes,
-            )
-        ctx.memory_barrier(ctx.SHADER_STORAGE_BARRIER_BIT)
 
 
 def _powder_direct_apply_is_safe(

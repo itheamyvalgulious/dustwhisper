@@ -8,6 +8,7 @@ import numpy as np
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
+from oracle_game.engine_config import DEFAULT_ENGINE_CONFIG, EngineConfig
 from oracle_game.gpu import typed_gas_id
 from oracle_game.sim.gpu_base import GPUPipelineBase, release_resource_fields
 from oracle_game.sim.shader_loader import build_compute_shader
@@ -18,12 +19,6 @@ MAX_SPECIES = 8
 ACTIVE_GAS_TEXTURE_UNIT = 7
 SPECIES_COOPERATIVE_LOCAL_X = 8
 SPECIES_COOPERATIVE_LOCAL_Y = 4
-PRESSURE_CONE_CORE_X = 48
-PRESSURE_CONE_CORE_Y = 16
-PRESSURE_CONE_LOCAL_X = 16
-PRESSURE_CONE_LOCAL_Y = 16
-PRESSURE_CONE_JACOBI_ITERATIONS = 11
-PRESSURE_CONE_HALO = PRESSURE_CONE_JACOBI_ITERATIONS + 1
 PRESSURE_PAIR_LOCAL_SIZE = 16
 PRESSURE_PAIR_HALO = 2
 PRESSURE_PAIR_CORE_SIZE = PRESSURE_PAIR_LOCAL_SIZE - 2 * PRESSURE_PAIR_HALO
@@ -37,12 +32,6 @@ _SHADER_SUBS = {
     "ACTIVE_GAS_TEXTURE_UNIT": ACTIVE_GAS_TEXTURE_UNIT,
     "SPECIES_COOPERATIVE_LOCAL_X": SPECIES_COOPERATIVE_LOCAL_X,
     "SPECIES_COOPERATIVE_LOCAL_Y": SPECIES_COOPERATIVE_LOCAL_Y,
-    "PRESSURE_CONE_CORE_X": PRESSURE_CONE_CORE_X,
-    "PRESSURE_CONE_CORE_Y": PRESSURE_CONE_CORE_Y,
-    "PRESSURE_CONE_LOCAL_X": PRESSURE_CONE_LOCAL_X,
-    "PRESSURE_CONE_LOCAL_Y": PRESSURE_CONE_LOCAL_Y,
-    "PRESSURE_CONE_JACOBI_ITERATIONS": PRESSURE_CONE_JACOBI_ITERATIONS,
-    "PRESSURE_CONE_HALO": PRESSURE_CONE_HALO,
     "PRESSURE_PAIR_LOCAL_SIZE": PRESSURE_PAIR_LOCAL_SIZE,
     "PRESSURE_PAIR_HALO": PRESSURE_PAIR_HALO,
     "PRESSURE_PAIR_CORE_SIZE": PRESSURE_PAIR_CORE_SIZE,
@@ -74,7 +63,10 @@ class GPUGasResources:
 
 
 class GPUGasPipeline(GPUPipelineBase):
-    def __init__(self, pressure_iterations: int = 12) -> None:
+    def __init__(
+        self, pressure_iterations: int = 12, *, engine_config: EngineConfig | None = None
+    ) -> None:
+        self.engine_config = engine_config if engine_config is not None else DEFAULT_ENGINE_CONFIG
         self.pressure_iterations = pressure_iterations
         self.resources: GPUGasResources | None = None
         self.programs: dict[str, Any] = {}
@@ -85,18 +77,12 @@ class GPUGasPipeline(GPUPipelineBase):
         self.last_cpu_active_upload_skipped = False
         self.last_divergence_pressure_seed_used = False
         self.last_species_terminal_cooperative_used = False
-        self.last_density_tree_reduction_used = False
-        self._divergence_pressure_seed_enabled = True
-        self._species_terminal_cooperative_enabled = True
-        self._pressure_projection_dependency_cone_enabled = False
-        self._pressure_jacobi_pair_enabled = True
-        self._density_tree_reduction_enabled = True
-        # Candidate: force-source application and thermo-field construction
-        # write disjoint outputs and can share one dispatch. Keep disabled
-        # until formal raw-byte/A-B retention; the canonical two-pass path is
-        # unchanged by default.
-        self._force_thermo_fusion_enabled = False
-        self.last_force_thermo_fusion_used = False
+        self._divergence_pressure_seed_enabled = self.engine_config.divergence_pressure_seed_enabled
+        self._species_terminal_cooperative_enabled = (
+            self.engine_config.species_terminal_cooperative_enabled
+        )
+        self._pressure_jacobi_pair_enabled = self.engine_config.pressure_jacobi_pair_enabled
+        self._density_tree_reduction_enabled = self.engine_config.density_tree_reduction_enabled
         self.last_pressure_jacobi_pair_used = False
         self.last_pass_profile: dict[str, Any] = {"passes": [], "summary": {}}
 
@@ -111,8 +97,6 @@ class GPUGasPipeline(GPUPipelineBase):
         self.reset_pass_profile()
         self.last_divergence_pressure_seed_used = False
         self.last_species_terminal_cooperative_used = False
-        self.last_density_tree_reduction_used = False
-        self.last_force_thermo_fusion_used = False
         self.last_pressure_jacobi_pair_used = False
         with self._profile_pass(world, "upload_inputs"):
             self._upload_inputs(world, resources, solve_gas_mask)
@@ -123,32 +107,18 @@ class GPUGasPipeline(GPUPipelineBase):
 
         with self._profile_pass(world, "advect_velocity"):
             self._run_advect_velocity(world, dt, resources, group_x, group_y)
-        force_thermo_fusion = bool(
-            self._force_thermo_fusion_enabled
-            and self._density_tree_reduction_enabled
-            and bool(world.force_sources)
-        )
-        self.last_force_thermo_fusion_used = force_thermo_fusion
-        if force_thermo_fusion:
-            with self._profile_pass(world, "force_sources_thermo_fields"):
-                self._run_force_sources_thermo_fields(world, dt, resources, group_x, group_y)
-        else:
-            with self._profile_pass(world, "force_sources"):
-                self._run_force_sources(world, dt, resources, group_x, group_y)
-            with self._profile_pass(world, "thermo_fields"):
-                self._run_thermo_fields(world, resources, group_x, group_y)
+        with self._profile_pass(world, "force_sources"):
+            self._run_force_sources(world, dt, resources, group_x, group_y)
+        with self._profile_pass(world, "thermo_fields"):
+            self._run_thermo_fields(world, resources, group_x, group_y)
         with self._profile_pass(world, "thermo_forces"):
             self._run_thermo_forces(world, dt, resources, group_x, group_y)
         with self._profile_pass(world, "divergence"):
             self._run_divergence(world, resources, group_x, group_y)
-        if self._can_run_pressure_projection_dependency_cone():
-            with self._profile_pass(world, "pressure_projection_dependency_cone"):
-                self._run_pressure_projection_dependency_cone(world, resources)
-        else:
-            with self._profile_pass(world, "pressure_jacobi"):
-                self._run_pressure_jacobi(world, resources, group_x, group_y)
-            with self._profile_pass(world, "projection"):
-                self._run_projection(world, resources, group_x, group_y)
+        with self._profile_pass(world, "pressure_jacobi"):
+            self._run_pressure_jacobi(world, resources, group_x, group_y)
+        with self._profile_pass(world, "projection"):
+            self._run_projection(world, resources, group_x, group_y)
         if self._can_run_species_terminal_cooperative(world):
             with self._profile_pass(world, "species_ambient_publish_cooperative"):
                 self._run_species_terminal_cooperative(world, dt, resources)
@@ -274,12 +244,6 @@ class GPUGasPipeline(GPUPipelineBase):
         self.programs["force_sources"] = build_compute_shader(
             ctx, "gas/force_sources.comp", _SHADER_SUBS, includes=["gas/_common.comp"]
         )
-        self.programs["force_sources_thermo_fields_density_buffer"] = build_compute_shader(
-            ctx,
-            "gas/force_sources_thermo_fields_density_buffer.comp",
-            _SHADER_SUBS,
-            includes=["gas/_common.comp"],
-        )
         self.programs["thermo_fields"] = build_compute_shader(
             ctx, "gas/thermo_fields.comp", _SHADER_SUBS, includes=["gas/_common.comp"]
         )
@@ -313,11 +277,6 @@ class GPUGasPipeline(GPUPipelineBase):
         )
         self.programs["projection"] = build_compute_shader(
             ctx, "gas/projection.comp", _SHADER_SUBS, includes=["gas/_common.comp"]
-        )
-        self.programs["pressure_projection_dependency_cone"] = build_compute_shader(
-            ctx,
-            "gas/pressure_projection_dependency_cone.comp",
-            _SHADER_SUBS,
         )
         self.programs["species"] = build_compute_shader(
             ctx, "gas/species.comp", _SHADER_SUBS, includes=["gas/_common.comp"]
@@ -548,53 +507,6 @@ class GPUGasPipeline(GPUPipelineBase):
             force.lifetime -= dt
         world.force_sources[:] = [force for force in world.force_sources if force.lifetime > 0.0]
 
-    def _run_force_sources_thermo_fields(
-        self,
-        world: "WorldEngine",
-        dt: float,
-        resources: GPUGasResources,
-        group_x: int,
-        group_y: int,
-    ) -> None:
-        """Fuse force application with density/thermo field generation.
-
-        The two canonical passes have no intermediate data dependency: the
-        force pass writes velocity while thermo fields read ambient/gas and
-        write pressure/density. This candidate keeps the exact ping-pong
-        roles and density reduction input, but pays one dispatch/barrier.
-        """
-        if not world.force_sources:
-            raise RuntimeError("force/thermo fusion requires at least one force source")
-        ctx = world.bridge.ctx
-        assert ctx is not None
-        program = self.programs["force_sources_thermo_fields_density_buffer"]
-        force_data = self._force_source_upload(world)
-        self._write_dynamic_buffer(ctx, resources, "force_sources", force_data)
-        program["grid_size"].value = (world.gas_width, world.gas_height)
-        program["dt"].value = float(dt)
-        program["gas_cell_size"].value = float(world.gas_cell_size)
-        program["force_count"].value = int(len(world.force_sources))
-        program["species_count"].value = int(world.gas_concentration.shape[0])
-        resources.force_sources.bind_to_storage_buffer(binding=0)
-        resources.species_force_params.bind_to_storage_buffer(binding=1)
-        resources.velocity_pong.use(location=0)
-        resources.ambient_ping.use(location=1)
-        resources.gas_ping.use(location=2)
-        resources.active_gas_tex.use(location=ACTIVE_GAS_TEXTURE_UNIT)
-        resources.velocity_ping.bind_to_image(0, read=False, write=True)
-        resources.thermo_pressure.bind_to_image(1, read=False, write=True)
-        resources.density_tex.bind_to_image(2, read=False, write=True)
-        resources.density_reduce_ping.bind_to_storage_buffer(binding=5)
-        program.run(group_x, group_y, 1)
-        self._sync_compute_writes(ctx)
-        resources.velocity_ping, resources.velocity_pong = (
-            resources.velocity_pong,
-            resources.velocity_ping,
-        )
-        for force in list(world.force_sources):
-            force.lifetime -= dt
-        world.force_sources[:] = [force for force in world.force_sources if force.lifetime > 0.0]
-
     def _run_divergence(
         self, world: "WorldEngine", resources: GPUGasResources, group_x: int, group_y: int
     ) -> None:
@@ -680,7 +592,6 @@ class GPUGasPipeline(GPUPipelineBase):
             input_count = output_count
         resources.density_reduce_ping = src
         resources.density_reduce_pong = dst
-        self.last_density_tree_reduction_used = tree_reduction
 
     def _run_thermo_forces(
         self,
@@ -776,45 +687,6 @@ class GPUGasPipeline(GPUPipelineBase):
 
     def _use_divergence_pressure_seed(self) -> bool:
         return bool(self._divergence_pressure_seed_enabled and self.pressure_iterations > 0)
-
-    def _can_run_pressure_projection_dependency_cone(self) -> bool:
-        return bool(
-            self._pressure_projection_dependency_cone_enabled
-            and self._use_divergence_pressure_seed()
-            and self.pressure_iterations == PRESSURE_CONE_JACOBI_ITERATIONS + 1
-        )
-
-    def _run_pressure_projection_dependency_cone(
-        self,
-        world: "WorldEngine",
-        resources: GPUGasResources,
-    ) -> None:
-        program = self.programs["pressure_projection_dependency_cone"]
-        ctx = world.bridge.ctx
-        assert ctx is not None
-        program["grid_size"].value = (world.gas_width, world.gas_height)
-        resources.pressure_ping.use(location=0)
-        resources.divergence.use(location=1)
-        resources.velocity_ping.use(location=2)
-        resources.active_gas_tex.use(location=ACTIVE_GAS_TEXTURE_UNIT)
-        resources.pressure_pong.bind_to_image(0, read=False, write=True)
-        resources.velocity_pong.bind_to_image(1, read=False, write=True)
-        resources.pressure_cone_shadow.bind_to_image(2, read=False, write=True)
-        program.run(
-            (world.gas_width + PRESSURE_CONE_CORE_X - 1) // PRESSURE_CONE_CORE_X,
-            (world.gas_height + PRESSURE_CONE_CORE_Y - 1) // PRESSURE_CONE_CORE_Y,
-            1,
-        )
-        self._sync_compute_writes(ctx)
-        resources.pressure_ping, resources.pressure_pong, resources.pressure_cone_shadow = (
-            resources.pressure_pong,
-            resources.pressure_cone_shadow,
-            resources.pressure_ping,
-        )
-        resources.velocity_ping, resources.velocity_pong = (
-            resources.velocity_pong,
-            resources.velocity_ping,
-        )
 
     def _can_run_species_terminal_cooperative(self, world: "WorldEngine") -> bool:
         species_count = int(world.gas_concentration.shape[0])

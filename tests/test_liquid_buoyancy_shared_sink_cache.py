@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 
+from oracle_game.sim import gpu_liquid_bridge as liquid_bridge
 from oracle_game.sim.gpu_liquid import _SHADER_SUBS, GPULiquidPipeline
 from oracle_game.sim.shader_loader import shader_source
 
@@ -46,7 +47,7 @@ def test_buoyancy_shared_sink_cache_keeps_partial_canonical_fallback() -> None:
 
 def test_buoyancy_shared_sink_cache_program_is_strictly_gated() -> None:
     ensure_source = inspect.getsource(GPULiquidPipeline._ensure_programs)
-    step_source = inspect.getsource(GPULiquidPipeline.step)
+    step_source = inspect.getsource(liquid_bridge.step)
     assert "buoyancy_fused_provenance_cleanup_snapshot_pre_shared_sink" in ensure_source
     assert "pipeline._buoyancy_snapshot_pre_state_frame_enabled" in step_source
     assert "pipeline._provenance_terminal_frame_enabled" in step_source

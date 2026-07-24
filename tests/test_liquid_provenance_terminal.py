@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import inspect
 
+from oracle_game.sim import gpu_liquid_bridge as liquid_bridge
+from oracle_game.sim import gpu_liquid_solve as liquid_solve
 from oracle_game.sim.gpu_liquid import _SHADER_SUBS, GPULiquidPipeline
 from oracle_game.sim.shader_loader import shader_source
 
@@ -60,10 +62,10 @@ def test_provenance_variants_carry_source_and_texture_markers() -> None:
 
 
 def test_liquid_step_swaps_spare_only_after_terminal_flow() -> None:
-    source = inspect.getsource(GPULiquidPipeline.step)
-    bridge_source = inspect.getsource(GPULiquidPipeline._run_liquid_intent_pass)
-    solve = inspect.getsource(GPULiquidPipeline._run_tile_solve)
-    buoyancy = inspect.getsource(GPULiquidPipeline._run_buoyancy_pass)
+    source = inspect.getsource(liquid_bridge.step)
+    bridge_source = inspect.getsource(liquid_bridge._run_liquid_intent_pass)
+    solve = inspect.getsource(liquid_solve._run_tile_solve)
+    buoyancy = inspect.getsource(liquid_solve._run_buoyancy_pass)
     assert "_provenance_terminal_frame_enabled" in source
     assert "phase_c_defer_cell_publish" in source
     assert "liquid_flow_intent_shared_halo_provenance" in bridge_source
@@ -72,13 +74,13 @@ def test_liquid_step_swaps_spare_only_after_terminal_flow() -> None:
     assert "resources.provenance_in.bind_to_storage_buffer(binding=9)" in bridge_source
     assert "resources.provenance_in, resources.provenance_out" in source
     assert 'program_name.startswith("buoyancy_fused")' in buoyancy
-    assert "init_liquid_provenance" in inspect.getsource(GPULiquidPipeline._run_provenance_init)
+    assert "init_liquid_provenance" in inspect.getsource(liquid_solve._run_provenance_init)
     assert "ensure_cell_core_spare" not in solve
 
 
 def test_provenance_init_fusion_is_gated_and_skips_only_identity_pass() -> None:
-    source = inspect.getsource(GPULiquidPipeline.step)
-    init_source = inspect.getsource(GPULiquidPipeline._run_provenance_init)
+    source = inspect.getsource(liquid_bridge.step)
+    init_source = inspect.getsource(liquid_solve._run_provenance_init)
     assert "_provenance_init_fusion_frame_enabled" in source
     assert "skip_when_all_tiles_active=pipeline._provenance_init_fusion_frame_enabled" in source
     assert "last_provenance_init_fusion_used" in source

@@ -18,7 +18,7 @@ from oracle_game.sim.gpu_collapse_dirty import (
     ensure_collapse_structure_dirty_tile_queue,
     mark_collapse_structure_dirty_tiles_from_bridge_cell_core,
 )
-from oracle_game.sim.gpu_reactions import (
+from oracle_game.sim.gpu_reactions_resources import (
     FLOW_SOURCE_LAYERS,
     FORMAL_GPU_EMPTY_DEFERRED_BATCH,
     LOCAL_SIZE,

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import statistics
 import sys
@@ -17,6 +18,7 @@ if str(ROOT) not in sys.path:
 
 import moderngl
 
+from oracle_game.engine_config import EngineConfig
 from oracle_game.types import ForceSource, Phase
 from oracle_game.world import WorldEngine
 
@@ -292,21 +294,24 @@ def run_scenario(
     heat_terminal_dirty_publish_fusion: bool | None = None,
     heat_terminal_workgroup16x8: bool | None = None,
 ) -> dict[str, object]:
-    engine = WorldEngine(width=width, height=height, gpu_context=ctx)
+    config_overrides: dict[str, bool] = {}
+    if heat_terminal_phase_fusion is not None:
+        config_overrides["terminal_phase_fusion_enabled"] = bool(heat_terminal_phase_fusion)
+    if heat_terminal_dirty_publish_fusion is not None:
+        config_overrides["terminal_dirty_publish_fusion_enabled"] = bool(
+            heat_terminal_dirty_publish_fusion
+        )
+    if heat_terminal_workgroup16x8 is not None:
+        config_overrides["terminal4x6_workgroup16x8_enabled"] = bool(heat_terminal_workgroup16x8)
+    engine_kwargs: dict[str, object] = {}
+    if config_overrides:
+        engine_kwargs["engine_config"] = dataclasses.replace(EngineConfig(), **config_overrides)
+    engine = WorldEngine(width=width, height=height, gpu_context=ctx, **engine_kwargs)
     try:
         engine.profile_passes_enabled = bool(profile_passes)
         engine.profile_passes_sync = bool(profile_passes_sync)
         heat_solver = getattr(engine, "heat_solver", None)
         heat_pipeline = getattr(heat_solver, "gpu_pipeline", None)
-        if heat_pipeline is not None:
-            if heat_terminal_phase_fusion is not None:
-                heat_pipeline._terminal_phase_fusion_enabled = bool(heat_terminal_phase_fusion)
-            if heat_terminal_dirty_publish_fusion is not None:
-                heat_pipeline._terminal_dirty_publish_fusion_enabled = bool(
-                    heat_terminal_dirty_publish_fusion
-                )
-            if heat_terminal_workgroup16x8 is not None:
-                heat_pipeline._terminal4x6_workgroup16x8_enabled = bool(heat_terminal_workgroup16x8)
         active_heat_terminal_phase_fusion = bool(
             getattr(heat_pipeline, "_terminal_phase_fusion_enabled", False)
         )

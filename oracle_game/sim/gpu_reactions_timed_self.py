@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
-from oracle_game.sim.gpu_reactions import LOCAL_SIZE
+from oracle_game.sim.gpu_reactions_resources import LOCAL_SIZE
 
 
 def _run_timed_self_combined_action_pass(

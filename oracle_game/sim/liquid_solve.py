@@ -7,7 +7,7 @@ import numpy as np
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
-from oracle_game.sim.liquid import LIQUID_SOLVER_TILE_LEVEL
+from oracle_game.sim.liquid_constants import LIQUID_SOLVER_TILE_LEVEL
 from oracle_game.types import Phase
 
 

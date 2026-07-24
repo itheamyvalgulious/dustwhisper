@@ -5,10 +5,10 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
-    from oracle_game.sim.gpu_liquid import GPULiquidResources
+    from oracle_game.sim.gpu_liquid_resources import GPULiquidResources
     from oracle_game.world import WorldEngine
 
-from oracle_game.sim.gpu_liquid import (
+from oracle_game.sim.gpu_liquid_resources import (
     MAX_MATERIALS,
     PASS_LOCAL_SIZE,
     TILE_SIZE,
@@ -68,130 +68,108 @@ def step(
     pipeline.last_provenance_init_fusion_used = False
     pipeline._provenance_init_fusion_frame_enabled = False
     pipeline._seam_x_multirow_frame_rows = 0
-    pipeline._provenance_terminal_frame_enabled = bool(
-        pipeline._provenance_terminal_enabled
-        and formal_gpu_frame
-        and not bool(getattr(world, "phase_c_defer_cell_publish", False))
-        and pipeline._flow_intent_shared_halo_enabled
-        and pipeline._tile_solve_snapshot_output_fusion_enabled
-        and pipeline._tile_solve_bridge_hydration_fusion_enabled
-        and pipeline._compact_tile_solve_snapshot_enabled
-        and pipeline._seam_x_row_leader_enabled
-        and pipeline._seam_y_shared_snapshot_enabled
-        and pipeline._buoyancy_pass_fusion_enabled
-        and pipeline._active_scheduler_gpu_authoritative(world)
-        and {
-            "cell_core",
-            "entity_id",
-            "placeholder_displaced_material",
-        }.issubset(world.bridge.gpu_authoritative_resources)
+    # --- frame gate table ---------------------------------------------------
+    # Each gate below is the declarative conjunction of EngineConfig switches
+    # and frame-derived predicates that authorizes one fused program variant
+    # for this frame.  The all(()) condition lists evaluate the exact same
+    # operands as the historical and-chains (every operand is a pure
+    # predicate), keep the gate names greppable in this orchestrator, and
+    # keep the pass dispatch under the per-function complexity budget.
+    pipeline._provenance_terminal_frame_enabled = all(
+        (
+            pipeline._provenance_terminal_enabled,
+            formal_gpu_frame,
+            not bool(getattr(world, "phase_c_defer_cell_publish", False)),
+            pipeline._flow_intent_shared_halo_enabled,
+            pipeline._tile_solve_snapshot_output_fusion_enabled,
+            pipeline._tile_solve_bridge_hydration_fusion_enabled,
+            pipeline._compact_tile_solve_snapshot_enabled,
+            pipeline._seam_x_row_leader_enabled,
+            pipeline._seam_y_shared_snapshot_enabled,
+            pipeline._buoyancy_pass_fusion_enabled,
+            pipeline._active_scheduler_gpu_authoritative(world),
+            {
+                "cell_core",
+                "entity_id",
+                "placeholder_displaced_material",
+            }.issubset(world.bridge.gpu_authoritative_resources),
+        )
     )
-    pipeline._provenance_init_fusion_frame_enabled = bool(
-        pipeline._provenance_init_fusion_enabled and pipeline._provenance_terminal_frame_enabled
+    pipeline._provenance_init_fusion_frame_enabled = all(
+        (
+            pipeline._provenance_init_fusion_enabled,
+            pipeline._provenance_terminal_frame_enabled,
+        )
     )
     pipeline.last_buoyancy_cleanup_split_fusion_used = False
-    pipeline._buoyancy_cleanup_split_fusion_frame_enabled = bool(
-        pipeline._buoyancy_cleanup_split_fusion_enabled
-        and pipeline._provenance_terminal_frame_enabled
-        and pipeline._buoyancy_pass_fusion_enabled
-        and pipeline._bridge_aux_cleanup_fusion_enabled
-        and pipeline._placeholder_lazy_roles_enabled
-        and {
-            "cell_core",
-            "island_id",
-            "entity_id",
-            "placeholder_displaced_material",
-        }.issubset(world.bridge.gpu_authoritative_resources)
+    pipeline._buoyancy_cleanup_split_fusion_frame_enabled = all(
+        (
+            pipeline._buoyancy_cleanup_split_fusion_enabled,
+            pipeline._provenance_terminal_frame_enabled,
+            pipeline._buoyancy_pass_fusion_enabled,
+            pipeline._bridge_aux_cleanup_fusion_enabled,
+            pipeline._placeholder_lazy_roles_enabled,
+            {
+                "cell_core",
+                "island_id",
+                "entity_id",
+                "placeholder_displaced_material",
+            }.issubset(world.bridge.gpu_authoritative_resources),
+        )
     )
     pipeline.last_buoyancy_snapshot_pre_state_used = False
-    pipeline._buoyancy_snapshot_pre_state_frame_enabled = bool(
-        pipeline._buoyancy_snapshot_pre_state_enabled
-        and pipeline._buoyancy_cleanup_split_fusion_frame_enabled
-        and pipeline._provenance_terminal_frame_enabled
-        and pipeline._tile_solve_snapshot_output_fusion_enabled
-        and pipeline._compact_tile_solve_snapshot_enabled
-        and not pipeline._tile_solve_liquid_kind_cache_enabled
-        and MAX_MATERIALS == 256
-        and TILE_SIZE * TILE_SIZE < 0xFFFF
+    pipeline._buoyancy_snapshot_pre_state_frame_enabled = all(
+        (
+            pipeline._buoyancy_snapshot_pre_state_enabled,
+            pipeline._buoyancy_cleanup_split_fusion_frame_enabled,
+            pipeline._provenance_terminal_frame_enabled,
+            pipeline._tile_solve_snapshot_output_fusion_enabled,
+            pipeline._compact_tile_solve_snapshot_enabled,
+            MAX_MATERIALS == 256,
+            TILE_SIZE * TILE_SIZE < 0xFFFF,
+        )
     )
     pipeline.last_tile_snapshot_state_elision_used = False
-    pipeline._tile_snapshot_state_elision_frame_enabled = bool(
-        pipeline._tile_snapshot_state_elision_enabled
-        and pipeline._buoyancy_snapshot_pre_state_frame_enabled
-        and pipeline._compact_tile_solve_snapshot_enabled
+    pipeline._tile_snapshot_state_elision_frame_enabled = all(
+        (
+            pipeline._tile_snapshot_state_elision_enabled,
+            pipeline._buoyancy_snapshot_pre_state_frame_enabled,
+            pipeline._compact_tile_solve_snapshot_enabled,
+        )
     )
     pipeline.last_buoyancy_shared_sink_cache_used = False
-    pipeline._buoyancy_shared_sink_cache_frame_enabled = bool(
-        pipeline._buoyancy_shared_sink_cache_enabled
-        and formal_gpu_frame
-        and pipeline._buoyancy_snapshot_pre_state_frame_enabled
-        and pipeline._buoyancy_pass_fusion_enabled
-        and pipeline._provenance_terminal_frame_enabled
-        and PASS_LOCAL_SIZE == 8
-    )
-    pipeline.last_provenance_cleanup_terminal_fusion_used = False
-    pipeline._provenance_cleanup_terminal_fusion_frame_enabled = bool(
-        pipeline._provenance_cleanup_terminal_fusion_enabled
-        and not pipeline._buoyancy_cleanup_split_fusion_frame_enabled
-        and pipeline._provenance_terminal_frame_enabled
-        and pipeline._bridge_aux_cleanup_fusion_enabled
-        and pipeline._placeholder_lazy_roles_enabled
-        and {
-            "cell_core",
-            "island_id",
-            "entity_id",
-            "placeholder_displaced_material",
-        }.issubset(world.bridge.gpu_authoritative_resources)
+    pipeline._buoyancy_shared_sink_cache_frame_enabled = all(
+        (
+            pipeline._buoyancy_shared_sink_cache_enabled,
+            formal_gpu_frame,
+            pipeline._buoyancy_snapshot_pre_state_frame_enabled,
+            pipeline._buoyancy_pass_fusion_enabled,
+            pipeline._provenance_terminal_frame_enabled,
+            PASS_LOCAL_SIZE == 8,
+        )
     )
     pipeline.last_buoyancy_blocker_displaced_hydration_used = False
-    pipeline._buoyancy_blocker_displaced_hydration_frame_enabled = bool(
-        pipeline._buoyancy_blocker_displaced_hydration_enabled
-        and pipeline._buoyancy_cleanup_split_fusion_frame_enabled
-        and pipeline._buoyancy_snapshot_pre_state_frame_enabled
-        and pipeline._provenance_terminal_frame_enabled
-        and pipeline._tile_solve_bridge_hydration_fusion_enabled
-        and pipeline._tile_solve_snapshot_output_fusion_enabled
-        and pipeline._compact_tile_solve_snapshot_enabled
-        and pipeline._bridge_aux_cleanup_fusion_enabled
-        and pipeline._placeholder_lazy_roles_enabled
-        and not pipeline._bridge_aux_residency_enabled
-        and {
-            "cell_core",
-            "island_id",
-            "entity_id",
-            "placeholder_displaced_material",
-        }.issubset(world.bridge.gpu_authoritative_resources)
+    pipeline._buoyancy_blocker_displaced_hydration_frame_enabled = all(
+        (
+            pipeline._buoyancy_blocker_displaced_hydration_enabled,
+            pipeline._buoyancy_cleanup_split_fusion_frame_enabled,
+            pipeline._buoyancy_snapshot_pre_state_frame_enabled,
+            pipeline._provenance_terminal_frame_enabled,
+            pipeline._tile_solve_bridge_hydration_fusion_enabled,
+            pipeline._tile_solve_snapshot_output_fusion_enabled,
+            pipeline._compact_tile_solve_snapshot_enabled,
+            pipeline._bridge_aux_cleanup_fusion_enabled,
+            pipeline._placeholder_lazy_roles_enabled,
+            {
+                "cell_core",
+                "island_id",
+                "entity_id",
+                "placeholder_displaced_material",
+            }.issubset(world.bridge.gpu_authoritative_resources),
+        )
     )
     pipeline._blocker_displaced_hydration_frame_enabled = bool(
-        pipeline._provenance_cleanup_terminal_fusion_frame_enabled
-        or pipeline._buoyancy_blocker_displaced_hydration_frame_enabled
-    )
-    pipeline.last_cleanup_flow_fusion_used = False
-    pipeline._cleanup_flow_fusion_frame_enabled = bool(
-        pipeline._cleanup_flow_fusion_enabled
-        and formal_gpu_frame
-        and not bool(getattr(world, "phase_c_defer_cell_publish", False))
-        and not pipeline._provenance_terminal_frame_enabled
-        and pipeline._flow_intent_shared_halo_enabled
-        and pipeline._bridge_aux_cleanup_fusion_enabled
-        and {
-            "cell_core",
-            "island_id",
-            "entity_id",
-            "placeholder_displaced_material",
-        }.issubset(world.bridge.gpu_authoritative_resources)
-    )
-    pipeline.last_flow_active_decay_fusion_used = False
-    pipeline._flow_active_decay_fusion_frame_id = None
-    pipeline._flow_active_decay_fusion_frame_enabled = bool(
-        pipeline._flow_active_decay_fusion_enabled
-        and formal_gpu_frame
-        and not bool(getattr(world, "phase_c_defer_cell_publish", False))
-        and pipeline._flow_intent_shared_halo_enabled
-        and not pipeline._provenance_terminal_frame_enabled
-        and not pipeline._cleanup_flow_fusion_frame_enabled
-        and not pipeline._bridge_aux_residency_enabled
-        and pipeline._active_scheduler_gpu_authoritative(world)
+        pipeline._buoyancy_blocker_displaced_hydration_frame_enabled
     )
     with pipeline._profile_pass(world, "liquid_upload_inputs"):
         pipeline._upload_inputs(world, resources, solve_tile_mask=solve_tile_mask)
@@ -228,106 +206,178 @@ def step(
             resources,
             workgroups_per_tile=pipeline._active_tile_workgroups_per_tile(world),
         )
-    direct_bridge_aux_inputs = bool(
-        formal_gpu_frame
-        and pipeline._bridge_aux_residency_enabled
-        and {"entity_id", "placeholder_displaced_material"}.issubset(
-            world.bridge.gpu_authoritative_resources
+    # --- dispatch plan ------------------------------------------------------
+    # Program names are selected once here; the stage helpers below only
+    # bind, dispatch, and hand off resource roles.
+    seam_y_shared_snapshot = all(
+        (
+            formal_gpu_frame,
+            pipeline._seam_y_shared_snapshot_enabled,
+            pipeline._buoyancy_pass_fusion_enabled,
         )
     )
-    seam_y_shared_snapshot = bool(
-        formal_gpu_frame
-        and pipeline._seam_y_shared_snapshot_enabled
-        and pipeline._buoyancy_pass_fusion_enabled
-    )
-    tile_snapshot_fusion = bool(
-        formal_gpu_frame
-        and pipeline._tile_solve_snapshot_output_fusion_enabled
-        and pipeline._tile_solve_bridge_hydration_fusion_enabled
-        and pipeline._active_scheduler_gpu_authoritative(world)
-        and {
-            "cell_core",
-            "entity_id",
-            "placeholder_displaced_material",
-        }.issubset(world.bridge.gpu_authoritative_resources)
+    tile_snapshot_fusion = all(
+        (
+            formal_gpu_frame,
+            pipeline._tile_solve_snapshot_output_fusion_enabled,
+            pipeline._tile_solve_bridge_hydration_fusion_enabled,
+            pipeline._active_scheduler_gpu_authoritative(world),
+            {
+                "cell_core",
+                "entity_id",
+                "placeholder_displaced_material",
+            }.issubset(world.bridge.gpu_authoritative_resources),
+        )
     )
     requested_seam_rows = int(pipeline._seam_x_multirow_rows)
     pipeline._seam_x_multirow_frame_rows = (
         requested_seam_rows
-        if requested_seam_rows == 4
-        and tile_snapshot_fusion
-        and pipeline._seam_x_row_leader_enabled
-        and pipeline.tile_solve_warp_fast_path
-        and int(world.active.tile_size) == TILE_SIZE
+        if all(
+            (
+                requested_seam_rows == 4,
+                tile_snapshot_fusion,
+                pipeline._seam_x_row_leader_enabled,
+                pipeline.tile_solve_warp_fast_path,
+                int(world.active.tile_size) == TILE_SIZE,
+            )
+        )
         else 0
     )
+    seam_x_program = "seam_x"
+    if tile_snapshot_fusion:
+        if pipeline._seam_x_multirow_frame_rows == 4:
+            seam_x_program = (
+                "seam_x_snapshot_row_leader4_provenance"
+                if pipeline._provenance_terminal_frame_enabled
+                else "seam_x_snapshot_row_leader4"
+            )
+        elif pipeline._seam_x_row_leader_enabled:
+            seam_x_program = (
+                "seam_x_snapshot_row_leader_provenance"
+                if pipeline._provenance_terminal_frame_enabled
+                else "seam_x_snapshot_row_leader"
+            )
+        else:
+            seam_x_program = "seam_x_snapshot"
+        if pipeline._buoyancy_snapshot_pre_state_frame_enabled:
+            if not pipeline._provenance_terminal_frame_enabled:
+                raise RuntimeError("liquid snapshot pre-state requires provenance seam")
+            seam_x_program += "_snapshot_pre"
+            if pipeline._tile_snapshot_state_elision_frame_enabled:
+                seam_x_program += "_state_elided"
+    buoyancy_program = (
+        (
+            "buoyancy_fused_provenance_cleanup_snapshot_pre"
+            if pipeline._buoyancy_snapshot_pre_state_frame_enabled
+            else "buoyancy_fused_provenance_cleanup"
+            if pipeline._buoyancy_cleanup_split_fusion_frame_enabled
+            else "buoyancy_fused_provenance"
+            if pipeline._provenance_terminal_frame_enabled
+            else "buoyancy_fused"
+        )
+        + ("_state_elided" if pipeline._tile_snapshot_state_elision_frame_enabled else "")
+        + ("_shared_sink" if pipeline._buoyancy_shared_sink_cache_frame_enabled else "")
+    )
+    _run_seam_stages(
+        pipeline,
+        world,
+        resources,
+        formal_gpu_frame=formal_gpu_frame,
+        tile_snapshot_fusion=tile_snapshot_fusion,
+        seam_y_shared_snapshot=seam_y_shared_snapshot,
+        seam_x_program=seam_x_program,
+    )
+    _run_buoyancy_stages(
+        pipeline,
+        world,
+        resources,
+        seam_y_shared_snapshot=seam_y_shared_snapshot,
+        buoyancy_program=buoyancy_program,
+    )
+    if pipeline._buoyancy_pass_fusion_enabled and pipeline._provenance_terminal_frame_enabled:
+        resources.provenance_in, resources.provenance_out = (
+            resources.provenance_out,
+            resources.provenance_in,
+        )
+    _run_placeholder_stages(pipeline, world, resources, formal_gpu_frame=formal_gpu_frame)
+    if pipeline._buoyancy_cleanup_split_fusion_frame_enabled:
+        with pipeline._profile_pass(world, "liquid_cleanup_placeholder_affected"):
+            pipeline._run_cleanup_runtime(
+                world,
+                resources,
+                affected_tile_dispatch=True,
+                restore_bridge_aux_values=True,
+            )
+        pipeline.last_buoyancy_cleanup_split_fusion_used = True
+    else:
+        with pipeline._profile_pass(world, "liquid_cleanup_runtime"):
+            pipeline._run_cleanup_runtime(world, resources)
+    _run_flow_stages(pipeline, world, resources, formal_gpu_frame=formal_gpu_frame)
+    if formal_gpu_frame:
+        with pipeline._profile_pass(world, "liquid_refresh_active_scheduler"):
+            pipeline._refresh_active_scheduler_from_ttl(world)
+    else:
+        with pipeline._profile_pass(world, "liquid_publish_bridge"):
+            pipeline._publish_bridge_outputs(world, resources)
+    pipeline.last_cpu_mirror_downloaded = not formal_gpu_frame
+    if pipeline.last_cpu_mirror_downloaded:
+        ctx.finish()
+        pipeline._download_outputs(world, resources, use_in=True)
+
+
+def _core_state_in_set(resources: GPULiquidResources) -> tuple:
+    return (
+        resources.cell_state_in,
+        resources.timer_in,
+        resources.temp_in,
+        resources.integrity_in,
+        resources.velocity_in,
+    )
+
+
+def _core_state_out_set(resources: GPULiquidResources) -> tuple:
+    return (
+        resources.cell_state_out,
+        resources.timer_out,
+        resources.temp_out,
+        resources.integrity_out,
+        resources.velocity_out,
+    )
+
+
+def _run_seam_stages(
+    pipeline,
+    world: "WorldEngine",
+    resources: GPULiquidResources,
+    *,
+    formal_gpu_frame: bool,
+    tile_snapshot_fusion: bool,
+    seam_y_shared_snapshot: bool,
+    seam_x_program: str,
+) -> None:
     if formal_gpu_frame:
         if not tile_snapshot_fusion:
             with pipeline._profile_pass(world, "liquid_copy_tile_solve"):
                 pipeline._run_copy_core_state(
                     world,
                     resources,
-                    (
-                        resources.cell_state_out,
-                        resources.timer_out,
-                        resources.temp_out,
-                        resources.integrity_out,
-                        resources.velocity_out,
-                    ),
-                    (
-                        resources.cell_state_in,
-                        resources.timer_in,
-                        resources.temp_in,
-                        resources.integrity_in,
-                        resources.velocity_in,
-                    ),
+                    _core_state_out_set(resources),
+                    _core_state_in_set(resources),
                 )
         with pipeline._profile_pass(world, "liquid_build_seam_x_boundaries"):
             pipeline._build_seam_boundary_dispatch(world, resources, axis="x")
         with pipeline._profile_pass(world, "liquid_prefetch_seam_x_boundaries"):
             pipeline._prefetch_seam_boundary_bridge_inputs(world, resources, axis="x")
     with pipeline._profile_pass(world, "liquid_seam_x"):
-        seam_x_program = "seam_x"
-        if tile_snapshot_fusion:
-            if pipeline._seam_x_multirow_frame_rows == 4:
-                seam_x_program = (
-                    "seam_x_snapshot_row_leader4_provenance"
-                    if pipeline._provenance_terminal_frame_enabled
-                    else "seam_x_snapshot_row_leader4"
-                )
-            elif pipeline._seam_x_row_leader_enabled:
-                seam_x_program = (
-                    "seam_x_snapshot_row_leader_provenance"
-                    if pipeline._provenance_terminal_frame_enabled
-                    else "seam_x_snapshot_row_leader"
-                )
-            else:
-                seam_x_program = "seam_x_snapshot"
-            if pipeline._buoyancy_snapshot_pre_state_frame_enabled:
-                if not pipeline._provenance_terminal_frame_enabled:
-                    raise RuntimeError("liquid snapshot pre-state requires provenance seam")
-                seam_x_program += "_snapshot_pre"
-                if pipeline._tile_snapshot_state_elision_frame_enabled:
-                    seam_x_program += "_state_elided"
-        elif direct_bridge_aux_inputs:
-            seam_x_program = "seam_x_bridge_aux"
         pipeline._run_seam_pass(
             seam_x_program,
             world,
             (
-                resources.cell_state_in if tile_snapshot_fusion else resources.cell_state_out,
-                resources.timer_in if tile_snapshot_fusion else resources.timer_out,
-                resources.temp_in if tile_snapshot_fusion else resources.temp_out,
-                resources.integrity_in if tile_snapshot_fusion else resources.integrity_out,
-                resources.velocity_in if tile_snapshot_fusion else resources.velocity_out,
+                _core_state_in_set(resources)
+                if tile_snapshot_fusion
+                else _core_state_out_set(resources)
             ),
-            (
-                resources.cell_state_in,
-                resources.timer_in,
-                resources.temp_in,
-                resources.integrity_in,
-                resources.velocity_in,
-            ),
+            _core_state_in_set(resources),
             resources.active_tile_tex,
             boundary_dispatch=formal_gpu_frame,
         )
@@ -339,54 +389,24 @@ def step(
                 pipeline._run_copy_core_state(
                     world,
                     resources,
-                    (
-                        resources.cell_state_in,
-                        resources.timer_in,
-                        resources.temp_in,
-                        resources.integrity_in,
-                        resources.velocity_in,
-                    ),
-                    (
-                        resources.cell_state_out,
-                        resources.timer_out,
-                        resources.temp_out,
-                        resources.integrity_out,
-                        resources.velocity_out,
-                    ),
+                    _core_state_in_set(resources),
+                    _core_state_out_set(resources),
                 )
         with pipeline._profile_pass(world, "liquid_build_seam_y_boundaries"):
             pipeline._build_seam_boundary_dispatch(world, resources, axis="y")
         with pipeline._profile_pass(world, "liquid_prefetch_seam_y_boundaries"):
             pipeline._prefetch_seam_boundary_bridge_inputs(world, resources, axis="y")
     with pipeline._profile_pass(world, "liquid_seam_y"):
-        seam_y_read_resources = (
-            resources.cell_state_in,
-            resources.timer_in,
-            resources.temp_in,
-            resources.integrity_in,
-            resources.velocity_in,
-        )
+        seam_y_read_resources = _core_state_in_set(resources)
         seam_y_write_resources = (
-            seam_y_read_resources
-            if seam_y_shared_snapshot
-            else (
-                resources.cell_state_out,
-                resources.timer_out,
-                resources.temp_out,
-                resources.integrity_out,
-                resources.velocity_out,
-            )
+            seam_y_read_resources if seam_y_shared_snapshot else _core_state_out_set(resources)
         )
         pipeline._run_seam_pass(
             (
                 "seam_y_shared_snapshot_provenance_aux"
                 if pipeline._provenance_terminal_frame_enabled
-                else "seam_y_shared_snapshot_aux"
-                if seam_y_shared_snapshot and direct_bridge_aux_inputs
                 else "seam_y_shared_snapshot"
                 if seam_y_shared_snapshot
-                else "seam_y_bridge_aux"
-                if direct_bridge_aux_inputs
                 else "seam_y"
             ),
             world,
@@ -398,54 +418,30 @@ def step(
     if formal_gpu_frame:
         with pipeline._profile_pass(world, "liquid_reload_seam_y_active_tiles"):
             pipeline._reload_and_compact_active_cell_tiles(world, resources)
+
+
+def _run_buoyancy_stages(
+    pipeline,
+    world: "WorldEngine",
+    resources: GPULiquidResources,
+    *,
+    seam_y_shared_snapshot: bool,
+    buoyancy_program: str,
+) -> None:
     if pipeline._buoyancy_pass_fusion_enabled:
         buoyancy_read_resources = (
-            (
-                resources.cell_state_in,
-                resources.timer_in,
-                resources.temp_in,
-                resources.integrity_in,
-                resources.velocity_in,
-            )
+            _core_state_in_set(resources)
             if seam_y_shared_snapshot
-            else (
-                resources.cell_state_out,
-                resources.timer_out,
-                resources.temp_out,
-                resources.integrity_out,
-                resources.velocity_out,
-            )
+            else _core_state_out_set(resources)
         )
         buoyancy_write_resources = (
-            (
-                resources.cell_state_out,
-                resources.timer_out,
-                resources.temp_out,
-                resources.integrity_out,
-                resources.velocity_out,
-            )
+            _core_state_out_set(resources)
             if seam_y_shared_snapshot
-            else (
-                resources.cell_state_in,
-                resources.timer_in,
-                resources.temp_in,
-                resources.integrity_in,
-                resources.velocity_in,
-            )
+            else _core_state_in_set(resources)
         )
         with pipeline._profile_pass(world, "liquid_buoyancy_fused"):
             pipeline._run_buoyancy_pass(
-                (
-                    "buoyancy_fused_provenance_cleanup_snapshot_pre"
-                    if pipeline._buoyancy_snapshot_pre_state_frame_enabled
-                    else "buoyancy_fused_provenance_cleanup"
-                    if pipeline._buoyancy_cleanup_split_fusion_frame_enabled
-                    else "buoyancy_fused_provenance"
-                    if pipeline._provenance_terminal_frame_enabled
-                    else "buoyancy_fused"
-                )
-                + ("_state_elided" if pipeline._tile_snapshot_state_elision_frame_enabled else "")
-                + ("_shared_sink" if pipeline._buoyancy_shared_sink_cache_frame_enabled else ""),
+                buoyancy_program,
                 world,
                 resources,
                 buoyancy_read_resources,
@@ -463,11 +459,6 @@ def step(
         pipeline.last_buoyancy_shared_sink_cache_used = bool(
             pipeline._buoyancy_shared_sink_cache_frame_enabled
         )
-        if pipeline._provenance_terminal_frame_enabled:
-            resources.provenance_in, resources.provenance_out = (
-                resources.provenance_out,
-                resources.provenance_in,
-            )
         # The fused pass produces the same final role as float without writing
         # an intermediate texture set. Keep all downstream role assumptions.
         if not seam_y_shared_snapshot:
@@ -491,41 +482,26 @@ def step(
                 "buoyancy_sink",
                 world,
                 resources,
-                (
-                    resources.cell_state_out,
-                    resources.timer_out,
-                    resources.temp_out,
-                    resources.integrity_out,
-                    resources.velocity_out,
-                ),
-                (
-                    resources.cell_state_in,
-                    resources.timer_in,
-                    resources.temp_in,
-                    resources.integrity_in,
-                    resources.velocity_in,
-                ),
+                _core_state_out_set(resources),
+                _core_state_in_set(resources),
             )
         with pipeline._profile_pass(world, "liquid_buoyancy_float"):
             pipeline._run_buoyancy_pass(
                 "buoyancy_float",
                 world,
                 resources,
-                (
-                    resources.cell_state_in,
-                    resources.timer_in,
-                    resources.temp_in,
-                    resources.integrity_in,
-                    resources.velocity_in,
-                ),
-                (
-                    resources.cell_state_out,
-                    resources.timer_out,
-                    resources.temp_out,
-                    resources.integrity_out,
-                    resources.velocity_out,
-                ),
+                _core_state_in_set(resources),
+                _core_state_out_set(resources),
             )
+
+
+def _run_placeholder_stages(
+    pipeline,
+    world: "WorldEngine",
+    resources: GPULiquidResources,
+    *,
+    formal_gpu_frame: bool,
+) -> None:
     lazy_placeholder_roles = bool(formal_gpu_frame and pipeline._placeholder_lazy_roles_enabled)
     if lazy_placeholder_roles:
         with pipeline._profile_pass(world, "liquid_build_placeholder_affected_tiles"):
@@ -539,20 +515,8 @@ def step(
         pipeline._run_copy_for_placeholder(
             world,
             resources,
-            (
-                resources.cell_state_out,
-                resources.timer_out,
-                resources.temp_out,
-                resources.integrity_out,
-                resources.velocity_out,
-            ),
-            (
-                resources.cell_state_in,
-                resources.timer_in,
-                resources.temp_in,
-                resources.integrity_in,
-                resources.velocity_in,
-            ),
+            _core_state_out_set(resources),
+            _core_state_in_set(resources),
             resources.displaced_in,
             resources.displaced_out,
             affected_tile_dispatch=lazy_placeholder_roles,
@@ -561,37 +525,21 @@ def step(
         pipeline._run_placeholder_displacement(
             world,
             resources,
-            (
-                resources.cell_state_out,
-                resources.timer_out,
-                resources.temp_out,
-                resources.integrity_out,
-                resources.velocity_out,
-            ),
-            (
-                resources.cell_state_in,
-                resources.timer_in,
-                resources.temp_in,
-                resources.integrity_in,
-                resources.velocity_in,
-            ),
+            _core_state_out_set(resources),
+            _core_state_in_set(resources),
             resources.displaced_in,
             resources.displaced_out,
             affected_dispatch_prepared=lazy_placeholder_roles,
         )
-    if not pipeline._cleanup_flow_fusion_frame_enabled:
-        if pipeline._buoyancy_cleanup_split_fusion_frame_enabled:
-            with pipeline._profile_pass(world, "liquid_cleanup_placeholder_affected"):
-                pipeline._run_cleanup_runtime(
-                    world,
-                    resources,
-                    affected_tile_dispatch=True,
-                    restore_bridge_aux_values=True,
-                )
-            pipeline.last_buoyancy_cleanup_split_fusion_used = True
-        elif not pipeline._provenance_cleanup_terminal_fusion_frame_enabled:
-            with pipeline._profile_pass(world, "liquid_cleanup_runtime"):
-                pipeline._run_cleanup_runtime(world, resources)
+
+
+def _run_flow_stages(
+    pipeline,
+    world: "WorldEngine",
+    resources: GPULiquidResources,
+    *,
+    formal_gpu_frame: bool,
+) -> None:
     if pipeline._active_scheduler_gpu_authoritative(world):
         with pipeline._profile_pass(world, "liquid_reload_flow_active_mask"):
             pipeline._load_authoritative_active_tile_mask(world, resources, expansion_radius=0)
@@ -607,16 +555,6 @@ def step(
             resources,
             publish_bridge_outputs=formal_gpu_frame,
         )
-    if formal_gpu_frame:
-        with pipeline._profile_pass(world, "liquid_refresh_active_scheduler"):
-            pipeline._refresh_active_scheduler_from_ttl(world)
-    else:
-        with pipeline._profile_pass(world, "liquid_publish_bridge"):
-            pipeline._publish_bridge_outputs(world, resources)
-    pipeline.last_cpu_mirror_downloaded = not formal_gpu_frame
-    if pipeline.last_cpu_mirror_downloaded:
-        ctx.finish()
-        pipeline._download_outputs(world, resources, use_in=True)
 
 
 def prepare_motion_flow_intent(
@@ -745,20 +683,8 @@ def _load_authoritative_bridge_inputs(
     blocker_mask_inputs = bool(
         pipeline._blocker_displaced_hydration_frame_enabled and copy_entity_id and copy_displaced
     )
-    direct_bridge_aux_inputs = bool(
-        copy_cell_core
-        and pipeline._tile_solve_bridge_hydration_fusion_enabled
-        and pipeline._bridge_aux_residency_enabled
-        and {"island_id", "entity_id", "placeholder_displaced_material"}.issubset(authoritative)
-    )
-    skip_island_hydration = bool(
-        copy_cell_core
-        and pipeline._tile_solve_bridge_hydration_fusion_enabled
-        and pipeline._cleanup_bridge_island_residency_enabled
-        and pipeline._bridge_aux_cleanup_fusion_enabled
-        and not direct_bridge_aux_inputs
-        and "island_id" in authoritative
-    )
+    direct_bridge_aux_inputs = False
+    skip_island_hydration = False
     copy_island_id = bool(copy_island_id and not (skip_island_hydration or blocker_mask_inputs))
     hydrate_island_id = bool(copy_island_id and not direct_bridge_aux_inputs)
     copy_entity_id = bool(copy_entity_id and not (direct_bridge_aux_inputs or blocker_mask_inputs))
@@ -886,26 +812,10 @@ def _load_authoritative_bridge_flow_intent_inputs(
         return
     bridge = world.bridge
     authoritative = bridge.gpu_authoritative_resources
-    direct_flow_inputs = bool(
-        pipeline._flow_intent_bridge_residency_enabled
-        and {
-            "cell_core",
-            "entity_id",
-            "placeholder_displaced_material",
-        }.issubset(authoritative)
-    )
-    if direct_flow_inputs:
-        # The pre-motion flow-intent shader reads the authoritative bridge
-        # buffers directly. The caller still compacts active tiles before the
-        # dispatch, so no texture hydration is needed here.
-        return
     copy_cell_core = "cell_core" in authoritative
     copy_entity_id = "entity_id" in authoritative
     copy_displaced = "placeholder_displaced_material" in authoritative
-    direct_bridge_aux_inputs = bool(
-        pipeline._bridge_aux_residency_enabled
-        and {"entity_id", "placeholder_displaced_material"}.issubset(authoritative)
-    )
+    direct_bridge_aux_inputs = False
     copy_entity_id = bool(copy_entity_id and not direct_bridge_aux_inputs)
     copy_displaced = bool(copy_displaced and not direct_bridge_aux_inputs)
     if not (copy_cell_core or copy_entity_id or copy_displaced):
@@ -1013,68 +923,23 @@ def _run_liquid_intent_pass(
         and pipeline._provenance_terminal_frame_enabled
         and not bool(getattr(world, "phase_c_defer_cell_publish", False))
     )
-    provenance_cleanup_terminal = bool(
-        provenance_terminal and pipeline._provenance_cleanup_terminal_fusion_frame_enabled
-    )
-    cleanup_flow_fusion = bool(
-        publish_bridge_outputs and pipeline._cleanup_flow_fusion_frame_enabled
-    )
-    active_decay_fusion = bool(
-        publish_bridge_outputs and pipeline._flow_active_decay_fusion_frame_enabled
-    )
-    direct_flow_inputs = bool(
-        pipeline._formal_gpu_frame(world)
-        and not publish_bridge_outputs
-        and pipeline._flow_intent_bridge_residency_enabled
-        and {
-            "cell_core",
-            "entity_id",
-            "placeholder_displaced_material",
-        }.issubset(world.bridge.gpu_authoritative_resources)
-    )
-    direct_bridge_aux_inputs = bool(
-        pipeline._formal_gpu_frame(world)
-        and pipeline._bridge_aux_residency_enabled
-        and {"entity_id", "placeholder_displaced_material"}.issubset(
-            world.bridge.gpu_authoritative_resources
-        )
-    )
     if provenance_terminal:
         # The terminal gather must see authoritative entity/displaced halo
         # values even when the broad aux-residency candidate is disabled.
         program_name = (
-            "liquid_flow_intent_shared_halo_provenance_cleanup_bridge_aux"
-            if provenance_cleanup_terminal
-            else "liquid_flow_intent_shared_halo_provenance_shared_meta_lazy_aux"
+            "liquid_flow_intent_shared_halo_provenance_shared_meta_lazy_aux"
             if (
                 pipeline._flow_intent_provenance_shared_meta_cache_enabled
                 and pipeline._flow_intent_provenance_lazy_aux_enabled
             )
             else "liquid_flow_intent_shared_halo_provenance_shared_meta"
             if pipeline._flow_intent_provenance_shared_meta_cache_enabled
-            else "liquid_flow_intent_shared_halo_provenance_mask_cache"
-            if pipeline._flow_intent_active_mask_cache_enabled
             else "liquid_flow_intent_shared_halo_provenance_bridge_aux"
         )
-    elif cleanup_flow_fusion:
-        program_name = "liquid_flow_intent_shared_halo_cleanup"
-    elif active_decay_fusion:
-        program_name = "liquid_flow_intent_shared_halo_active_decay"
     elif pipeline._flow_intent_shared_halo_enabled:
-        if direct_flow_inputs:
-            program_name = "liquid_flow_intent_shared_halo_resident"
-        elif direct_bridge_aux_inputs:
-            program_name = "liquid_flow_intent_shared_halo_bridge_aux"
-        else:
-            program_name = "liquid_flow_intent_shared_halo"
+        program_name = "liquid_flow_intent_shared_halo"
     else:
-        program_name = (
-            "liquid_flow_intent_resident"
-            if direct_flow_inputs
-            else "liquid_flow_intent_bridge_aux"
-            if direct_bridge_aux_inputs
-            else "liquid_flow_intent"
-        )
+        program_name = "liquid_flow_intent"
     program = pipeline.programs[program_name]
     ctx = world.bridge.ctx
     assert ctx is not None
@@ -1098,7 +963,7 @@ def _run_liquid_intent_pass(
         and not (pipeline._formal_gpu_frame(world) and pipeline._bridge_aux_cleanup_fusion_enabled)
     )
     program["write_cell_core"].value = not bool(getattr(world, "phase_c_defer_cell_publish", False))
-    program["resident_hydrate_inputs"].value = bool(direct_flow_inputs)
+    program["resident_hydrate_inputs"].value = False
     split_placeholder_roles = bool(
         publish_bridge_outputs and pipeline._placeholder_lazy_roles_enabled
     )
@@ -1121,11 +986,6 @@ def _run_liquid_intent_pass(
     resources.active_tile_tex.use(location=3)
     resources.entity_in.use(location=4)
     resources.displaced_in.use(location=5)
-    if cleanup_flow_fusion or provenance_cleanup_terminal:
-        resources.displaced_out.use(location=6)
-    if cleanup_flow_fusion:
-        resources.entity_in.bind_to_image(4, read=False, write=True)
-        resources.island_in.bind_to_image(6, read=False, write=True)
     resources.timer_in.use(location=7)
     resources.temp_in.use(location=8)
     resources.integrity_in.use(location=9)
@@ -1139,14 +999,7 @@ def _run_liquid_intent_pass(
     resources.active_tile_count.bind_to_storage_buffer(binding=1)
     resources.active_tile_list.bind_to_storage_buffer(binding=2)
     resources.affected_tile_flags.bind_to_storage_buffer(binding=7)
-    if active_decay_fusion:
-        world.bridge.buffers["active_tile_ttl"].bind_to_storage_buffer(binding=11)
     target_texture.bind_to_image(0, read=False, write=True)
-    if direct_flow_inputs:
-        resources.cell_state_in.bind_to_image(2, read=False, write=True)
-        resources.velocity_in.bind_to_image(3, read=False, write=True)
-        resources.entity_in.bind_to_image(4, read=False, write=True)
-        resources.displaced_in.bind_to_image(5, read=False, write=True)
     if publish_bridge_outputs:
         bridge = world.bridge
         bridge.buffers["cell_core"].bind_to_storage_buffer(binding=3)
@@ -1154,16 +1007,6 @@ def _run_liquid_intent_pass(
         bridge.buffers["entity_id"].bind_to_storage_buffer(binding=5)
         bridge.buffers["placeholder_displaced_material"].bind_to_storage_buffer(binding=6)
         bridge.textures["material"].bind_to_image(1, read=False, write=True)
-    elif direct_flow_inputs:
-        bridge = world.bridge
-        bridge.buffers["cell_core"].bind_to_storage_buffer(binding=3)
-        bridge.buffers["entity_id"].bind_to_storage_buffer(binding=5)
-        bridge.buffers["placeholder_displaced_material"].bind_to_storage_buffer(binding=6)
-    elif direct_bridge_aux_inputs:
-        bridge = world.bridge
-        bridge.buffers["island_id"].bind_to_storage_buffer(binding=4)
-        bridge.buffers["entity_id"].bind_to_storage_buffer(binding=5)
-        bridge.buffers["placeholder_displaced_material"].bind_to_storage_buffer(binding=6)
     if provenance_terminal:
         bridge.ensure_cell_core_spare(world)
         if bridge.cell_core_spare is None:
@@ -1198,14 +1041,6 @@ def _run_liquid_intent_pass(
                 )
             bridge.buffers["cell_core"], bridge.cell_core_spare = spare, live
             pipeline.last_provenance_terminal_used = True
-        if provenance_cleanup_terminal:
-            pipeline.last_provenance_cleanup_terminal_fusion_used = True
-        if cleanup_flow_fusion:
-            pipeline.last_cleanup_flow_fusion_used = True
-        if active_decay_fusion:
-            world.bridge.mark_gpu_authoritative("active_tile_ttl")
-            pipeline.last_flow_active_decay_fusion_used = True
-            pipeline._flow_active_decay_fusion_frame_id = int(getattr(world, "frame_id", 0))
 
 
 def _download_outputs(

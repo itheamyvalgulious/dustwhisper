@@ -5,6 +5,7 @@ import inspect
 import numpy as np
 import pytest
 
+from oracle_game.sim import gpu_heat_stages as heat_stages
 from oracle_game.sim.gpu_collapse_dirty import (
     COLLAPSE_STRUCTURE_DIRTY_TILE_COUNT_BUFFER,
     COLLAPSE_STRUCTURE_DIRTY_TILE_DISPATCH_ARGS_BUFFER,
@@ -30,37 +31,28 @@ def test_heat_terminal4x6_is_default_enabled() -> None:
     assert pipeline._terminal_dead_condense_target_store_elision_enabled is True
     assert pipeline._terminal_inplace_sparse_write_enabled is True
     assert pipeline._terminal_sparse_resident_specialization_enabled is True
-    assert pipeline._deferred_dirty_publish_handoff_enabled is False
 
 
 def test_heat_terminal4x6_has_strict_formal_dispatch_gate() -> None:
-    source = inspect.getsource(GPUHeatPipeline.step)
-    assert "pipeline._terminal4x6_fusion_enabled" in source
-    assert "and fuse_condense_apply_gas" in source
-    assert "int(world.gas_width) == (int(world.width) + 3) // 4" in source
-    assert "int(world.gas_height) == (int(world.height) + 3) // 4" in source
-    assert "if fuse_terminal4x6:" in source
+    source = inspect.getsource(heat_stages.step)
+    plan_source = inspect.getsource(heat_stages._resolve_terminal_fusion_plan)
+    dirty_source = inspect.getsource(heat_stages._prepare_terminal_dirty_resources)
+    assert "pipeline._terminal4x6_fusion_enabled" in plan_source
+    assert "and fuse_condense_apply_gas" in plan_source
+    assert "int(world.gas_width) == (int(world.width) + 3) // 4" in plan_source
+    assert "int(world.gas_height) == (int(world.height) + 3) // 4" in plan_source
+    assert "if terminal_plan.fuse_terminal4x6:" in source
     assert "pipeline._run_apply_terminal4x6" in source
-    assert "pipeline._terminal_phase_fusion_enabled" in source
-    assert "pipeline._terminal_dirty_publish_fusion_enabled" in source
+    assert "pipeline._terminal_phase_fusion_enabled" in plan_source
+    assert "pipeline._terminal_dirty_publish_fusion_enabled" in plan_source
     assert "and deferred_cell_core" in source
-    assert 'getattr(world, "heat_motion_handoff_active", False)' in source
-    assert '"placeholder_displaced_material"' in source
-    assert "_active_scheduler_gpu_authoritative(world)" in source
-    assert "ensure_collapse_structure_dirty_tile_mask(world)" in source
-    assert "ensure_collapse_structure_dirty_tile_queue(world)" in source
+    assert 'getattr(world, "heat_motion_handoff_active", False)' in plan_source
+    assert '"placeholder_displaced_material"' in plan_source
+    assert "_active_scheduler_gpu_authoritative(world)" in plan_source
+    assert "ensure_collapse_structure_dirty_tile_mask(world)" in dirty_source
+    assert "ensure_collapse_structure_dirty_tile_queue(world)" in dirty_source
     assert "if not terminal_phase_fusion:" in source
     assert "skip_cell=terminal_dirty_publish_fusion" in source
-
-
-def test_heat_deferred_dirty_publish_requires_motion_dirty_handoff() -> None:
-    source = inspect.getsource(GPUHeatPipeline._publish_bridge_outputs)
-    assert "pipeline._deferred_dirty_publish_handoff_enabled" in source
-    assert "defer_cell_core" in source
-    assert 'getattr(motion_pipeline, "can_consume_deferred_heat_core", None)' in source
-    assert "and can_consume_deferred(world)" in source
-    assert "skip_cell_publish = bool(skip_cell or defer_dirty_publish_to_handoff)" in source
-    assert "publish_bridge_outputs.cell_deferred_to_handoff" in source
 
 
 def test_heat_terminal4x6_preserves_row_major_condense_and_aux_integrity() -> None:
@@ -122,7 +114,7 @@ def test_heat_terminal_sparse_resident_path_is_compile_specialized() -> None:
 
 
 def test_heat_terminal_sparse_resident_specialization_has_strict_gate() -> None:
-    source = inspect.getsource(GPUHeatPipeline._run_apply_terminal4x6)
+    source = inspect.getsource(heat_stages._run_apply_terminal4x6)
     assert "pipeline._terminal_sparse_resident_specialization_enabled" in source
     assert "and pipeline._formal_gpu_frame(world)" in source
     assert "and bridge_aux_resident" in source

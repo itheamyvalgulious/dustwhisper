@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -8,13 +9,70 @@ if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
 from oracle_game.sim.gpu_base import release_resource_fields
-from oracle_game.sim.gpu_heat import (
-    LOCAL_SIZE,
-    MAX_GAS_SPECIES,
-    MAX_MATERIALS,
-    GPUHeatResources,
-)
 from oracle_game.sim.gpu_timer_pack import pack_cell_state, pack_u8x4
+
+LOCAL_SIZE = 8
+MAX_MATERIALS = 256
+MAX_GAS_SPECIES = 256
+FREEZE_COLD_NEIGHBOR_THRESHOLD = 4
+
+
+@dataclass(slots=True)
+class GPUHeatResources:
+    signature: tuple[int, int, int, int, int]
+    cell_state_tex: Any
+    cell_state_out_tex: Any
+    timer_tex: Any
+    timer_out_tex: Any
+    integrity_tex: Any
+    integrity_out_tex: Any
+    island_id_tex: Any
+    island_id_out_tex: Any
+    entity_id_tex: Any
+    entity_id_out_tex: Any
+    displaced_tex: Any
+    displaced_out_tex: Any
+    velocity_tex: Any
+    velocity_out_tex: Any
+    temp_ping: Any
+    temp_pong: Any
+    phase_target_tex: Any
+    boil_target_tex: Any
+    gas_tex: Any
+    gas_out_tex: Any
+    condense_target_tex: Any
+    ambient_ping: Any
+    ambient_pong: Any
+    active_tile_tex: Any
+    material_params: Any
+    material_response_params: Any
+    material_phase_params: Any
+    gas_params: Any
+    material_params_signature: tuple[int, int] | None = None
+    gas_params_signature: tuple[int, int] | None = None
+
+
+@dataclass(slots=True)
+class GPUHeatStageTargets:
+    phase_targets: np.ndarray
+    boil_targets: np.ndarray
+    condense_targets: np.ndarray
+
+    @property
+    def empty(self) -> bool:
+        return (
+            self.phase_targets.size == 0
+            and self.boil_targets.size == 0
+            and self.condense_targets.size == 0
+        )
+
+    @classmethod
+    def empty_sentinel(cls) -> "GPUHeatStageTargets":
+        return cls(
+            phase_targets=np.zeros((0, 0), dtype=np.int32),
+            boil_targets=np.zeros((0, 0), dtype=np.int32),
+            condense_targets=np.zeros((0, 0, 0), dtype=np.bool_),
+        )
 
 
 def release(pipeline) -> None:

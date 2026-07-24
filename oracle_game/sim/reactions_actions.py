@@ -21,7 +21,7 @@ from oracle_game.sim.gpu_reactions import (
     TYPE_MODIFY_GAS,
     TYPE_MODIFY_TEMPERATURE,
 )
-from oracle_game.sim.reactions import REACTION_FLOW_SOURCE_LIFETIME
+from oracle_game.sim.reactions_constants import REACTION_FLOW_SOURCE_LIFETIME
 from oracle_game.types import CellFlag, ForceSource, ReactionType
 
 

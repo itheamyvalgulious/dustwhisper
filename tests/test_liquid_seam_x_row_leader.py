@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import inspect
 
+from oracle_game.sim import gpu_liquid_bridge as liquid_bridge
+from oracle_game.sim import gpu_liquid_solve as liquid_solve
 from oracle_game.sim.gpu_liquid import _SHADER_SUBS, GPULiquidPipeline
 from oracle_game.sim.shader_loader import shader_source
 
@@ -64,7 +66,7 @@ def test_liquid_seam_x_multirow_specialization_packs_four_independent_row_warps(
 
 
 def test_liquid_step_keeps_control_fallback() -> None:
-    source = inspect.getsource(GPULiquidPipeline.step)
+    source = inspect.getsource(liquid_bridge.step)
     assert "_seam_x_multirow_frame_rows" in source
     assert "requested_seam_rows == 4" in source
     assert '"seam_x_snapshot_row_leader"' in source
@@ -72,8 +74,8 @@ def test_liquid_step_keeps_control_fallback() -> None:
 
 
 def test_liquid_seam_x_multirow_keeps_prefetch_on_canonical_flat_dispatch() -> None:
-    build_source = inspect.getsource(GPULiquidPipeline._build_seam_boundary_dispatch)
-    prefetch_source = inspect.getsource(GPULiquidPipeline._prefetch_seam_boundary_bridge_inputs)
+    build_source = inspect.getsource(liquid_solve._build_seam_boundary_dispatch)
+    prefetch_source = inspect.getsource(liquid_solve._prefetch_seam_boundary_bridge_inputs)
     compact_source = shader_source(
         "liquid/compact_seam_x_boundaries_from_active_tiles.comp",
         _SHADER_SUBS,
