@@ -68,6 +68,7 @@ def queue_readback(
             slot.buffer = bridge.ctx.buffer(reserve=max(plan.nbytes, 4), dynamic=True)
         else:
             slot.buffer.orphan(max(plan.nbytes, 4))
+
         for offset, data in plan.cpu_chunks:
             if data:
                 slot.buffer.write(data, offset=offset)
@@ -374,6 +375,51 @@ def _ensure_readback_programs(bridge) -> None:
         )
 
 
+def _fill_slot_from_buffer_rows(
+    bridge,
+    slot_buffer: Any,
+    offset: int,
+    src_buffer: Any,
+    *,
+    src_row_offset: int,
+    src_row_stride: int,
+    row_bytes: int,
+    row_count: int,
+    dst_row_stride: int,
+) -> None:
+    """Fill a readback slot from a GPU buffer via DMA copies and one mapped read.
+
+    On some NVIDIA EGL standalone contexts compute-shader SSBO reads return
+    stale or wrong data (uniform-indexed reads landing on the wrong words);
+    the ``glCopyBufferSubData`` + map path has been empirically verified to
+    stay coherent with the buffer's actual contents there, so buffer-backed
+    readback windows are copied this way instead of with the pack shaders.
+    """
+    nbytes = max(row_bytes * row_count, 4)
+    staging = bridge.readback_staging
+    if staging is None or staging.size < nbytes:
+        if staging is not None:
+            staging.release()
+        staging = bridge.ctx.buffer(reserve=nbytes, dynamic=True)
+        bridge.readback_staging = staging
+    for row in range(row_count):
+        bridge.ctx.copy_buffer(
+            staging,
+            src_buffer,
+            row_bytes,
+            read_offset=src_row_offset + row * src_row_stride,
+            write_offset=row * row_bytes,
+        )
+    if dst_row_stride == row_bytes:
+        slot_buffer.write(staging.read(size=row_bytes * row_count), offset=offset)
+        return
+    for row in range(row_count):
+        slot_buffer.write(
+            staging.read(size=row_bytes, offset=row * row_bytes),
+            offset=offset + row * dst_row_stride,
+        )
+
+
 def _pack_cell_core_window_into_buffer(
     bridge,
     slot_buffer: Any,
@@ -388,26 +434,22 @@ def _pack_cell_core_window_into_buffer(
     height, width = source.shape[:2]
     if width <= 0 or height <= 0:
         return
-    bridge._ensure_readback_programs()
-    program = bridge.readback_programs.get("cell_core_window")
-    if program is None:
-        bridge._raise_gpu_readback_unavailable(source, "missing cell core readback shader")
-        return
     src_buffer = bridge.buffers.get(source.resource_name)
     if src_buffer is None:
         bridge._raise_gpu_readback_unavailable(source, "missing GPU buffer")
         return
-    src_buffer.bind_to_storage_buffer(binding=0)
-    slot_buffer.bind_to_storage_buffer(binding=1)
-    program["window_origin"].value = (source.origin_x, source.origin_y)
-    program["window_size"].value = (width, height)
-    program["cell_grid_width"].value = source.cell_grid_width
-    program["dst_word_offset"].value = offset // 4
-    program["dst_cell_grid_width"].value = int(source.dst_cell_grid_width or width)
-    group_x = (width + 7) // 8
-    group_y = (height + 7) // 8
-    program.run(group_x, group_y, 1)
-    bridge.ctx.memory_barrier()
+    dst_grid = int(source.dst_cell_grid_width or width)
+    _fill_slot_from_buffer_rows(
+        bridge,
+        slot_buffer,
+        offset,
+        src_buffer,
+        src_row_offset=(source.origin_y * source.cell_grid_width + source.origin_x) * 5 * 4,
+        src_row_stride=source.cell_grid_width * 5 * 4,
+        row_bytes=width * 5 * 4,
+        row_count=height,
+        dst_row_stride=dst_grid * 5 * 4,
+    )
 
 
 def _pack_gas_window_into_buffer(
@@ -424,26 +466,25 @@ def _pack_gas_window_into_buffer(
     height, width = source.shape
     if width <= 0 or height <= 0:
         return
-    bridge._ensure_readback_programs()
-    program = bridge.readback_programs.get("gas_window")
-    if program is None:
-        bridge._raise_gpu_readback_unavailable(source, "missing gas readback shader")
-        return
     src_buffer = bridge.buffers.get(source.resource_name)
     if src_buffer is None:
         bridge._raise_gpu_readback_unavailable(source, "missing GPU buffer")
         return
-    src_buffer.bind_to_storage_buffer(binding=0)
-    slot_buffer.bind_to_storage_buffer(binding=1)
-    program["window_origin"].value = (source.origin_x, source.origin_y)
-    program["window_size"].value = (width, height)
-    program["gas_grid_size"].value = (source.gas_grid_width, source.gas_grid_height)
-    program["species_id"].value = source.species_id
-    program["dst_word_offset"].value = offset // 4
-    group_x = (width + 7) // 8
-    group_y = (height + 7) // 8
-    program.run(group_x, group_y, 1)
-    bridge.ctx.memory_barrier()
+    _fill_slot_from_buffer_rows(
+        bridge,
+        slot_buffer,
+        offset,
+        src_buffer,
+        src_row_offset=(
+            (source.species_id * source.gas_grid_height + source.origin_y) * source.gas_grid_width
+            + source.origin_x
+        )
+        * 4,
+        src_row_stride=source.gas_grid_width * 4,
+        row_bytes=width * 4,
+        row_count=height,
+        dst_row_stride=width * 4,
+    )
 
 
 def _pack_buffer_window_into_buffer(
@@ -468,27 +509,21 @@ def _pack_buffer_window_into_buffer(
         return
     if source.chunk_size <= 0 or source.count <= 0:
         return
-    bridge._ensure_readback_programs()
-    program = bridge.readback_programs.get("buffer_window")
-    if program is None:
-        bridge._raise_gpu_readback_unavailable(source, "missing buffer readback shader")
-        return
     src_buffer = bridge.buffers.get(source.resource_name)
     if src_buffer is None:
         bridge._raise_gpu_readback_unavailable(source, "missing GPU buffer")
         return
-    src_buffer.bind_to_storage_buffer(binding=0)
-    slot_buffer.bind_to_storage_buffer(binding=1)
-    program["src_word_offset"].value = source.start // 4
-    program["src_word_stride"].value = source.step // 4
-    program["dst_word_offset"].value = offset // 4
-    program["dst_words_per_row"].value = source.chunk_size // 4
-    program["dst_word_stride"].value = (source.dst_step or source.chunk_size) // 4
-    program["row_count"].value = source.count
-    group_x = ((source.chunk_size // 4) + 7) // 8
-    group_y = (source.count + 7) // 8
-    program.run(group_x, group_y, 1)
-    bridge.ctx.memory_barrier()
+    _fill_slot_from_buffer_rows(
+        bridge,
+        slot_buffer,
+        offset,
+        src_buffer,
+        src_row_offset=source.start,
+        src_row_stride=source.step,
+        row_bytes=source.chunk_size,
+        row_count=source.count,
+        dst_row_stride=source.dst_step or source.chunk_size,
+    )
 
 
 def _pack_texture_window_into_buffer(

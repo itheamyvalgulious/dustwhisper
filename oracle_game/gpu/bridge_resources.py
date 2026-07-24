@@ -475,6 +475,13 @@ def release_resources(bridge) -> None:
     # Preserve in-flight readbacks before resetting the ring: their GL
     # storage is released here, but the requests must survive the rebuild.
     bridge._stash_inflight_readback_slots()
+    staging = bridge.readback_staging
+    if staging is not None:
+        try:
+            staging.release()
+        except Exception:
+            pass
+        bridge.readback_staging = None
     for slot in bridge.readback_slots:
         if bridge.enabled and bridge.ctx is not None and hasattr(slot.buffer, "release"):
             try:
