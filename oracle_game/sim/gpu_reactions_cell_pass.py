@@ -1239,7 +1239,6 @@ def _run_local_cell_action_pass(
     may_have_flow_sources: bool = True,
     flow_source_layers: int = FLOW_SOURCE_LAYERS,
     write_deferred_hi_outputs: bool | None = None,
-    fused_gas_output_safe: bool = False,
     inplace: bool = False,
     candidate_dispatch: bool = False,
     timed_sparse_inplace: bool = False,

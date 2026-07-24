@@ -373,18 +373,6 @@ class GPULiquidPipeline(GPUPipelineBase):
                 "LIQUID_PROVENANCE": 1,
             },
         )
-        self.programs["tile_solve_bridge_snapshot_provenance_aux"] = build_compute_shader(
-            ctx,
-            "liquid/tile_solve.comp",
-            {
-                **tile_solve_subs,
-                "DIRECT_BRIDGE_INPUTS": 1,
-                "DIRECT_BRIDGE_AUX_INPUTS": 1,
-                "TILE_SNAPSHOT_OUTPUT": 1,
-                "TILE_COMPACT_SNAPSHOT": int(self._compact_tile_solve_snapshot_enabled),
-                "LIQUID_PROVENANCE": 1,
-            },
-        )
         self.programs["tile_solve_bridge_snapshot_provenance_blocker"] = build_compute_shader(
             ctx,
             "liquid/tile_solve.comp",
@@ -423,21 +411,6 @@ class GPULiquidPipeline(GPUPipelineBase):
                     },
                 )
             )
-            self.programs["tile_solve_bridge_snapshot_row_stream_provenance_aux"] = (
-                build_compute_shader(
-                    ctx,
-                    "liquid/tile_solve.comp",
-                    {
-                        **tile_solve_subs,
-                        "DIRECT_BRIDGE_INPUTS": 1,
-                        "DIRECT_BRIDGE_AUX_INPUTS": 1,
-                        "TILE_SNAPSHOT_OUTPUT": 1,
-                        "TILE_COMPACT_SNAPSHOT": int(self._compact_tile_solve_snapshot_enabled),
-                        "TILE_WARP_PROVENANCE_ROW_STREAM": 1,
-                        "LIQUID_PROVENANCE": 1,
-                    },
-                )
-            )
             self.programs["tile_solve_bridge_snapshot_row_stream_provenance_blocker"] = (
                 build_compute_shader(
                     ctx,
@@ -456,10 +429,8 @@ class GPULiquidPipeline(GPUPipelineBase):
         if self._buoyancy_snapshot_pre_state_enabled:
             for name, row_stream, direct_aux, blocker_mask in (
                 ("tile_solve_bridge_snapshot_provenance_snapshot_pre", 0, 0, 0),
-                ("tile_solve_bridge_snapshot_provenance_aux_snapshot_pre", 0, 1, 0),
                 ("tile_solve_bridge_snapshot_provenance_blocker_snapshot_pre", 0, 0, 1),
                 ("tile_solve_bridge_snapshot_row_stream_provenance_snapshot_pre", 1, 0, 0),
-                ("tile_solve_bridge_snapshot_row_stream_provenance_aux_snapshot_pre", 1, 1, 0),
                 ("tile_solve_bridge_snapshot_row_stream_provenance_blocker_snapshot_pre", 1, 0, 1),
             ):
                 if row_stream and not self.tile_solve_warp_fast_path:
@@ -552,7 +523,6 @@ class GPULiquidPipeline(GPUPipelineBase):
         )
         if self._buoyancy_snapshot_pre_state_enabled:
             for name, row_leader, rows_per_group in (
-                ("seam_x_snapshot_provenance_snapshot_pre", 0, 1),
                 ("seam_x_snapshot_row_leader_provenance_snapshot_pre", 1, 1),
                 ("seam_x_snapshot_row_leader4_provenance_snapshot_pre", 1, 4),
             ):
@@ -589,16 +559,6 @@ class GPULiquidPipeline(GPUPipelineBase):
             ctx,
             "liquid/seam_y_shared_snapshot.comp",
             _SHADER_SUBS,
-        )
-        self.programs["seam_y_shared_snapshot_aux"] = build_compute_shader(
-            ctx,
-            "liquid/seam_y_shared_snapshot.comp",
-            {**_SHADER_SUBS, "DIRECT_BRIDGE_AUX_INPUTS": 1},
-        )
-        self.programs["seam_y_shared_snapshot_provenance"] = build_compute_shader(
-            ctx,
-            "liquid/seam_y_shared_snapshot.comp",
-            {**_SHADER_SUBS, "LIQUID_PROVENANCE": 1},
         )
         self.programs["seam_y_shared_snapshot_provenance_aux"] = build_compute_shader(
             ctx,
@@ -749,11 +709,6 @@ class GPULiquidPipeline(GPUPipelineBase):
             ctx,
             "liquid/liquid_flow_intent_shared_halo.comp",
             _SHADER_SUBS,
-        )
-        self.programs["liquid_flow_intent_shared_halo_provenance"] = build_compute_shader(
-            ctx,
-            "liquid/liquid_flow_intent_shared_halo.comp",
-            {**_SHADER_SUBS, "LIQUID_PROVENANCE": 1, "PROVENANCE_TERMINAL": 1},
         )
         self.programs["liquid_flow_intent_shared_halo_provenance_bridge_aux"] = (
             build_compute_shader(

@@ -178,7 +178,6 @@ from oracle_game.sim.gpu_motion_powder import (
     _clear_powder_apply_index_for_active_tiles,
     _clear_powder_apply_index_for_reservations,
     _clear_powder_target_winners_for_reservations,
-    _dispatch_apply_powder_fast_path,
     _dispatch_apply_powder_reservations,
     _dispatch_index_powder_apply,
     _powder_direct_apply_is_safe,
@@ -611,9 +610,6 @@ class GPUMotionPipeline(GPUPipelineBase):
             "motion/fill_powder_apply_index.comp",
             {**_SHADER_SUBS, "POWDER_APPLY_INDEX_EPOCH": 1},
         )
-        self.programs["apply_powder_fast_path"] = build_compute_shader(
-            ctx, "motion/apply_powder_fast_path.comp", _SHADER_SUBS
-        )
         self.programs["apply_powder_reservations_legacy"] = build_compute_shader(
             ctx, "motion/apply_powder_reservations.comp", _SHADER_SUBS
         )
@@ -877,9 +873,6 @@ class GPUMotionPipeline(GPUPipelineBase):
 
     def resolve_and_apply_powders(self, *args: Any, **kwargs: Any) -> Any:
         return resolve_and_apply_powders(self, *args, **kwargs)
-
-    def _dispatch_apply_powder_fast_path(self, *args: Any, **kwargs: Any) -> Any:
-        return _dispatch_apply_powder_fast_path(self, *args, **kwargs)
 
     def apply_powder_reservations(self, *args: Any, **kwargs: Any) -> Any:
         return apply_powder_reservations(self, *args, **kwargs)

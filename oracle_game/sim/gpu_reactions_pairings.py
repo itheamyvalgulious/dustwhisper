@@ -301,7 +301,6 @@ def run_self_actions(
         may_have_flow_sources=pipeline._compiled_actions_include_flow_sources(compiled),
         flow_source_layers=flow_source_layers,
         write_deferred_hi_outputs=write_deferred_hi_outputs,
-        fused_gas_output_safe=not pipeline._compiled_actions_include_emit_light(compiled),
         use_expanded_active_tile_mask=use_expanded_active_tile_mask,
     )
     with pipeline._profile_pass(world, "self_publish_cell_state"):

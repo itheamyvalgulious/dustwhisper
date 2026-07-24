@@ -291,7 +291,6 @@ def format_demo_controller_status(
     *,
     preview: dict[str, Any] | None,
     turn: dict[str, Any] | None,
-    applied: bool | None = None,
 ) -> str | None:
     if preview is None:
         return None

@@ -543,53 +543,6 @@ def resolve_and_apply_powders(
     return pipeline._read_powder_reservations(resources, reservation_count)
 
 
-def _dispatch_apply_powder_fast_path(
-    pipeline,
-    world: "WorldEngine",
-    resources: GPUMotionResources,
-    group_x: int,
-    group_y: int,
-    dt: float,
-) -> None:
-    ctx = world.bridge.ctx
-    assert ctx is not None
-    program = pipeline.programs["apply_powder_fast_path"]
-    program["cell_grid_size"].value = (world.width, world.height)
-    program["tile_grid_size"].value = (world.active.tile_width, world.active.tile_height)
-    program["tile_size"].value = world.active.tile_size
-    program["phase_powder"].value = int(Phase.POWDER)
-    program["phase_falling_island"].value = int(Phase.FALLING_ISLAND)
-    program["max_powder_step"].value = 3
-    program["dt"].value = float(dt)
-    program["active_ttl_reset"].value = int(world.active.active_ttl_reset)
-    resources.material_params.bind_to_storage_buffer(binding=0)
-    resources.material_contact_params.bind_to_storage_buffer(binding=1)
-    resources.powder_reservation_count.bind_to_storage_buffer(binding=2)
-    world.bridge.buffers["active_tile_ttl"].bind_to_storage_buffer(binding=11)
-    resources.cell_state_tex.use(location=0)
-    resources.velocity_tex.use(location=3)
-    resources.temp_tex.use(location=4)
-    resources.timer_tex.use(location=5)
-    resources.integrity_tex.use(location=6)
-    resources.island_id_tex.use(location=7)
-    resources.entity_id_tex.use(location=8)
-    resources.displaced_tex.use(location=9)
-    resources.active_tile_tex.use(location=10)
-    resources.cell_state_out_tex.bind_to_image(0, read=False, write=True)
-    resources.velocity_out_tex.bind_to_image(3, read=False, write=True)
-    resources.temp_out_tex.bind_to_image(4, read=False, write=True)
-    resources.timer_out_tex.bind_to_image(5, read=False, write=True)
-    resources.integrity_out_tex.bind_to_image(6, read=False, write=True)
-    program.run(group_x, group_y, 1)
-    pipeline._sync_compute_writes(ctx)
-    pipeline._publish_bridge_outputs(world, resources, output_textures=True)
-    world.bridge._ensure_active_scheduler_programs()
-    world.bridge._refresh_active_chunks_and_meta(world, read_meta=False)
-    resources.powder_reservation_count.write(np.array([0], dtype=np.int32).tobytes())
-    pipeline.publish_bridge_powder_reservations(world, 0)
-    pipeline.last_cpu_mirror_downloaded = False
-
-
 def apply_powder_reservations(pipeline, world: "WorldEngine", reservations: np.ndarray) -> bool:
     ctx = world.bridge.ctx
     if ctx is None:

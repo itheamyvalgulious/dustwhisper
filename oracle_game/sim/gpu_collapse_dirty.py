@@ -699,31 +699,6 @@ def mark_collapse_structure_dirty_tiles_from_bridge_cell_core(
     return True
 
 
-def dirty_tile_mask_to_regions(
-    world: "WorldEngine", tile_mask: np.ndarray
-) -> list[tuple[int, int, int, int]]:
-    if tile_mask.size == 0:
-        return []
-    tile_size = max(1, int(world.active.tile_size))
-    regions: list[tuple[int, int, int, int]] = []
-    for tile_y in range(tile_mask.shape[0]):
-        tile_x = 0
-        while tile_x < tile_mask.shape[1]:
-            if not bool(tile_mask[tile_y, tile_x]):
-                tile_x += 1
-                continue
-            run_x0 = tile_x
-            while tile_x < tile_mask.shape[1] and bool(tile_mask[tile_y, tile_x]):
-                tile_x += 1
-            x0 = run_x0 * tile_size
-            y0 = tile_y * tile_size
-            x1 = min(int(world.width), tile_x * tile_size)
-            y1 = min(int(world.height), (tile_y + 1) * tile_size)
-            if x0 < x1 and y0 < y1:
-                regions.append((x0, y0, x1, y1))
-    return regions
-
-
 def drain_collapse_structure_dirty_tile_regions(
     world: "WorldEngine",
 ) -> list[tuple[int, int, int, int]]:

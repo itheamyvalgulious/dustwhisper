@@ -199,7 +199,6 @@ def _shadow_gas_name(engine: "WorldEngine", species_id: int) -> str | None:
         return None
 
     return engine.gas_name_by_id[int(species_id)]
-    return None
 
 
 def _shadow_light_name(engine: "WorldEngine", light_id: int) -> str | None:

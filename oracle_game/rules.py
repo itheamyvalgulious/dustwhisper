@@ -82,27 +82,6 @@ class RuleBook:
         for entry in optics:
             self.optics[(entry.material_name, entry.light_type)] = entry
 
-    def update_reaction_actions(self, actions: Iterable[ReactionAction]) -> None:
-        for action in actions:
-            self.reaction_actions.append(action)
-
-    def update_reaction_rules(
-        self,
-        *,
-        material_material: Iterable[PairReactionRule] = (),
-        material_gas: Iterable[PairReactionRule] = (),
-        material_light: Iterable[PairReactionRule] = (),
-        gas_gas: Iterable[PairReactionRule] = (),
-        gas_light: Iterable[PairReactionRule] = (),
-        self_rules: Iterable[SelfReactionRule] = (),
-    ) -> None:
-        self.material_material_rules.extend(material_material)
-        self.material_gas_rules.extend(material_gas)
-        self.material_light_rules.extend(material_light)
-        self.gas_gas_rules.extend(gas_gas)
-        self.gas_light_rules.extend(gas_light)
-        self.self_rules.extend(self_rules)
-
     def material_id(self, name: str) -> int:
         return self.materials_by_name[name].material_id
 

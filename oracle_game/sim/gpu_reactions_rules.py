@@ -216,12 +216,6 @@ def _compiled_actions_include_emit_material(
     return bool(np.any(compiled_actions[0][:, 0] == TYPE_EMIT_MATERIAL))
 
 
-def _compiled_actions_include_emit_light(
-    pipeline, compiled_actions: tuple[np.ndarray, np.ndarray]
-) -> bool:
-    return bool(np.any(compiled_actions[0][:, 0] == TYPE_EMIT_LIGHT))
-
-
 def _compiled_actions_require_deferred_outputs(
     pipeline,
     compiled_actions: tuple[np.ndarray, np.ndarray],

@@ -751,7 +751,6 @@ def main() -> None:
             status_label = format_demo_controller_status(
                 preview=cycle["preview"],
                 turn=cycle["result"],
-                applied=cycle["applied"],
             )
             observation_summary = format_demo_controller_observation_summary(
                 (cycle["result"] or cycle["preview"]).get("consumed", {}).get("observations"),

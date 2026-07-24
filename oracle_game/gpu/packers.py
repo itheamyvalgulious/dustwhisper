@@ -447,17 +447,6 @@ def pack_active_meta_upload(
     return meta
 
 
-def pack_active_upload(world: "WorldEngine") -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    tile_ttl = np.asarray(world.active.active_tile_ttl or [], dtype=np.int32)
-    chunk_mask = np.asarray(world.active.active_chunk_mask or [], dtype=np.uint8)
-    meta = pack_active_meta_upload(
-        world,
-        active_tile_count=int(np.count_nonzero(tile_ttl > 0)),
-        active_chunk_count=int(np.count_nonzero(chunk_mask > 0)),
-    )
-    return meta, tile_ttl, chunk_mask
-
-
 from oracle_game.gpu.packers_extra import (  # noqa: F401
     PAGE_STRIPE_AXIS_IDS,
     PAGE_STRIPE_DTYPE_CODES,

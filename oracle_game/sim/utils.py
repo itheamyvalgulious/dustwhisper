@@ -156,13 +156,3 @@ def tile_mask_to_gas_mask(
         gy1 = min(gas_height, (y1 + gas_cell_size - 1) // gas_cell_size)
         gas_mask[gy0:gy1, gx0:gx1] = True
     return gas_mask
-
-
-def unit_vector_from_name(name: str) -> tuple[int, int]:
-    mapping = {
-        "up": (0, -1),
-        "down": (0, 1),
-        "left": (-1, 0),
-        "right": (1, 0),
-    }
-    return mapping.get(name, (0, 0))

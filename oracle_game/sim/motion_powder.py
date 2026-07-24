@@ -102,50 +102,6 @@ def _plan_cpu_powder_reservations(
     return packed
 
 
-def _move_powders(solver, world: "WorldEngine", solve_cell_mask: np.ndarray, dt: float) -> None:
-    processed = np.zeros((world.height, world.width), dtype=bool)
-    for y in range(world.height - 2, -1, -1):
-        active_xs = np.flatnonzero(solve_cell_mask[y])
-        if active_xs.size == 0:
-            continue
-        for x in active_xs.tolist():
-            if processed[y, x]:
-                continue
-            material_id = int(world.material_id[y, x])
-            if material_id == 0:
-                continue
-            if int(world.phase[y, x]) != int(Phase.POWDER):
-                continue
-            dda_target = solver._resolve_powder_dda_target(
-                world,
-                x,
-                y,
-                solver._material_max_dda_step(world, material_id),
-                dt,
-            )
-            moved = False
-            if dda_target is not None and dda_target != (x, y):
-                world.swap_cells(x, y, dda_target[0], dda_target[1])
-                processed[dda_target[1], dda_target[0]] = True
-                moved = True
-            if moved:
-                continue
-            candidates = (
-                [(x, y + 1), (x - 1, y + 1), (x + 1, y + 1)]
-                if solver._material_gravity(world, material_id) >= 0.0
-                else [(x, y - 1), (x - 1, y - 1), (x + 1, y - 1)]
-            )
-            for tx, ty in candidates:
-                if world.in_bounds(tx, ty) and world.material_id[ty, tx] == 0:
-                    world.swap_cells(x, y, tx, ty)
-                    processed[ty, tx] = True
-                    moved = True
-                    break
-            if not moved:
-                world.velocity[y, x] *= 0.2
-                processed[y, x] = True
-
-
 def _apply_powder_reservations(
     solver,
     world: "WorldEngine",

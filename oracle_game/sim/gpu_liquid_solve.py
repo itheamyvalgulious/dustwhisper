@@ -353,10 +353,8 @@ def _run_tile_solve(pipeline, world: "WorldEngine", resources: GPULiquidResource
     if snapshot_pre_state:
         candidate_names = {
             "tile_solve_bridge_snapshot_provenance",
-            "tile_solve_bridge_snapshot_provenance_aux",
             "tile_solve_bridge_snapshot_provenance_blocker",
             "tile_solve_bridge_snapshot_row_stream_provenance",
-            "tile_solve_bridge_snapshot_row_stream_provenance_aux",
             "tile_solve_bridge_snapshot_row_stream_provenance_blocker",
         }
         if program_name not in candidate_names:
@@ -489,10 +487,7 @@ def _run_seam_pass(
         world.bridge.buffers["placeholder_displaced_material"].bind_to_storage_buffer(binding=7)
         if "_provenance" in program_name:
             resources.provenance_in.bind_to_storage_buffer(binding=8)
-    elif program_name in {
-        "seam_y_shared_snapshot_aux",
-        "seam_y_shared_snapshot_provenance_aux",
-    }:
+    elif program_name == "seam_y_shared_snapshot_provenance_aux":
         world.bridge.buffers["entity_id"].bind_to_storage_buffer(binding=4)
         world.bridge.buffers["placeholder_displaced_material"].bind_to_storage_buffer(binding=5)
     if program_name.startswith("seam_y_shared_snapshot") and "_provenance" in program_name:

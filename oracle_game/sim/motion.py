@@ -69,7 +69,6 @@ from oracle_game.sim.motion_material import (
 from oracle_game.sim.motion_powder import (
     _apply_powder_reservations,
     _mark_powder_reservation_regions,
-    _move_powders,
     _path_is_clear,
     _path_is_clear_material,
     _plan_cpu_powder_reservations,
@@ -187,9 +186,6 @@ class MotionSolver:
 
     def _mark_powder_reservation_regions(self, *args: Any, **kwargs: Any) -> Any:
         return _mark_powder_reservation_regions(self, *args, **kwargs)
-
-    def _move_powders(self, *args: Any, **kwargs: Any) -> Any:
-        return _move_powders(self, *args, **kwargs)
 
     def _path_is_clear(self, *args: Any, **kwargs: Any) -> Any:
         return _path_is_clear(self, *args, **kwargs)

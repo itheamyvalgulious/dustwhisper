@@ -327,10 +327,6 @@ def active_meta_dtype() -> np.dtype:
     return ACTIVE_META_DTYPE
 
 
-def active_rect_dtype() -> np.dtype:
-    return ACTIVE_RECT_DTYPE
-
-
 def gas_runtime_meta_dtype() -> np.dtype:
     return GAS_RUNTIME_META_DTYPE
 
@@ -561,25 +557,5 @@ def material_table_dtype() -> np.dtype:
     return MATERIAL_TABLE_DTYPE
 
 
-def gas_table_dtype() -> np.dtype:
-    return GAS_TABLE_DTYPE
-
-
-def light_table_dtype() -> np.dtype:
-    return LIGHT_TABLE_DTYPE
-
-
-def optics_table_dtype() -> np.dtype:
-    return OPTICS_TABLE_DTYPE
-
-
 def reaction_action_table_dtype() -> np.dtype:
     return REACTION_ACTION_TABLE_DTYPE
-
-
-def pair_reaction_rule_table_dtype() -> np.dtype:
-    return PAIR_REACTION_RULE_TABLE_DTYPE
-
-
-def self_reaction_rule_table_dtype() -> np.dtype:
-    return SELF_REACTION_RULE_TABLE_DTYPE

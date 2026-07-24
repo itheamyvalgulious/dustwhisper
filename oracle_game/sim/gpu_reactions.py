@@ -147,7 +147,6 @@ from oracle_game.sim.gpu_reactions_rules import (
     _compile_material_rule_candidate_masks,
     _compile_single_gas_gas_rule,
     _compile_single_gas_light_rule,
-    _compiled_actions_include_emit_light,
     _compiled_actions_include_emit_material,
     _compiled_actions_include_flow_sources,
     _compiled_actions_include_modify_gas,
@@ -1403,9 +1402,6 @@ class GPUReactionPipeline(GPUPipelineBase):
 
     def _compiled_actions_include_emit_material(self, *args: Any, **kwargs: Any) -> Any:
         return _compiled_actions_include_emit_material(self, *args, **kwargs)
-
-    def _compiled_actions_include_emit_light(self, *args: Any, **kwargs: Any) -> Any:
-        return _compiled_actions_include_emit_light(self, *args, **kwargs)
 
     def _compiled_actions_require_deferred_outputs(self, *args: Any, **kwargs: Any) -> Any:
         return _compiled_actions_require_deferred_outputs(self, *args, **kwargs)
