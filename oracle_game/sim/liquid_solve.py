@@ -10,6 +10,13 @@ if TYPE_CHECKING:
 from oracle_game.sim.liquid_constants import LIQUID_SOLVER_TILE_LEVEL
 from oracle_game.types import Phase
 
+# Lateral seam spread clamps, mirroring SEAM_MAX_MOVE_PER_FRAME /
+# SEAM_UNSUPPORTED_OVERHANG in shaders/liquid/seam_x.comp: a boundary move
+# fills at most this many cells per frame, and at most the leading
+# overhang cells may lack support from below.
+SEAM_MAX_MOVE_PER_FRAME = 4
+SEAM_UNSUPPORTED_OVERHANG = 2
+
 
 def prepare_motion_flow_intent(solver, world: "WorldEngine") -> None:
     gpu_available = world._gpu_pipeline_available(solver.gpu_pipeline, "liquid")
@@ -329,7 +336,24 @@ def _apply_horizontal_seam_run(
             world, target_end, y
         ):
             target_end += 1
-        move_count = min(left - source_start + 1, target_end - right)
+        target_len = target_end - right
+        # Same speed/support clamps as seam_x.comp left_to_right_move: at
+        # most the leading SEAM_UNSUPPORTED_OVERHANG filled cells may lack
+        # support below (out of bounds below the world floor counts as
+        # supported), and the front advances at most
+        # SEAM_MAX_MOVE_PER_FRAME cells per frame.
+        supported_prefix = 0
+        while supported_prefix < target_len and (
+            y + 1 >= world.height
+            or not solver._world_cell_reachable_empty(world, right + supported_prefix, y + 1)
+        ):
+            supported_prefix += 1
+        move_count = min(
+            left - source_start + 1,
+            target_len,
+            supported_prefix + SEAM_UNSUPPORTED_OVERHANG,
+            SEAM_MAX_MOVE_PER_FRAME,
+        )
         if move_count > 0:
             source_base = left - move_count + 1
             for offset in range(move_count):
@@ -353,7 +377,20 @@ def _apply_horizontal_seam_run(
             world, target_start - 1, y
         ):
             target_start -= 1
-        move_count = min(source_end - right, right - target_start)
+        target_len = right - target_start
+        # Same mirrored clamps as the left-to-right branch above.
+        supported_prefix = 0
+        while supported_prefix < target_len and (
+            y + 1 >= world.height
+            or not solver._world_cell_reachable_empty(world, left - supported_prefix, y + 1)
+        ):
+            supported_prefix += 1
+        move_count = min(
+            source_end - right,
+            target_len,
+            supported_prefix + SEAM_UNSUPPORTED_OVERHANG,
+            SEAM_MAX_MOVE_PER_FRAME,
+        )
         if move_count > 0:
             target_base = right - move_count
             for offset in range(move_count):

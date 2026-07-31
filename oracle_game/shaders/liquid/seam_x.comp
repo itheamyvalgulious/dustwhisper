@@ -13,6 +13,15 @@ layout(local_size_x={{TILE_SIZE}}, local_size_y={{SEAM_ROWS_PER_GROUP}}, local_s
 layout(local_size_x={{PASS_LOCAL_SIZE}}, local_size_y={{PASS_LOCAL_SIZE}}, local_size_z=1) in;
 #endif
 const int TILE_SIZE = {{TILE_SIZE}};
+// Lateral seam spread is speed-limited and support-limited: a boundary move
+// fills at most SEAM_MAX_MOVE_PER_FRAME cells per frame, and among the
+// filled target cells at most the leading SEAM_UNSUPPORTED_OVERHANG cells
+// may lack support from below (the advancing front over a lip); everything
+// past the supported prefix plus that overhang stays put this frame.  Both
+// clamps are computed directly from the target run (no iteration over
+// frames), and must match the CPU oracle constants in liquid_solve.py.
+const int SEAM_MAX_MOVE_PER_FRAME = 4;
+const int SEAM_UNSUPPORTED_OVERHANG = 2;
 uniform ivec2 cell_grid_size;
 uniform ivec2 tile_grid_size;
 uniform int active_ttl_reset;
@@ -448,7 +457,18 @@ bool left_to_right_move(
     while (target_end < target_tile_end && is_reachable_empty(ivec2(target_end, y))) {
         target_end += 1;
     }
-    move_count = min(source_end - source_start + 1, target_end - target_start);
+    int target_len = target_end - target_start;
+    int supported_prefix = 0;
+    while (
+        supported_prefix < target_len
+        && !is_reachable_empty(ivec2(target_start + supported_prefix, y + 1))
+    ) {
+        supported_prefix += 1;
+    }
+    move_count = min(
+        source_end - source_start + 1,
+        min(target_len, min(supported_prefix + SEAM_UNSUPPORTED_OVERHANG, SEAM_MAX_MOVE_PER_FRAME))
+    );
     if (move_count <= 0) {
         return false;
     }
@@ -490,7 +510,18 @@ bool right_to_left_move(
     while (target_start > target_tile_start && is_reachable_empty(ivec2(target_start - 1, y))) {
         target_start -= 1;
     }
-    move_count = min(source_end - source_start, target_end - target_start);
+    int target_len = target_end - target_start;
+    int supported_prefix = 0;
+    while (
+        supported_prefix < target_len
+        && !is_reachable_empty(ivec2(target_end - 1 - supported_prefix, y + 1))
+    ) {
+        supported_prefix += 1;
+    }
+    move_count = min(
+        source_end - source_start,
+        min(target_len, min(supported_prefix + SEAM_UNSUPPORTED_OVERHANG, SEAM_MAX_MOVE_PER_FRAME))
+    );
     if (move_count <= 0) {
         return false;
     }
