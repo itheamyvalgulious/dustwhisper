@@ -145,11 +145,14 @@ class CollapseSolver:
                     int(motion_pipeline.last_published_island_runtime_capacity),
                     int(admitted_capacity),
                 )
+        pending_admission = pipeline._pending_formal_runtime_admission
         compact_island_id_space(
             world,
-            reservation_pending=(
-                pipeline._pending_formal_runtime_admission is not None
-                or pipeline.has_active_formal_dirty_epoch()
+            protected_base=(
+                int(pending_admission.island_id_base) if pending_admission is not None else 0
+            ),
+            protected_count=(
+                int(pending_admission.component_capacity) if pending_admission is not None else 0
             ),
         )
         if pipeline.has_active_formal_dirty_epoch():

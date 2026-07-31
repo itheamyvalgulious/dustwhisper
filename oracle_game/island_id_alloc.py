@@ -14,9 +14,15 @@ component ids for transient fragments that never publish, so any design that
 materializes those ids in a Python set costs milliseconds per frame.
 
 Because the mark alone would grow without bound, ``compact_island_id_space``
-resets it to just past the live island ids once nothing is in flight (no
-pending runtime admission, no active collapse epoch), which is called once
-per frame from ``CollapseSolver.advance_formal_gpu_dirty_epoch``.
+resets it to just past the live island ids once per frame from
+``CollapseSolver.advance_formal_gpu_dirty_epoch``.  Compaction must run under
+continuous load (a busy world has an active collapse epoch or a pending
+runtime admission essentially every frame, so gating on "nothing in flight"
+would never fire and the mark would ratchet past int32/float32-exact range),
+so the only range it protects is the reserved block whose runtime records
+have not been published yet (the pending formal runtime admission).  An
+active epoch holds no reservation until its commit, and the commit itself
+takes ``max(mark, max_live + 1)``, so compaction cannot collide with it.
 """
 
 from __future__ import annotations
@@ -64,19 +70,20 @@ def reserve_island_id_block(world: "WorldEngine", count: int) -> int:
     return base
 
 
-def compact_island_id_space(world: "WorldEngine", *, reservation_pending: bool) -> None:
+def compact_island_id_space(
+    world: "WorldEngine", *, protected_base: int = 0, protected_count: int = 0
+) -> None:
     """Reset the high-water mark to just past the live island ids.
 
-    Must only run when no reserved block is still being published
-    (``reservation_pending`` covers a pending runtime admission or an active
-    collapse epoch); otherwise the mark could drop below a block whose
-    records have not materialized yet and later allocations would collide
-    with it.
+    The block ``[protected_base, protected_base + protected_count)`` is a
+    reservation whose runtime records have not been published into
+    ``world.islands`` yet (the pending formal runtime admission); the mark
+    never drops below the end of that block so later allocations cannot
+    collide with it.  Everything else is fair game: an active collapse epoch
+    holds no reservation until its commit, so compaction is safe to run every
+    frame, including under continuous collapse load.
     """
-    if reservation_pending:
-        return
     islands = world.islands
-    if islands:
-        world.next_island_id = max(int(island_id) for island_id in islands) + 1
-    else:
-        world.next_island_id = 1
+    live_max = max((int(island_id) for island_id in islands), default=0)
+    protected_end = int(protected_base) + int(protected_count) if protected_count > 0 else 0
+    world.next_island_id = max(live_max, protected_end - 1) + 1
