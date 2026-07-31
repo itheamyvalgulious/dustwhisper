@@ -69,7 +69,7 @@ void main() {
     if (material_id > 0) {
         material_id = clamp(material_id, 0, {{MAX_MATERIALS_MINUS_1}});
         vec4 material_params = params[material_id];
-        velocity.y += material_params.y * dt * 24.0;
+        velocity.y += material_params.y * dt * {{GRAVITY_CELLS_PER_SECOND_SQ}};
         ivec2 gas_cell = ivec2(
             min(gid.x / gas_cell_size, gas_grid_size.x - 1),
             min(gid.y / gas_cell_size, gas_grid_size.y - 1)

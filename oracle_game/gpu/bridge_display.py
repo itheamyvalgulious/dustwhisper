@@ -211,7 +211,7 @@ def decay_active_scheduler(bridge, world: "WorldEngine") -> bool:
         | getattr(bridge.ctx, "BUFFER_UPDATE_BARRIER_BIT", 0)
     )
 
-    bridge._refresh_active_chunks_and_meta(world, read_meta=False)
+    bridge._refresh_active_chunks_and_meta(world, read_meta=True)
     bridge.mark_gpu_authoritative("active_meta", "active_tile_ttl", "active_chunk_mask")
     return True
 

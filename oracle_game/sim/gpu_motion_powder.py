@@ -459,6 +459,8 @@ def resolve_and_apply_powders(
         )
         use_bridge_blockers = pipeline._bridge_authoritative_cell_blockers(world)
         resolve["use_bridge_authoritative_blockers"].value = bool(use_bridge_blockers)
+        resolve["dt"].value = float(dt)
+        resolve["frame_id"].value = int(world.frame_id) & 0xFFFFFFFF
         (
             resources.powder_compact_reservations
             if compact_reservations
@@ -487,6 +489,7 @@ def resolve_and_apply_powders(
         resources.active_tile_tex.use(location=3)
         resources.entity_id_tex.use(location=5)
         resources.displaced_tex.use(location=6)
+        resources.velocity_tex.use(location=7)
 
         def bind_apply_dispatch_outputs() -> None:
             affected_tile_count.bind_to_storage_buffer(binding=6)

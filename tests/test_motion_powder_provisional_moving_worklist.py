@@ -40,7 +40,8 @@ def test_powder_resolve_appends_every_provisionally_moving_reservation_index() -
     store = "provisional_moving_indices[moving_slot] = index;"
     resolution = "store_resolution(index, resolved, resolve_state);"
 
-    assert "resolve_state == 1 || resolve_state == 2" in source
+    assert "resolve_state == 1" in source
+    assert "|| (resolve_state & 7) == 2" in source
     assert "&& !same_cell(source, resolved)" in source
     assert source.index(resolution) < source.index(append) < source.index(store)
 

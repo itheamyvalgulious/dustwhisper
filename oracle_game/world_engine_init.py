@@ -126,6 +126,15 @@ def _init_world_engine(
     engine.emitters: list[dict[str, object]] = []
     engine._formal_gpu_frame_has_light_dose: bool | None = None
     engine._gpu_optics_outputs_clear = False
+    # --- quiet-frame gate state (see world_frame_pipeline._compute_quiet_frame) ---
+    engine._quiet_light_outputs_zero = False
+    engine._frame_active_rect_marks = False
+    engine._collapse_dirty_tile_count_shadow = 0
+    engine._collapse_active_epoch_real = False
+    engine._collapse_admission_real = False
+    engine._collapse_admission_epoch_id = -1
+    engine.last_quiet_frame = False
+    engine.quiet_frame_count = 0
 
     # --- realtime budget and pass profiling knobs ---
     engine.gpu_realtime_budget_enabled = True

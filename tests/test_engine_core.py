@@ -38,6 +38,7 @@ from oracle_game.enginedemo import (
     demo_brush_selection_label,
     demo_debug_view_for_key,
     demo_default_focus_world,
+    demo_focus_scroll_direction,
     demo_force_direction_from_drag,
     demo_light_direction_and_spread_from_drag,
     demo_material_for_key,
@@ -1575,6 +1576,46 @@ def test_gpu_liquid_vertical_seam_moves_continuous_run_into_neighbor_tile_empty_
     assert [int(engine.material_id[10, x]) for x in range(32, 35)] == [water_id, water_id, water_id]
 
 
+def test_gpu_liquid_vertical_seam_moves_run_both_directions_across_tile_boundary(
+    require_gpu,
+) -> None:
+    engine = WorldEngine(width=64, height=64, simulation_backend="gpu", gpu_context=require_gpu)
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        # Right-to-left: liquid run just right of the x=32 boundary, empty span left.
+        for x in range(32, 35):
+            engine.set_cell(x, 10, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+            engine.set_cell(x, 11, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(35, 10, "raw_stone_solid", mark_dirty=False)
+        # Left-to-right regression guard: liquid run just left of the boundary.
+        for x in range(29, 32):
+            engine.set_cell(x, 20, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+            engine.set_cell(x, 21, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(28, 20, "raw_stone_solid", mark_dirty=False)
+        engine.active.mark_rect(0, 0, 64, 64)
+
+        engine.liquid_solver.step(engine)
+
+        assert engine.liquid_solver.last_backend == "gpu"
+        assert [int(engine.material_id[10, x]) for x in range(29, 32)] == [
+            water_id,
+            water_id,
+            water_id,
+        ]
+        assert [int(engine.material_id[10, x]) for x in range(32, 35)] == [0, 0, 0]
+        assert [int(engine.material_id[20, x]) for x in range(29, 32)] == [0, 0, 0]
+        assert [int(engine.material_id[20, x]) for x in range(32, 35)] == [
+            water_id,
+            water_id,
+            water_id,
+        ]
+    finally:
+        engine.close()
+
+
 def test_gpu_liquid_horizontal_seam_packs_run_around_explicit_blockers() -> None:
     engine = WorldEngine(width=64, height=64, simulation_backend="gpu")
     if not engine.liquid_solver.gpu_pipeline.available(engine):
@@ -1596,6 +1637,116 @@ def test_gpu_liquid_horizontal_seam_packs_run_around_explicit_blockers() -> None
     assert [int(engine.material_id[32, x]) for x in range(15, 18)] == [water_id, water_id, water_id]
     assert int(engine.material_id[32, 18]) == 0
     assert [int(engine.material_id[31, x]) for x in range(14, 18)] == [0, 0, 0, water_id]
+
+
+def test_gpu_liquid_suspended_falling_column_falls_straight_without_lateral_spread(
+    require_gpu,
+) -> None:
+    engine = WorldEngine(width=64, height=64, simulation_backend="gpu", gpu_context=require_gpu)
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        # Suspended stream: air below and to both sides.
+        for y in range(8, 11):
+            engine.set_cell(10, y, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.active.mark_rect(0, 0, 64, 64)
+
+        engine.liquid_solver.step(engine)
+
+        assert engine.liquid_solver.last_backend == "gpu"
+        # The whole stream fell one cell straight down.
+        assert [int(engine.material_id[y, 10]) for y in range(8, 12)] == [
+            0,
+            water_id,
+            water_id,
+            water_id,
+        ]
+        # Nothing smeared sideways while suspended.
+        assert [int(engine.material_id[y, 9]) for y in range(7, 13)] == [0] * 6
+        assert [int(engine.material_id[y, 11]) for y in range(7, 13)] == [0] * 6
+    finally:
+        engine.close()
+
+
+def test_gpu_liquid_resting_on_solid_spreads_laterally(require_gpu) -> None:
+    engine = WorldEngine(width=64, height=64, simulation_backend="gpu", gpu_context=require_gpu)
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.set_cell(10, 10, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.set_cell(10, 11, "raw_stone_solid", mark_dirty=False)
+        engine.active.mark_rect(0, 0, 64, 64)
+
+        engine.liquid_solver.step(engine)
+
+        assert engine.liquid_solver.last_backend == "gpu"
+        assert int(engine.material_id[10, 10]) == 0
+        assert int(engine.material_id[10, 9]) == water_id
+        assert int(engine.material_id[10, 11]) == 0
+    finally:
+        engine.close()
+
+
+def test_gpu_liquid_resting_on_standing_liquid_spreads_laterally(require_gpu) -> None:
+    engine = WorldEngine(width=64, height=64, simulation_backend="gpu", gpu_context=require_gpu)
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        # Stone cup pins the support cell so only the stacked cell can move.
+        for x in range(9, 12):
+            engine.set_cell(x, 12, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(9, 11, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(11, 11, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(10, 11, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.set_cell(10, 10, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.active.mark_rect(0, 0, 64, 64)
+
+        engine.liquid_solver.step(engine)
+
+        assert engine.liquid_solver.last_backend == "gpu"
+        assert int(engine.material_id[11, 10]) == water_id
+        assert int(engine.material_id[10, 10]) == 0
+        assert int(engine.material_id[10, 9]) == water_id
+        assert int(engine.material_id[10, 11]) == 0
+    finally:
+        engine.close()
+
+
+def test_gpu_liquid_horizontal_seam_spread_requires_support_from_below(require_gpu) -> None:
+    engine = WorldEngine(width=64, height=64, simulation_backend="gpu", gpu_context=require_gpu)
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        # Suspended cell pressed against the x=32 seam: must not cross.
+        engine.set_cell(31, 10, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        # Supported cell pressed against the seam with its left side blocked:
+        # must cross the seam instead of drifting left.
+        engine.set_cell(31, 20, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.set_cell(31, 21, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(30, 20, "raw_stone_solid", mark_dirty=False)
+        engine.active.mark_rect(0, 0, 64, 64)
+
+        engine.liquid_solver.step(engine)
+
+        assert engine.liquid_solver.last_backend == "gpu"
+        # The suspended cell fell straight down and stayed on its side.
+        assert int(engine.material_id[10, 31]) == 0
+        assert int(engine.material_id[11, 31]) == water_id
+        assert int(engine.material_id[10, 32]) == 0
+        assert int(engine.material_id[11, 32]) == 0
+        # The supported cell spread across the seam.
+        assert int(engine.material_id[20, 31]) == 0
+        assert int(engine.material_id[20, 32]) == water_id
+    finally:
+        engine.close()
 
 
 def test_patch_material_changes_collapse_behavior_in_cpu_and_gpu_paths() -> None:
@@ -4346,6 +4497,7 @@ def _make_enginedemo_harness(
     engine.demo_visible_width = demo.demo_visible_width
     engine.demo_visible_height = demo.demo_visible_height
     demo.state = EngineRunState()
+    demo.accumulator = 0.0
     demo.selected_material = "sand"
     demo.debug_view = DebugView.MATERIAL
     demo.brush_radius = 3
@@ -4353,6 +4505,10 @@ def _make_enginedemo_harness(
     demo.optics_view_light = None
     demo.brush_mode = "material"
     demo.focus_x, demo.focus_y = demo_default_focus_world(engine.paging)
+    demo.focus_scroll_speed = 512.0
+    demo._focus_scroll_held_keys = set()
+    demo._focus_scroll_x = 0.0
+    demo._focus_scroll_y = 0.0
     demo._last_present_time = 0.0
     demo.controller_debug_enabled = False
     demo.controller_debug_cycle = 0
@@ -4377,7 +4533,6 @@ def _make_enginedemo_harness(
     )()
     demo._record_cpu_frame = lambda now: config._record_cpu_frame(demo, now)
     demo._record_gpu_steps = lambda steps, now: config._record_gpu_steps(demo, steps, now)
-    demo._move_focus = lambda dx, dy: config._move_focus(demo, dx, dy)
     demo._paint_from_screen = lambda x, y, dx=0, dy=0: config._paint_from_screen(
         demo, x, y, dx=dx, dy=dy
     )
@@ -4638,6 +4793,54 @@ def test_enginedemo_key_event_updates_debug_brush_and_simulation_controls(
     assert demo.brush_mode == "gas"
 
 
+def test_enginedemo_focus_scroll_direction_combines_held_wasd_keys() -> None:
+    assert demo_focus_scroll_direction(set()) is None
+    assert demo_focus_scroll_direction({ord("X")}) is None
+    assert demo_focus_scroll_direction({ord("D")}) == (1.0, 0.0)
+    assert demo_focus_scroll_direction({ord("d")}) == (1.0, 0.0)
+    assert demo_focus_scroll_direction({ord("A"), ord("D")}) is None
+
+    diagonal = demo_focus_scroll_direction({ord("W"), ord("d")})
+
+    assert diagonal is not None
+    assert np.allclose(
+        np.array(diagonal, dtype=np.float64),
+        np.array([1.0 / np.sqrt(2.0), -1.0 / np.sqrt(2.0)]),
+    )
+
+
+def test_enginedemo_wasd_hold_scrolls_focus_continuously_and_pages_via_deadzone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _capture_enginedemo_config_class(monkeypatch)
+    demo = _make_enginedemo_harness(config)
+
+    origin_before = demo.engine.paging.origin_x
+    config.on_key_event(demo, ord("D"), 1, None)
+    enginedemo_module._demo_scroll_held_focus_keys(demo, 1.0 / 60.0)
+    assert demo.focus_x == 16
+    assert demo.engine.paging.origin_x == origin_before
+
+    enginedemo_module._demo_scroll_held_focus_keys(demo, 1.0 / 60.0)
+    enginedemo_module._demo_scroll_held_focus_keys(demo, 1.0 / 60.0)
+    assert demo.focus_x == 16
+    enginedemo_module._demo_scroll_held_focus_keys(demo, 1.0 / 60.0)
+    assert demo.focus_x == 48
+    assert demo.engine.paging.origin_x == origin_before + 32
+    assert demo.engine.paging.buffer_origin_x == origin_before + 32
+
+    config.on_key_event(demo, ord("d"), 0, None)
+    assert demo._focus_scroll_held_keys == {ord("D")}
+    for _ in range(4):
+        enginedemo_module._demo_scroll_held_focus_keys(demo, 1.0 / 60.0)
+    assert demo.focus_x == 80
+    config.on_key_event(demo, ord("D"), 0, None)
+    assert demo._focus_scroll_held_keys == set()
+    enginedemo_module._demo_scroll_held_focus_keys(demo, 1.0 / 60.0)
+    assert demo.focus_x == 80
+    assert demo.engine.paging.origin_x == origin_before + 64
+
+
 def test_enginedemo_window_events_support_scroll_focus_paint_and_reset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4653,10 +4856,20 @@ def test_enginedemo_window_events_support_scroll_focus_paint_and_reset(
     assert demo.brush_radius == 0
 
     config.on_key_event(demo, ord("D"), 1, None)
+    assert demo._focus_scroll_held_keys == {ord("D")}
+    enginedemo_module._demo_scroll_held_focus_keys(demo, 1.0 / 30.0)
+    assert demo.focus_x == 16
+    assert demo.engine.paging.origin_x == 0
+    enginedemo_module._demo_scroll_held_focus_keys(demo, 1.0 / 30.0)
     assert demo.focus_x == 48
     assert demo.focus_y == 8
     assert demo.engine.paging.origin_x == 32
     assert demo.engine.paging.buffer_origin_x == 32
+    config.on_key_event(demo, ord("D"), 0, None)
+    assert demo._focus_scroll_held_keys == set()
+    enginedemo_module._demo_scroll_held_focus_keys(demo, 1.0 / 30.0)
+    assert demo.focus_x == 48
+    assert demo.engine.paging.origin_x == 32
 
     world_x, world_y = demo_screen_to_world_cell(
         0,
@@ -35664,6 +35877,56 @@ def test_gpu_bridge_decay_active_scheduler_updates_gpu_buffers_without_cpu_activ
     assert np.array_equal(second_chunk_mask, np.zeros((1, 1), dtype=np.int32))
 
 
+def test_gpu_quiet_frame_skips_solver_segment_on_idle_scene(require_gpu) -> None:
+    import time
+
+    engine = WorldEngine(width=345, height=216, simulation_backend="gpu", gpu_context=require_gpu)
+    try:
+        settled_frame = None
+        for frame_index in range(240):
+            engine.step(1.0 / 60.0)
+            require_gpu.finish()
+            if engine.last_quiet_frame:
+                settled_frame = frame_index
+                break
+        assert settled_frame is not None, "default scene never reached a quiet frame"
+        assert engine._gpu_active_tile_count() == 0
+
+        quiet_count_before = engine.quiet_frame_count
+        samples_ms = []
+        for _ in range(30):
+            start = time.perf_counter()
+            engine.step(1.0 / 60.0)
+            require_gpu.finish()
+            samples_ms.append((time.perf_counter() - start) * 1000.0)
+        assert engine.quiet_frame_count > quiet_count_before
+        assert engine.last_quiet_frame
+        idle_solvers = (
+            engine.gas_solver,
+            engine.heat_solver,
+            engine.reaction_solver,
+            engine.motion_solver,
+            engine.liquid_solver,
+            engine.optics_solver,
+        )
+        for solver in idle_solvers:
+            assert solver.last_backend == "idle"
+        samples_ms.sort()
+        # Loose wall bound: the un-gated idle pipeline costs ~7.5ms on the
+        # reference GPU while quiet frames measure ~0.2ms; 2.5ms is generous.
+        assert samples_ms[len(samples_ms) // 2] < 2.5
+
+        # Waking the scene must produce a full active frame again.
+        engine.set_cell(10, 10, "sand_powder")
+        engine.step(1.0 / 60.0)
+        require_gpu.finish()
+        assert not engine.last_quiet_frame
+        for solver in idle_solvers:
+            assert solver.last_backend == "gpu"
+    finally:
+        engine.close()
+
+
 def test_gpu_world_command_formal_frame_marks_active_scheduler_on_gpu(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -44152,6 +44415,137 @@ def test_cpu_liquid_horizontal_seam_run_continues_until_blocker_occupancy() -> N
             elif blocker_kind == "displaced":
                 assert int(engine.material_id[y, 34]) == 0
                 assert int(engine.placeholder_displaced_material[y, 34]) == water_id
+    finally:
+        engine.close()
+
+
+def test_cpu_liquid_horizontal_seam_run_moves_both_directions_across_tile_boundary() -> None:
+    engine = _cpu_liquid_test_engine(width=64, height=64)
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        # Right-to-left: liquid run just right of the x=32 boundary, empty span left.
+        for x in range(32, 35):
+            engine.set_cell(x, 10, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+            engine.set_cell(x, 11, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(35, 10, "raw_stone_solid", mark_dirty=False)
+        # Left-to-right regression guard: liquid run just left of the boundary.
+        for x in range(29, 32):
+            engine.set_cell(x, 20, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+            engine.set_cell(x, 21, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(28, 20, "raw_stone_solid", mark_dirty=False)
+        engine.active.mark_rect(0, 0, 64, 64)
+
+        engine.liquid_solver.step(engine)
+
+        assert engine.liquid_solver.last_backend == "cpu"
+        assert [int(engine.material_id[10, x]) for x in range(29, 32)] == [
+            water_id,
+            water_id,
+            water_id,
+        ]
+        assert [int(engine.material_id[10, x]) for x in range(32, 35)] == [0, 0, 0]
+        assert [int(engine.material_id[20, x]) for x in range(29, 32)] == [0, 0, 0]
+        assert [int(engine.material_id[20, x]) for x in range(32, 35)] == [
+            water_id,
+            water_id,
+            water_id,
+        ]
+    finally:
+        engine.close()
+
+
+def test_cpu_liquid_suspended_falling_column_falls_straight_without_lateral_spread() -> None:
+    engine = _cpu_liquid_test_engine(width=64, height=64)
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        # Suspended stream: air below and to both sides.
+        for y in range(8, 11):
+            engine.set_cell(10, y, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.active.mark_rect(0, 0, 64, 64)
+
+        engine.liquid_solver.step(engine)
+
+        assert engine.liquid_solver.last_backend == "cpu"
+        # The whole stream fell one cell straight down.
+        assert [int(engine.material_id[y, 10]) for y in range(8, 12)] == [
+            0,
+            water_id,
+            water_id,
+            water_id,
+        ]
+        # Nothing smeared sideways while suspended.
+        assert [int(engine.material_id[y, 9]) for y in range(7, 13)] == [0] * 6
+        assert [int(engine.material_id[y, 11]) for y in range(7, 13)] == [0] * 6
+    finally:
+        engine.close()
+
+
+def test_cpu_liquid_resting_on_solid_spreads_laterally() -> None:
+    engine = _cpu_liquid_test_engine(width=64, height=64)
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        engine.set_cell(10, 10, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.set_cell(10, 11, "raw_stone_solid", mark_dirty=False)
+        engine.active.mark_rect(0, 0, 64, 64)
+
+        engine.liquid_solver.step(engine)
+
+        assert engine.liquid_solver.last_backend == "cpu"
+        assert int(engine.material_id[10, 10]) == 0
+        assert int(engine.material_id[10, 9]) == water_id
+        assert int(engine.material_id[10, 11]) == 0
+    finally:
+        engine.close()
+
+
+def test_cpu_liquid_resting_on_standing_liquid_spreads_laterally() -> None:
+    engine = _cpu_liquid_test_engine(width=64, height=64)
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        # Stone cup pins the support cell so only the stacked cell can move.
+        for x in range(9, 12):
+            engine.set_cell(x, 12, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(9, 11, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(11, 11, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(10, 11, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.set_cell(10, 10, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.active.mark_rect(0, 0, 64, 64)
+
+        engine.liquid_solver.step(engine)
+
+        assert engine.liquid_solver.last_backend == "cpu"
+        assert int(engine.material_id[11, 10]) == water_id
+        assert int(engine.material_id[10, 10]) == 0
+        assert int(engine.material_id[10, 9]) == water_id
+        assert int(engine.material_id[10, 11]) == 0
+    finally:
+        engine.close()
+
+
+def test_cpu_liquid_horizontal_seam_spread_requires_support_from_below() -> None:
+    engine = _cpu_liquid_test_engine(width=64, height=64)
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        # Suspended cell pressed against the x=32 seam: must not cross.
+        engine.set_cell(31, 10, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        # Supported cell pressed against the seam with its left side blocked:
+        # must cross the seam instead of drifting left.
+        engine.set_cell(31, 20, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+        engine.set_cell(31, 21, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(30, 20, "raw_stone_solid", mark_dirty=False)
+        engine.active.mark_rect(0, 0, 64, 64)
+
+        engine.liquid_solver.step(engine)
+
+        assert engine.liquid_solver.last_backend == "cpu"
+        # The suspended cell fell straight down and stayed on its side.
+        assert int(engine.material_id[10, 31]) == 0
+        assert int(engine.material_id[11, 31]) == water_id
+        assert int(engine.material_id[10, 32]) == 0
+        assert int(engine.material_id[11, 32]) == 0
+        # The supported cell spread across the seam.
+        assert int(engine.material_id[20, 31]) == 0
+        assert int(engine.material_id[20, 32]) == water_id
     finally:
         engine.close()
 
@@ -59436,8 +59830,12 @@ def test_motion_solver_only_updates_active_tile_neighborhoods_for_powders() -> N
     engine.motion_solver.step(engine, 1.0 / 60.0)
 
     sand_id = engine.rulebook.material_id("sand_powder")
-    assert int(engine.material_id[5, 4]) == sand_id
-    assert int(engine.material_id[4, 4]) == 0
+    # The active grain either stays put or trickles one cell down (slow free
+    # fall is stochastically gated), while the inactive grain must never move.
+    active_cells = int(engine.material_id[4, 4] == sand_id) + int(
+        engine.material_id[5, 4] == sand_id
+    )
+    assert active_cells == 1
     assert int(engine.material_id[80, 80]) == sand_id
     assert int(engine.material_id[81, 80]) == 0
 
@@ -59533,8 +59931,12 @@ def test_gpu_motion_solver_only_updates_active_tile_neighborhoods_for_powders() 
 
     sand_id = engine.rulebook.material_id("sand_powder")
     assert engine.motion_solver.last_backend == "gpu"
-    assert int(engine.material_id[5, 4]) == sand_id
-    assert int(engine.material_id[4, 4]) == 0
+    # The active grain either stays put or trickles one cell down (slow free
+    # fall is stochastically gated), while the inactive grain must never move.
+    active_cells = int(engine.material_id[4, 4] == sand_id) + int(
+        engine.material_id[5, 4] == sand_id
+    )
+    assert active_cells == 1
     assert int(engine.material_id[80, 80]) == sand_id
     assert int(engine.material_id[81, 80]) == 0
 
@@ -61464,6 +61866,62 @@ def test_gpu_liquid_formal_vertical_seam_moves_shifted_run_into_lower_empty_segm
         assert int(core["material_id"][32, 15]) == 0
         assert int(core["phase"][32, 15]) == int(Phase.FALLING_ISLAND)
         assert [int(core["material_id"][32, x]) for x in range(16, 19)] == [0, 0, 0]
+    finally:
+        engine.close()
+
+
+def test_gpu_liquid_formal_horizontal_seam_moves_run_both_directions_across_tile_boundary() -> None:
+    engine = WorldEngine(width=64, height=64, gas_cell_size=4)
+    if not engine.liquid_solver.gpu_pipeline.available(engine):
+        pytest.skip("GPU liquid pipeline is not available")
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        # Right-to-left: liquid run just right of the x=32 boundary, empty span left.
+        for x in range(32, 35):
+            engine.set_cell(x, 10, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+            engine.set_cell(x, 11, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(35, 10, "raw_stone_solid", mark_dirty=False)
+        # Left-to-right regression guard: liquid run just left of the boundary.
+        for x in range(29, 32):
+            engine.set_cell(x, 20, "water_liquid", phase=Phase.LIQUID, mark_dirty=False)
+            engine.set_cell(x, 21, "raw_stone_solid", mark_dirty=False)
+        engine.set_cell(28, 20, "raw_stone_solid", mark_dirty=False)
+        _seed_gpu_authoritative_active_tiles(engine, [(0, 0), (1, 0)])
+        engine.bridge.mark_gpu_authoritative(
+            "cell_core",
+            "material",
+            "island_id",
+            "entity_id",
+            "placeholder_displaced_material",
+            "active_meta",
+            "active_tile_ttl",
+            "active_chunk_mask",
+        )
+
+        pipeline = engine.liquid_solver.gpu_pipeline
+        previous_frame_active = engine._world_simulation_frame_active
+        engine._world_simulation_frame_active = True
+        try:
+            engine.liquid_solver.step(engine)
+        finally:
+            engine._world_simulation_frame_active = previous_frame_active
+
+        # The formal frame must take the default row-leader seam pass.
+        assert pipeline._seam_x_multirow_frame_rows == 4
+        core = _bridge_cell_core(engine)
+        assert [int(core["material_id"][10, x]) for x in range(29, 32)] == [
+            water_id,
+            water_id,
+            water_id,
+        ]
+        assert [int(core["material_id"][10, x]) for x in range(32, 35)] == [0, 0, 0]
+        assert [int(core["material_id"][20, x]) for x in range(29, 32)] == [0, 0, 0]
+        assert [int(core["material_id"][20, x]) for x in range(32, 35)] == [
+            water_id,
+            water_id,
+            water_id,
+        ]
     finally:
         engine.close()
 

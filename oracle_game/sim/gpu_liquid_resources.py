@@ -206,7 +206,7 @@ def _refresh_active_scheduler_from_ttl(pipeline, world: "WorldEngine") -> None:
     if not bridge.enabled or bridge.ctx is None:
         raise RuntimeError("GPU liquid pipeline requires bridge GPU resources for active refresh")
     bridge._ensure_active_scheduler_programs()
-    bridge._refresh_active_chunks_and_meta(world, read_meta=False)
+    bridge._refresh_active_chunks_and_meta(world, read_meta=True)
     bridge.mark_gpu_authoritative("active_meta", "active_tile_ttl", "active_chunk_mask")
 
 

@@ -130,7 +130,7 @@ void publish_reservation(int index, PowderReservation reservation) {
 bool is_moving(PowderReservation reservation) {
     return (
         (reservation.resolve_state == {{POWDER_RESOLVE_DDA}}
-            || reservation.resolve_state == {{POWDER_RESOLVE_FALLBACK}})
+            || (reservation.resolve_state & 7) == {{POWDER_RESOLVE_FALLBACK}})
         && !same_cell(reservation.source_xy, reservation.resolved_target_xy)
     );
 }
@@ -233,6 +233,12 @@ void main() {
     if (material_id != 0
         && (desired_delta.x != actual_delta.x || desired_delta.y != actual_delta.y)) {
         velocity = collision_response(velocity, desired_delta, actual_delta, material_id);
+    }
+    if ((reservation.resolve_state & 16) != 0) {
+        // A supported diagonal trickle slide is a pile readjustment, not
+        // vertical free-fall progress: consume the vertical velocity so the
+        // resting grain settles instead of re-launching next frame.
+        velocity.y = 0.0;
     }
 
     bridge_cell_core[source_word] = 0u;

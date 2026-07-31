@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from oracle_game.island_id_alloc import allocate_island_id as _allocate_island_id
 from oracle_game.types import MaterialDef, Phase
 
 if TYPE_CHECKING:
@@ -18,11 +19,7 @@ def material_by_id(engine: "WorldEngine", material_id: int) -> MaterialDef:
 
 
 def allocate_island_id(engine: "WorldEngine") -> int:
-    island_id = max(1, int(engine.next_island_id))
-    while island_id in engine.islands:
-        island_id += 1
-    engine.next_island_id = island_id + 1
-    return island_id
+    return _allocate_island_id(engine)
 
 
 def in_bounds(engine: "WorldEngine", x: int, y: int) -> bool:

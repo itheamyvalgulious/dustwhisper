@@ -868,6 +868,12 @@ void main() {
         materialize_streamed_cell(tile, row + 1, local.x, below_source_id);
 #endif
         int lateral_target_x = -1;
+        // Suspended liquid falls straight down: lateral spread is allowed only
+        // when the cell is supported from below, i.e. the cell directly below
+        // is not reachable-empty (solid or standing liquid both count as
+        // support). Row + 1 is always in-tile here (the row loop stops at
+        // TILE_SIZE - 2) and reflects this frame's down moves, so a cell that
+        // lands this frame first spreads on the next one.
         if (
 #if TILE_WARP_DIRECT_VERTICAL_MAPPING
             direct_down_segment_claimed == 0
@@ -877,6 +883,7 @@ void main() {
             && local_cell_in_world(tile, row, local.x)
             && local_cell_in_world(tile, row + 1, local.x)
             && is_columnar_liquid_cell(row, local.x)
+            && !is_reachable_empty(row + 1, local.x)
         ) {
             if (
                 local.x > 0
@@ -989,11 +996,14 @@ void main() {
         s_lateral_source_x[local.x] = -1;
         barrier();
 
+        // Same support gate as the warp fast path above: no lateral spread
+        // while the cell below is reachable-empty (suspended/falling).
         if (
             s_down_segment_claimed[local.x] == 0
             && local_cell_in_world(tile, row, local.x)
             && local_cell_in_world(tile, row + 1, local.x)
             && is_columnar_liquid_cell(row, local.x)
+            && !is_reachable_empty(row + 1, local.x)
         ) {
             if (
                 local.x > 0

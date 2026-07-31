@@ -106,6 +106,61 @@ def clamp_demo_brush_radius(radius: int) -> int:
     return max(0, min(16, int(radius)))
 
 
+DEMO_FOCUS_SCROLL_CELLS_PER_SECOND = 512.0
+
+_DEMO_FOCUS_SCROLL_DIRS: dict[int, tuple[float, float]] = {
+    key: direction
+    for letter, direction in (
+        ("W", (0.0, -1.0)),
+        ("S", (0.0, 1.0)),
+        ("A", (-1.0, 0.0)),
+        ("D", (1.0, 0.0)),
+    )
+    for key in _alpha_keys(letter)
+}
+
+
+def demo_focus_scroll_key_direction(key: int) -> tuple[float, float] | None:
+    return _DEMO_FOCUS_SCROLL_DIRS.get(key)
+
+
+def demo_focus_scroll_direction(held_keys: set[int]) -> tuple[float, float] | None:
+    """Unit-diagonal-normalized scroll direction from the held WASD keys."""
+    if not held_keys:
+        return None
+    direction_x = 0.0
+    direction_y = 0.0
+    for key in held_keys:
+        direction = _DEMO_FOCUS_SCROLL_DIRS.get(int(key))
+        if direction is None:
+            continue
+        direction_x += direction[0]
+        direction_y += direction[1]
+    if direction_x == 0.0 and direction_y == 0.0:
+        return None
+    length = math.hypot(direction_x, direction_y)
+    return (direction_x / length, direction_y / length)
+
+
+def advance_demo_focus_scroll(
+    scroll_x: float,
+    scroll_y: float,
+    *,
+    direction: tuple[float, float],
+    frame_time: float,
+    speed_cells_per_second: float,
+    tile_size: int,
+) -> tuple[float, float, int, int]:
+    """Integrate per-frame scroll remainder into tile-granular focus steps."""
+    distance = max(0.0, float(speed_cells_per_second)) * max(0.0, float(frame_time))
+    scroll_x += float(direction[0]) * distance
+    scroll_y += float(direction[1]) * distance
+    stride = max(1, int(tile_size))
+    step_x = int(math.trunc(scroll_x / stride)) * stride
+    step_y = int(math.trunc(scroll_y / stride)) * stride
+    return (scroll_x - step_x, scroll_y - step_y, step_x, step_y)
+
+
 def demo_velocity_from_drag(dx: int, dy: int) -> tuple[float, float]:
     if dx == 0 and dy == 0:
         return (0.0, -1.5)

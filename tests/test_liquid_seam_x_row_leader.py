@@ -33,6 +33,30 @@ def test_liquid_seam_x_row_leader_specialization_is_single_warp_per_row() -> Non
     assert "apply_row_leader_move(right_cell);" in source
 
 
+def test_liquid_seam_x_row_leader_reprobes_firing_boundary_interval() -> None:
+    source = shader_source(
+        "liquid/seam_x.comp",
+        {
+            **_SHADER_SUBS,
+            "SEAM_SNAPSHOT_INPUT": 1,
+            "SEAM_ROW_LEADER": 1,
+        },
+    )
+    # Both row-leader branches probe the boundary left of the firing one for
+    # coverage and must then re-probe their own boundary so the stored
+    # source/target interval is the firing boundary's; without the re-probe
+    # the discarded left-boundary probe zeroes the move (right-to-left moves
+    # were silently dropped).
+    assert (
+        source.count("left_to_right_move(boundary_x, y, source_base, target_base, move_count);")
+        == 1
+    )
+    assert (
+        source.count("right_to_left_move(boundary_x, y, source_base, target_base, move_count);")
+        == 1
+    )
+
+
 def test_liquid_seam_x_multirow_specialization_packs_four_independent_row_warps() -> None:
     rows_per_group = 4
     source = shader_source(

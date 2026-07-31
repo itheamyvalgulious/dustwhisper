@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
 from oracle_game.gpu import ISLAND_RUNTIME_DTYPE
+from oracle_game.island_id_alloc import reserve_island_id_block
 from oracle_game.sim.gpu_collapse_resources import (
     FORMAL_CONNECTED_TILE_COUNT_BUFFER,
     FORMAL_CONNECTED_TILE_DISPATCH_ARGS_BUFFER,
@@ -196,14 +197,7 @@ def materialize_component_texture_formal(
 def _reserve_formal_component_island_ids(
     pipeline, world: "WorldEngine", component_capacity: int
 ) -> int:
-    component_capacity = max(0, int(component_capacity))
-    if component_capacity == 0:
-        return 0
-    next_id = max(1, int(getattr(world, "next_island_id", 1)))
-    max_existing = max((int(island_id) for island_id in getattr(world, "islands", {})), default=0)
-    island_id_base = max(next_id, max_existing + 1)
-    world.next_island_id = max(next_id, island_id_base + component_capacity)
-    return island_id_base
+    return reserve_island_id_block(world, component_capacity)
 
 
 def _ensure_component_work_buffers(

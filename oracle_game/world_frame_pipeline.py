@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from oracle_game.sim.gpu_collapse_dirty import COLLAPSE_STRUCTURE_DIRTY_TILE_COUNT_BUFFER
 from oracle_game.sim.gpu_merge import MergeCandidates
 from oracle_game.types import (
     CellFlag,
@@ -184,17 +185,32 @@ def _step_once_impl(
         )
     with engine._profile_pass("commands"):
         engine._apply_commands()
+    pre_sync_needed = engine._needs_pre_simulation_bridge_sync(frame_input=frame_input)
     with engine._profile_pass("pre_sync"):
-        if engine._needs_pre_simulation_bridge_sync(frame_input=frame_input):
+        if pre_sync_needed:
             engine._sync_pre_simulation_bridge_without_debug_upload()
             engine._gpu_cpu_dirty_resources.clear()
     with engine._profile_pass("commands"):
         persistent_observation_plans = _queue_persistent_entity_observations(engine)
         observation_plans.extend(persistent_observation_plans)
         queued_observations += len(persistent_observation_plans)
+    quiet_frame = _compute_quiet_frame(engine, pre_sync_needed=pre_sync_needed)
+    # The mark flag is consumed once per frame by the predicate above; marks
+    # made by solvers later this frame re-arm it for the next frame.
+    engine._frame_active_rect_marks = False
+    engine.last_quiet_frame = bool(quiet_frame)
+    if quiet_frame:
+        engine.quiet_frame_count += 1
+    elif engine.simulation_backend == "gpu":
+        # A non-quiet frame always runs the optics GPU step, leaving the light
+        # outputs in an unknown state; the zero-proof must be re-established.
+        engine._quiet_light_outputs_zero = False
     if engine.profile_passes_enabled:
         engine.collapse_solver.gpu_pipeline.reset_pass_profile()
     collapse_pipeline = engine.collapse_solver.gpu_pipeline
+    had_collapse_regions = bool(engine.collapse_dirty_regions or engine.collapse_deferred_regions)
+    epoch_before = getattr(collapse_pipeline, "_formal_dirty_epoch", None)
+    epoch_id_before = None if epoch_before is None else int(epoch_before.epoch_id)
     with engine._profile_pass("collapse"):
         incremental_collapse = bool(
             engine.simulation_backend == "gpu"
@@ -211,11 +227,258 @@ def _step_once_impl(
         else:
             with collapse_pipeline._profile_pass(engine, "scheduled_defer"):
                 pass
+    _note_collapse_epoch_transitions(
+        engine,
+        had_collapse_regions=had_collapse_regions,
+        epoch_id_before=epoch_id_before,
+    )
     collapse_profile = getattr(
         getattr(engine.collapse_solver, "gpu_pipeline", None), "last_pass_profile", None
     )
     if engine.profile_passes_enabled and isinstance(collapse_profile, dict):
         engine.last_pass_profile["collapse"] = collapse_profile
+    if quiet_frame:
+        _step_quiet_solver_segment(engine, dt)
+    else:
+        _step_active_solver_segment(engine, dt)
+    with engine._profile_pass("active_decay"):
+        liquid_pipeline = engine.liquid_solver.gpu_pipeline
+        active_decay_fused = bool(
+            getattr(liquid_pipeline, "last_flow_active_decay_fusion_used", False)
+            and getattr(liquid_pipeline, "_flow_active_decay_fusion_frame_id", None)
+            == int(engine.frame_id)
+        )
+        active_scheduler_gpu_authoritative = (
+            engine.simulation_backend == "gpu"
+            and "active_tile_ttl" in engine.bridge.gpu_authoritative_resources
+        )
+        if active_scheduler_gpu_authoritative:
+            if not active_decay_fused and not engine.bridge.decay_active_scheduler(engine):
+                engine._require_gpu_stage("active scheduler decay")
+                raise RuntimeError("GPU active scheduler decay failed; CPU fallback is disabled")
+        elif engine.simulation_backend == "gpu":
+            engine._require_gpu_stage("active scheduler decay")
+        else:
+            engine.active.decay()
+    _refresh_collapse_dirty_tile_count_shadow(engine)
+    bridge_world_synced = False
+    if capture_output:
+        if engine.simulation_backend != "gpu":
+            engine.bridge.sync_world(engine)
+            bridge_world_synced = True
+        else:
+            engine.bridge.sync_force_sources(engine)
+        bridge_upload_snapshot = engine.serialize_bridge_upload_snapshot()
+        bridge_frame_snapshot = engine.serialize_bridge_frame_snapshot()
+    with engine._profile_pass("readback"):
+        _finish_readbacks(engine, world_synced=bridge_world_synced)
+        _collect_ready_readbacks(engine, engine.frame_id)
+    engine._bridge_inputs_prepared = False
+
+    if not capture_output:
+        return None
+    return WorldFrameOutput(
+        frame_id=engine.frame_id,
+        submission_id=frame_input.submission_id if frame_input is not None else None,
+        controller_state=output_controller_state,
+        consumed_readbacks=consumed_readbacks,
+        resolved_targets=resolved_targets,
+        resolved_change_intents=resolved_change_intents,
+        resolved_carrier_intents=resolved_carrier_intents,
+        observations=observations,
+        entity_feedback=entity_feedback,
+        paging_updates=paging_updates,
+        observation_plans=observation_plans,
+        readback_plans=readback_plans,
+        bridge_upload_snapshot=bridge_upload_snapshot,
+        bridge_frame_snapshot=bridge_frame_snapshot,
+        queued_observations=queued_observations,
+        queued_readbacks=queued_readbacks,
+        queued_commands=queued_commands,
+        placeholder_count=placeholder_count,
+    )
+
+
+def _compute_quiet_frame(engine: "WorldEngine", *, pre_sync_needed: bool) -> bool:
+    """All-or-nothing idle-frame predicate for the formal GPU path.
+
+    Returns True only when every solver pass this frame is provably an
+    identity op, so the gas -> heat -> reactions -> motion -> liquid ->
+    optics -> latch-clear segment can be skipped as a single unit (heat's
+    deferred cell-core publish requires a same-frame motion/reaction
+    handoff, so skipping any subset is forbidden).  Any doubt answers
+    False and the full pipeline runs.
+    """
+    if engine.simulation_backend != "gpu":
+        return False
+    if "active_tile_ttl" not in engine.bridge.gpu_authoritative_resources:
+        return False
+    # CPU-side activity this frame: bridge sync dirt, applied commands, or
+    # active-rect marks since the previous frame's predicate.
+    if pre_sync_needed or engine.bridge_frame_commands:
+        return False
+    if engine._frame_active_rect_marks:
+        return False
+    # Zero active tiles on GPU (CPU shadow refreshed by every sync and by the
+    # per-frame decay/fused-liquid refresh with read_meta=True).
+    if engine._gpu_active_tile_count() != 0:
+        return False
+    # No entities or force/light sources that could inject work mid-frame.
+    if (
+        engine.force_sources
+        or engine.emitters
+        or engine.persistent_emitters
+        or engine.entity_states
+        or engine.entity_placeholders
+    ):
+        return False
+    if engine.islands:
+        return False
+    # Note: motion_pipeline.last_published_island_runtime_capacity is NOT a
+    # usable idle signal — the incremental collapse revalidation republishes
+    # the full structural component runtime on idle scenes, so it stays at
+    # the world cell count forever.  Island motion is provably identity here
+    # instead: records only move after a support change (collapse work, rules
+    # out above) or while their tiles are awake (rules out tiles == 0), and a
+    # fall marks its tiles, so any real island work re-opens the gate.
+    # No pending collapse work.  Use the dirty-tile count shadow (refreshed at
+    # the end of every frame) instead of the pending *flag*: the solver
+    # terminal passes set that flag every frame even when they marked zero
+    # tiles, so it never clears on an idle scene.  Epoch/admission reality is
+    # recorded at the source by ``_note_collapse_epoch_transitions``: only an
+    # epoch that began with a non-empty queue (or an admission one produced)
+    # blocks the gate.  The perpetual zero-tile revalidation cycle on idle
+    # scenes is identity and does not.
+    if engine.collapse_dirty_regions or engine.collapse_deferred_regions:
+        return False
+    if engine._collapse_dirty_tile_count_shadow != 0:
+        return False
+    collapse_pipeline = engine.collapse_solver.gpu_pipeline
+    if engine._collapse_active_epoch_real and (
+        getattr(collapse_pipeline, "_formal_dirty_epoch", None) is not None
+    ):
+        return False
+    if engine._collapse_admission_real and (
+        getattr(collapse_pipeline, "_pending_formal_runtime_admission", None) is not None
+    ):
+        return False
+    return _gpu_light_outputs_provably_zero(engine)
+
+
+def _note_collapse_epoch_transitions(
+    engine: "WorldEngine",
+    *,
+    had_collapse_regions: bool,
+    epoch_id_before: int | None,
+) -> None:
+    """Record collapse epoch/admission reality for the quiet-frame gate.
+
+    Runs right after the collapse stage.  A newly begun epoch is "real" when
+    it claimed a non-empty dirty queue (count shadow from the end of last
+    frame) or consumed CPU dirty regions this frame; an epoch that began with
+    neither is the perpetual zero-tile revalidation found on idle scenes and
+    its work (including the island runtime admission it commits) is identity.
+    The admission reality is attributed at the frame it appears, while the
+    committed epoch's reality is still fresh in ``_collapse_active_epoch_real``.
+    """
+    collapse_pipeline = engine.collapse_solver.gpu_pipeline
+    epoch_after = getattr(collapse_pipeline, "_formal_dirty_epoch", None)
+    if epoch_after is not None and int(epoch_after.epoch_id) != epoch_id_before:
+        engine._collapse_active_epoch_real = bool(
+            had_collapse_regions or engine._collapse_dirty_tile_count_shadow != 0
+        )
+    admission = getattr(collapse_pipeline, "_pending_formal_runtime_admission", None)
+    if admission is not None and int(admission.epoch_id) != engine._collapse_admission_epoch_id:
+        engine._collapse_admission_epoch_id = int(admission.epoch_id)
+        engine._collapse_admission_real = bool(engine._collapse_active_epoch_real)
+
+
+def _refresh_collapse_dirty_tile_count_shadow(engine: "WorldEngine") -> None:
+    """Snapshot the GPU collapse dirty-tile queue count once per frame.
+
+    Read right after the active-scheduler decay refresh, where the driver
+    queue is already drained by the active-meta read, so it adds no extra
+    sync point on busy frames while keeping the quiet-frame predicate exact.
+    """
+    if engine.simulation_backend != "gpu":
+        return
+    buffer = engine.bridge.buffers.get(COLLAPSE_STRUCTURE_DIRTY_TILE_COUNT_BUFFER)
+    if buffer is None:
+        engine._collapse_dirty_tile_count_shadow = 0
+        return
+    engine._collapse_dirty_tile_count_shadow = int(
+        np.frombuffer(buffer.read(size=4), dtype=np.uint32, count=1)[0]
+    )
+
+
+def _gpu_light_outputs_provably_zero(engine: "WorldEngine") -> bool:
+    """True when the GPU light outputs are known to be fully cleared.
+
+    Skipping the optics step leaves visible_illumination, the optical dose
+    textures and the light-dose guard untouched, so the quiet gate may only
+    fire once a previous optics GPU step provably recomputed them from zero
+    emitters (every formal optics step clears the accumulators and the guard
+    before tracing).  Once proven, the proof holds across quiet frames
+    because nothing else writes those resources until a non-quiet frame runs
+    optics again (which resets ``engine._quiet_light_outputs_zero``).
+    """
+    if engine._quiet_light_outputs_zero:
+        return True
+    optics_solver = engine.optics_solver
+    if optics_solver.last_backend != "gpu" or int(optics_solver.last_emitter_count) != 0:
+        return False
+    count_buffer = engine.bridge.buffers.get("reaction_light_emitter_count")
+    if count_buffer is None:
+        return False
+    # Small buffer map read: the coherent path on this driver (AGENTS.md), and
+    # only reached on active->idle transitions, never on busy frames (the
+    # active-tile check above short-circuits first).
+    emitted = np.frombuffer(count_buffer.read(size=4), dtype=np.uint32, count=1)
+    if int(emitted[0]) != 0:
+        return False
+    engine._quiet_light_outputs_zero = True
+    return True
+
+
+def _step_quiet_solver_segment(engine: "WorldEngine", dt: float) -> None:
+    """Idle bookkeeping replacing the solver segment on a quiet frame.
+
+    Every skipped solver only gets its cheap CPU reset (which also publishes
+    the ``last_backend = "idle"`` telemetry, following the collapse idle
+    precedent); all GPU upload/dispatch/publish work is provably identity
+    and skipped.  The force-source lifetime decay and transient emitter
+    clearing the skipped solvers would have done are no-ops because the
+    quiet predicate requires both lists empty; they run anyway so a future
+    predicate change cannot silently drop the bookkeeping.
+    """
+    engine.phase_c_defer_cell_publish = False
+    engine.heat_motion_handoff_active = False
+    engine.reaction_motion_handoff_active = False
+    engine._reaction_motion_terminal_dt = float(dt)
+    with engine._profile_pass("gas"):
+        engine.gas_solver.reset_runtime_state(engine)
+    with engine._profile_pass("heat"):
+        engine.heat_solver.reset_runtime_state(engine, empty_heat_targets=True)
+    engine.reaction_solver.reset_runtime_state(engine)
+    engine.reaction_solver.last_backend = "idle"
+    with engine._profile_pass("motion"):
+        engine.motion_solver.reset_runtime_state()
+        engine.motion_solver.last_backend = "idle"
+    with engine._profile_pass("liquid"):
+        engine.liquid_solver.reset_runtime_state(engine)
+    optics_pipeline = engine.optics_solver.gpu_pipeline
+    optics_pipeline.last_reaction_latch_clear_fused = False
+    optics_pipeline.last_full_active_mask_hydration_elision_used = False
+    with engine._profile_pass("optics"):
+        engine.optics_solver._reset_frame_runtime_state(engine)
+        engine.optics_solver.last_backend = "idle"
+    for force in list(engine.force_sources):
+        force.lifetime -= dt
+    engine.force_sources[:] = [force for force in engine.force_sources if force.lifetime > 0.0]
+    engine.emitters.clear()
+
+
+def _step_active_solver_segment(engine: "WorldEngine", dt: float) -> None:
     if engine.profile_passes_enabled:
         engine.gas_solver.gpu_pipeline.reset_pass_profile()
     with engine._profile_pass("gas"):
@@ -332,61 +595,6 @@ def _step_once_impl(
     )
     if engine.profile_passes_enabled and isinstance(reaction_profile, dict):
         engine.last_pass_profile["reactions"] = reaction_profile
-    with engine._profile_pass("active_decay"):
-        liquid_pipeline = engine.liquid_solver.gpu_pipeline
-        active_decay_fused = bool(
-            getattr(liquid_pipeline, "last_flow_active_decay_fusion_used", False)
-            and getattr(liquid_pipeline, "_flow_active_decay_fusion_frame_id", None)
-            == int(engine.frame_id)
-        )
-        active_scheduler_gpu_authoritative = (
-            engine.simulation_backend == "gpu"
-            and "active_tile_ttl" in engine.bridge.gpu_authoritative_resources
-        )
-        if active_scheduler_gpu_authoritative:
-            if not active_decay_fused and not engine.bridge.decay_active_scheduler(engine):
-                engine._require_gpu_stage("active scheduler decay")
-                raise RuntimeError("GPU active scheduler decay failed; CPU fallback is disabled")
-        elif engine.simulation_backend == "gpu":
-            engine._require_gpu_stage("active scheduler decay")
-        else:
-            engine.active.decay()
-    bridge_world_synced = False
-    if capture_output:
-        if engine.simulation_backend != "gpu":
-            engine.bridge.sync_world(engine)
-            bridge_world_synced = True
-        else:
-            engine.bridge.sync_force_sources(engine)
-        bridge_upload_snapshot = engine.serialize_bridge_upload_snapshot()
-        bridge_frame_snapshot = engine.serialize_bridge_frame_snapshot()
-    with engine._profile_pass("readback"):
-        _finish_readbacks(engine, world_synced=bridge_world_synced)
-        _collect_ready_readbacks(engine, engine.frame_id)
-    engine._bridge_inputs_prepared = False
-
-    if not capture_output:
-        return None
-    return WorldFrameOutput(
-        frame_id=engine.frame_id,
-        submission_id=frame_input.submission_id if frame_input is not None else None,
-        controller_state=output_controller_state,
-        consumed_readbacks=consumed_readbacks,
-        resolved_targets=resolved_targets,
-        resolved_change_intents=resolved_change_intents,
-        resolved_carrier_intents=resolved_carrier_intents,
-        observations=observations,
-        entity_feedback=entity_feedback,
-        paging_updates=paging_updates,
-        observation_plans=observation_plans,
-        readback_plans=readback_plans,
-        bridge_upload_snapshot=bridge_upload_snapshot,
-        bridge_frame_snapshot=bridge_frame_snapshot,
-        queued_observations=queued_observations,
-        queued_readbacks=queued_readbacks,
-        queued_commands=queued_commands,
-        placeholder_count=placeholder_count,
-    )
 
 
 def _queue_persistent_entity_observations(engine: "WorldEngine") -> list[dict[str, Any]]:
@@ -562,6 +770,9 @@ def _mark_active_rects_runtime(
 ) -> None:
     if not rects:
         return
+    # Record every mark so the quiet-frame predicate (consumed once per frame
+    # in _step_once_impl) never skips a frame whose active set just grew.
+    engine._frame_active_rect_marks = True
     if engine.simulation_backend == "gpu" and engine._world_simulation_frame_active:
         if not engine.bridge.mark_active_rects(engine, rects):
             engine._require_gpu_stage("active scheduler region marking")

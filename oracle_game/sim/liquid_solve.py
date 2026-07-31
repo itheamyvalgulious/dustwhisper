@@ -134,16 +134,35 @@ def _solve_tile(solver, world: "WorldEngine", x0: int, y0: int, x1: int, y1: int
         row_material = local_material[ly].copy()
         row_phase = local_phase[ly].copy()
         width = local_material.shape[1]
+        # Row-snapshot replays: every pass below evaluates the pre-move row
+        # (like the GPU warp ballot in tile_solve.comp). Within one row pass a
+        # liquid cell keeps its liquid/source status and an empty cell stays
+        # empty even if a planned move targets it; executing the plan only at
+        # the end keeps interleaved liquid/empty runs from teleporting cells
+        # across the row, which produced disconnected flickering patches. A
+        # cell whose snapshot status was liquid never becomes a destination
+        # within the same pass (source cells stay liquid on the snapshot), so
+        # an arriving cell cannot chain-hop in one frame.
+        snapshot_liquid = np.fromiter(
+            (snapshot_tile_level_liquid(row_material, row_phase, lx) for lx in range(width)),
+            dtype=np.bool_,
+            count=width,
+        )
+        # Tile-level liquids plan against the row snapshot (like the GPU warp
+        # ballot in tile_solve.comp); non-tile-level (columnar) liquids keep
+        # their canonical live row pass below so a left-blocked column can
+        # still flow right within the same frame.
+        tile_level_liquid = bool(np.any(snapshot_liquid))
         claimed_down_source = np.zeros((width,), dtype=np.bool_)
         claimed_down_target = np.zeros((width,), dtype=np.bool_)
         planned_down_moves: list[tuple[int, int, int, int]] = []
         lx = 0
         while lx < width:
-            if not snapshot_tile_level_liquid(row_material, row_phase, lx):
+            if not bool(snapshot_liquid[lx]):
                 lx += 1
                 continue
             run_start = lx
-            while lx < width and snapshot_tile_level_liquid(row_material, row_phase, lx):
+            while lx < width and bool(snapshot_liquid[lx]):
                 lx += 1
             run_end = lx
             first_empty_x = -1
@@ -179,17 +198,46 @@ def _solve_tile(solver, world: "WorldEngine", x0: int, y0: int, x1: int, y1: int
             move_cell(src_y, src_x, dst_y, dst_x)
             changed = True
 
+        planned_straight_down: list[tuple[int, int, int, int]] = []
         for lx in range(width):
             if bool(claimed_down_source[lx]):
                 continue
-            if is_liquid(ly, lx) and reachable_empty(ly + 1, lx):
-                move_cell(ly, lx, ly + 1, lx)
-                changed = True
+            if tile_level_liquid:
+                # Tile-level rows keep the GPU single-swap semantics: a cell
+                # that was empty on the row snapshot (a down-run target) is
+                # not re-evaluated as a straight-down source this frame.
+                if not bool(snapshot_liquid[lx]):
+                    continue
+            elif not is_liquid(ly, lx):
+                continue
+            if reachable_empty(ly + 1, lx):
+                # Mark the source as claimed: the cell leaves this row, so the
+                # lateral pass must not treat its snapshot-liquid status as a
+                # live source and steal a neighbor's lateral destination.
+                claimed_down_source[lx] = True
+                planned_straight_down.append((ly, lx, ly + 1, lx))
+        for src_y, src_x, dst_y, dst_x in planned_straight_down:
+            move_cell(src_y, src_x, dst_y, dst_x)
+            changed = True
 
         claimed_lateral_dest = np.zeros((width,), dtype=np.bool_)
         planned_lateral_moves: list[tuple[int, int, int, int]] = []
         for lx in range(width):
-            if bool(claimed_down_source[lx]) or not is_tile_level_liquid(ly, lx):
+            if bool(claimed_down_source[lx]):
+                continue
+            # Suspended liquid falls straight down: lateral spread is allowed
+            # only when the cell is supported from below, i.e. the cell
+            # directly below is not reachable-empty (solid or standing liquid
+            # both count as support). Row ly + 1 is always in-tile here and
+            # reflects this frame's down moves, matching the GPU shared-state
+            # read in tile_solve.comp; a cell that lands this frame first
+            # spreads on the next one.
+            if reachable_empty(ly + 1, lx):
+                continue
+            if tile_level_liquid:
+                if not bool(snapshot_liquid[lx]):
+                    continue
+            elif not is_tile_level_liquid(ly, lx):
                 continue
             if lx > 0 and reachable_empty(ly, lx - 1) and not bool(claimed_lateral_dest[lx - 1]):
                 claimed_lateral_dest[lx - 1] = True
@@ -261,6 +309,14 @@ def _apply_horizontal_seam_run(
     if solver._world_cell_is_tile_level_liquid(
         world, left, y
     ) and solver._world_cell_reachable_empty(world, right, y):
+        # Suspended liquid does not spread across the seam: the run moves only
+        # when the boundary-adjacent source cell (always part of the moved
+        # set) is supported from below, i.e. the cell below is not
+        # reachable-empty (solid or standing liquid both count as support;
+        # below the world floor counts as supported, matching the GPU
+        # out-of-bounds rule in seam_x.comp).
+        if y + 1 < world.height and solver._world_cell_reachable_empty(world, left, y + 1):
+            return False
         source_start = left
         source_tile_start = (left // tile_size) * tile_size
         while source_start > source_tile_start and solver._world_cell_is_tile_level_liquid(
@@ -282,6 +338,9 @@ def _apply_horizontal_seam_run(
     if solver._world_cell_is_tile_level_liquid(
         world, right, y
     ) and solver._world_cell_reachable_empty(world, left, y):
+        # Same below-support gate as the left-to-right branch above.
+        if y + 1 < world.height and solver._world_cell_reachable_empty(world, right, y + 1):
+            return False
         source_end = right + 1
         source_tile_end = min(world.width, right + tile_size)
         while source_end < source_tile_end and solver._world_cell_is_tile_level_liquid(

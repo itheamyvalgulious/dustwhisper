@@ -12,16 +12,20 @@ from oracle_game.demo_input import (
     BRUSH_MODES,
     CONTROLLER_TOGGLE_KEYS,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
     DEBUG_VIEW_KEYMAP,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
+    DEMO_FOCUS_SCROLL_CELLS_PER_SECOND,
     GAS_SPECIES_CYCLE_KEYS,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
     MATERIAL_KEYS,
     OPTICS_LIGHT_CYCLE_KEYS,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
     RESET_WORLD_KEYS,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
     _alpha_keys,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
+    advance_demo_focus_scroll,
     apply_demo_paint,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
     clamp_demo_brush_radius,
     cycle_demo_brush_mode,
     cycle_demo_named_choice,
     demo_debug_view_for_key,
+    demo_focus_scroll_direction,
+    demo_focus_scroll_key_direction,
     demo_force_direction_from_drag,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
     demo_light_direction_and_spread_from_drag,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
     demo_material_for_key,
@@ -73,6 +77,8 @@ from oracle_game.types import DebugView
 from oracle_game.world import WorldEngine
 
 DEMO_REALTIME_BUDGET_CELL_THRESHOLD = 1_000_000
+DEMO_FOCUS_KEY_ACTION_RELEASE = 0
+DEMO_FOCUS_KEY_ACTION_PRESS = 1
 DEMO_DEBUG_TEXTURE_REFRESH_SECONDS = 1.0 / 15.0
 DEMO_VERTEX_SHADER_SOURCE = """
     #version 330
@@ -283,10 +289,24 @@ def _demo_publish_runtime_state(demo: Any) -> None:
         "sim_ms": float(demo.sim_ms),
         "sync_ms": float(demo.sync_ms),
         "render_ms": float(demo.render_ms),
+        "scroll_ms": float(getattr(demo, "scroll_ms", 0.0)),
+        "controller_ms": float(getattr(demo, "controller_ms", 0.0)),
+        "worst_frames": list(getattr(demo, "_frame_stage_history", [])),
         "backend_report": demo_backend_report(demo.engine),
     }
     demo._refresh_status_title()
     request_demo_redraw(demo.wnd)
+
+
+def _demo_record_frame_stage(demo: Any, **stage: float) -> None:
+    history = getattr(demo, "_frame_stage_history", None)
+    if history is None:
+        history = []
+        demo._frame_stage_history = history
+    history.append(stage)
+    # Keep the worst frames by total frame_ms for the HTTP console dump.
+    history.sort(key=lambda s: s["frame_ms"], reverse=True)
+    del history[8:]
 
 
 def _demo_handle_brush_and_view_keys(demo: Any, key: int) -> bool:
@@ -337,6 +357,8 @@ def _demo_handle_cycle_and_reset_keys(demo: Any, key: int) -> bool:
     elif is_demo_reset_key(key):
         demo.engine.reset_world()
         demo.focus_x, demo.focus_y = demo_default_focus_world(demo.engine.paging)
+        demo._focus_scroll_x = 0.0
+        demo._focus_scroll_y = 0.0
         demo.controller_debug_cycle = 0
         demo.controller_debug_label = None
         demo.controller_debug_saved_state = demo.engine.serialize_controller_state()[
@@ -348,17 +370,55 @@ def _demo_handle_cycle_and_reset_keys(demo: Any, key: int) -> bool:
     return True
 
 
-def _demo_handle_focus_move_keys(demo: Any, key: int) -> bool:
-    if key in (ord("W"), ord("w")):
-        demo._move_focus(0, -demo.engine.paging.tile_size)
-    elif key in (ord("S"), ord("s")):
-        demo._move_focus(0, demo.engine.paging.tile_size)
-    elif key in (ord("A"), ord("a")):
-        demo._move_focus(-demo.engine.paging.tile_size, 0)
-    elif key in (ord("D"), ord("d")):
-        demo._move_focus(demo.engine.paging.tile_size, 0)
-    else:
+def _demo_key_action_is_release(action: object) -> bool:
+    """moderngl-window passes release as int 0 on some backends, 'ACTION_RELEASE' on others."""
+    if isinstance(action, str):
+        return action == "ACTION_RELEASE"
+    return int(action) == DEMO_FOCUS_KEY_ACTION_RELEASE
+
+
+def _demo_handle_focus_move_keys(demo: Any, key: int, action: int) -> bool:
+    """Track WASD hold state; the render loop scrolls focus continuously."""
+    if demo_focus_scroll_key_direction(key) is None:
         return False
+    held = getattr(demo, "_focus_scroll_held_keys", None)
+    if held is None:
+        held = set()
+        demo._focus_scroll_held_keys = held
+    if _demo_key_action_is_release(action):
+        held.discard(int(key))
+        if not held:
+            # Drop the sub-tile remainder so a fresh hold always starts aligned.
+            demo._focus_scroll_x = 0.0
+            demo._focus_scroll_y = 0.0
+        return True
+    held.add(int(key))
+    return True
+
+
+def _demo_scroll_held_focus_keys(demo: Any, frame_time: float) -> bool:
+    """Advance focus by the held WASD keys; paging triggers via its own deadzone."""
+    direction = demo_focus_scroll_direction(getattr(demo, "_focus_scroll_held_keys", set()))
+    if direction is None:
+        return False
+    scroll_x, scroll_y, step_x, step_y = advance_demo_focus_scroll(
+        float(getattr(demo, "_focus_scroll_x", 0.0)),
+        float(getattr(demo, "_focus_scroll_y", 0.0)),
+        direction=direction,
+        frame_time=frame_time,
+        speed_cells_per_second=float(
+            getattr(demo, "focus_scroll_speed", DEMO_FOCUS_SCROLL_CELLS_PER_SECOND)
+        ),
+        tile_size=int(demo.engine.paging.tile_size),
+    )
+    demo._focus_scroll_x = scroll_x
+    demo._focus_scroll_y = scroll_y
+    if step_x == 0 and step_y == 0:
+        return False
+    demo.focus_x += step_x
+    demo.focus_y += step_y
+    demo.engine.advance_paging(demo.focus_x, demo.focus_y, immediate=True)
+    demo.controller_debug_dirty = demo.controller_debug_enabled
     return True
 
 
@@ -370,6 +430,14 @@ def main() -> None:
         raise SystemExit(
             "Install moderngl and moderngl-window inside the venv before running enginedemo."
         ) from exc
+
+    # Prefer the discrete NVIDIA GPU on PRIME hybrid-graphics laptops/desktops.
+    # These must be set before pyglet opens the X11/GLX window, which happens
+    # inside run_window_config below.
+    import os
+
+    os.environ.setdefault("__NV_PRIME_RENDER_OFFLOAD", "1")
+    os.environ.setdefault("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
 
     class EngineDemo(mglw.WindowConfig):
         gl_version = (4, 3)
@@ -390,6 +458,20 @@ def main() -> None:
             self._refresh_status_title()
 
         def _init_world_engine(self) -> None:
+            ctx_info = getattr(self.ctx, "info", None)
+            renderer = str(ctx_info.get("GL_RENDERER", "")) if hasattr(ctx_info, "get") else ""
+            if (
+                os.environ.get("__NV_PRIME_RENDER_OFFLOAD") == "1"
+                and "NVIDIA" not in renderer.upper()
+            ):
+                import warnings
+
+                warnings.warn(
+                    f"enginedemo requested the discrete NVIDIA GPU but the GL context landed on "
+                    f"{renderer!r}; simulation will run on the wrong (slow) device. "
+                    f"Check your PRIME/offload setup.",
+                    stacklevel=2,
+                )
             sizing = compute_demo_grid_sizing(self.wnd.width, self.wnd.height)
             self.demo_visible_width = sizing["visible_width"]
             self.demo_visible_height = sizing["visible_height"]
@@ -430,6 +512,10 @@ def main() -> None:
             self.gas_view_species = "water_gas"
             self.optics_view_light: str | None = None
             self.focus_x, self.focus_y = demo_default_focus_world(self.engine.paging)
+            self.focus_scroll_speed = DEMO_FOCUS_SCROLL_CELLS_PER_SECOND
+            self._focus_scroll_held_keys: set[int] = set()
+            self._focus_scroll_x = 0.0
+            self._focus_scroll_y = 0.0
             self.accumulator = 0.0
             self._last_present_time = _time.perf_counter()
             self._status_title = ""
@@ -534,14 +620,32 @@ def main() -> None:
             now = _time.perf_counter()
             self._record_cpu_frame(now)
             with self.engine.state_lock:
+                scrolled = _demo_scroll_held_focus_keys(self, frame_time)
+                scroll_done = _time.perf_counter()
                 stepped = _demo_step_simulation(self, frame_time)
+                step_done = _time.perf_counter()
                 if self.controller_debug_enabled and (self.controller_debug_dirty or stepped):
                     self._run_demo_controller_cycle(apply_turn=stepped)
+                controller_done = _time.perf_counter()
                 self.engine.default_debug_view = self.debug_view
                 sync_done = _demo_sync_display_textures(self, now)
                 render_done = _demo_draw_frame(self)
+                # Per-stage breakdown for diagnosing frame spikes (all ms).
+                self.scroll_ms = (scroll_done - now) * 1000.0
+                self.controller_ms = (controller_done - step_done) * 1000.0
                 self.render_ms = (render_done - sync_done) * 1000.0
                 self.frame_ms = (render_done - frame_start) * 1000.0
+                _demo_record_frame_stage(
+                    self,
+                    scrolled=scrolled,
+                    stepped=stepped,
+                    scroll_ms=self.scroll_ms,
+                    sim_ms=self.sim_ms,
+                    controller_ms=self.controller_ms,
+                    sync_ms=self.sync_ms,
+                    render_ms=self.render_ms,
+                    frame_ms=self.frame_ms,
+                )
                 _demo_publish_runtime_state(self)
 
         def _record_cpu_frame(self, now: float) -> None:
@@ -583,16 +687,17 @@ def main() -> None:
                 self.brush_radius = clamp_demo_brush_radius(self.brush_radius + int(y_offset))
 
         def on_key_event(self, key: int, action: int, modifiers: object) -> None:
-            if action == 0:
-                return
             with self.engine.state_lock:
+                if _demo_handle_focus_move_keys(self, key, action):
+                    return
+                if _demo_key_action_is_release(action):
+                    return
                 if _demo_handle_brush_and_view_keys(self, key):
                     return
                 if _demo_handle_speed_and_step_keys(self, key):
                     return
                 if _demo_handle_cycle_and_reset_keys(self, key):
                     return
-                _demo_handle_focus_move_keys(self, key)
 
         def close(self) -> None:  # pragma: no cover
             self.http.stop()
@@ -627,6 +732,12 @@ def main() -> None:
                 world_origin_y=self.engine.paging.origin_y,
                 focus_probe_label=focus_probe_label,
                 controller_label=self.controller_debug_label,
+                cpu_fps=self.cpu_fps,
+                gpu_fps=self.gpu_fps,
+                frame_ms=self.frame_ms,
+                sim_ms=self.sim_ms,
+                sync_ms=self.sync_ms,
+                render_ms=self.render_ms,
             )
             if title == self._status_title:
                 return
@@ -701,6 +812,8 @@ def main() -> None:
                 )
                 self.focus_x = int(world_x)
                 self.focus_y = int(world_y)
+                self._focus_scroll_x = 0.0
+                self._focus_scroll_y = 0.0
                 self.engine.advance_paging(self.focus_x, self.focus_y, immediate=True)
                 self.controller_debug_dirty = self.controller_debug_enabled
 
@@ -766,13 +879,6 @@ def main() -> None:
             if cycle["applied"]:
                 self.controller_debug_cycle += 1
             self.controller_debug_dirty = False
-
-        def _move_focus(self, dx: int, dy: int) -> None:
-            with self.engine.state_lock:
-                self.focus_x += dx
-                self.focus_y += dy
-                self.engine.advance_paging(self.focus_x, self.focus_y, immediate=True)
-                self.controller_debug_dirty = self.controller_debug_enabled
 
     mglw.run_window_config(EngineDemo)
 

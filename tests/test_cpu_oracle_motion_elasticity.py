@@ -14,10 +14,11 @@ from __future__ import annotations
 import numpy as np
 
 from oracle_game.gpu import unpack_cell_core
+from oracle_game.sim.gpu_motion_constants import GRAVITY_CELLS_PER_SECOND_SQ
 from oracle_game.types import Phase
 from oracle_game.world import WorldEngine
 
-GRAVITY_TICK = 24.0 / 60.0  # gravity_scale=1.0 * dt * 24.0 for one 1/60s step
+GRAVITY_TICK = GRAVITY_CELLS_PER_SECOND_SQ / 60.0  # gravity_scale=1.0 * dt * g for one 1/60s step
 
 
 def _build_blocked_powder_case(engine: WorldEngine, *, elasticity: float) -> None:

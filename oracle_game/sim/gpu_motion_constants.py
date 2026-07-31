@@ -18,6 +18,11 @@ ACTIVE_TILE_WORKGROUPS_PER_TILE = ACTIVE_TILE_WORKGROUP_AXIS * ACTIVE_TILE_WORKG
 MAX_MATERIALS = 256
 MAX_ISLAND_DDA_STEP = 4
 INDEX_EMPTY = 2147483647
+# Global gravity acceleration in cells/s^2 applied to velocity.y before drag.
+# Strong enough that a freely falling grain clears the velocity-DDA engagement
+# threshold (30 cells/s) within a few frames; 24.0 needed ~1.25 s at 60 fps and
+# looked like a uniform 1 cell/frame trickle for the first seconds.
+GRAVITY_CELLS_PER_SECOND_SQ = 120.0
 FALLING_ISLAND_INDEX_CLEAR_APPLY_INCOMING = 1
 FALLING_ISLAND_INDEX_CLEAR_APPLY_OUTGOING = 2
 FALLING_ISLAND_INDEX_CLEAR_MATERIALIZATION = 4

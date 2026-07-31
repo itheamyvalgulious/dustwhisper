@@ -429,6 +429,14 @@ bool left_to_right_move(
     if (!is_tile_liquid(ivec2(source_end, y)) || !is_reachable_empty(ivec2(boundary_x, y))) {
         return false;
     }
+    // Suspended liquid does not spread across the seam: the run moves only
+    // when the boundary-adjacent source cell (always part of the moved set)
+    // is supported from below, i.e. the cell below is not reachable-empty
+    // (solid or standing liquid both count as support; out of bounds below
+    // the world floor counts as supported).
+    if (is_reachable_empty(ivec2(source_end, y + 1))) {
+        return false;
+    }
     int source_tile_start = (source_end / TILE_SIZE) * TILE_SIZE;
     int source_start = source_end;
     while (source_start > source_tile_start && is_tile_liquid(ivec2(source_start - 1, y))) {
@@ -464,6 +472,11 @@ bool right_to_left_move(
     }
     int source_start = boundary_x;
     if (!is_tile_liquid(ivec2(source_start, y)) || !is_reachable_empty(ivec2(boundary_x - 1, y))) {
+        return false;
+    }
+    // Same below-support gate as left_to_right_move: no lateral seam spread
+    // while the source cell is suspended (reachable-empty below).
+    if (is_reachable_empty(ivec2(source_start, y + 1))) {
         return false;
     }
     int source_end = source_start + 1;
@@ -596,12 +609,46 @@ void run_row_leader_boundary() {
         ROW_TARGET_BASE(row_slot) = 0;
         ROW_MOVE_COUNT(row_slot) = 0;
         if (row_valid) {
+            // The move probes below re-derive the source/target interval for
+            // the boundary left of this one and discard it (each branch ends
+            // by re-probing this boundary's own interval), so a run ending
+            // exactly at the boundary is not claimed by the cell just past it.
             if (left_to_right_move(boundary_x, y, source_base, target_base, move_count)) {
+                left_to_right_move(
+                    boundary_x - 1,
+                    y,
+                    source_base,
+                    target_base,
+                    move_count
+                );
+                right_to_left_move(
+                    boundary_x - 1,
+                    y,
+                    source_base,
+                    target_base,
+                    move_count
+                );
+                left_to_right_move(boundary_x, y, source_base, target_base, move_count);
                 ROW_MOVE_DIRECTION(row_slot) = 1;
                 ROW_SOURCE_BASE(row_slot) = source_base;
                 ROW_TARGET_BASE(row_slot) = target_base;
                 ROW_MOVE_COUNT(row_slot) = move_count;
             } else if (right_to_left_move(boundary_x, y, source_base, target_base, move_count)) {
+                left_to_right_move(
+                    boundary_x - 1,
+                    y,
+                    source_base,
+                    target_base,
+                    move_count
+                );
+                right_to_left_move(
+                    boundary_x - 1,
+                    y,
+                    source_base,
+                    target_base,
+                    move_count
+                );
+                right_to_left_move(boundary_x, y, source_base, target_base, move_count);
                 ROW_MOVE_DIRECTION(row_slot) = -1;
                 ROW_SOURCE_BASE(row_slot) = source_base;
                 ROW_TARGET_BASE(row_slot) = target_base;

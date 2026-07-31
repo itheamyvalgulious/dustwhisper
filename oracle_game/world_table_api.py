@@ -310,6 +310,16 @@ def _reset_world_state(
     engine.collapse_solver.reset_runtime_state(engine)
     engine.optics_solver.reset_runtime_state(engine)
     engine.motion_solver.reset_runtime_state()
+    engine._quiet_light_outputs_zero = False
+    engine._frame_active_rect_marks = False
+    engine._collapse_dirty_tile_count_shadow = 0
+    # Conservative after a reset: treat any in-flight collapse epoch/admission
+    # as real until the frame pipeline re-proves it empty.
+    engine._collapse_active_epoch_real = True
+    engine._collapse_admission_real = True
+    engine._collapse_admission_epoch_id = -1
+    engine.last_quiet_frame = False
+    engine.quiet_frame_count = 0
     if reset_bridge_frame_inputs:
         engine._clear_bridge_frame_inputs(keep_commands=keep_command_log, prepared=False)
     engine.page_store.clear()
@@ -536,3 +546,13 @@ def delete_reaction_rule(engine, rule_set: str, index: int, *, immediate: bool =
     engine._set_stable_shadow_payload("reactions", reactions_payload)
     engine.bridge.upload_table("reactions", reactions_payload)
     engine.bridge.sync_rule_tables(engine)
+
+
+def island_id_alloc_debug(engine) -> dict[str, int]:
+    """Temporary debug probe for island-id allocator growth."""
+    islands = engine.islands
+    return {
+        "islands": len(islands),
+        "max_island": max((int(island_id) for island_id in islands), default=0),
+        "next_island_id": int(engine.next_island_id),
+    }

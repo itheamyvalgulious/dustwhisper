@@ -10,6 +10,7 @@ if TYPE_CHECKING:
 
 from oracle_game.engine_config import DEFAULT_ENGINE_CONFIG, EngineConfig
 from oracle_game.gpu import ISLAND_RUNTIME_DTYPE
+from oracle_game.island_id_alloc import compact_island_id_space
 from oracle_game.sim.cpu_base import material_table_row
 from oracle_game.sim.gpu_collapse import GPUCollapsePipeline
 from oracle_game.sim.gpu_collapse_dirty import (
@@ -144,6 +145,13 @@ class CollapseSolver:
                     int(motion_pipeline.last_published_island_runtime_capacity),
                     int(admitted_capacity),
                 )
+        compact_island_id_space(
+            world,
+            reservation_pending=(
+                pipeline._pending_formal_runtime_admission is not None
+                or pipeline.has_active_formal_dirty_epoch()
+            ),
+        )
         if pipeline.has_active_formal_dirty_epoch():
             component_capacity = pipeline.advance_formal_connected_dirty_tile_queue(world)
         else:

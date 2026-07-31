@@ -7,6 +7,7 @@ import numpy as np
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
 
+from oracle_game.sim.gpu_motion_constants import GRAVITY_CELLS_PER_SECOND_SQ
 from oracle_game.sim.utils import expand_bool_mask, tile_mask_to_cell_mask
 from oracle_game.types import Phase
 
@@ -134,7 +135,7 @@ def _integrate_velocity(
             world, world.material_id, "gravity_scale", world.material_gravity
         )
         * dt
-        * 24.0
+        * GRAVITY_CELLS_PER_SECOND_SQ
     )
     world.velocity[..., 1][non_empty] += gravity[non_empty]
     cell_flow = world.sample_flow_to_cells()

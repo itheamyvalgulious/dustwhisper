@@ -46,7 +46,8 @@ bool same_cell(ivec2 lhs, ivec2 rhs) {
 
 bool is_moving(PowderReservation reservation) {
     return (
-        (reservation.resolve_state == {{POWDER_RESOLVE_DDA}} || reservation.resolve_state == {{POWDER_RESOLVE_FALLBACK}})
+        (reservation.resolve_state == {{POWDER_RESOLVE_DDA}}
+            || (reservation.resolve_state & 7) == {{POWDER_RESOLVE_FALLBACK}})
         && !same_cell(reservation.source_xy, reservation.resolved_target_xy)
     );
 }
