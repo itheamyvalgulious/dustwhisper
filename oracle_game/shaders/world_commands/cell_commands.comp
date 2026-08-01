@@ -23,6 +23,7 @@
             layout(std430, binding=13) readonly buffer CommandI2 { ivec4 command_i2[]; };
             layout(std430, binding=14) readonly buffer CommandF { vec4 command_f[]; };
             layout(std430, binding=15) readonly buffer MaterialParams { vec4 material_params[{{MAX_MATERIALS}}]; };
+            layout(r32ui, binding=0) writeonly uniform uimage2D cell_changed_mask_img;
 
             int cell_index(ivec2 cell) {
                 return cell.y * cell_grid_size.x + cell.x;
@@ -93,6 +94,7 @@
                     return;
                 }
                 int index = cell_index(gid);
+                bool changed = false;
                 for (int i = 0; i < command_count; ++i) {
                     ivec4 c0 = command_i0[i];
                     ivec4 c1 = command_i1[i];
@@ -101,6 +103,7 @@
                     if (c0.x == KIND_INJECT_MATERIAL) {
                         if (c1.z > 0 && in_circle(gid, c0.yz, max(0, c0.w))) {
                             write_material(index, c1.z);
+                            changed = true;
                         }
                     } else if (c0.x == KIND_WRITE_MATERIAL_REGION) {
                         if (
@@ -111,10 +114,12 @@
                             && gid.y < c0.z + max(0, c1.y)
                         ) {
                             write_material(index, c1.z);
+                            changed = true;
                         }
                     } else if (c0.x == KIND_INJECT_TEMPERATURE) {
                         if (in_circle(gid, c0.yz, max(0, c0.w))) {
                             temperature[index] += cf.x;
+                            changed = true;
                         }
                     } else if (c0.x == KIND_INJECT_VELOCITY) {
                         if ((c2.x == CARRIER_CELL || c2.x == CARRIER_BOTH) && in_circle(gid, c0.yz, max(0, c0.w))) {
@@ -123,8 +128,10 @@
                             } else {
                                 velocity[index] += cf.xy;
                             }
+                            changed = true;
                         }
                     }
                 }
+                imageStore(cell_changed_mask_img, gid, uvec4(changed ? 1u : 0u, 0u, 0u, 0u));
             }
             

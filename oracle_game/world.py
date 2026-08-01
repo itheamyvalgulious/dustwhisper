@@ -401,6 +401,7 @@ from oracle_game.world_internal_helpers import (
     _pending_frame_input,
     _public_resolved_change_intent,
     _queued_command_xy,
+    _record_cpu_written_cell_rect,
     _refresh_island_records_for_ids,
     _resolve_anchor_target,
     _set_nested_payload_value,
@@ -1363,6 +1364,9 @@ class WorldEngine:
 
     def _refresh_island_records_for_ids(self, *args: Any, **kwargs: Any) -> Any:
         return _refresh_island_records_for_ids(self, *args, **kwargs)
+
+    def _record_cpu_written_cell_rect(self, *args: Any, **kwargs: Any) -> Any:
+        return _record_cpu_written_cell_rect(self, *args, **kwargs)
 
     def in_bounds(self, *args: Any, **kwargs: Any) -> Any:
         return in_bounds(self, *args, **kwargs)

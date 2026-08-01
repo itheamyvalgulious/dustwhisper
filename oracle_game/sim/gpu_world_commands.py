@@ -67,6 +67,8 @@ class GPUWorldCommandResources:
     command_i2: Any
     command_f: Any
     material_params: Any
+    cell_changed_mask: Any
+    gas_changed_mask: Any
     material_params_signature: tuple[int, int] | None = None
 
 
@@ -256,6 +258,8 @@ class GPUWorldCommandPipeline(GPUPipelineBase):
             command_i2=ctx.buffer(reserve=4 * 4, dynamic=True),
             command_f=ctx.buffer(reserve=4 * 4, dynamic=True),
             material_params=ctx.buffer(reserve=MAX_MATERIALS * 4 * 4, dynamic=True),
+            cell_changed_mask=ctx.texture((world.width, world.height), 1, dtype="u4"),
+            gas_changed_mask=ctx.texture((world.gas_width, world.gas_height), 1, dtype="u4"),
         )
         assert self._active_thread_id is not None
         self._thread_resources[self._active_thread_id] = self.resources
@@ -525,6 +529,7 @@ class GPUWorldCommandPipeline(GPUPipelineBase):
         resources.command_i2.bind_to_storage_buffer(binding=13)
         resources.command_f.bind_to_storage_buffer(binding=14)
         resources.material_params.bind_to_storage_buffer(binding=15)
+        resources.cell_changed_mask.bind_to_image(0, read=False, write=True)
         program.run(
             (world.width + PASS_LOCAL_SIZE - 1) // PASS_LOCAL_SIZE,
             (world.height + PASS_LOCAL_SIZE - 1) // PASS_LOCAL_SIZE,
@@ -546,6 +551,7 @@ class GPUWorldCommandPipeline(GPUPipelineBase):
         resources.command_i1.bind_to_storage_buffer(binding=3)
         resources.command_i2.bind_to_storage_buffer(binding=4)
         resources.command_f.bind_to_storage_buffer(binding=5)
+        resources.gas_changed_mask.bind_to_image(0, read=False, write=True)
         program.run(
             (world.gas_width + PASS_LOCAL_SIZE - 1) // PASS_LOCAL_SIZE,
             (world.gas_height + PASS_LOCAL_SIZE - 1) // PASS_LOCAL_SIZE,
@@ -674,6 +680,7 @@ class GPUWorldCommandPipeline(GPUPipelineBase):
         bridge.buffers["island_id"].bind_to_storage_buffer(binding=11)
         bridge.buffers["entity_id"].bind_to_storage_buffer(binding=12)
         bridge.buffers["placeholder_displaced_material"].bind_to_storage_buffer(binding=13)
+        resources.cell_changed_mask.bind_to_image(1, read=True, write=False)
         bridge.textures["material"].bind_to_image(0, read=False, write=True)
         cell_program.run(
             (world.width + PASS_LOCAL_SIZE - 1) // PASS_LOCAL_SIZE,
@@ -686,6 +693,7 @@ class GPUWorldCommandPipeline(GPUPipelineBase):
         gas_program["species_count"].value = int(world.gas_concentration.shape[0])
         resources.flow_velocity.bind_to_storage_buffer(binding=0)
         resources.gas_concentration.bind_to_storage_buffer(binding=1)
+        resources.gas_changed_mask.bind_to_image(3, read=True, write=False)
         bridge.textures["flow_velocity"].bind_to_image(2, read=False, write=True)
         bridge.buffers["gas_concentration"].bind_to_storage_buffer(binding=3)
         gas_program.run(

@@ -5079,6 +5079,58 @@ def test_queue_demo_paint_is_consumed_in_gpu_frame_without_cpu_state_resync() ->
         engine.close()
 
 
+def test_cpu_written_cell_rects_merge_into_bounding_box() -> None:
+    engine = WorldEngine(width=64, height=64, simulation_backend="cpu")
+    try:
+        for index in range(100):
+            engine._record_cpu_written_cell_rect(
+                index % 60, index % 50, index % 60 + 1, index % 50 + 1
+            )
+        assert len(engine._cpu_written_cell_rects) == 1
+        x0, y0, x1, y1 = engine._cpu_written_cell_rects[0]
+        assert (x0, y0) == (0, 0)
+        assert x1 >= 60 and y1 >= 50
+    finally:
+        engine.close()
+
+
+def test_paint_during_gpu_sim_uploads_only_written_cells(require_gpu) -> None:
+    # Regression for the stale-hydration rewind: any CPU write used to clear
+    # GPU authority for the cell resources and the next sync re-uploaded the
+    # full (stale) CPU arrays, teleporting every in-flight cell back to the
+    # snapshot — brush strokes froze falling water world-wide.
+    engine = WorldEngine(width=128, height=64, gpu_context=require_gpu)
+    if not engine.grid_command_pipeline.available(engine):
+        pytest.skip("GPU world command pipeline is not available")
+    try:
+        water_id = engine.rulebook.material_id("water_liquid")
+        engine.clear_cell_region(0, 0, engine.width, engine.height)
+        engine.active.mark_rect(0, 0, engine.width, engine.height)
+        engine.bridge.sync_world(engine, force_cpu_resource_upload=True)
+        engine._gpu_cpu_dirty_resources.clear()
+        # Blob A falls far from the brush; it must keep falling while
+        # unrelated cells are painted elsewhere.
+        engine.inject_material(20, 8, "water_liquid", radius=1, immediate=True)
+        y_max_series: list[int] = []
+        for step in range(12):
+            if step % 3 == 1:
+                engine.inject_material(100, 8 + step, "water_liquid", radius=1, immediate=True)
+            engine.step(1.0 / 60.0)
+            core = _bridge_cell_core(engine)
+            mask = (core["material_id"] == water_id) & (core["phase"] == int(Phase.LIQUID))
+            ys = np.nonzero(mask[:, 12:28])[0]
+            y_max_series.append(int(ys.max()) if len(ys) else -1)
+        assert y_max_series[-1] > y_max_series[0] + 6
+        rewinds = [
+            (earlier, later)
+            for earlier, later in zip(y_max_series, y_max_series[1:])
+            if later < earlier - 1
+        ]
+        assert rewinds == []
+    finally:
+        engine.close()
+
+
 def test_gpu_demo_initial_active_scheduler_is_empty_until_paint() -> None:
     engine = WorldEngine(width=128, height=128, gas_cell_size=4)
     if not engine.grid_command_pipeline.available(engine):

@@ -8,6 +8,7 @@
             layout(std430, binding=1) readonly buffer GasConcentrationBuffer { float gas_concentration[]; };
             layout(rg32f, binding=2) writeonly uniform image2D bridge_flow_velocity_img;
             layout(std430, binding=3) writeonly buffer BridgeGasBuffer { float bridge_gas[]; };
+            layout(r32ui, binding=3) readonly uniform uimage2D gas_changed_mask_img;
 
             void main() {
                 ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
@@ -16,6 +17,10 @@
                     return;
                 }
                 int cell_index = gid.y * gas_grid_size.x + gid.x;
+                // Same changed-cell gating as publish_bridge_cell.
+                if (imageLoad(gas_changed_mask_img, gid).x == 0u) {
+                    return;
+                }
                 if (species == 0) {
                     imageStore(bridge_flow_velocity_img, gid, vec4(flow_velocity[cell_index], 0.0, 0.0));
                 }

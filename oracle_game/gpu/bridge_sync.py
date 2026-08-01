@@ -29,6 +29,7 @@ from oracle_game.gpu.packers import (
     _pack_pair_reaction_rules,
     pack_active_meta_upload,
     pack_cell_core,
+    pack_cell_core_window,
     pack_collapse_runtime_upload,
     pack_entity_state_upload,
     pack_force_source_upload,
@@ -771,9 +772,83 @@ def _stage_shadow_buffers(bridge, world: "WorldEngine", uploads: dict[str, Any])
     bridge.shadow_buffers["frame_meta"] = uploads["frame_meta"].copy()
 
 
+def _upload_cpu_written_cell_rects(bridge, world: "WorldEngine") -> bool:
+    """Upload only the cells the CPU explicitly wrote since the last sync.
+
+    The CPU cell arrays are not refreshed from the GPU every frame, so the
+    legacy full-array upload after any CPU write rewound the whole world to
+    a stale snapshot (paint strokes teleported falling water back up, and
+    partial readback coverage produced tile-aligned stale mosaics).  The
+    written cells themselves are correct in the CPU arrays by construction,
+    so uploading just those rects merges the writes into the live GPU
+    state.  Uploaded resources are re-marked GPU-authoritative so the
+    full-array uploads in this sync skip them.
+    """
+    rects = getattr(world, "_cpu_written_cell_rects", None)
+    if not rects:
+        return False
+    width, height = int(world.width), int(world.height)
+
+    def _clamped_rects() -> list[tuple[int, int, int, int]]:
+        clamped: list[tuple[int, int, int, int]] = []
+        for x0, y0, x1, y1 in rects:
+            cx0, cy0 = max(0, int(x0)), max(0, int(y0))
+            cx1, cy1 = min(width, int(x1)), min(height, int(y1))
+            if cx1 > cx0 and cy1 > cy0:
+                clamped.append((cx0, cy0, cx1, cy1))
+        return clamped
+
+    clamped = _clamped_rects()
+    rects.clear()
+    if bridge._force_cpu_resource_upload:
+        return False
+    if getattr(world, "simulation_backend", "") != "gpu":
+        return False
+    if not bridge.enabled or bridge.ctx is None:
+        return False
+    if not clamped:
+        return False
+    uint32_bytes = int(np.dtype(np.uint32).itemsize)
+    uploaded: list[str] = []
+    if bridge._should_upload_cpu_resource(world, "cell_core"):
+        buffer = bridge.buffers["cell_core"]
+        for x0, y0, x1, y1 in clamped:
+            packed = pack_cell_core_window(world, x0, y0, x1, y1)
+            for row in range(y1 - y0):
+                offset = ((y0 + row) * width + x0) * 5 * uint32_bytes
+                buffer.write(packed[row].tobytes(), offset=offset)
+        uploaded.append("cell_core")
+    for name, array in (
+        ("island_id", world.island_id),
+        ("entity_id", world.entity_id),
+        ("placeholder_displaced_material", world.placeholder_displaced_material),
+    ):
+        if not bridge._should_upload_cpu_resource(world, name):
+            continue
+        buffer = bridge.buffers[name]
+        data = np.ascontiguousarray(array.astype(np.int32))
+        for x0, y0, x1, y1 in clamped:
+            for row in range(y0, y1):
+                offset = (row * width + x0) * uint32_bytes
+                buffer.write(data[row, x0:x1].tobytes(), offset=offset)
+        uploaded.append(name)
+    if bridge._should_upload_cpu_resource(world, "material"):
+        texture = bridge.textures["material"]
+        for x0, y0, x1, y1 in clamped:
+            texture.write(
+                world.material_id[y0:y1, x0:x1].astype("f4").tobytes(),
+                viewport=(x0, y0, x1 - x0, y1 - y0),
+            )
+        uploaded.append("material")
+    if uploaded:
+        bridge.mark_gpu_authoritative(*uploaded)
+    return True
+
+
 def _upload_bridge_core_buffers(bridge, world: "WorldEngine", uploads: dict[str, Any]) -> None:
     """Write the core per-frame buffers (entities, commands, doses) to the GPU."""
     bridge._ensure_atlas_texture(world)
+    _upload_cpu_written_cell_rects(bridge, world)
     upload_cell_dose_from_cpu = bridge._should_upload_cpu_resource(world, "cell_optical_dose")
     upload_gas_dose_from_cpu = bridge._should_upload_cpu_resource(world, "gas_optical_dose")
     upload_light_from_cpu = bridge._should_upload_cpu_resource(world, "light")

@@ -17,6 +17,7 @@
             layout(std430, binding=11) writeonly buffer BridgeIslandBuffer { int bridge_island_id[]; };
             layout(std430, binding=12) writeonly buffer BridgeEntityBuffer { int bridge_entity_id[]; };
             layout(std430, binding=13) writeonly buffer BridgeDisplacedBuffer { int bridge_displaced[]; };
+            layout(r32ui, binding=1) readonly uniform uimage2D cell_changed_mask_img;
             layout(r32f, binding=0) writeonly uniform image2D bridge_material_img;
 
             uint pack_timer(ivec4 timer) {
@@ -30,6 +31,12 @@
                     return;
                 }
                 int cell_index = gid.y * cell_grid_size.x + gid.x;
+                // Only cells a command actually changed are published: the
+                // input snapshot may lag the live sim, and publishing it
+                // wholesale would rewind every other cell to that snapshot.
+                if (imageLoad(cell_changed_mask_img, gid).x == 0u) {
+                    return;
+                }
                 uint material = uint(clamp(material_id[cell_index], 0, 65535));
                 uint phase_value = uint(clamp(phase[cell_index], 0, 255));
                 uint flag_value = uint(clamp(flags[cell_index], 0, 255));

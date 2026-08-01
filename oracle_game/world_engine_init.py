@@ -119,6 +119,12 @@ def _init_world_engine(
     engine.bridge_frame_page_stripes: list[tuple[PageStripeUpdate, dict[str, Any]]] = []
     engine._bridge_inputs_prepared = False
     engine._gpu_cpu_dirty_resources: set[str] = set()
+    # Rects of cells explicitly written from the CPU side since the last
+    # bridge sync (paint/inject/set_cell paths).  The incremental bridge
+    # hydration uploads only these rects: the full CPU arrays are not
+    # refreshed from the GPU every frame, so uploading them wholesale would
+    # rewind the whole world to a stale snapshot on every brush stroke.
+    engine._cpu_written_cell_rects: list[tuple[int, int, int, int]] = []
     engine._resolver_blocked_cells: set[tuple[int, int]] | None = None
     engine._resolver_released_cells: set[tuple[int, int]] | None = None
     engine.force_sources: list[ForceSource] = []

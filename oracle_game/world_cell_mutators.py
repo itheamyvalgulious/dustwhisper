@@ -71,6 +71,7 @@ def set_cell_by_id(
     mark_dirty: bool = True,
 ) -> None:
     engine._invalidate_gpu_authoritative_cell_resources()
+    engine._record_cpu_written_cell_rect(int(x), int(y), int(x) + 1, int(y) + 1)
     previous_material = int(engine.material_id[y, x])
     previous_phase = int(engine.phase[y, x])
     previous_island_id = int(engine.island_id[y, x])
@@ -137,6 +138,12 @@ def _inject_velocity_immediate(
         raise ValueError(f"unsupported velocity carrier: {carrier}")
     if carrier in {"cell", "both"}:
         engine._invalidate_gpu_authoritative_resources("cell_core")
+        engine._record_cpu_written_cell_rect(
+            max(0, int(x) - int(radius)),
+            max(0, int(y) - int(radius)),
+            min(engine.width, int(x) + int(radius) + 1),
+            min(engine.height, int(y) + int(radius) + 1),
+        )
         yy, xx = np.mgrid[0 : engine.height, 0 : engine.width]
         cell_mask = (xx - x) ** 2 + (yy - y) ** 2 <= radius**2
         if mode == "set":
@@ -166,6 +173,12 @@ def _inject_temperature_immediate(
     engine: "WorldEngine", x: int, y: int, delta: float, radius: int
 ) -> None:
     engine._invalidate_gpu_authoritative_resources("cell_core")
+    engine._record_cpu_written_cell_rect(
+        max(0, int(x) - int(radius)),
+        max(0, int(y) - int(radius)),
+        min(engine.width, int(x) + int(radius) + 1),
+        min(engine.height, int(y) + int(radius) + 1),
+    )
     yy, xx = np.mgrid[0 : engine.height, 0 : engine.width]
     mask = (xx - x) ** 2 + (yy - y) ** 2 <= radius**2
     engine.cell_temperature[mask] += delta
@@ -213,6 +226,7 @@ def set_cell(
 
 def clear_cell(engine: "WorldEngine", x: int, y: int, *, mark_dirty: bool = True) -> None:
     engine._invalidate_gpu_authoritative_cell_resources()
+    engine._record_cpu_written_cell_rect(int(x), int(y), int(x) + 1, int(y) + 1)
     previous_material = int(engine.material_id[y, x])
     previous_phase = int(engine.phase[y, x])
     previous_island_id = int(engine.island_id[y, x])
@@ -259,6 +273,8 @@ def set_material_by_mask(
 
 def swap_cells(engine: "WorldEngine", x0: int, y0: int, x1: int, y1: int) -> None:
     engine._invalidate_gpu_authoritative_cell_resources()
+    engine._record_cpu_written_cell_rect(int(x0), int(y0), int(x0) + 1, int(y0) + 1)
+    engine._record_cpu_written_cell_rect(int(x1), int(y1), int(x1) + 1, int(y1) + 1)
     previous_placeholder_cells = (
         (x0, y0, int(engine.entity_id[y0, x0]), int(engine.material_id[y0, x0])),
         (x1, y1, int(engine.entity_id[y1, x1]), int(engine.material_id[y1, x1])),
@@ -353,6 +369,7 @@ def clear_cell_region(
     engine: "WorldEngine", x0: int, y0: int, x1: int, y1: int, *, mark_dirty: bool = True
 ) -> None:
     engine._invalidate_gpu_authoritative_cell_resources()
+    engine._record_cpu_written_cell_rect(int(x0), int(y0), int(x1), int(y1))
     region_material = engine.material_id[y0:y1, x0:x1]
     region_phase = engine.phase[y0:y1, x0:x1]
     region_island_id = engine.island_id[y0:y1, x0:x1].copy()

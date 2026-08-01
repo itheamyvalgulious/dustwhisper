@@ -120,6 +120,29 @@ def submit_entity_controller_turn(
     return engine.submit_frame_input(frame_input)
 
 
+_MAX_CPU_WRITTEN_CELL_RECTS = 64
+
+
+def _record_cpu_written_cell_rect(
+    engine: "WorldEngine", x0: int, y0: int, x1: int, y1: int
+) -> None:
+    """Track a rect of cells explicitly written from the CPU side.
+
+    The incremental bridge hydration uploads only these rects (see
+    ``_upload_cpu_written_cell_rects`` in ``gpu/bridge_sync.py``); beyond
+    the cap the list collapses into a single bounding rect so a full brush
+    stroke stays one upload region.
+    """
+    rects = engine._cpu_written_cell_rects
+    rects.append((int(x0), int(y0), int(x1), int(y1)))
+    if len(rects) > _MAX_CPU_WRITTEN_CELL_RECTS:
+        bx0 = min(rect[0] for rect in rects)
+        by0 = min(rect[1] for rect in rects)
+        bx1 = max(rect[2] for rect in rects)
+        by1 = max(rect[3] for rect in rects)
+        rects[:] = [(bx0, by0, bx1, by1)]
+
+
 def _refresh_island_records_for_ids(engine: "WorldEngine", island_ids: Iterable[int]) -> None:
     touched = {int(island_id) for island_id in island_ids if int(island_id) > 0}
     if not touched:
