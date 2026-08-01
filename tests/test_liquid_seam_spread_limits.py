@@ -16,6 +16,7 @@ import numpy as np
 from oracle_game.sim.gpu_liquid import _SHADER_SUBS
 from oracle_game.sim.liquid_constants import LIQUID_SOLVER_TILE_LEVEL
 from oracle_game.sim.liquid_solve import (
+    LIQUID_DOWNFILL_MAX_LATERAL_SHIFT,
     SEAM_MAX_MOVE_PER_FRAME,
     SEAM_UNSUPPORTED_OVERHANG,
     _apply_horizontal_seam_run,
@@ -86,11 +87,11 @@ def _flat_world(*, floor: bool = True) -> _FakeWorld:
     return world
 
 
-def test_speed_cap_limits_flat_ground_spread_per_frame() -> None:
+def test_speed_cap_matches_in_tile_rate_on_flat_ground() -> None:
     solver = _FakeSolver()
     world = _flat_world()
     assert _apply_horizontal_seam_run(solver, world, 8, 4, TILE_SIZE) is True
-    assert _liquid_xs(world, 4) == {0, 1, 2, 3, 8, 9, 10, 11}
+    assert _liquid_xs(world, 4) == {0, 1, 2, 3, 4, 5, 6, 8}
 
 
 def test_suspended_source_does_not_spread() -> None:
@@ -100,35 +101,35 @@ def test_suspended_source_does_not_spread() -> None:
     assert _liquid_xs(world, 4) == set(range(8))
 
 
-def test_unsupported_targets_fill_only_the_overhang() -> None:
+def test_grounded_source_pushes_one_lip_cell_over_unsupported_targets() -> None:
     solver = _FakeSolver()
     world = _flat_world(floor=False)
     for x in range(8):
         _put_solid(world, x, 5)
     assert _apply_horizontal_seam_run(solver, world, 8, 4, TILE_SIZE) is True
-    assert _liquid_xs(world, 4) == {0, 1, 2, 3, 4, 5, 8, 9}
+    assert _liquid_xs(world, 4) == {0, 1, 2, 3, 4, 5, 6, 8}
 
 
-def test_supported_prefix_plus_overhang_binds_below_cap() -> None:
+def test_source_on_liquid_gets_no_overhang_over_unsupported_targets() -> None:
+    # The source run stands on other liquid (not ground), so the spread must
+    # strictly follow its support: with unsupported targets nothing crosses,
+    # which keeps pool surfaces from hanging past their base (the wall).
     solver = _FakeSolver()
     world = _flat_world(floor=False)
-    # Floor under the source run and the first three target cells: the
-    # support clamp (3 + 2) would allow five, so the speed cap (four) binds.
-    for x in range(11):
-        _put_solid(world, x, 5)
-    assert _apply_horizontal_seam_run(solver, world, 8, 4, TILE_SIZE) is True
-    assert _liquid_xs(world, 4) == {0, 1, 2, 3, 8, 9, 10, 11}
+    for x in range(8):
+        _put_liquid(world, x, 5)
+    assert _apply_horizontal_seam_run(solver, world, 8, 4, TILE_SIZE) is False
+    assert _liquid_xs(world, 4) == set(range(8))
 
 
-def test_support_clamp_binds_below_speed_cap() -> None:
+def test_source_on_liquid_follows_supported_targets() -> None:
     solver = _FakeSolver()
     world = _flat_world(floor=False)
-    # Floor only under the source run and the first target cell: support
-    # clamp (1 + 2 = 3) binds below the speed cap (4).
-    for x in range(9):
-        _put_solid(world, x, 5)
+    for x in range(8):
+        _put_liquid(world, x, 5)
+    _put_solid(world, 8, 5)
     assert _apply_horizontal_seam_run(solver, world, 8, 4, TILE_SIZE) is True
-    assert _liquid_xs(world, 4) == {0, 1, 2, 3, 4, 8, 9, 10}
+    assert _liquid_xs(world, 4) == {0, 1, 2, 3, 4, 5, 6, 8}
 
 
 def test_right_to_left_speed_cap_mirrors_left_to_right() -> None:
@@ -139,7 +140,7 @@ def test_right_to_left_speed_cap_mirrors_left_to_right() -> None:
     for x in range(8, 16):
         _put_liquid(world, x, 4)
     assert _apply_horizontal_seam_run(solver, world, 8, 4, TILE_SIZE) is True
-    assert _liquid_xs(world, 4) == {4, 5, 6, 7, 12, 13, 14, 15}
+    assert _liquid_xs(world, 4) == {7, 9, 10, 11, 12, 13, 14, 15}
 
 
 def test_seam_clamp_constants_match_shader() -> None:
@@ -152,3 +153,12 @@ def test_seam_clamp_constants_match_shader() -> None:
     )
     assert shader_cap == SEAM_MAX_MOVE_PER_FRAME
     assert shader_overhang == SEAM_UNSUPPORTED_OVERHANG
+
+
+def test_downfill_lateral_shift_constant_matches_shaders() -> None:
+    for shader in ("liquid/tile_solve.comp", "liquid/seam_y.comp"):
+        source = shader_source(shader, dict(_SHADER_SUBS))
+        shader_shift = int(
+            re.search(r"const int LIQUID_DOWNFILL_MAX_LATERAL_SHIFT = (\d+);", source).group(1)  # type: ignore[union-attr]
+        )
+        assert shader_shift == LIQUID_DOWNFILL_MAX_LATERAL_SHIFT

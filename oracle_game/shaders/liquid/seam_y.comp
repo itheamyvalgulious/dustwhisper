@@ -2,6 +2,11 @@
 #define DIRECT_BRIDGE_AUX_INPUTS {{DIRECT_BRIDGE_AUX_INPUTS}}
 layout(local_size_x={{PASS_LOCAL_SIZE}}, local_size_y={{PASS_LOCAL_SIZE}}, local_size_z=1) in;
 const int TILE_SIZE = {{TILE_SIZE}};
+// A down-move may slide at most this many cells sideways while crossing the
+// seam — the in-tile lateral rate — so falling runs cannot teleport
+// diagonally into long hovering lines.  Must match
+// LIQUID_DOWNFILL_MAX_LATERAL_SHIFT in tile_solve.comp and liquid_solve.py.
+const int LIQUID_DOWNFILL_MAX_LATERAL_SHIFT = 1;
 uniform ivec2 cell_grid_size;
 uniform ivec2 tile_grid_size;
 uniform int active_ttl_reset;
@@ -203,8 +208,26 @@ bool down_move_from_liquid(
     if (move_count <= 0) {
         return false;
     }
+    // Bound the lateral shift to LIQUID_DOWNFILL_MAX_LATERAL_SHIFT cells per
+    // row dropped: an unbounded shift teleports whole runs diagonally and
+    // draws long hovering lines over empty space.  When the empty segment is
+    // out of reach, only the straight-down subset crosses (the seam has no
+    // per-cell straight-down fallback of its own).
+    int target_lo = max(empty_start, liquid_start - LIQUID_DOWNFILL_MAX_LATERAL_SHIFT);
+    int target_hi = min(empty_end - move_count, liquid_start + LIQUID_DOWNFILL_MAX_LATERAL_SHIFT);
+    if (target_lo > target_hi) {
+        int straight_start = max(liquid_start, empty_start);
+        int straight_end = min(liquid_end, empty_end);
+        move_count = straight_end - straight_start;
+        if (move_count <= 0) {
+            return false;
+        }
+        source_base = straight_start;
+        target_base = straight_start;
+        return true;
+    }
     source_base = liquid_start;
-    target_base = clamp(liquid_start, empty_start, empty_end - move_count);
+    target_base = clamp(liquid_start, target_lo, target_hi);
     return true;
 }
 
@@ -271,8 +294,23 @@ bool down_move_from_empty(
     if (move_count <= 0) {
         return false;
     }
+    // Same lateral-shift bound (and straight-down subset fallback) as
+    // down_move_from_liquid above.
+    int target_lo = max(empty_start, liquid_start - LIQUID_DOWNFILL_MAX_LATERAL_SHIFT);
+    int target_hi = min(empty_end - move_count, liquid_start + LIQUID_DOWNFILL_MAX_LATERAL_SHIFT);
+    if (target_lo > target_hi) {
+        int straight_start = max(liquid_start, empty_start);
+        int straight_end = min(liquid_end, empty_end);
+        move_count = straight_end - straight_start;
+        if (move_count <= 0) {
+            return false;
+        }
+        source_base = straight_start;
+        target_base = straight_start;
+        return true;
+    }
     source_base = liquid_start;
-    target_base = clamp(liquid_start, empty_start, empty_end - move_count);
+    target_base = clamp(liquid_start, target_lo, target_hi);
     return true;
 }
 

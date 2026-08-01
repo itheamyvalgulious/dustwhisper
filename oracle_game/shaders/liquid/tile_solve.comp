@@ -17,6 +17,11 @@ const bool DIRECT_BRIDGE_INPUTS = {{DIRECT_BRIDGE_INPUTS}} != 0;
 #define DIRECT_BRIDGE_AUX_INPUTS {{DIRECT_BRIDGE_AUX_INPUTS}}
 layout(local_size_x={{TILE_LOCAL_SIZE}}, local_size_y=1, local_size_z=1) in;
 const int TILE_SIZE = {{TILE_SIZE}};
+// A down-run may slide at most this many cells sideways while dropping one
+// row — the in-tile lateral rate — so falling runs cannot teleport
+// diagonally into long hovering lines.  Must match
+// LIQUID_DOWNFILL_MAX_LATERAL_SHIFT in seam_y.comp and liquid_solve.py.
+const int LIQUID_DOWNFILL_MAX_LATERAL_SHIFT = 1;
 uniform ivec2 cell_grid_size;
 uniform ivec2 tile_grid_size;
 uniform int active_ttl_reset;
@@ -331,6 +336,14 @@ bool is_columnar_liquid_cell(int y, int x) {
     return is_liquid_cell(y, x) && shared_liquid_kind_at(y, x) == 1;
 }
 
+// Ground support for the ledge-lip exception: a non-liquid material cell
+// (static solid, powder, falling island).  Standing liquid counts as
+// support for the cell above it via is_reachable_empty, but it drains away
+// and must not let a lateral front hang over empty space.
+bool is_ground_support(int y, int x) {
+    return shared_material_at(y, x) > 0.5 && int(shared_phase_at(y, x) + 0.5) != phase_liquid;
+}
+
 uint bridge_core_word(ivec2 cell, int word_offset) {
     int cell_index = cell.y * cell_grid_size.x + cell.x;
     return bridge_cell_core[cell_index * 5 + word_offset];
@@ -579,7 +592,6 @@ void main() {
                     & liquid_run_upper_mask;
                 int first_empty_x = findLSB(direct_run_empty_candidates);
                 if (first_empty_x >= 0) {
-                    direct_down_segment_claimed = 1;
                     uint before_first_empty_mask = first_empty_x <= 0
                         ? 0u
                         : (1u << uint(first_empty_x)) - 1u;
@@ -592,9 +604,28 @@ void main() {
                     int empty_start = empty_left + 1;
                     int empty_end = empty_right < 0 ? TILE_SIZE : empty_right;
                     int move_count = min(liquid_end - liquid_start, empty_end - empty_start);
+                    // Bound the downfill's lateral shift to the in-tile
+                    // lateral rate (LIQUID_DOWNFILL_MAX_LATERAL_SHIFT cells
+                    // per row dropped): an unbounded shift teleports whole
+                    // runs diagonally and draws long hovering lines over
+                    // empty space.  When the empty segment is out of reach,
+                    // nothing is claimed so unclaimed cells still fall
+                    // straight down this frame.
+                    int target_lo = max(
+                        empty_start, liquid_start - LIQUID_DOWNFILL_MAX_LATERAL_SHIFT
+                    );
+                    int target_hi = min(
+                        empty_end - move_count, liquid_start + LIQUID_DOWNFILL_MAX_LATERAL_SHIFT
+                    );
+                    if (target_lo > target_hi) {
+                        move_count = 0;
+                    }
                     int source_offset = local.x - liquid_start;
+                    if (move_count > 0) {
+                        direct_down_segment_claimed = 1;
+                    }
                     if (source_offset < move_count) {
-                        int target_base = clamp(liquid_start, empty_start, empty_end - move_count);
+                        int target_base = clamp(liquid_start, target_lo, target_hi);
                         direct_down_target_x = target_base + source_offset;
                         atomicMin(s_down_source_x[direct_down_target_x], local.x);
                     }
@@ -777,13 +808,28 @@ void main() {
                 int liquid_end = s_liquid_run_end[local.x];
                 int first_empty_x = s_liquid_run_first_empty_x[liquid_start];
                 if (first_empty_x < TILE_SIZE) {
-                    s_down_segment_claimed[local.x] = 1;
                     int empty_start = s_empty_segment_start[first_empty_x];
                     int empty_end = s_empty_segment_end[first_empty_x];
                     int move_count = min(liquid_end - liquid_start, empty_end - empty_start);
+                    // Same lateral-shift bound as the direct-mapping variant
+                    // above (LIQUID_DOWNFILL_MAX_LATERAL_SHIFT); when the
+                    // empty segment is out of reach the run stays unclaimed
+                    // so its cells can still fall straight down this frame.
+                    int target_lo = max(
+                        empty_start, liquid_start - LIQUID_DOWNFILL_MAX_LATERAL_SHIFT
+                    );
+                    int target_hi = min(
+                        empty_end - move_count, liquid_start + LIQUID_DOWNFILL_MAX_LATERAL_SHIFT
+                    );
+                    if (target_lo > target_hi) {
+                        move_count = 0;
+                    }
                     int source_offset = local.x - liquid_start;
+                    if (move_count > 0) {
+                        s_down_segment_claimed[local.x] = 1;
+                    }
                     if (source_offset < move_count) {
-                        int target_base = clamp(liquid_start, empty_start, empty_end - move_count);
+                        int target_base = clamp(liquid_start, target_lo, target_hi);
                         int target_x = target_base + source_offset;
                         s_down_target_x[local.x] = target_x;
                         atomicMin(s_down_source_x[target_x], local.x);
@@ -885,16 +931,25 @@ void main() {
             && is_columnar_liquid_cell(row, local.x)
             && !is_reachable_empty(row + 1, local.x)
         ) {
+            // The destination must be supported from below too (row + 1 is
+            // fully resolved by the bottom-up row loop), otherwise the front
+            // would skate ahead as a hovering line while its base drains.
+            // Exception: a source standing on ground (non-liquid below) may
+            // push a single ledge-lip cell into unsupported space; that cell
+            // falls next frame, which keeps waterfalls flowing.
+            bool source_on_ground = is_ground_support(row + 1, local.x);
             if (
                 local.x > 0
                 && local_cell_in_world(tile, row, local.x - 1)
                 && is_reachable_empty(row, local.x - 1)
+                && (!is_reachable_empty(row + 1, local.x - 1) || source_on_ground)
             ) {
                 lateral_target_x = local.x - 1;
             } else if (
                 local.x + 1 < TILE_SIZE
                 && local_cell_in_world(tile, row, local.x + 1)
                 && is_reachable_empty(row, local.x + 1)
+                && (!is_reachable_empty(row + 1, local.x + 1) || source_on_ground)
             ) {
                 lateral_target_x = local.x + 1;
             }

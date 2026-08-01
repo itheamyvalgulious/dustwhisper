@@ -12,10 +12,18 @@ from oracle_game.types import Phase
 
 # Lateral seam spread clamps, mirroring SEAM_MAX_MOVE_PER_FRAME /
 # SEAM_UNSUPPORTED_OVERHANG in shaders/liquid/seam_x.comp: a boundary move
-# fills at most this many cells per frame, and at most the leading
-# overhang cells may lack support from below.
-SEAM_MAX_MOVE_PER_FRAME = 4
+# fills at most this many cells per frame — the same rate as the in-tile
+# lateral pass, so the seam is not a faster channel that tears holes into
+# the run.  Among the filled target cells at most the leading overhang may
+# lack support from below, and only when the boundary-adjacent source cell
+# stands on ground (a non-liquid material).
+SEAM_MAX_MOVE_PER_FRAME = 1
 SEAM_UNSUPPORTED_OVERHANG = 2
+# A down-run may slide at most this many cells sideways while dropping one
+# row — the in-tile lateral rate — so falling runs cannot teleport
+# diagonally into long hovering lines.  Mirrors
+# LIQUID_DOWNFILL_MAX_LATERAL_SHIFT in tile_solve.comp / seam_y.comp.
+LIQUID_DOWNFILL_MAX_LATERAL_SHIFT = 1
 
 
 def prepare_motion_flow_intent(solver, world: "WorldEngine") -> None:
@@ -66,6 +74,18 @@ def _world_cell_is_tile_level_liquid(solver, world: "WorldEngine", x: int, y: in
     )
 
 
+def _world_cell_ground_support(world: "WorldEngine", x: int, y: int) -> bool:
+    # Ground support for the ledge-lip exception: a non-liquid material cell
+    # (static solid, powder, falling island).  Standing liquid counts as
+    # support for the cell above it via _world_cell_reachable_empty, but it
+    # drains away and must not let a lateral front hang over empty space.
+    # Below the world floor counts as ground, matching the seam_x.comp
+    # out-of-bounds rule.
+    if y >= world.height:
+        return True
+    return int(world.material_id[y, x]) > 0 and int(world.phase[y, x]) != int(Phase.LIQUID)
+
+
 def _solve_tile(solver, world: "WorldEngine", x0: int, y0: int, x1: int, y1: int) -> None:
     local_material = world.material_id[y0:y1, x0:x1].copy()
     local_phase = world.phase[y0:y1, x0:x1].copy()
@@ -104,6 +124,15 @@ def _solve_tile(solver, world: "WorldEngine", x0: int, y0: int, x1: int, y1: int
             and int(local_phase[local_y, local_x]) == int(Phase.LIQUID)
             and solver._material_liquid_solver_kind(world, material_id) == LIQUID_SOLVER_TILE_LEVEL
         )
+
+    def ground_support(local_y: int, local_x: int) -> bool:
+        # Mirrors is_ground_support in tile_solve.comp: a non-liquid material
+        # cell (static solid, powder, falling island).  Standing liquid
+        # counts as support via reachable_empty, but drains away and must not
+        # let a lateral front hang over empty space.
+        return int(local_material[local_y, local_x]) > 0 and int(
+            local_phase[local_y, local_x]
+        ) != int(Phase.LIQUID)
 
     def snapshot_tile_level_liquid(
         row_material: np.ndarray, row_phase: np.ndarray, local_x: int
@@ -196,7 +225,16 @@ def _solve_tile(solver, world: "WorldEngine", x0: int, y0: int, x1: int, y1: int
             move_count = min(run_end - run_start, empty_end - empty_start)
             if move_count <= 0:
                 continue
-            target_base = min(max(run_start, empty_start), empty_end - move_count)
+            # Bound the downfill's lateral shift to the in-tile lateral rate:
+            # an unbounded shift teleports whole runs diagonally and draws
+            # long hovering lines over empty space.  When the empty segment
+            # is out of reach nothing is claimed, so cells above empties
+            # still fall straight down this frame.
+            target_lo = max(empty_start, run_start - LIQUID_DOWNFILL_MAX_LATERAL_SHIFT)
+            target_hi = min(empty_end - move_count, run_start + LIQUID_DOWNFILL_MAX_LATERAL_SHIFT)
+            if target_lo > target_hi:
+                continue
+            target_base = min(max(run_start, target_lo), target_hi)
             claimed_down_source[run_start:run_end] = True
             claimed_down_target[target_base : target_base + move_count] = True
             for offset in range(move_count):
@@ -246,7 +284,19 @@ def _solve_tile(solver, world: "WorldEngine", x0: int, y0: int, x1: int, y1: int
                     continue
             elif not is_tile_level_liquid(ly, lx):
                 continue
-            if lx > 0 and reachable_empty(ly, lx - 1) and not bool(claimed_lateral_dest[lx - 1]):
+            # The destination must be supported from below too (row ly + 1 is
+            # fully resolved by the bottom-up row loop), otherwise the front
+            # would skate ahead as a hovering line while its base drains.
+            # Exception: a source standing on ground (non-liquid below) may
+            # push a single ledge-lip cell into unsupported space; that cell
+            # falls next frame, which keeps waterfalls flowing.
+            source_on_ground = ground_support(ly + 1, lx)
+            if (
+                lx > 0
+                and reachable_empty(ly, lx - 1)
+                and not bool(claimed_lateral_dest[lx - 1])
+                and (not reachable_empty(ly + 1, lx - 1) or source_on_ground)
+            ):
                 claimed_lateral_dest[lx - 1] = True
                 planned_lateral_moves.append((ly, lx, ly, lx - 1))
                 continue
@@ -254,6 +304,7 @@ def _solve_tile(solver, world: "WorldEngine", x0: int, y0: int, x1: int, y1: int
                 lx + 1 < width
                 and reachable_empty(ly, lx + 1)
                 and not bool(claimed_lateral_dest[lx + 1])
+                and (not reachable_empty(ly + 1, lx + 1) or source_on_ground)
             ):
                 claimed_lateral_dest[lx + 1] = True
                 planned_lateral_moves.append((ly, lx, ly, lx + 1))
@@ -338,20 +389,25 @@ def _apply_horizontal_seam_run(
             target_end += 1
         target_len = target_end - right
         # Same speed/support clamps as seam_x.comp left_to_right_move: at
-        # most the leading SEAM_UNSUPPORTED_OVERHANG filled cells may lack
-        # support below (out of bounds below the world floor counts as
-        # supported), and the front advances at most
-        # SEAM_MAX_MOVE_PER_FRAME cells per frame.
+        # most SEAM_MAX_MOVE_PER_FRAME cells per frame (the in-tile rate), and
+        # the leading SEAM_UNSUPPORTED_OVERHANG cells may lack support below
+        # only when the boundary-adjacent source cell stands on ground (a
+        # non-liquid material); with liquid below, the spread strictly
+        # follows its support.  Out of bounds below the world floor counts as
+        # ground.
         supported_prefix = 0
         while supported_prefix < target_len and (
             y + 1 >= world.height
             or not solver._world_cell_reachable_empty(world, right + supported_prefix, y + 1)
         ):
             supported_prefix += 1
+        overhang = (
+            SEAM_UNSUPPORTED_OVERHANG if _world_cell_ground_support(world, left, y + 1) else 0
+        )
         move_count = min(
             left - source_start + 1,
             target_len,
-            supported_prefix + SEAM_UNSUPPORTED_OVERHANG,
+            supported_prefix + overhang,
             SEAM_MAX_MOVE_PER_FRAME,
         )
         if move_count > 0:
@@ -385,10 +441,13 @@ def _apply_horizontal_seam_run(
             or not solver._world_cell_reachable_empty(world, left - supported_prefix, y + 1)
         ):
             supported_prefix += 1
+        overhang = (
+            SEAM_UNSUPPORTED_OVERHANG if _world_cell_ground_support(world, right, y + 1) else 0
+        )
         move_count = min(
             source_end - right,
             target_len,
-            supported_prefix + SEAM_UNSUPPORTED_OVERHANG,
+            supported_prefix + overhang,
             SEAM_MAX_MOVE_PER_FRAME,
         )
         if move_count > 0:
@@ -446,7 +505,19 @@ def _apply_vertical_seam_run(
         move_count = min(run_end - run_start, empty_end - empty_start)
         if move_count <= 0:
             continue
-        target_base = min(max(run_start, empty_start), empty_end - move_count)
+        # Same lateral-shift bound as the in-tile down-run above; when the
+        # empty segment is out of reach, only the straight-down subset
+        # crosses (the seam has no per-cell straight-down fallback).
+        target_lo = max(empty_start, run_start - LIQUID_DOWNFILL_MAX_LATERAL_SHIFT)
+        target_hi = min(empty_end - move_count, run_start + LIQUID_DOWNFILL_MAX_LATERAL_SHIFT)
+        if target_lo > target_hi:
+            run_start = max(run_start, empty_start)
+            move_count = min(run_end, empty_end) - run_start
+            if move_count <= 0:
+                continue
+            target_base = run_start
+        else:
+            target_base = min(max(run_start, target_lo), target_hi)
         claimed_source.update(range(run_start, run_end))
         claimed_target.update(range(target_base, target_base + move_count))
         for offset in range(move_count):
