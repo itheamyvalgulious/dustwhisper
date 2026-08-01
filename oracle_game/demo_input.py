@@ -149,15 +149,17 @@ def advance_demo_focus_scroll(
     direction: tuple[float, float],
     frame_time: float,
     speed_cells_per_second: float,
-    tile_size: int,
 ) -> tuple[float, float, int, int]:
-    """Integrate per-frame scroll remainder into tile-granular focus steps."""
+    """Integrate per-frame scroll remainder into whole-cell focus steps.
+
+    Steps are single cells so held keys pan the camera smoothly; the paging
+    window re-tiles on its own deadzone behind the margin.
+    """
     distance = max(0.0, float(speed_cells_per_second)) * max(0.0, float(frame_time))
     scroll_x += float(direction[0]) * distance
     scroll_y += float(direction[1]) * distance
-    stride = max(1, int(tile_size))
-    step_x = int(math.trunc(scroll_x / stride)) * stride
-    step_y = int(math.trunc(scroll_y / stride)) * stride
+    step_x = int(math.trunc(scroll_x))
+    step_y = int(math.trunc(scroll_y))
     return (scroll_x - step_x, scroll_y - step_y, step_x, step_y)
 
 

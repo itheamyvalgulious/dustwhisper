@@ -16,13 +16,28 @@ DEMO_CONTROLLER_ENTITY_ID = 2_147_483_000
 DEMO_TARGET_CELL_PIXELS = 1
 DEMO_ACTIVE_SCALE = 1.5
 DEMO_LOGICAL_WORLD_SCALE = 20
+# Active/buffer grids must be integral multiples of the paging tile size:
+# page stripes require gas-grid-aligned buffer dimensions (the gas cell size
+# divides the tile size), and tile-aligned dims keep tile counts exact.
+_DEMO_ACTIVE_GRID_STRIDE = 32
+
+
+def _ceil_multiple(value: int, stride: int) -> int:
+    stride = max(1, int(stride))
+    return ((int(value) + stride - 1) // stride) * stride
 
 
 def compute_demo_grid_sizing(screen_width: int, screen_height: int) -> dict[str, int]:
     visible_width = max(64, int(screen_width) // DEMO_TARGET_CELL_PIXELS)
     visible_height = max(48, int(screen_height) // DEMO_TARGET_CELL_PIXELS)
-    active_width = max(visible_width, int(round(visible_width * DEMO_ACTIVE_SCALE)))
-    active_height = max(visible_height, int(round(visible_height * DEMO_ACTIVE_SCALE)))
+    active_width = max(
+        visible_width,
+        _ceil_multiple(int(round(visible_width * DEMO_ACTIVE_SCALE)), _DEMO_ACTIVE_GRID_STRIDE),
+    )
+    active_height = max(
+        visible_height,
+        _ceil_multiple(int(round(visible_height * DEMO_ACTIVE_SCALE)), _DEMO_ACTIVE_GRID_STRIDE),
+    )
     buffer_width = active_width
     buffer_height = active_height
     logical_world_width = visible_width * DEMO_LOGICAL_WORLD_SCALE

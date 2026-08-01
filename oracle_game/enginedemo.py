@@ -409,7 +409,6 @@ def _demo_scroll_held_focus_keys(demo: Any, frame_time: float) -> bool:
         speed_cells_per_second=float(
             getattr(demo, "focus_scroll_speed", DEMO_FOCUS_SCROLL_CELLS_PER_SECOND)
         ),
-        tile_size=int(demo.engine.paging.tile_size),
     )
     demo._focus_scroll_x = scroll_x
     demo._focus_scroll_y = scroll_y
@@ -516,6 +515,7 @@ def main() -> None:
             self._focus_scroll_held_keys: set[int] = set()
             self._focus_scroll_x = 0.0
             self._focus_scroll_y = 0.0
+            self._right_pan_held = False
             self.accumulator = 0.0
             self._last_present_time = _time.perf_counter()
             self._status_title = ""
@@ -673,6 +673,16 @@ def main() -> None:
             self._gpu_fps_sample_time = sample_time
 
         def on_mouse_drag_event(self, x: int, y: int, dx: int, dy: int) -> None:
+            if getattr(self, "_right_pan_held", False):
+                # Right-drag pans the camera relative to the pointer delta
+                # (grab-style: the world follows the cursor); one screen
+                # pixel is one world cell at the demo zoom.
+                cell_pixels = max(1, DEMO_TARGET_CELL_PIXELS)
+                self.focus_x -= int(dx) // cell_pixels
+                self.focus_y -= int(dy) // cell_pixels
+                self.engine.advance_paging(self.focus_x, self.focus_y, immediate=True)
+                self.controller_debug_dirty = self.controller_debug_enabled
+                return
             self._paint_from_screen(x, y, dx=dx, dy=dy)
 
         def on_mouse_press_event(self, x: int, y: int, button: int) -> None:
@@ -680,7 +690,12 @@ def main() -> None:
                 self._last_paint_key = None
                 self._paint_from_screen(x, y, dx=0, dy=0)
                 return
+            self._right_pan_held = True
             self._focus_from_screen(x, y)
+
+        def on_mouse_release_event(self, x: int, y: int, button: int) -> None:
+            if int(button) != 1:
+                self._right_pan_held = False
 
         def on_mouse_scroll_event(self, x_offset: float, y_offset: float) -> None:
             with self.engine.state_lock:

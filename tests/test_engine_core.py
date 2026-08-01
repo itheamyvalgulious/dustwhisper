@@ -4263,12 +4263,26 @@ def test_compute_demo_grid_sizing_uses_screen_cells_active_margin_and_logical_wo
 
     assert sizing["visible_width"] == 1440
     assert sizing["visible_height"] == 900
-    assert sizing["active_width"] == 2160
-    assert sizing["active_height"] == 1350
-    assert sizing["buffer_width"] == 2160
-    assert sizing["buffer_height"] == 1350
+    assert sizing["active_width"] == 2176
+    assert sizing["active_height"] == 1376
+    assert sizing["buffer_width"] == 2176
+    assert sizing["buffer_height"] == 1376
     assert sizing["logical_world_width"] == 28800
     assert sizing["logical_world_height"] == 18000
+
+
+def test_compute_demo_grid_sizing_aligns_active_and_buffer_to_the_tile_grid() -> None:
+    # Page stripes require gas-grid-aligned buffer dimensions (the gas cell
+    # size divides the tile size); a misaligned buffer height (e.g. 1350 at
+    # 1440x900) crashed stripe capture with "page stripe is not aligned to
+    # the gas grid".
+    for screen in ((1440, 900), (1920, 1080), (1366, 768), (1024, 768), (800, 600)):
+        sizing = compute_demo_grid_sizing(*screen)
+        for key in ("active_width", "active_height", "buffer_width", "buffer_height"):
+            assert sizing[key] % 32 == 0, (screen, key, sizing[key])
+            assert sizing[key] % 4 == 0, (screen, key, sizing[key])
+        assert sizing["active_width"] >= sizing["visible_width"]
+        assert sizing["active_height"] >= sizing["visible_height"]
 
 
 def test_enginedemo_main_requires_moderngl_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4554,6 +4568,9 @@ def _make_enginedemo_harness(
     demo.on_render = lambda time, frame_time: config.on_render(demo, time, frame_time)
     demo.on_mouse_drag_event = lambda x, y, dx, dy: config.on_mouse_drag_event(demo, x, y, dx, dy)
     demo.on_mouse_press_event = lambda x, y, button: config.on_mouse_press_event(demo, x, y, button)
+    demo.on_mouse_release_event = lambda x, y, button: config.on_mouse_release_event(
+        demo, x, y, button
+    )
     demo.on_mouse_scroll_event = lambda x_offset, y_offset: config.on_mouse_scroll_event(
         demo, x_offset, y_offset
     )
@@ -4828,27 +4845,33 @@ def test_enginedemo_wasd_hold_scrolls_focus_continuously_and_pages_via_deadzone(
 
     origin_before = demo.engine.paging.origin_x
     config.on_key_event(demo, ord("D"), 1, None)
+    # Whole-cell steps: the camera pans smoothly at ~512 cells/s while the
+    # paging window re-tiles on its own deadzone behind the margin.
     enginedemo_module._demo_scroll_held_focus_keys(demo, 1.0 / 60.0)
-    assert demo.focus_x == 16
+    assert demo.focus_x == 24
     assert demo.engine.paging.origin_x == origin_before
 
     enginedemo_module._demo_scroll_held_focus_keys(demo, 1.0 / 60.0)
+    assert demo.focus_x == 33
     enginedemo_module._demo_scroll_held_focus_keys(demo, 1.0 / 60.0)
-    assert demo.focus_x == 16
+    assert demo.focus_x == 41
     enginedemo_module._demo_scroll_held_focus_keys(demo, 1.0 / 60.0)
-    assert demo.focus_x == 48
+    assert demo.focus_x == 50
     assert demo.engine.paging.origin_x == origin_before + 32
     assert demo.engine.paging.buffer_origin_x == origin_before + 32
 
     config.on_key_event(demo, ord("d"), 0, None)
     assert demo._focus_scroll_held_keys == {ord("D")}
-    for _ in range(4):
+    expected_focus = 50
+    for step in (58, 67, 75, 84):
         enginedemo_module._demo_scroll_held_focus_keys(demo, 1.0 / 60.0)
-    assert demo.focus_x == 80
+        assert demo.focus_x == step
+        expected_focus = step
+    assert demo.engine.paging.origin_x == origin_before + 64
     config.on_key_event(demo, ord("D"), 0, None)
     assert demo._focus_scroll_held_keys == set()
     enginedemo_module._demo_scroll_held_focus_keys(demo, 1.0 / 60.0)
-    assert demo.focus_x == 80
+    assert demo.focus_x == expected_focus
     assert demo.engine.paging.origin_x == origin_before + 64
 
 
@@ -4869,17 +4892,17 @@ def test_enginedemo_window_events_support_scroll_focus_paint_and_reset(
     config.on_key_event(demo, ord("D"), 1, None)
     assert demo._focus_scroll_held_keys == {ord("D")}
     enginedemo_module._demo_scroll_held_focus_keys(demo, 1.0 / 30.0)
-    assert demo.focus_x == 16
+    assert demo.focus_x == 33
     assert demo.engine.paging.origin_x == 0
     enginedemo_module._demo_scroll_held_focus_keys(demo, 1.0 / 30.0)
-    assert demo.focus_x == 48
+    assert demo.focus_x == 50
     assert demo.focus_y == 8
     assert demo.engine.paging.origin_x == 32
     assert demo.engine.paging.buffer_origin_x == 32
     config.on_key_event(demo, ord("D"), 0, None)
     assert demo._focus_scroll_held_keys == set()
     enginedemo_module._demo_scroll_held_focus_keys(demo, 1.0 / 30.0)
-    assert demo.focus_x == 48
+    assert demo.focus_x == 50
     assert demo.engine.paging.origin_x == 32
 
     world_x, world_y = demo_screen_to_world_cell(
@@ -4967,6 +4990,35 @@ def test_enginedemo_mouse_press_non_primary_button_updates_focus_and_pages_witho
     assert f"focus=({world_x},{world_y})" in demo.wnd.title
     assert "origin=(0,0)" in demo.wnd.title
     assert "probe=empty" in demo.wnd.title
+
+
+def test_enginedemo_right_drag_pans_camera_relative_without_painting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _capture_enginedemo_config_class(monkeypatch)
+    demo = _make_enginedemo_harness(config)
+    demo.engine.clear_cell_region(0, 0, demo.engine.width, demo.engine.height)
+    demo.selected_material = "gold"
+    demo.brush_radius = 0
+
+    config.on_mouse_press_event(demo, 24, 12, 2)
+    # The press itself teleports the focus to the clicked cell (pinned
+    # behavior); the drag below pans relative to that point.
+    assert (demo.focus_x, demo.focus_y) == (24, 12)
+    config.on_mouse_drag_event(demo, 30, 16, 6, 4)
+
+    # Grab-style relative pan: the camera moves opposite the pointer delta,
+    # one screen pixel per world cell, and nothing is painted.
+    assert (demo.focus_x, demo.focus_y) == (18, 8)
+    assert len(demo.engine.command_queue) == 0
+    config.on_mouse_release_event(demo, 30, 16, 2)
+    assert demo._right_pan_held is False
+    config.on_mouse_drag_event(demo, 18, 14, 6, 6)
+    # After release the drag handler is back to painting with the primary
+    # button semantics (a paint command is queued), and the camera no longer
+    # pans.
+    assert (demo.focus_x, demo.focus_y) == (18, 8)
+    assert len(demo.engine.command_queue) == 1
 
 
 def test_queue_demo_paint_is_consumed_in_gpu_frame_without_cpu_state_resync() -> None:
