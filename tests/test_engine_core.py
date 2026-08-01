@@ -1577,10 +1577,10 @@ def test_gpu_liquid_vertical_seam_moves_continuous_run_into_neighbor_tile_empty_
     engine.liquid_solver.step(engine)
 
     assert engine.liquid_solver.last_backend == "gpu"
-    # The target span has no support below (floor ends at the source run), so
-    # only a single ledge-lip cell crosses per step — the seam advances at
-    # the in-tile lateral rate instead of teleporting the whole run.
-    assert [int(engine.material_id[10, x]) for x in range(29, 32)] == [water_id, water_id, 0]
+    # One cell crosses per step (the in-tile lateral rate) and sources clear
+    # from the run's trailing edge, so the whole run shifts one cell right
+    # contiguously — no hole is torn at the boundary.
+    assert [int(engine.material_id[10, x]) for x in range(29, 32)] == [0, water_id, water_id]
     assert [int(engine.material_id[10, x]) for x in range(32, 35)] == [water_id, 0, 0]
 
 
@@ -1608,15 +1608,19 @@ def test_gpu_liquid_vertical_seam_moves_run_both_directions_across_tile_boundary
         engine.liquid_solver.step(engine)
 
         assert engine.liquid_solver.last_backend == "gpu"
-        # Target cells lack support below (floor sits under the source run
-        # only), so each direction crosses just one ledge-lip cell this
-        # step — the seam advances at the in-tile lateral rate.
+        # Each direction shifts one cell across the boundary this step (the
+        # in-tile lateral rate), clearing sources from the run's trailing
+        # edge so the rows stay contiguous.
         assert [int(engine.material_id[10, x]) for x in range(29, 32)] == [0, 0, water_id]
-        assert [int(engine.material_id[10, x]) for x in range(32, 35)] == [0, water_id, water_id]
-        assert [int(engine.material_id[20, x]) for x in range(29, 32)] == [
+        assert [int(engine.material_id[10, x]) for x in range(32, 35)] == [
             water_id,
             water_id,
             0,
+        ]
+        assert [int(engine.material_id[20, x]) for x in range(29, 32)] == [
+            0,
+            water_id,
+            water_id,
         ]
         assert [int(engine.material_id[20, x]) for x in range(32, 35)] == [water_id, 0, 0]
     finally:
@@ -44407,14 +44411,14 @@ def test_cpu_liquid_horizontal_seam_run_continues_until_blocker_occupancy() -> N
 
         assert engine.liquid_solver.last_backend == "cpu"
         for blocker_kind, y in blocker_rows.items():
-            # One ledge-lip cell crosses the seam per step (the in-tile
-            # lateral rate); the blocker two cells past the seam is not
-            # reached.
+            # The run shifts one cell across the seam this step, clearing
+            # from its trailing edge (contiguous); the blocker two cells
+            # past the seam is not reached.
             assert [int(engine.material_id[y, x]) for x in range(28, 34)] == [
-                water_id,
-                water_id,
-                water_id,
                 0,
+                water_id,
+                water_id,
+                water_id,
                 water_id,
                 0,
             ]
@@ -44457,15 +44461,19 @@ def test_cpu_liquid_horizontal_seam_run_moves_both_directions_across_tile_bounda
         engine.liquid_solver.step(engine)
 
         assert engine.liquid_solver.last_backend == "cpu"
-        # Target cells lack support below (floor sits under the source run
-        # only), so each direction crosses just one ledge-lip cell this
-        # step — the seam advances at the in-tile lateral rate.
+        # Each direction shifts one cell across the boundary this step (the
+        # in-tile lateral rate), clearing sources from the run's trailing
+        # edge so the rows stay contiguous.
         assert [int(engine.material_id[10, x]) for x in range(29, 32)] == [0, 0, water_id]
-        assert [int(engine.material_id[10, x]) for x in range(32, 35)] == [0, water_id, water_id]
-        assert [int(engine.material_id[20, x]) for x in range(29, 32)] == [
+        assert [int(engine.material_id[10, x]) for x in range(32, 35)] == [
             water_id,
             water_id,
             0,
+        ]
+        assert [int(engine.material_id[20, x]) for x in range(29, 32)] == [
+            0,
+            water_id,
+            water_id,
         ]
         assert [int(engine.material_id[20, x]) for x in range(32, 35)] == [water_id, 0, 0]
     finally:
@@ -61936,15 +61944,19 @@ def test_gpu_liquid_formal_horizontal_seam_moves_run_both_directions_across_tile
         # The formal frame must take the default row-leader seam pass.
         assert pipeline._seam_x_multirow_frame_rows == 4
         core = _bridge_cell_core(engine)
-        # Target cells lack support below (floor sits under the source run
-        # only), so each direction crosses just one ledge-lip cell this
-        # step — the seam advances at the in-tile lateral rate.
+        # Each direction shifts one cell across the boundary this step (the
+        # in-tile lateral rate), clearing sources from the run's trailing
+        # edge so the rows stay contiguous.
         assert [int(core["material_id"][10, x]) for x in range(29, 32)] == [0, 0, water_id]
-        assert [int(core["material_id"][10, x]) for x in range(32, 35)] == [0, water_id, water_id]
-        assert [int(core["material_id"][20, x]) for x in range(29, 32)] == [
+        assert [int(core["material_id"][10, x]) for x in range(32, 35)] == [
             water_id,
             water_id,
             0,
+        ]
+        assert [int(core["material_id"][20, x]) for x in range(29, 32)] == [
+            0,
+            water_id,
+            water_id,
         ]
         assert [int(core["material_id"][20, x]) for x in range(32, 35)] == [water_id, 0, 0]
     finally:

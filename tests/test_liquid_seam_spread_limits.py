@@ -91,7 +91,9 @@ def test_speed_cap_matches_in_tile_rate_on_flat_ground() -> None:
     solver = _FakeSolver()
     world = _flat_world()
     assert _apply_horizontal_seam_run(solver, world, 8, 4, TILE_SIZE) is True
-    assert _liquid_xs(world, 4) == {0, 1, 2, 3, 4, 5, 6, 8}
+    # Sources clear from the run's trailing edge: the whole run shifts one
+    # cell right contiguously instead of tearing a hole at the boundary.
+    assert _liquid_xs(world, 4) == {1, 2, 3, 4, 5, 6, 7, 8}
 
 
 def test_suspended_source_does_not_spread() -> None:
@@ -107,19 +109,19 @@ def test_grounded_source_pushes_one_lip_cell_over_unsupported_targets() -> None:
     for x in range(8):
         _put_solid(world, x, 5)
     assert _apply_horizontal_seam_run(solver, world, 8, 4, TILE_SIZE) is True
-    assert _liquid_xs(world, 4) == {0, 1, 2, 3, 4, 5, 6, 8}
+    assert _liquid_xs(world, 4) == {1, 2, 3, 4, 5, 6, 7, 8}
 
 
-def test_source_on_liquid_gets_no_overhang_over_unsupported_targets() -> None:
-    # The source run stands on other liquid (not ground), so the spread must
-    # strictly follow its support: with unsupported targets nothing crosses,
-    # which keeps pool surfaces from hanging past their base (the wall).
+def test_source_on_liquid_also_gets_the_terrace_lip() -> None:
+    # The source run stands on other liquid, which still counts as support;
+    # the leading terrace lip (SEAM_UNSUPPORTED_OVERHANG) may extend past it
+    # over unsupported space, and the run shifts contiguously.
     solver = _FakeSolver()
     world = _flat_world(floor=False)
     for x in range(8):
         _put_liquid(world, x, 5)
-    assert _apply_horizontal_seam_run(solver, world, 8, 4, TILE_SIZE) is False
-    assert _liquid_xs(world, 4) == set(range(8))
+    assert _apply_horizontal_seam_run(solver, world, 8, 4, TILE_SIZE) is True
+    assert _liquid_xs(world, 4) == {1, 2, 3, 4, 5, 6, 7, 8}
 
 
 def test_source_on_liquid_follows_supported_targets() -> None:
@@ -129,7 +131,7 @@ def test_source_on_liquid_follows_supported_targets() -> None:
         _put_liquid(world, x, 5)
     _put_solid(world, 8, 5)
     assert _apply_horizontal_seam_run(solver, world, 8, 4, TILE_SIZE) is True
-    assert _liquid_xs(world, 4) == {0, 1, 2, 3, 4, 5, 6, 8}
+    assert _liquid_xs(world, 4) == {1, 2, 3, 4, 5, 6, 7, 8}
 
 
 def test_right_to_left_speed_cap_mirrors_left_to_right() -> None:
@@ -140,7 +142,7 @@ def test_right_to_left_speed_cap_mirrors_left_to_right() -> None:
     for x in range(8, 16):
         _put_liquid(world, x, 4)
     assert _apply_horizontal_seam_run(solver, world, 8, 4, TILE_SIZE) is True
-    assert _liquid_xs(world, 4) == {7, 9, 10, 11, 12, 13, 14, 15}
+    assert _liquid_xs(world, 4) == {7, 8, 9, 10, 11, 12, 13, 14}
 
 
 def test_seam_clamp_constants_match_shader() -> None:

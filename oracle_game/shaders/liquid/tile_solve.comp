@@ -336,14 +336,6 @@ bool is_columnar_liquid_cell(int y, int x) {
     return is_liquid_cell(y, x) && shared_liquid_kind_at(y, x) == 1;
 }
 
-// Ground support for the ledge-lip exception: a non-liquid material cell
-// (static solid, powder, falling island).  Standing liquid counts as
-// support for the cell above it via is_reachable_empty, but it drains away
-// and must not let a lateral front hang over empty space.
-bool is_ground_support(int y, int x) {
-    return shared_material_at(y, x) > 0.5 && int(shared_phase_at(y, x) + 0.5) != phase_liquid;
-}
-
 uint bridge_core_word(ivec2 cell, int word_offset) {
     int cell_index = cell.y * cell_grid_size.x + cell.x;
     return bridge_cell_core[cell_index * 5 + word_offset];
@@ -919,7 +911,9 @@ void main() {
         // is not reachable-empty (solid or standing liquid both count as
         // support). Row + 1 is always in-tile here (the row loop stops at
         // TILE_SIZE - 2) and reflects this frame's down moves, so a cell that
-        // lands this frame first spreads on the next one.
+        // lands this frame first spreads on the next one.  A single lateral
+        // step into unsupported space is the ledge-lip terrace: the lip cell
+        // falls next frame unless support arrives.
         if (
 #if TILE_WARP_DIRECT_VERTICAL_MAPPING
             direct_down_segment_claimed == 0
@@ -931,25 +925,16 @@ void main() {
             && is_columnar_liquid_cell(row, local.x)
             && !is_reachable_empty(row + 1, local.x)
         ) {
-            // The destination must be supported from below too (row + 1 is
-            // fully resolved by the bottom-up row loop), otherwise the front
-            // would skate ahead as a hovering line while its base drains.
-            // Exception: a source standing on ground (non-liquid below) may
-            // push a single ledge-lip cell into unsupported space; that cell
-            // falls next frame, which keeps waterfalls flowing.
-            bool source_on_ground = is_ground_support(row + 1, local.x);
             if (
                 local.x > 0
                 && local_cell_in_world(tile, row, local.x - 1)
                 && is_reachable_empty(row, local.x - 1)
-                && (!is_reachable_empty(row + 1, local.x - 1) || source_on_ground)
             ) {
                 lateral_target_x = local.x - 1;
             } else if (
                 local.x + 1 < TILE_SIZE
                 && local_cell_in_world(tile, row, local.x + 1)
                 && is_reachable_empty(row, local.x + 1)
-                && (!is_reachable_empty(row + 1, local.x + 1) || source_on_ground)
             ) {
                 lateral_target_x = local.x + 1;
             }

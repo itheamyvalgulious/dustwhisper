@@ -15,14 +15,14 @@ layout(local_size_x={{PASS_LOCAL_SIZE}}, local_size_y={{PASS_LOCAL_SIZE}}, local
 const int TILE_SIZE = {{TILE_SIZE}};
 // Lateral seam spread is speed-limited and support-limited: a boundary move
 // fills at most SEAM_MAX_MOVE_PER_FRAME cells per frame — the same rate as
-// the in-tile lateral pass, so the seam is not a faster channel that tears
-// holes into the run and piles flickering chunks past the boundary.  Among
-// the filled target cells at most the leading SEAM_UNSUPPORTED_OVERHANG may
-// lack support from below, and that ledge-lip overhang is only allowed when
-// the boundary-adjacent source cell stands on ground (a non-liquid
-// material); with liquid below, the spread strictly follows its support.
-// Both clamps are computed directly from the target run (no iteration over
-// frames), and must match the CPU oracle constants in liquid_solve.py.
+// the in-tile lateral pass, so the seam is not a faster channel that piles
+// flickering chunks past the boundary.  Among the filled target cells at
+// most the leading SEAM_UNSUPPORTED_OVERHANG may lack support from below:
+// the leading edge may form a short contiguous terrace lip past its
+// support, and those lip cells fall on later frames if support never
+// arrives.  Both clamps are computed directly from the target run (no
+// iteration over frames), and must match the CPU oracle constants in
+// liquid_solve.py.
 const int SEAM_MAX_MOVE_PER_FRAME = 1;
 const int SEAM_UNSUPPORTED_OVERHANG = 2;
 uniform ivec2 cell_grid_size;
@@ -408,21 +408,6 @@ bool is_reachable_empty(ivec2 cell) {
         && !is_placeholder_material(material);
 }
 
-// Ground support for the ledge-lip exception: a non-liquid material cell
-// (static solid, powder, falling island).  Standing liquid counts as
-// support for the cell above it via is_reachable_empty, but it drains away
-// and must not let a lateral front hang over empty space.  Out of bounds
-// below the world floor counts as ground, matching is_reachable_empty.
-bool is_ground_support(ivec2 cell) {
-    if (!in_bounds(cell)) {
-        return true;
-    }
-    uint cell_state = input_cell_state(cell);
-    float material = float(cell_state & 0xFFFFu);
-    int phase = int((cell_state >> 16u) & 0xFFu);
-    return material > 0.5 && phase != phase_liquid;
-}
-
 void refresh_changed_cell(ivec2 changed_cell) {
     if (
         changed_cell.x < 0
@@ -483,17 +468,17 @@ bool left_to_right_move(
     ) {
         supported_prefix += 1;
     }
-    // Ledge-lip overhang only from ground: with liquid below the source, the
-    // spread follows its support and never hangs past it.
-    int overhang = is_ground_support(ivec2(source_end, y + 1)) ? SEAM_UNSUPPORTED_OVERHANG : 0;
     move_count = min(
         source_end - source_start + 1,
-        min(target_len, min(supported_prefix + overhang, SEAM_MAX_MOVE_PER_FRAME))
+        min(target_len, min(supported_prefix + SEAM_UNSUPPORTED_OVERHANG, SEAM_MAX_MOVE_PER_FRAME))
     );
     if (move_count <= 0) {
         return false;
     }
-    source_base = source_end - move_count + 1;
+    // Clear from the run's TRAILING edge, not the boundary-adjacent one: a
+    // partial move then shifts the whole run contiguously (the trailing
+    // edge recedes) instead of punching a hole into the row.
+    source_base = source_start;
     target_base = target_start;
     return true;
 }
@@ -539,16 +524,16 @@ bool right_to_left_move(
     ) {
         supported_prefix += 1;
     }
-    // Same ground-conditioned overhang as left_to_right_move.
-    int overhang = is_ground_support(ivec2(source_start, y + 1)) ? SEAM_UNSUPPORTED_OVERHANG : 0;
     move_count = min(
         source_end - source_start,
-        min(target_len, min(supported_prefix + overhang, SEAM_MAX_MOVE_PER_FRAME))
+        min(target_len, min(supported_prefix + SEAM_UNSUPPORTED_OVERHANG, SEAM_MAX_MOVE_PER_FRAME))
     );
     if (move_count <= 0) {
         return false;
     }
-    source_base = source_start;
+    // Same contiguous-shift source selection as left_to_right_move: clear
+    // the run's trailing (right) edge so the row never tears.
+    source_base = source_end - move_count;
     target_base = target_end - move_count;
     return true;
 }
