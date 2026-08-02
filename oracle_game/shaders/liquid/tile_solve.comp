@@ -22,6 +22,12 @@ const int TILE_SIZE = {{TILE_SIZE}};
 // diagonally into long hovering lines.  Must match
 // LIQUID_DOWNFILL_MAX_LATERAL_SHIFT in seam_y.comp and liquid_solve.py.
 const int LIQUID_DOWNFILL_MAX_LATERAL_SHIFT = 1;
+// A suspended liquid cell hangs (does not fall) while it is within this
+// many cells of a supported cell in its own row run — the terrace lip.
+// Anything farther falls, so hovering lines cannot run away; the whole
+// front advances at the in-tile rate instead of dripping cell-by-cell.
+// Must match LIQUID_LIP_OVERHANG in liquid_solve.py.
+const int LIQUID_LIP_OVERHANG = 2;
 uniform ivec2 cell_grid_size;
 uniform ivec2 tile_grid_size;
 uniform int active_ttl_reset;
@@ -122,7 +128,10 @@ shared int s_empty_segment_start[TILE_SIZE];
 shared int s_empty_segment_end[TILE_SIZE];
 shared int s_liquid_run_first_empty_x[TILE_SIZE];
 shared int s_lateral_target_x[TILE_SIZE];
-shared int s_lateral_source_x[TILE_SIZE];
+shared int s_lip_nearest_left[TILE_SIZE];
+shared int s_lip_nearest_right[TILE_SIZE];
+shared int s_lip_left_scan_tmp[TILE_SIZE];
+shared int s_lip_right_scan_tmp[TILE_SIZE];
 
 uint pack_cell_state(float material, float phase, float flagsv) {
     uint material_id = uint(clamp(round(material), 0.0, 65535.0));
@@ -569,7 +578,32 @@ void main() {
 #if TILE_WARP_FAST_PATH && TILE_WARP_DIRECT_VERTICAL_MAPPING
             barrier();
 
+            // Lip-hang rule (LIQUID_LIP_OVERHANG, mirrors the CPU oracle): a
+            // suspended cell hangs while it is within the overhang distance
+            // of a supported cell in its own row run; anything farther
+            // falls.  A run with at least one supported cell never collapses
+            // as a segment — its beyond-lip cells fall individually below.
+            bool run_has_support = false;
+            bool within_lip = false;
             if (row_liquid) {
+                uint lip_support_ballot = ballotThreadNV(
+                    is_columnar_liquid_cell(row, local.x) && !is_reachable_empty(row + 1, local.x)
+                );
+                int lip_left = findMSB((~row_liquid_ballot) & gl_ThreadLtMaskNV);
+                int lip_right = findLSB((~row_liquid_ballot) & gl_ThreadGtMaskNV);
+                lip_right = lip_right < 0 ? TILE_SIZE : lip_right;
+                uint lip_span = lip_support_ballot
+                    & (0xFFFFFFFFu << uint(lip_left + 1))
+                    & (lip_right >= TILE_SIZE ? 0xFFFFFFFFu : (1u << uint(lip_right)) - 1u);
+                run_has_support = lip_span != 0u;
+                if (run_has_support) {
+                    int span_min = findLSB(lip_span);
+                    int span_max = findMSB(lip_span);
+                    within_lip = local.x >= span_min - LIQUID_LIP_OVERHANG
+                        && local.x <= span_max + LIQUID_LIP_OVERHANG;
+                }
+            }
+            if (row_liquid && !run_has_support) {
                 int liquid_left = findMSB((~row_liquid_ballot) & gl_ThreadLtMaskNV);
                 int liquid_right = findLSB((~row_liquid_ballot) & gl_ThreadGtMaskNV);
                 liquid_right = liquid_right < 0 ? TILE_SIZE : liquid_right;
@@ -613,10 +647,13 @@ void main() {
                         move_count = 0;
                     }
                     int source_offset = local.x - liquid_start;
-                    if (move_count > 0) {
-                        direct_down_segment_claimed = 1;
-                    }
                     if (source_offset < move_count) {
+                        // Only lanes that actually move are claimed (same
+                        // per-cell rule as the CPU oracle): claiming the
+                        // whole run for a bounded shift starved the lateral
+                        // pass of unmoved cells and pinned unmoved cells
+                        // above empties in the air.
+                        direct_down_segment_claimed = 1;
                         int target_base = clamp(liquid_start, target_lo, target_hi);
                         direct_down_target_x = target_base + source_offset;
                         atomicMin(s_down_source_x[direct_down_target_x], local.x);
@@ -688,6 +725,7 @@ void main() {
                 && local_cell_in_world(tile, row + 1, local.x)
                 && is_liquid_cell(row, local.x)
                 && is_vertical_empty(row + 1, local.x)
+                && !within_lip
                 && source_x < 0
             ) {
 #if TILE_SHARED_PACKED_STATE
@@ -739,6 +777,14 @@ void main() {
             s_empty_segment_start[local.x] = -1;
             s_empty_segment_end[local.x] = -1;
             s_liquid_run_first_empty_x[local.x] = TILE_SIZE;
+            // Lip-hang rule (LIQUID_LIP_OVERHANG, mirrors the CPU oracle):
+            // nearest supported liquid cell to each side within the row;
+            // combined with the run blockers below it yields the terrace
+            // lip span, and whether a run ever collapses as a segment.
+            bool lip_supported = is_columnar_liquid_cell(row, local.x)
+                && !is_reachable_empty(row + 1, local.x);
+            s_lip_nearest_left[local.x] = lip_supported ? local.x : -1;
+            s_lip_nearest_right[local.x] = lip_supported ? TILE_SIZE : local.x;
             barrier();
 
 #if TILE_WARP_FAST_PATH
@@ -752,32 +798,71 @@ void main() {
             s_liquid_right_blocker[local.x] = liquid_right;
             s_empty_left_blocker[local.x] = empty_left;
             s_empty_right_blocker[local.x] = empty_right;
+            uint lip_support_ballot = ballotThreadNV(lip_supported);
+            uint lip_le_mask = gl_ThreadLtMaskNV | (1u << uint(local.x));
+            uint lip_ge_mask = gl_ThreadGtMaskNV | (1u << uint(local.x));
+            s_lip_nearest_left[local.x] = findMSB(lip_support_ballot & lip_le_mask);
+            int lip_right_pos = findLSB(lip_support_ballot & lip_ge_mask);
+            s_lip_nearest_right[local.x] = lip_right_pos < 0 ? TILE_SIZE : lip_right_pos;
 #else
             for (int stride = 1; stride < TILE_SIZE; stride *= 2) {
                 int liquid_left = s_liquid_left_blocker[local.x];
                 int liquid_right = s_liquid_right_blocker[local.x];
                 int empty_left = s_empty_left_blocker[local.x];
                 int empty_right = s_empty_right_blocker[local.x];
+                int lip_left = s_lip_nearest_left[local.x];
+                int lip_right = s_lip_nearest_right[local.x];
                 if (local.x >= stride) {
                     liquid_left = max(liquid_left, s_liquid_left_blocker[local.x - stride]);
                     empty_left = max(empty_left, s_empty_left_blocker[local.x - stride]);
+                    lip_left = max(lip_left, s_lip_nearest_left[local.x - stride]);
                 }
                 if (local.x + stride < TILE_SIZE) {
                     liquid_right = min(liquid_right, s_liquid_right_blocker[local.x + stride]);
                     empty_right = min(empty_right, s_empty_right_blocker[local.x + stride]);
+                    lip_right = min(lip_right, s_lip_nearest_right[local.x + stride]);
                 }
                 s_liquid_left_scan_tmp[local.x] = liquid_left;
                 s_liquid_right_scan_tmp[local.x] = liquid_right;
                 s_empty_left_scan_tmp[local.x] = empty_left;
                 s_empty_right_scan_tmp[local.x] = empty_right;
+                s_lip_left_scan_tmp[local.x] = lip_left;
+                s_lip_right_scan_tmp[local.x] = lip_right;
                 barrier();
                 s_liquid_left_blocker[local.x] = s_liquid_left_scan_tmp[local.x];
                 s_liquid_right_blocker[local.x] = s_liquid_right_scan_tmp[local.x];
                 s_empty_left_blocker[local.x] = s_empty_left_scan_tmp[local.x];
                 s_empty_right_blocker[local.x] = s_empty_right_scan_tmp[local.x];
+                s_lip_nearest_left[local.x] = s_lip_left_scan_tmp[local.x];
+                s_lip_nearest_right[local.x] = s_lip_right_scan_tmp[local.x];
                 barrier();
             }
 #endif
+            // Resolve the terrace lip span and whether this lane's run ever
+            // collapses as a segment (runs with any supported cell do not;
+            // their beyond-lip cells fall individually below).
+            int lip_run_start = s_liquid_left_blocker[local.x] + 1;
+            int lip_run_end = s_liquid_right_blocker[local.x];
+            bool within_lip = false;
+            bool run_has_support = false;
+            if (
+                s_lip_nearest_left[local.x] >= lip_run_start
+                && local.x - s_lip_nearest_left[local.x] <= LIQUID_LIP_OVERHANG
+            ) {
+                within_lip = true;
+            }
+            if (
+                s_lip_nearest_right[local.x] < lip_run_end
+                && s_lip_nearest_right[local.x] - local.x <= LIQUID_LIP_OVERHANG
+            ) {
+                within_lip = true;
+            }
+            if (
+                lip_run_start < lip_run_end
+                && s_lip_nearest_right[lip_run_start] < lip_run_end
+            ) {
+                run_has_support = true;
+            }
 
             if (s_row_liquid_flag[local.x] != 0) {
                 int liquid_start = s_liquid_left_blocker[local.x] + 1;
@@ -795,7 +880,7 @@ void main() {
             memoryBarrierShared();
             barrier();
 
-            if (s_row_liquid_flag[local.x] != 0) {
+            if (s_row_liquid_flag[local.x] != 0 && !run_has_support) {
                 int liquid_start = s_liquid_run_start[local.x];
                 int liquid_end = s_liquid_run_end[local.x];
                 int first_empty_x = s_liquid_run_first_empty_x[liquid_start];
@@ -817,10 +902,9 @@ void main() {
                         move_count = 0;
                     }
                     int source_offset = local.x - liquid_start;
-                    if (move_count > 0) {
-                        s_down_segment_claimed[local.x] = 1;
-                    }
                     if (source_offset < move_count) {
+                        // Same per-cell claiming as the direct variant above.
+                        s_down_segment_claimed[local.x] = 1;
                         int target_base = clamp(liquid_start, target_lo, target_hi);
                         int target_x = target_base + source_offset;
                         s_down_target_x[local.x] = target_x;
@@ -873,6 +957,7 @@ void main() {
                 && local_cell_in_world(tile, row + 1, local.x)
                 && is_liquid_cell(row, local.x)
                 && is_vertical_empty(row + 1, local.x)
+                && !within_lip
                 && s_down_source_x[local.x] < 0
             ) {
 #if TILE_SHARED_PACKED_STATE
@@ -914,39 +999,47 @@ void main() {
         // lands this frame first spreads on the next one.  A single lateral
         // step into unsupported space is the ledge-lip terrace: the lip cell
         // falls next frame unless support arrives.
-        if (
+        //
+        // Conflict-free targets (mirrors the CPU oracle's ascending sweep):
+        // a left move is valid only when the left-left cell is NOT a
+        // supported liquid cell — otherwise that cell right-moves into the
+        // same destination this pass, and its claim wins.  With that rule a
+        // destination's two candidate sources (left-neighbor right-move and
+        // right-neighbor left-move) are mutually exclusive, so no owner
+        // arbitration is needed at all.
+        bool lane_liquid = false;
 #if TILE_WARP_DIRECT_VERTICAL_MAPPING
-            direct_down_segment_claimed == 0
+        lane_liquid = direct_down_segment_claimed == 0;
 #else
-            s_down_segment_claimed[local.x] == 0
+        lane_liquid = s_down_segment_claimed[local.x] == 0;
 #endif
+        lane_liquid = lane_liquid
             && local_cell_in_world(tile, row, local.x)
             && local_cell_in_world(tile, row + 1, local.x)
             && is_columnar_liquid_cell(row, local.x)
-            && !is_reachable_empty(row + 1, local.x)
-        ) {
-            if (
-                local.x > 0
-                && local_cell_in_world(tile, row, local.x - 1)
-                && is_reachable_empty(row, local.x - 1)
-            ) {
-                lateral_target_x = local.x - 1;
-            } else if (
-                local.x + 1 < TILE_SIZE
-                && local_cell_in_world(tile, row, local.x + 1)
-                && is_reachable_empty(row, local.x + 1)
-            ) {
-                lateral_target_x = local.x + 1;
-            }
+            && !is_reachable_empty(row + 1, local.x);
+        bool left_cell_empty = local.x > 0
+            && local_cell_in_world(tile, row, local.x - 1)
+            && is_reachable_empty(row, local.x - 1);
+        bool right_cell_empty = local.x + 1 < TILE_SIZE
+            && local_cell_in_world(tile, row, local.x + 1)
+            && is_reachable_empty(row, local.x + 1);
+        bool left2_blocker = local.x >= 2
+            && is_columnar_liquid_cell(row, local.x - 2)
+            && !is_reachable_empty(row + 1, local.x - 2);
+        if (lane_liquid && left_cell_empty && !left2_blocker) {
+            lateral_target_x = local.x - 1;
+        } else if (lane_liquid && right_cell_empty) {
+            lateral_target_x = local.x + 1;
         }
         if (anyThreadNV(lateral_target_x >= 0)) {
             int left_target_x = shuffleUpNV(lateral_target_x, 1u, TILE_SIZE);
             int right_target_x = shuffleDownNV(lateral_target_x, 1u, TILE_SIZE);
-            int lateral_owner_x = -1;
+            int lateral_source_x = -1;
             if (local.x > 0 && left_target_x == local.x) {
-                lateral_owner_x = local.x - 1;
+                lateral_source_x = local.x - 1;
             } else if (local.x + 1 < TILE_SIZE && right_target_x == local.x) {
-                lateral_owner_x = local.x + 1;
+                lateral_source_x = local.x + 1;
             }
 
 #if TILE_WARP_PROVENANCE_ROW_STREAM
@@ -979,29 +1072,26 @@ void main() {
             int left_source_y = shuffleUpNV(own_source_y, 1u, TILE_SIZE);
             int right_source_y = shuffleDownNV(own_source_y, 1u, TILE_SIZE);
 #endif
-            int left_owner_x = shuffleUpNV(lateral_owner_x, 1u, TILE_SIZE);
-            int right_owner_x = shuffleDownNV(lateral_owner_x, 1u, TILE_SIZE);
-
-            if (lateral_owner_x >= 0) {
-                bool owner_is_left = lateral_owner_x < local.x;
+            if (lateral_source_x >= 0) {
+                bool source_is_left = lateral_source_x < local.x;
 #if TILE_SHARED_PACKED_STATE
 #if TILE_WARP_PROVENANCE_ROW_STREAM
                 write_cell_state(
                     row,
                     local.x,
-                    owner_is_left ? left_cell_state : right_cell_state,
+                    source_is_left ? left_cell_state : right_cell_state,
                     0,
                     0,
                     lane_changed
                 );
-                current_source_id = owner_is_left ? left_source_id : right_source_id;
+                current_source_id = source_is_left ? left_source_id : right_source_id;
 #else
                 write_cell_state(
                     row,
                     local.x,
-                    owner_is_left ? left_cell_state : right_cell_state,
-                    owner_is_left ? left_source_x : right_source_x,
-                    owner_is_left ? left_source_y : right_source_y,
+                    source_is_left ? left_cell_state : right_cell_state,
+                    source_is_left ? left_source_x : right_source_x,
+                    source_is_left ? left_source_y : right_source_y,
                     lane_changed
                 );
 #endif
@@ -1009,17 +1099,18 @@ void main() {
                 write_cell(
                     row,
                     local.x,
-                    owner_is_left ? left_material : right_material,
-                    owner_is_left ? left_phase : right_phase,
-                    owner_is_left ? left_flags : right_flags,
-                    owner_is_left ? left_source_x : right_source_x,
-                    owner_is_left ? left_source_y : right_source_y,
+                    source_is_left ? left_material : right_material,
+                    source_is_left ? left_phase : right_phase,
+                    source_is_left ? left_flags : right_flags,
+                    source_is_left ? left_source_x : right_source_x,
+                    source_is_left ? left_source_y : right_source_y,
                     lane_changed
                 );
 #endif
             }
-            int target_owner_x = lateral_target_x < local.x ? left_owner_x : right_owner_x;
-            if (lateral_target_x >= 0 && target_owner_x == local.x) {
+            // The rule is conflict-free by construction (see above): the
+            // moving source simply clears itself, no owner arbitration.
+            if (lateral_target_x >= 0) {
                 clear_cell(row, local.x, lane_changed);
 #if TILE_WARP_PROVENANCE_ROW_STREAM
                 current_source_id = -1;
@@ -1032,45 +1123,40 @@ void main() {
 #endif
 #else
         barrier();
-        s_lateral_target_x[local.x] = -1;
-        s_lateral_source_x[local.x] = -1;
-        barrier();
-
-        // Same support gate as the warp fast path above: no lateral spread
-        // while the cell below is reachable-empty (suspended/falling).
-        if (
-            s_down_segment_claimed[local.x] == 0
+        // Same conflict-free targets as the warp fast path above: a left
+        // move is valid only when the left-left cell is not a supported
+        // liquid cell (otherwise it right-moves into the same destination
+        // this pass and wins), which makes every destination's two candidate
+        // sources mutually exclusive — no owner arbitration needed.
+        bool lane_liquid = s_down_segment_claimed[local.x] == 0
             && local_cell_in_world(tile, row, local.x)
             && local_cell_in_world(tile, row + 1, local.x)
             && is_columnar_liquid_cell(row, local.x)
-            && !is_reachable_empty(row + 1, local.x)
-        ) {
-            if (
-                local.x > 0
-                && local_cell_in_world(tile, row, local.x - 1)
-                && is_reachable_empty(row, local.x - 1)
-            ) {
-                s_lateral_target_x[local.x] = local.x - 1;
-            } else if (
-                local.x + 1 < TILE_SIZE
-                && local_cell_in_world(tile, row, local.x + 1)
-                && is_reachable_empty(row, local.x + 1)
-            ) {
-                s_lateral_target_x[local.x] = local.x + 1;
-            }
+            && !is_reachable_empty(row + 1, local.x);
+        bool left_cell_empty = local.x > 0
+            && local_cell_in_world(tile, row, local.x - 1)
+            && is_reachable_empty(row, local.x - 1);
+        bool right_cell_empty = local.x + 1 < TILE_SIZE
+            && local_cell_in_world(tile, row, local.x + 1)
+            && is_reachable_empty(row, local.x + 1);
+        bool left2_blocker = local.x >= 2
+            && is_columnar_liquid_cell(row, local.x - 2)
+            && !is_reachable_empty(row + 1, local.x - 2);
+        int lateral_target_x = -1;
+        if (lane_liquid && left_cell_empty && !left2_blocker) {
+            lateral_target_x = local.x - 1;
+        } else if (lane_liquid && right_cell_empty) {
+            lateral_target_x = local.x + 1;
         }
+        s_lateral_target_x[local.x] = lateral_target_x;
         barrier();
 
-        int owner_x = -1;
+        int source_x = -1;
         if (local.x > 0 && s_lateral_target_x[local.x - 1] == local.x) {
-            owner_x = local.x - 1;
+            source_x = local.x - 1;
         } else if (local.x + 1 < TILE_SIZE && s_lateral_target_x[local.x + 1] == local.x) {
-            owner_x = local.x + 1;
+            source_x = local.x + 1;
         }
-        s_lateral_source_x[local.x] = owner_x;
-        barrier();
-
-        source_x = s_lateral_source_x[local.x];
         if (source_x >= 0) {
 #if TILE_SHARED_PACKED_STATE
             write_cell_state(
@@ -1097,7 +1183,7 @@ void main() {
         barrier();
 
         target_x = s_lateral_target_x[local.x];
-        if (target_x >= 0 && s_lateral_source_x[target_x] == local.x) {
+        if (target_x >= 0) {
             clear_cell(row, local.x, lane_changed);
         }
         barrier();

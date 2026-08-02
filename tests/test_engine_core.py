@@ -43986,7 +43986,6 @@ def test_gpu_liquid_tile_solver_shader_uses_parallel_row_mapping() -> None:
     assert "atomicMin(s_down_source_x[target_x], local.x)" in tile_solve_source
     assert "s_down_target_x[local.x]" in tile_solve_source
     assert "s_down_source_x[local.x]" in tile_solve_source
-    assert "s_lateral_source_x[local.x]" in tile_solve_source
     assert "shared int s_row_any_liquid;" in tile_solve_source
     assert "shared int s_row_any_below_empty;" in tile_solve_source
     assert "#define TILE_WARP_FAST_PATH {{TILE_WARP_FAST_PATH}}" in tile_solve_source
@@ -44025,7 +44024,7 @@ def test_gpu_liquid_tile_solver_shader_uses_parallel_row_mapping() -> None:
         below_empty_guard_index,
     )
     lateral_reset_index = tile_solve_source.index(
-        "s_lateral_target_x[local.x] = -1;",
+        "s_lateral_target_x[local.x] = lateral_target_x;",
         below_empty_guard_index,
     )
 
@@ -44040,7 +44039,11 @@ def test_gpu_liquid_tile_solver_shader_uses_parallel_row_mapping() -> None:
     assert vertical_guard_end_index > blocker_scan_index
     assert "if (anyThreadNV(lateral_target_x >= 0))" in tile_solve_source
     assert "int left_target_x = shuffleUpNV(lateral_target_x, 1u, TILE_SIZE)" in tile_solve_source
-    assert "int right_owner_x = shuffleDownNV(lateral_owner_x, 1u, TILE_SIZE)" in tile_solve_source
+    assert (
+        "int right_target_x = shuffleDownNV(lateral_target_x, 1u, TILE_SIZE)" in tile_solve_source
+    )
+    assert "lateral_source_x = local.x - 1;" in tile_solve_source
+    assert "lateral_source_x = local.x + 1;" in tile_solve_source
     assert lateral_reset_index > below_empty_guard_index
     assert lateral_reset_index > vertical_guard_end_index
 
@@ -44316,11 +44319,17 @@ def test_gpu_liquid_tile_solver_spreads_liquid_run_into_reachable_below_empty_ru
         engine.liquid_solver.step(engine)
 
         assert engine.liquid_solver.last_backend == "gpu"
-        # Same bounded-shift outcome as the CPU oracle: the two cells above
-        # the empty segment fall straight down, one lip cell spills left.
+        # The two suspended cells hang as terrace lip (within
+        # LIQUID_LIP_OVERHANG of the supported span) instead of falling;
+        # the leftmost supported cell slides one cell left.
         assert int(engine.material_id[10, 7]) == water_id
-        assert [int(engine.material_id[10, x]) for x in range(8, 12)] == [0, 0, water_id, 0]
-        assert np.count_nonzero(engine.material_id[11, 10:12] == water_id) == 2
+        assert [int(engine.material_id[10, x]) for x in range(8, 12)] == [
+            0,
+            water_id,
+            water_id,
+            water_id,
+        ]
+        assert [int(engine.material_id[11, x]) for x in range(10, 12)] == [0, 0]
     finally:
         engine.close()
 
@@ -44403,29 +44412,33 @@ def test_cpu_liquid_tile_solve_downfills_run_into_reachable_empty_segment_and_pr
         engine.liquid_solver.step(engine)
 
         assert engine.liquid_solver.last_backend == "cpu"
-        # The empty segment below sits past the run's right edge, out of the
-        # bounded downfill shift (LIQUID_DOWNFILL_MAX_LATERAL_SHIFT): the two
-        # cells above it fall straight down, the ledge cell pushes one lip
-        # cell left onto unsupported space, and the remaining cell slides
-        # right over the just-fallen water.
+        # Same terrace-lip outcome as the GPU path: the two cells above the
+        # empty segment hang (within LIQUID_LIP_OVERHANG of the supported
+        # span) instead of falling, and the leftmost supported cell slides
+        # one cell left, so the field-bearing cell (10, 10) does not move.
         assert int(engine.material_id[10, 7]) == water_id
-        assert [int(engine.material_id[10, x]) for x in range(8, 12)] == [0, 0, water_id, 0]
+        assert [int(engine.material_id[10, x]) for x in range(8, 12)] == [
+            0,
+            water_id,
+            water_id,
+            water_id,
+        ]
         assert [int(engine.material_id[11, x]) for x in range(8, 14)] == [
             engine.rulebook.material_id("raw_stone_solid"),
             engine.rulebook.material_id("raw_stone_solid"),
-            water_id,
-            water_id,
+            0,
+            0,
             engine.rulebook.material_id("raw_stone_solid"),
             engine.rulebook.material_id("raw_stone_solid"),
         ]
-        assert int(engine.phase[10, 9]) == 0
-        assert int(engine.cell_flags[11, 10]) == int(
+        assert int(engine.phase[10, 8]) == 0
+        assert int(engine.cell_flags[10, 10]) == int(
             CellFlag.PHASE_LOCKED | CellFlag.REACTION_LATCHED
         )
-        assert np.array_equal(engine.timer_pack[11, 10], np.array([1, 3, 5, 7], dtype=np.uint8))
-        assert np.isclose(float(engine.cell_temperature[11, 10]), 81.0)
-        assert np.isclose(float(engine.integrity[11, 10]), 42.0)
-        assert np.allclose(engine.velocity[11, 10], np.array([0.75, -0.25], dtype=np.float32))
+        assert np.array_equal(engine.timer_pack[10, 10], np.array([1, 3, 5, 7], dtype=np.uint8))
+        assert np.isclose(float(engine.cell_temperature[10, 10]), 81.0)
+        assert np.isclose(float(engine.integrity[10, 10]), 42.0)
+        assert np.allclose(engine.velocity[10, 10], np.array([0.75, -0.25], dtype=np.float32))
     finally:
         engine.close()
 
@@ -44697,18 +44710,22 @@ def test_cpu_liquid_columnar_solver_stays_vertical_only_with_runs_and_tile_seams
         engine.liquid_solver.step(engine)
 
         assert engine.liquid_solver.last_backend == "cpu"
+        # The two middle cells hang as terrace lip (within
+        # LIQUID_LIP_OVERHANG of the stone-supported ends) instead of
+        # falling between the stones; columnar liquids still never spread
+        # laterally.
         assert [int(engine.material_id[10, x]) for x in range(9, 15)] == [
             0,
             water_id,
-            0,
-            0,
+            water_id,
+            water_id,
             water_id,
             0,
         ]
         assert [int(engine.material_id[11, x]) for x in range(10, 14)] == [
             engine.rulebook.material_id("raw_stone_solid"),
-            water_id,
-            water_id,
+            0,
+            0,
             engine.rulebook.material_id("raw_stone_solid"),
         ]
         assert int(engine.material_id[20, 31]) == water_id

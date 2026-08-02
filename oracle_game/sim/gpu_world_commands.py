@@ -535,7 +535,9 @@ class GPUWorldCommandPipeline(GPUPipelineBase):
             (world.height + PASS_LOCAL_SIZE - 1) // PASS_LOCAL_SIZE,
             1,
         )
-        ctx.memory_barrier(ctx.SHADER_STORAGE_BARRIER_BIT)
+        # The publish pass reads the changed mask via imageLoad: storage
+        # barriers alone do not order image writes, so use the full mask.
+        self._sync_compute_writes(ctx)
 
     def _run_gas_commands(
         self, world: "WorldEngine", resources: GPUWorldCommandResources, *, command_count: int
@@ -557,7 +559,8 @@ class GPUWorldCommandPipeline(GPUPipelineBase):
             (world.gas_height + PASS_LOCAL_SIZE - 1) // PASS_LOCAL_SIZE,
             1,
         )
-        ctx.memory_barrier(ctx.SHADER_STORAGE_BARRIER_BIT)
+        # Same image-ordering requirement as the cell mask above.
+        self._sync_compute_writes(ctx)
 
     # ``_formal_gpu_frame`` is inherited from :class:`GPUPipelineBase`
     # (formerly inlined here verbatim).

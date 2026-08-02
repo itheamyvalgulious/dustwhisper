@@ -25,6 +25,13 @@ SEAM_UNSUPPORTED_OVERHANG = 2
 # diagonally into long hovering lines.  Mirrors
 # LIQUID_DOWNFILL_MAX_LATERAL_SHIFT in tile_solve.comp / seam_y.comp.
 LIQUID_DOWNFILL_MAX_LATERAL_SHIFT = 1
+# A suspended liquid cell hangs (does not fall) while it is within this
+# many cells of a supported cell in its own row run — the terrace lip
+# ("只有最末若干格可以没有支撑").  Anything farther falls, so hovering
+# lines cannot run away; the whole front advances at the in-tile rate
+# instead of dripping cell-by-cell.  Mirrors LIQUID_LIP_OVERHANG in
+# tile_solve.comp.
+LIQUID_LIP_OVERHANG = 2
 
 
 def prepare_motion_flow_intent(solver, world: "WorldEngine") -> None:
@@ -169,6 +176,36 @@ def _solve_tile(solver, world: "WorldEngine", x0: int, y0: int, x1: int, y1: int
         # their canonical live row pass below so a left-blocked column can
         # still flow right within the same frame.
         tile_level_liquid = bool(np.any(snapshot_liquid))
+        # Lip-hang span (LIQUID_LIP_OVERHANG, mirrors tile_solve.comp): a
+        # suspended cell hangs while it is within the overhang distance of a
+        # supported cell in its own row run; anything farther falls.  A run
+        # with at least one supported cell never collapses as a segment —
+        # its beyond-lip cells fall individually below.
+        lane_liquid = (
+            snapshot_liquid
+            if tile_level_liquid
+            else np.fromiter(
+                (is_liquid(ly, lx) for lx in range(width)), dtype=np.bool_, count=width
+            )
+        )
+        within_lip = np.zeros((width,), dtype=np.bool_)
+        run_has_support = np.zeros((width,), dtype=np.bool_)
+        lx = 0
+        while lx < width:
+            if not bool(lane_liquid[lx]):
+                lx += 1
+                continue
+            run_start = lx
+            while lx < width and bool(lane_liquid[lx]):
+                lx += 1
+            run_end = lx
+            supported = [x for x in range(run_start, run_end) if not reachable_empty(ly + 1, x)]
+            if not supported:
+                continue
+            run_has_support[run_start:run_end] = True
+            span_lo = max(run_start, supported[0] - LIQUID_LIP_OVERHANG)
+            span_hi = min(run_end, supported[-1] + LIQUID_LIP_OVERHANG + 1)
+            within_lip[span_lo:span_hi] = True
         claimed_down_source = np.zeros((width,), dtype=np.bool_)
         claimed_down_target = np.zeros((width,), dtype=np.bool_)
         planned_down_moves: list[tuple[int, int, int, int]] = []
@@ -181,6 +218,10 @@ def _solve_tile(solver, world: "WorldEngine", x0: int, y0: int, x1: int, y1: int
             while lx < width and bool(snapshot_liquid[lx]):
                 lx += 1
             run_end = lx
+            if bool(run_has_support[run_start]):
+                # The run is (partly) supported: no segment collapse; the
+                # straight-down pass below drops only its beyond-lip cells.
+                continue
             first_empty_x = -1
             for probe_x in range(run_start, run_end):
                 if reachable_empty(ly + 1, probe_x) and not bool(claimed_down_target[probe_x]):
@@ -215,7 +256,11 @@ def _solve_tile(solver, world: "WorldEngine", x0: int, y0: int, x1: int, y1: int
             if target_lo > target_hi:
                 continue
             target_base = min(max(run_start, target_lo), target_hi)
-            claimed_down_source[run_start:run_end] = True
+            # Only the cells that actually move are claimed: claiming the
+            # whole run for a bounded shift starved the lateral pass of
+            # unmoved cells and pinned unmoved cells above empties in the
+            # air (the straight-down fallback below handles those).
+            claimed_down_source[run_start : run_start + move_count] = True
             claimed_down_target[target_base : target_base + move_count] = True
             for offset in range(move_count):
                 planned_down_moves.append((ly, run_start + offset, ly + 1, target_base + offset))
@@ -235,6 +280,10 @@ def _solve_tile(solver, world: "WorldEngine", x0: int, y0: int, x1: int, y1: int
                     continue
             elif not is_liquid(ly, lx):
                 continue
+            if bool(within_lip[lx]):
+                # Suspended but inside the terrace lip: hangs instead of
+                # dripping, so the front advances as a connected body.
+                continue
             if reachable_empty(ly + 1, lx):
                 # Mark the source as claimed: the cell leaves this row, so the
                 # lateral pass must not treat its snapshot-liquid status as a
@@ -245,7 +294,6 @@ def _solve_tile(solver, world: "WorldEngine", x0: int, y0: int, x1: int, y1: int
             move_cell(src_y, src_x, dst_y, dst_x)
             changed = True
 
-        claimed_lateral_dest = np.zeros((width,), dtype=np.bool_)
         planned_lateral_moves: list[tuple[int, int, int, int]] = []
         for lx in range(width):
             if bool(claimed_down_source[lx]):
@@ -264,19 +312,23 @@ def _solve_tile(solver, world: "WorldEngine", x0: int, y0: int, x1: int, y1: int
                     continue
             elif not is_tile_level_liquid(ly, lx):
                 continue
-            # A single lateral step into unsupported space is the ledge-lip
-            # terrace (mirrors tile_solve.comp): the lip cell falls next
-            # frame unless support arrives.
-            if lx > 0 and reachable_empty(ly, lx - 1) and not bool(claimed_lateral_dest[lx - 1]):
-                claimed_lateral_dest[lx - 1] = True
+            # Conflict-free targets, mirroring tile_solve.comp: a left move
+            # is valid only when the left-left cell is not a supported
+            # liquid cell (otherwise that cell right-moves into the same
+            # destination this pass and wins), which makes every
+            # destination's two candidate sources mutually exclusive.
+            left2_blocker = lx >= 2 and (
+                (
+                    bool(snapshot_liquid[lx - 2])
+                    if tile_level_liquid
+                    else is_tile_level_liquid(ly, lx - 2)
+                )
+                and not reachable_empty(ly + 1, lx - 2)
+            )
+            if lx > 0 and reachable_empty(ly, lx - 1) and not left2_blocker:
                 planned_lateral_moves.append((ly, lx, ly, lx - 1))
                 continue
-            if (
-                lx + 1 < width
-                and reachable_empty(ly, lx + 1)
-                and not bool(claimed_lateral_dest[lx + 1])
-            ):
-                claimed_lateral_dest[lx + 1] = True
+            if lx + 1 < width and reachable_empty(ly, lx + 1):
                 planned_lateral_moves.append((ly, lx, ly, lx + 1))
         for src_y, src_x, dst_y, dst_x in planned_lateral_moves:
             move_cell(src_y, src_x, dst_y, dst_x)
@@ -483,7 +535,8 @@ def _apply_vertical_seam_run(
             target_base = run_start
         else:
             target_base = min(max(run_start, target_lo), target_hi)
-        claimed_source.update(range(run_start, run_end))
+        # Same per-cell claiming as the in-tile down-run above.
+        claimed_source.update(range(run_start, run_start + move_count))
         claimed_target.update(range(target_base, target_base + move_count))
         for offset in range(move_count):
             planned_moves.append((run_start + offset, target_base + offset))
