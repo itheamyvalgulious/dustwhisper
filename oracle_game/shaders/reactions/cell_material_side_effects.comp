@@ -26,6 +26,9 @@
             layout(std430, binding=2) buffer ActionF {
                 vec4 action_f[{{MAX_ACTIONS}}];
             };
+            layout(std430, binding=14) buffer ReactionChainGeneration {
+                uint reaction_chain_generation_words[];
+            };
             layout(std430, binding=15) buffer ReactionCounters {
                 uint reaction_counts[16];
             };
@@ -39,6 +42,38 @@
 
             uint material_id_at(ivec2 cell) {
                 return texelFetch(cell_state_tex, cell, 0).x & 0xFFFFu;
+            }
+
+            uint generation_index(ivec2 cell) {
+                return uint(cell.y * cell_grid_size.x + cell.x);
+            }
+
+            uint generation_at(ivec2 cell) {
+                uint index = generation_index(cell);
+                uint word = reaction_chain_generation_words[index >> 2u];
+                return (word >> ((index & 3u) * 8u)) & 0xffu;
+            }
+
+            void generation_max(ivec2 cell, uint generation) {
+                uint index = generation_index(cell);
+                uint word_index = index >> 2u;
+                uint shift = (index & 3u) * 8u;
+                uint mask = 0xffu << shift;
+                uint old_word = reaction_chain_generation_words[word_index];
+                for (int attempt = 0; attempt < 8; ++attempt) {
+                    uint old_generation = (old_word >> shift) & 0xffu;
+                    if (old_generation >= generation) {
+                        return;
+                    }
+                    uint next_word = (old_word & ~mask) | ((generation & 0xffu) << shift);
+                    uint observed = atomicCompSwap(
+                        reaction_chain_generation_words[word_index], old_word, next_word
+                    );
+                    if (observed == old_word) {
+                        return;
+                    }
+                    old_word = observed;
+                }
             }
 
             uint pack_emitted_cell_state(int material_id, float phase) {
@@ -170,6 +205,7 @@
                 if (spawn_temp == spawn_temp) {
                     imageStore(temp_out_img, target, vec4(max(current_temp, spawn_temp), 0.0, 0.0, 0.0));
                 }
+                generation_max(target, min(255u, generation_at(source) + 1u));
                 vec4 velocity_value = vec4(emitted_velocity(source, target, ai, af), 0.0, 0.0);
                 if (velocity_in_place) {
                     imageStore(velocity_inout_img, target, velocity_value);

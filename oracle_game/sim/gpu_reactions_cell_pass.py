@@ -168,6 +168,17 @@ def _upload_material_pair_terminal_tables(
         action_meta = np.zeros((MAX_ACTIONS, 4), dtype=np.int32)
         action_count = min(MAX_ACTIONS, int(action_table.shape[0]))
         action_meta[:action_count, 0] = action_table[:action_count]["duration"]
+        if "generation" in action_table.dtype.names:
+            action_meta[:action_count, 1] = np.clip(
+                action_table[:action_count]["generation"], 0, 255
+            )
+        generation_bytes = np.ascontiguousarray(
+            world.reaction_chain_generation, dtype=np.uint8
+        ).reshape(-1)
+        padded_generation = np.pad(
+            generation_bytes,
+            (0, (-generation_bytes.size) % np.dtype(np.uint32).itemsize),
+        ).view(np.uint32)
         resources.material_pair_terminal_action_tables.write(
             b"".join(
                 (
@@ -175,6 +186,7 @@ def _upload_material_pair_terminal_tables(
                     plan.compiled_actions[1].tobytes(),
                     action_meta.tobytes(),
                     pipeline.random_targets.astype(np.int32, copy=False).tobytes(),
+                    padded_generation.tobytes(),
                 )
             )
         )

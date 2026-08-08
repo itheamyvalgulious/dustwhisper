@@ -907,7 +907,7 @@ def _build_special_materials(add: Callable[..., None]) -> None:
         boil_point=80,
         boil_to_gas_species="pollution_gas",
         powder_solver_kind="suspended",
-        tags=("pollution", "powder", "chaos_convert"),
+        tags=("pollution", "powder", "chaos_convert", "acid_immune"),
     )
     add(
         "vortex_heart_solid",

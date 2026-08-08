@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from oracle_game.types import PairReactionRule, SelfReactionRule
 
 
-def _build_rules() -> dict[str, object]:
+def _build_rules(materials: Iterable[object] | None = None) -> dict[str, object]:
     MM = []
     MG = []
     ML = []
@@ -152,6 +154,29 @@ def _build_rules() -> dict[str, object]:
     MM.append(
         PairReactionRule(lhs_material="log_solid", rhs_material="acid_liquid", result_action=10)
     )
+    # Keep the hand-tuned slot actions above, but cover every future material
+    # automatically.  The generic corrosion action is deliberately used for
+    # new materials so adding a material cannot silently make acid inert.
+    if materials is not None:
+        covered = set(acid_slot_map) | {"log_solid"}
+        for material in materials:
+            name = str(getattr(material, "name", ""))
+            tags = set(getattr(material, "tags", ()))
+            if (
+                not name
+                or name in covered
+                or "acid" in tags
+                or "acid_immune" in tags
+                or name.startswith("acid_")
+            ):
+                continue
+            MM.append(
+                PairReactionRule(
+                    lhs_material=name,
+                    rhs_material="acid_liquid",
+                    result_action=10,
+                )
+            )
     poison_slot_map = {
         "root_solid": 1,
         "log_solid": 2,
@@ -286,7 +311,7 @@ def _build_rules() -> dict[str, object]:
 
     GL.append(
         PairReactionRule(
-            rhs_gas="pollution_gas", rhs_light="holy_light", threshold=0.10, result_action=27
+            rhs_gas="pollution_gas", rhs_light="holy_light", threshold=0.10, result_action=26
         )
     )
 
@@ -316,7 +341,6 @@ def _build_rules() -> dict[str, object]:
             SelfReactionRule(material="phosphor_magic_powder", trigger_slot_index=4),
             SelfReactionRule(material="vortex_heart_solid", trigger_slot_index=4),
             SelfReactionRule(material="vortex_heart_solid", trigger_slot_index=5),
-            SelfReactionRule(material="water_liquid", trigger_slot_index=4, min_temperature=100.0),
         ]
     )
 

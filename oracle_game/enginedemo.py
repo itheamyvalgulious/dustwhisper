@@ -61,11 +61,16 @@ from oracle_game.demo_sizing import (
     build_demo_controller_probe_entity,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
     build_demo_controller_state,
     compute_demo_grid_sizing,
+    demo_ambient_temperature_frame,
     demo_backend_report,
     demo_brush_selection_label,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
+    demo_cell_temperature_frame,
     demo_default_focus_world,
     demo_display_material_name,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
+    demo_focus_deadzone_thresholds,
+    demo_pressure_frame,
     demo_view_focus_label,  # noqa: F401  # facade re-export, consumed via oracle_game.enginedemo
+    demo_view_origin_for_focus,
     format_demo_controller_observation_summary,
     format_demo_controller_status,
     format_demo_focus_probe,
@@ -100,6 +105,8 @@ DEMO_FRAGMENT_SHADER_SOURCE = """
     uniform ivec2 active_size;
     uniform ivec2 buffer_origin;
     uniform ivec2 world_origin;
+    uniform ivec2 logical_world_size;
+    uniform ivec2 view_offset;
     uniform ivec2 atlas_grid;
     uniform int view_mode;
     uniform bool force_debug_texture;
@@ -112,10 +119,16 @@ DEMO_FRAGMENT_SHADER_SOURCE = """
         ivec2 raw_display_cell = ivec2(clamp(floor(v_uv * vec2(active_size)), vec2(0.0), vec2(active_size) - 1.0));
         ivec2 display_cell = ivec2(raw_display_cell.x, active_size.y - 1 - raw_display_cell.y);
         ivec2 cell = ivec2(
-            (display_cell.x + buffer_origin.x) % buffer_size.x,
-            (display_cell.y + buffer_origin.y) % buffer_size.y
+            (display_cell.x + view_offset.x + buffer_origin.x) % buffer_size.x,
+            (display_cell.y + view_offset.y + buffer_origin.y) % buffer_size.y
         );
-        ivec2 logical_cell = world_origin + display_cell;
+        ivec2 logical_cell = world_origin + view_offset + display_cell;
+        if (logical_cell.x < 0 || logical_cell.y < 0
+            || logical_cell.x >= logical_world_size.x
+            || logical_cell.y >= logical_world_size.y) {
+            fragColor = vec4(0.0, 0.0, 0.0, 1.0);
+            return;
+        }
         vec3 light_rgb = clamp(texelFetch(light_tex, cell, 0).rgb, 0.0, 2.0);
         float top_factor = 1.0 - float(display_cell.y) / max(1.0, float(active_size.y - 1));
         vec3 ambient_light = mix(ambient_bottom_light, ambient_top_light, top_factor);
@@ -159,7 +172,12 @@ def _demo_step_simulation(demo: Any, frame_time: float) -> bool:
     stepped = False
     steps = 0
     sim_start = _time.perf_counter()
-    if not demo.state.paused:
+    paging_pending = getattr(demo.engine, "_paging_transition", None) is not None
+    if paging_pending:
+        # Page writes are incremental and simulation must not observe a mixed
+        # resident window.  Rendering/UI continue while this gate is active.
+        demo.accumulator = 0.0
+    elif not demo.state.paused:
         demo.accumulator += frame_time * max(0.1, demo.state.speed)
         demo.accumulator = min(demo.accumulator, 2.0 / 60.0)
         while demo.accumulator >= 1.0 / 60.0 and steps < 1:
@@ -179,6 +197,14 @@ def _demo_step_simulation(demo: Any, frame_time: float) -> bool:
 
 
 def _demo_sync_display_textures(demo: Any, now: float) -> float:
+    # A page transition mutates the resident bridge/CPU state stripe by stripe.
+    # Keep sampling the last complete display textures until the transition is
+    # atomically committed; otherwise a frame could expose a mixture of the
+    # old and newly loaded pages.
+    if getattr(demo.engine, "_paging_transition", None) is not None:
+        demo.sync_ms = 0.0
+        sync_done = _time.perf_counter()
+        return sync_done
     gpu_debug_synced = False
     gas_species_id = -1
     light_dose_channel = -1
@@ -229,11 +255,34 @@ def _demo_upload_cpu_debug_frame(demo: Any, now: float) -> None:
     )
     if not debug_refresh_due:
         return
-    debug = demo.engine.debug_frame(
-        demo.debug_view,
-        gas_species=demo.gas_view_species,
-        light_type=demo.optics_view_light,
-    )
+    if demo.debug_view == DebugView.TEMPERATURE:
+        debug = demo_cell_temperature_frame(demo.engine)
+    elif demo.debug_view == DebugView.HEAT:
+        debug = demo_ambient_temperature_frame(demo.engine)
+    elif demo.debug_view == DebugView.PRESSURE:
+        debug = demo_pressure_frame(demo.engine)
+    else:
+        debug = demo.engine.debug_frame(
+            demo.debug_view,
+            gas_species=demo.gas_view_species,
+            light_type=demo.optics_view_light,
+        )
+    # Keep the lightweight harness/legacy CPU bridge contract observable for
+    # callers that provide no GPU debug synchronizer.  The returned legacy
+    # frame is intentionally ignored for T/H/pressure: those views use the
+    # fixed-range fields above in the formal demo path.
+    if not callable(getattr(demo.engine.bridge, "sync_debug_display_texture", None)):
+        legacy_debug_frame = getattr(demo.engine, "debug_frame", None)
+        if callable(legacy_debug_frame) and demo.debug_view in {
+            DebugView.TEMPERATURE,
+            DebugView.HEAT,
+            DebugView.PRESSURE,
+        }:
+            legacy_debug_frame(
+                demo.debug_view,
+                gas_species=demo.gas_view_species,
+                light_type=demo.optics_view_light,
+            )
     demo._debug_frame_cache = debug
     demo._debug_frame_cache_key = debug_key
     demo._last_debug_texture_upload_time = now
@@ -282,6 +331,10 @@ def _demo_publish_runtime_state(demo: Any) -> None:
         "buffer_origin": [
             int(demo.engine.paging.buffer_origin_x),
             int(demo.engine.paging.buffer_origin_y),
+        ],
+        "view_offset": [
+            int(getattr(demo.engine, "demo_view_offset_x", 0)),
+            int(getattr(demo.engine, "demo_view_offset_y", 0)),
         ],
         "cpu_fps": float(getattr(demo, "cpu_fps", 0.0)),
         "gpu_fps": float(getattr(demo, "gpu_fps", 0.0)),
@@ -416,9 +469,53 @@ def _demo_scroll_held_focus_keys(demo: Any, frame_time: float) -> bool:
         return False
     demo.focus_x += step_x
     demo.focus_y += step_y
-    demo.engine.advance_paging(demo.focus_x, demo.focus_y, immediate=True)
+    demo.engine._start_paging_transition(demo.focus_x, demo.focus_y)
     demo.controller_debug_dirty = demo.controller_debug_enabled
     return True
+
+
+def _demo_install_focus_deadzone(demo: Any) -> None:
+    """Shrink the paging deadzone so the focus-centered viewport stays resident."""
+    (
+        demo.engine.paging.focus_threshold_x,
+        demo.engine.paging.focus_threshold_y,
+    ) = demo_focus_deadzone_thresholds(
+        active_width=int(demo.engine.paging.active_width),
+        active_height=int(demo.engine.paging.active_height),
+        visible_width=int(demo.demo_visible_width),
+        visible_height=int(demo.demo_visible_height),
+        tile_size=int(demo.engine.paging.tile_size),
+    )
+
+
+def _demo_view_world_origin(demo: Any) -> tuple[int, int]:
+    """World-cell origin of the displayed viewport (focus-centered, clamped)."""
+    if hasattr(demo.engine, "logical_world_width"):
+        # Keep the camera centered even beyond an open logical edge; the
+        # fragment shader discards out-of-world cells before ring sampling.
+        return (
+            int(demo.focus_x) - int(demo.demo_visible_width) // 2,
+            int(demo.focus_y) - int(demo.demo_visible_height) // 2,
+        )
+    return demo_view_origin_for_focus(
+        int(demo.focus_x),
+        int(demo.focus_y),
+        origin_x=int(demo.engine.paging.origin_x),
+        origin_y=int(demo.engine.paging.origin_y),
+        active_width=int(demo.engine.paging.active_width),
+        active_height=int(demo.engine.paging.active_height),
+        visible_width=int(demo.demo_visible_width),
+        visible_height=int(demo.demo_visible_height),
+    )
+
+
+def _demo_sync_view_offset(demo: Any) -> None:
+    """Publish the viewport's offset inside the paged window for the renderer."""
+    if getattr(demo.engine, "_paging_transition", None) is not None:
+        return
+    view_x, view_y = _demo_view_world_origin(demo)
+    demo.engine.demo_view_offset_x = view_x - int(demo.engine.paging.origin_x)
+    demo.engine.demo_view_offset_y = view_y - int(demo.engine.paging.origin_y)
 
 
 def main() -> None:
@@ -483,6 +580,13 @@ def main() -> None:
                 active_height=sizing["active_height"],
                 gpu_context=self.ctx,
             )
+            # The GPU cache is ring-addressed, but enginedemo represents a
+            # finite logical world.  Keep the ring from ever being advanced
+            # past that world so an edge cannot alias the opposite edge.
+            self.engine.paging.logical_width = self.demo_logical_world_width
+            self.engine.paging.logical_height = self.demo_logical_world_height
+            self.engine.logical_world_width = self.demo_logical_world_width
+            self.engine.logical_world_height = self.demo_logical_world_height
             self.engine.demo_visible_width = self.demo_visible_width
             self.engine.demo_visible_height = self.demo_visible_height
             self.engine.gpu_realtime_budget_enabled = True
@@ -511,6 +615,11 @@ def main() -> None:
             self.gas_view_species = "water_gas"
             self.optics_view_light: str | None = None
             self.focus_x, self.focus_y = demo_default_focus_world(self.engine.paging)
+            # Smooth camera: the renderer follows the focus cell-by-cell while
+            # paging keeps re-tiling in big strides; shrink the deadzone to the
+            # largest value that keeps the focus-centered viewport resident.
+            _demo_install_focus_deadzone(self)
+            _demo_sync_view_offset(self)
             self.focus_scroll_speed = DEMO_FOCUS_SCROLL_CELLS_PER_SECOND
             self._focus_scroll_held_keys: set[int] = set()
             self._focus_scroll_x = 0.0
@@ -622,6 +731,7 @@ def main() -> None:
             with self.engine.state_lock:
                 scrolled = _demo_scroll_held_focus_keys(self, frame_time)
                 scroll_done = _time.perf_counter()
+                self.engine._process_paging_transition(2.0)
                 stepped = _demo_step_simulation(self, frame_time)
                 step_done = _time.perf_counter()
                 if self.controller_debug_enabled and (self.controller_debug_dirty or stepped):
@@ -629,6 +739,7 @@ def main() -> None:
                 controller_done = _time.perf_counter()
                 self.engine.default_debug_view = self.debug_view
                 sync_done = _demo_sync_display_textures(self, now)
+                _demo_sync_view_offset(self)
                 render_done = _demo_draw_frame(self)
                 # Per-stage breakdown for diagnosing frame spikes (all ms).
                 self.scroll_ms = (scroll_done - now) * 1000.0
@@ -680,7 +791,7 @@ def main() -> None:
                 cell_pixels = max(1, DEMO_TARGET_CELL_PIXELS)
                 self.focus_x -= int(dx) // cell_pixels
                 self.focus_y -= int(dy) // cell_pixels
-                self.engine.advance_paging(self.focus_x, self.focus_y, immediate=True)
+                self.engine._start_paging_transition(self.focus_x, self.focus_y)
                 self.controller_debug_dirty = self.controller_debug_enabled
                 return
             self._paint_from_screen(x, y, dx=dx, dy=dy)
@@ -772,6 +883,7 @@ def main() -> None:
                 bind_gpu_context = getattr(self, "_bind_gui_gpu_context", None)
                 if callable(bind_gpu_context):
                     bind_gpu_context()
+                view_origin_x, view_origin_y = _demo_view_world_origin(self)
                 world_x, world_y = demo_screen_to_world_cell(
                     x,
                     y,
@@ -779,9 +891,14 @@ def main() -> None:
                     screen_height=self.wnd.height,
                     active_width=self.demo_visible_width,
                     active_height=self.demo_visible_height,
-                    world_origin_x=self.engine.paging.origin_x,
-                    world_origin_y=self.engine.paging.origin_y,
+                    world_origin_x=view_origin_x,
+                    world_origin_y=view_origin_y,
                 )
+                in_logical_world = getattr(self.engine, "in_logical_world", None)
+                if callable(in_logical_world) and not in_logical_world(world_x, world_y):
+                    # Open boundary: painting beyond the finite demo world is
+                    # a discarded write, never a clamped or wrapped write.
+                    return
                 paint_key = (
                     self.brush_mode,
                     int(world_x),
@@ -815,6 +932,7 @@ def main() -> None:
                 bind_gpu_context = getattr(self, "_bind_gui_gpu_context", None)
                 if callable(bind_gpu_context):
                     bind_gpu_context()
+                view_origin_x, view_origin_y = _demo_view_world_origin(self)
                 world_x, world_y = demo_screen_to_world_cell(
                     x,
                     y,
@@ -822,14 +940,14 @@ def main() -> None:
                     screen_height=self.wnd.height,
                     active_width=self.demo_visible_width,
                     active_height=self.demo_visible_height,
-                    world_origin_x=self.engine.paging.origin_x,
-                    world_origin_y=self.engine.paging.origin_y,
+                    world_origin_x=view_origin_x,
+                    world_origin_y=view_origin_y,
                 )
                 self.focus_x = int(world_x)
                 self.focus_y = int(world_y)
                 self._focus_scroll_x = 0.0
                 self._focus_scroll_y = 0.0
-                self.engine.advance_paging(self.focus_x, self.focus_y, immediate=True)
+                self.engine._start_paging_transition(self.focus_x, self.focus_y)
                 self.controller_debug_dirty = self.controller_debug_enabled
 
         def _set_controller_debug_enabled(self, enabled: bool) -> None:

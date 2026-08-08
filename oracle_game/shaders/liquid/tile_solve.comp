@@ -1151,31 +1151,31 @@ void main() {
         s_lateral_target_x[local.x] = lateral_target_x;
         barrier();
 
-        int source_x = -1;
+        int lateral_source_x = -1;
         if (local.x > 0 && s_lateral_target_x[local.x - 1] == local.x) {
-            source_x = local.x - 1;
+            lateral_source_x = local.x - 1;
         } else if (local.x + 1 < TILE_SIZE && s_lateral_target_x[local.x + 1] == local.x) {
-            source_x = local.x + 1;
+            lateral_source_x = local.x + 1;
         }
-        if (source_x >= 0) {
+        if (lateral_source_x >= 0) {
 #if TILE_SHARED_PACKED_STATE
             write_cell_state(
                 row,
                 local.x,
-                s_cell_state[row][source_x],
-                s_source_x[row][source_x],
-                s_source_y[row][source_x],
+                s_cell_state[row][lateral_source_x],
+                s_source_x[row][lateral_source_x],
+                s_source_y[row][lateral_source_x],
                 lane_changed
             );
 #else
             write_cell(
                 row,
                 local.x,
-                s_material[row][source_x],
-                s_phase[row][source_x],
-                s_flags[row][source_x],
-                s_source_x[row][source_x],
-                s_source_y[row][source_x],
+                s_material[row][lateral_source_x],
+                s_phase[row][lateral_source_x],
+                s_flags[row][lateral_source_x],
+                s_source_x[row][lateral_source_x],
+                s_source_y[row][lateral_source_x],
                 lane_changed
             );
 #endif

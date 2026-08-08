@@ -44,6 +44,7 @@
             };
             layout(std430, binding=10) buffer ActionMeta {
                 ivec4 action_meta[{{MAX_ACTIONS}}];
+                uint reaction_chain_generation_words[];
             };
             layout(std430, binding=11) buffer RandomTargets {
                 int random_targets[{{MAX_MATERIALS}}];
@@ -88,6 +89,44 @@
             }
             bool mask_matches(uint value, uint required) {
                 return required == 0u || (value & required) == required;
+            }
+            uint cell_generation_index(ivec2 gid) {
+                return uint(gid.y * cell_grid_size.x + gid.x);
+            }
+            uint cell_generation_at(ivec2 gid) {
+                uint index = cell_generation_index(gid);
+                uint word = reaction_chain_generation_words[index >> 2u];
+                return (word >> ((index & 3u) * 8u)) & 0xffu;
+            }
+            void set_cell_generation(ivec2 gid, uint generation) {
+                uint index = cell_generation_index(gid);
+                uint word_index = index >> 2u;
+                uint shift = (index & 3u) * 8u;
+                uint mask = 0xffu << shift;
+                uint old_word = reaction_chain_generation_words[word_index];
+                for (int attempt = 0; attempt < 8; ++attempt) {
+                    uint next_word = (old_word & ~mask) | ((generation & 0xffu) << shift);
+                    uint observed = atomicCompSwap(
+                        reaction_chain_generation_words[word_index], old_word, next_word
+                    );
+                    if (observed == old_word) {
+                        return;
+                    }
+                    old_word = observed;
+                }
+            }
+            bool action_is_generational(ivec4 ai, vec4 af) {
+                return ai.x == {{TYPE_EMIT_MATERIAL}}
+                    || ai.x == {{TYPE_CONVERT_MATERIAL}}
+                    || (ai.x == {{TYPE_MODIFY_GAS}} && af.x > 0.0);
+            }
+            bool action_generation_allowed(ivec2 gid, int action_index, ivec4 ai, vec4 af) {
+                if (!action_is_generational(ai, af)) {
+                    return true;
+                }
+                uint source_generation = cell_generation_at(gid);
+                uint action_generation = uint(max(0, action_meta[action_index].y));
+                return source_generation <= action_generation;
             }
             int clamp_material_id(int material_id) {
                 return clamp(material_id, 0, {{MAX_MATERIALS_MINUS_1}});
@@ -223,6 +262,10 @@
                 }
                 ivec4 ai = action_i[action_index];
                 vec4 af = action_f[action_index];
+                if (!action_generation_allowed(gid, action_index, ai, af)) {
+                    return;
+                }
+                uint source_generation = cell_generation_at(gid);
                 record_gpu_local_action(ai.x);
                 reaction_latched_value = 1.0;
                 if (ai.x == {{TYPE_HARM}}) {
@@ -284,6 +327,7 @@
                             if (spawn_temp == spawn_temp) {
                                 temp_value = max(temp_value, spawn_temp);
                             }
+                            set_cell_generation(gid, source_generation + 1u);
                         }
                     }
                 } else if (ai.x == {{TYPE_MODIFY_GAS}}) {
@@ -308,6 +352,9 @@
                             scale
                         );
                     }
+                    if (af.x > 0.0) {
+                        set_cell_generation(gid, source_generation + 1u);
+                    }
                 } else if (ai.x == {{TYPE_EMIT_LIGHT}}) {
                     append_light_emitter(gid, ai, af, scale);
                 } else if (ai.x == {{TYPE_EMIT_MATERIAL}}) {
@@ -320,6 +367,7 @@
                         action_index,
                         scale
                     );
+                    set_cell_generation(gid, source_generation + 1u);
                 } else if (ai.x == {{TYPE_DEFERRED}}) {
                     append_deferred(
                         deferred_action_lo,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import asdict, replace
 from typing import TYPE_CHECKING, Any, Iterable
 
@@ -239,6 +240,128 @@ def _advance_paging(engine: "WorldEngine", center_x: int, center_y: int) -> list
     if force_sources:
         engine._sync_force_sources(force_sources)
     return updates
+
+
+def _start_paging_transition(
+    engine: "WorldEngine", center_x: int, center_y: int
+) -> list[PageStripeUpdate]:
+    """Plan a finite demo page transition without publishing its origin yet."""
+    # The incremental state machine is an enginedemo GPU concern.  Preserve
+    # the synchronous CPU oracle semantics used by console/tests and by
+    # non-demo callers.
+    if getattr(engine, "simulation_backend", "cpu") != "gpu" or not hasattr(
+        engine, "logical_world_width"
+    ):
+        return _advance_paging(engine, int(center_x), int(center_y))
+    if getattr(engine, "_paging_transition", None) is not None:
+        engine._paging_transition_target = (int(center_x), int(center_y))
+        return []
+    target_paging = replace(engine.paging)
+    updates = target_paging.focus_on(int(center_x), int(center_y))
+    if not updates:
+        return []
+    force_sources = [
+        replace(
+            force_source,
+            world_x=engine._force_source_world_position(force_source)[0],
+            world_y=engine._force_source_world_position(force_source)[1],
+        )
+        for force_source in engine.force_sources
+    ]
+    # A logical stripe spans the whole orthogonal resident dimension.  Split
+    # it into gas/tile-aligned sub-stripes before doing any GPU DMA so one
+    # capture/store/load/apply unit remains bounded by the frame budget.  The
+    # public update list stays intact; sub-stripes are only an internal work
+    # representation and therefore do not expose a half-page to callers.
+    substripe_span = max(
+        int(engine.gas_cell_size),
+        min(int(engine.paging.tile_size), int(engine.gas_cell_size) * 8),
+    )
+
+    def split_update(update: PageStripeUpdate) -> list[PageStripeUpdate]:
+        span = abs(int(update.world_end) - int(update.world_start))
+        if span <= substripe_span:
+            return [update]
+        size = int(engine.width if update.axis == "x" else engine.height)
+        pieces: list[PageStripeUpdate] = []
+        offset = 0
+        while offset < span:
+            piece_span = min(substripe_span, span - offset)
+            buffer_start = (int(update.buffer_start) + offset) % max(1, size)
+            buffer_end = (buffer_start + piece_span) % max(1, size)
+            pieces.append(
+                replace(
+                    update,
+                    world_start=int(update.world_start) + offset,
+                    world_end=int(update.world_start) + offset + piece_span,
+                    buffer_start=buffer_start,
+                    buffer_end=buffer_end,
+                )
+            )
+            offset += piece_span
+        return pieces
+
+    work_updates = [piece for update in updates for piece in split_update(update)]
+    engine._paging_transition = {
+        "target_paging": target_paging,
+        "force_sources": force_sources,
+        # Keep the externally reported order intact, but execute the
+        # transition in explicit capture/store then load/apply phases.  That
+        # prevents a newly loaded stripe from becoming a source for a later
+        # save and mirrors the synchronous paging contract.
+        "updates": list(updates),
+        "work_updates": [
+            *[update for update in work_updates if update.kind == "save"],
+            *[update for update in work_updates if update.kind == "load"],
+        ],
+        "index": 0,
+    }
+    engine._paging_transition_target = None
+    return list(updates)
+
+
+def _process_paging_transition(
+    engine: "WorldEngine", budget_ms: float = 2.0
+) -> tuple[bool, list[PageStripeUpdate]]:
+    """Advance at most the configured page-work budget on this render frame."""
+    transition = getattr(engine, "_paging_transition", None)
+    if transition is None:
+        return False, []
+    started = time.perf_counter()
+    completed: list[PageStripeUpdate] = []
+    updates = transition["updates"]
+    work_updates = transition.get("work_updates", updates)
+    while transition["index"] < len(work_updates):
+        update = work_updates[transition["index"]]
+        if update.kind == "save":
+            engine.page_store.save(update, engine.capture_page_stripe(update))
+            engine._clear_saved_page_stripe_runtime_state(update)
+        else:
+            payload = engine.page_store.load(update)
+            if payload is None:
+                payload = engine._default_page_stripe_payload(update)
+            engine._apply_page_stripe(update, payload)
+            engine._sync_loaded_page_stripe_cpu_mirror(update, payload)
+            engine._record_bridge_page_stripe(update, payload)
+        completed.append(update)
+        transition["index"] += 1
+        if (time.perf_counter() - started) * 1000.0 >= max(0.25, float(budget_ms)):
+            break
+    if transition["index"] >= len(work_updates):
+        engine.paging = transition["target_paging"]
+        force_sources = transition.get("force_sources", ())
+        if force_sources:
+            engine._sync_force_sources(force_sources)
+        engine.bridge_frame_paging_updates.extend(
+            PageStripeUpdate(**asdict(update)) for update in updates
+        )
+        engine._paging_transition = None
+        pending_target = getattr(engine, "_paging_transition_target", None)
+        engine._paging_transition_target = None
+        if pending_target is not None:
+            _start_paging_transition(engine, *pending_target)
+        return True, completed
+    return False, completed
 
 
 def _mirror_release_entity_placeholder_cell(

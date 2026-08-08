@@ -99,7 +99,7 @@ def build_default_payloads() -> dict[str, object]:
     actions = _build_actions()
     materials = _assign_reaction_slots(materials, actions)
     optics = build_default_optics_entries(materials, lights)
-    rules = _build_rules()
+    rules = _build_rules(materials)
     return {
         "materials": materials,
         "gases": gases,
@@ -280,6 +280,7 @@ def _build_actions() -> list[ReactionAction]:
             direction=Direction.DOWN,
             duration=4,
             speed=0.0,
+            generation=32,
         ),
         ReactionAction(
             ReactionType.EMIT_MATERIAL,
@@ -287,6 +288,7 @@ def _build_actions() -> list[ReactionAction]:
             direction=Direction.UP,
             duration=4,
             speed=0.0,
+            generation=32,
         ),
         ReactionAction(
             ReactionType.EMIT_MATERIAL,
@@ -294,6 +296,7 @@ def _build_actions() -> list[ReactionAction]:
             direction=Direction.RANDOM,
             duration=2,
             speed=1.0,
+            generation=32,
         ),
         ReactionAction(ReactionType.HARM, value=1.5, duration=1),
         ReactionAction(
@@ -301,31 +304,38 @@ def _build_actions() -> list[ReactionAction]:
             target_material="fire_powder",
             harm_per_frame=3.0,
             integrity_threshold=20.0,
+            generation=16,
         ),
         ReactionAction(
             ReactionType.CONVERT_MATERIAL,
             target_material=None,
             harm_per_frame=2.0,
             integrity_threshold=8.0,
+            generation=16,
         ),
         ReactionAction(
             ReactionType.CONVERT_MATERIAL,
             target_material="fire_powder",
             harm_per_frame=5.0,
             integrity_threshold=40.0,
+            generation=16,
         ),
         ReactionAction(
             ReactionType.CONVERT_MATERIAL,
             target_material="fire_powder",
             harm_per_frame=14.0,
             integrity_threshold=30.0,
+            generation=16,
         ),
-        ReactionAction(ReactionType.MODIFY_GAS, gas_species="oil_gas", speed=4.0, duration=8),
+        ReactionAction(
+            ReactionType.MODIFY_GAS, gas_species="oil_gas", speed=4.0, duration=8, generation=16
+        ),
         ReactionAction(
             ReactionType.CONVERT_MATERIAL,
             target_material=None,
             harm_per_frame=4.0,
             integrity_threshold=10.0,
+            generation=16,
         ),
         ReactionAction(ReactionType.HARM, value=2.5, duration=0),
         ReactionAction(
@@ -363,12 +373,14 @@ def _build_actions() -> list[ReactionAction]:
             harm_per_frame=5.0,
             integrity_threshold=16.0,
             allow_subunit_scale=True,
+            generation=16,
         ),
         ReactionAction(
             ReactionType.CONVERT_MATERIAL,
             target_material="__random__",
             harm_per_frame=1.0,
             integrity_threshold=14.0,
+            generation=16,
         ),
         ReactionAction(ReactionType.MODIFY_TEMPERATURE, delta=3.0, duration=1),
         ReactionAction(
@@ -376,6 +388,7 @@ def _build_actions() -> list[ReactionAction]:
             target_material="pollution_powder",
             harm_per_frame=1.5,
             integrity_threshold=12.0,
+            generation=16,
         ),
         ReactionAction(
             ReactionType.MODIFY_GAS,
@@ -392,15 +405,27 @@ def _build_actions() -> list[ReactionAction]:
             duration=1,
             strength=1.2,
             range_cells=8,
+            generation=16,
         ),
         ReactionAction(ReactionType.HARM, value=-1.5, duration=1),
         ReactionAction(ReactionType.MODIFY_TEMPERATURE, delta=12.0, duration=1),
-        ReactionAction(ReactionType.MODIFY_GAS, gas_species="poison_gas", speed=1.5, duration=1),
-        ReactionAction(ReactionType.MODIFY_GAS, gas_species="water_gas", speed=1.5, duration=1),
+        ReactionAction(
+            ReactionType.MODIFY_GAS,
+            gas_species="poison_gas",
+            speed=1.5,
+            duration=1,
+            generation=8,
+        ),
         ReactionAction(
             ReactionType.MODIFY_GAS, gas_species="pollution_gas", speed=-10.0, duration=1
         ),
-        ReactionAction(ReactionType.MODIFY_GAS, gas_species="fire_gas", speed=2.0, duration=1),
+        ReactionAction(
+            ReactionType.MODIFY_GAS,
+            gas_species="fire_gas",
+            speed=2.0,
+            duration=1,
+            generation=16,
+        ),
     ]
 
 
@@ -423,13 +448,12 @@ def _assign_reaction_slots(
         "oil_liquid": {0: 7},
         "explosive_solid": {0: 8, 1: 9, 4: 24},
         "poison_liquid": {4: 25},
-        "fire_powder": {0: 6, 3: 28, 4: 12, 5: 24},
+        "fire_powder": {0: 6, 3: 27, 4: 12, 5: 24},
         "phosphor_visible_powder": {4: 12},
         "phosphor_holy_powder": {4: 13},
         "phosphor_chaos_powder": {4: 14},
         "phosphor_magic_powder": {4: 15},
         "vortex_heart_solid": {4: 21, 5: 22},
-        "water_liquid": {4: 26},
         "placeholder_solid": {0: 11, 1: 20, 2: 17},
     }
     fire_reactive_materials = {

@@ -54,11 +54,14 @@ def add_gas_from_cells(
     species_id = engine._resolve_sanctioned_gas_id(species)
     if species_id < 0:
         raise KeyError(species)
-    engine._invalidate_gpu_authoritative_resources("gas_concentration")
+    engine._invalidate_gpu_authoritative_resources(
+        "gas_concentration", "gas_reaction_chain_generation"
+    )
     ys, xs = np.nonzero(mask)
     for y, x in zip(ys.tolist(), xs.tolist()):
         gy, gx = engine.cell_to_gas(y, x)
         engine.gas_concentration[species_id, gy, gx] += amount
+        engine.gas_reaction_chain_generation[species_id, gy, gx] = 0
 
 
 def set_cell_by_id(
@@ -77,6 +80,7 @@ def set_cell_by_id(
     previous_island_id = int(engine.island_id[y, x])
     previous_displaced = int(engine.placeholder_displaced_material[y, x])
     engine.material_id[y, x] = int(material_id)
+    engine.reaction_chain_generation[y, x] = 0
     if phase is not None:
         resolved_phase = int(phase)
     else:
@@ -197,10 +201,13 @@ def _inject_gas_immediate(
     species_id = engine._resolve_sanctioned_gas_id(species)
     if species_id < 0:
         raise KeyError(species)
-    engine._invalidate_gpu_authoritative_resources("gas_concentration")
+    engine._invalidate_gpu_authoritative_resources(
+        "gas_concentration", "gas_reaction_chain_generation"
+    )
     engine.gas_concentration[species_id, gy, gx] = max(
         0.0, engine.gas_concentration[species_id, gy, gx] + amount
     )
+    engine.gas_reaction_chain_generation[species_id, gy, gx] = 0
     engine._mark_active_rect_runtime(
         max(0, x - radius),
         max(0, y - radius),
@@ -233,6 +240,7 @@ def clear_cell(engine: "WorldEngine", x: int, y: int, *, mark_dirty: bool = True
     previous_displaced = int(engine.placeholder_displaced_material[y, x])
     previous_is_placeholder = engine._shadow_material_is_placeholder(previous_material)
     engine.material_id[y, x] = 0
+    engine.reaction_chain_generation[y, x] = 0
     engine.phase[y, x] = 0
     engine.cell_flags[y, x] = 0
     engine.velocity[y, x] = 0.0
@@ -291,6 +299,7 @@ def swap_cells(engine: "WorldEngine", x0: int, y0: int, x1: int, y1: int) -> Non
             engine.material_id,
             engine.phase,
             engine.cell_flags,
+            engine.reaction_chain_generation,
             engine.cell_temperature,
             engine.integrity,
             engine.island_id,
@@ -308,6 +317,7 @@ def swap_cells(engine: "WorldEngine", x0: int, y0: int, x1: int, y1: int) -> Non
         engine.material_id[src_y, src_x] = 0
         engine.phase[src_y, src_x] = 0
         engine.cell_flags[src_y, src_x] = 0
+        engine.reaction_chain_generation[src_y, src_x] = 0
         engine.cell_temperature[src_y, src_x] = 0.0
         engine.integrity[src_y, src_x] = 0.0
         engine.island_id[src_y, src_x] = 0
@@ -320,6 +330,7 @@ def swap_cells(engine: "WorldEngine", x0: int, y0: int, x1: int, y1: int) -> Non
             engine.material_id,
             engine.phase,
             engine.cell_flags,
+            engine.reaction_chain_generation,
             engine.cell_temperature,
             engine.integrity,
             engine.island_id,
@@ -388,6 +399,7 @@ def clear_cell_region(
     engine.material_id[y0:y1, x0:x1] = 0
     engine.phase[y0:y1, x0:x1] = 0
     engine.cell_flags[y0:y1, x0:x1] = 0
+    engine.reaction_chain_generation[y0:y1, x0:x1] = 0
     engine.velocity[y0:y1, x0:x1] = 0.0
     engine.cell_temperature[y0:y1, x0:x1] = engine.ambient_temperature_region(x0, y0, x1, y1)
     engine.timer_pack[y0:y1, x0:x1] = 0

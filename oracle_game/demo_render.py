@@ -13,11 +13,15 @@ DEMO_AMBIENT_BOTTOM_LIGHT = (0.24, 0.26, 0.28)
 def build_demo_render_uniforms(engine: WorldEngine, *, debug_view: DebugView) -> dict[str, object]:
     visible_width = int(getattr(engine, "demo_visible_width", engine.paging.active_width))
     visible_height = int(getattr(engine, "demo_visible_height", engine.paging.active_height))
-    return {
+    uniforms = {
         "buffer_size": (engine.width, engine.height),
         "active_size": (visible_width, visible_height),
         "buffer_origin": (engine.paging.buffer_origin_x, engine.paging.buffer_origin_y),
         "world_origin": (engine.paging.origin_x, engine.paging.origin_y),
+        "view_offset": (
+            int(getattr(engine, "demo_view_offset_x", 0)),
+            int(getattr(engine, "demo_view_offset_y", 0)),
+        ),
         "atlas_grid": tuple(engine.bridge.atlas_grid),
         "view_mode": 0 if debug_view == DebugView.MATERIAL else 1,
         "force_debug_texture": debug_view != DebugView.MATERIAL,
@@ -25,6 +29,15 @@ def build_demo_render_uniforms(engine: WorldEngine, *, debug_view: DebugView) ->
         "ambient_top_light": DEMO_AMBIENT_TOP_LIGHT,
         "ambient_bottom_light": DEMO_AMBIENT_BOTTOM_LIGHT,
     }
+    if (
+        hasattr(engine, "logical_world_width")
+        or int(getattr(engine.paging, "logical_width", -1)) > 0
+    ):
+        uniforms["logical_world_size"] = (
+            int(getattr(engine, "logical_world_width", engine.paging.logical_width)),
+            int(getattr(engine, "logical_world_height", engine.paging.logical_height)),
+        )
+    return uniforms
 
 
 def apply_demo_render_uniforms(program: Any, uniforms: dict[str, object]) -> None:

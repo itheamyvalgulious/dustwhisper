@@ -334,8 +334,8 @@ def _validate_reaction_payload(engine: "WorldEngine", reactions_payload: dict[st
         if duration < 0:
             raise ValueError(f"reaction actions require non-negative duration: {duration}")
         generation = int(action.get("generation", 0))
-        if generation != 0:
-            raise ValueError("reaction actions do not support non-zero generation")
+        if generation < 0 or generation > 255:
+            raise ValueError("reaction action generation must be in uint8 range 0..255")
         if (
             bool(action.get("allow_subunit_scale", False))
             and reaction_type != ReactionType.CONVERT_MATERIAL

@@ -45,11 +45,20 @@
             layout(std430, binding=6) buffer GasTags {
                 uvec4 gas_tags[{{MAX_MATERIALS}}];
             };
+            layout(std430, binding=7) buffer ActionMeta {
+                ivec4 action_meta[{{MAX_ACTIONS}}];
+            };
             int clamp_material_id(int material_id) {
                 return clamp(material_id, 0, {{MAX_MATERIALS_MINUS_1}});
             }
             layout(std430, binding=15) buffer ReactionCounters {
                 uint reaction_counts[16];
+            };
+            layout(std430, binding=17) buffer ReactionChainGeneration {
+                uint reaction_chain_generation_words[];
+            };
+            layout(std430, binding=18) buffer GasReactionChainGeneration {
+                uint gas_reaction_chain_generation_words[];
             };
             layout(r32f, binding=0) writeonly uniform image2DArray gas_out_img;
             layout(rgba32f, binding=1) writeonly uniform image2DArray flow_source_img;
@@ -73,6 +82,38 @@
 
             int phase_id_at(ivec2 cell) {
                 return int((texelFetch(cell_state_tex, cell, 0).x >> 16u) & 0xFFu);
+            }
+            uint cell_generation_at(ivec2 cell) {
+                uint index = uint(cell.y * cell_grid_size.x + cell.x);
+                uint word = reaction_chain_generation_words[index >> 2u];
+                return (word >> ((index & 3u) * 8u)) & 0xffu;
+            }
+            uint gas_generation_index(ivec2 gas_cell, int layer) {
+                return uint(
+                    (layer * gas_grid_size.y + gas_cell.y) * gas_grid_size.x + gas_cell.x
+                );
+            }
+            uint gas_generation_at(ivec2 gas_cell, int layer) {
+                uint index = gas_generation_index(gas_cell, layer);
+                uint word = gas_reaction_chain_generation_words[index >> 2u];
+                return (word >> ((index & 3u) * 8u)) & 0xffu;
+            }
+            void set_gas_generation(ivec2 gas_cell, int layer, uint generation) {
+                uint index = gas_generation_index(gas_cell, layer);
+                uint word_index = index >> 2u;
+                uint shift = (index & 3u) * 8u;
+                uint mask = 0xffu << shift;
+                uint old_word = gas_reaction_chain_generation_words[word_index];
+                for (int attempt = 0; attempt < 8; ++attempt) {
+                    uint next_word = (old_word & ~mask) | ((generation & 0xffu) << shift);
+                    uint observed = atomicCompSwap(
+                        gas_reaction_chain_generation_words[word_index], old_word, next_word
+                    );
+                    if (observed == old_word) {
+                        return;
+                    }
+                    old_word = observed;
+                }
             }
 
             void write_flow_sources(ivec2 cell, ivec4 ai, vec4 af, float scale, int layer_base) {
@@ -179,7 +220,15 @@
                 }
             }
 
-            void apply_action_vector(ivec2 gas_cell, int layer, vec4 actions, vec4 scales, int slot_offset, inout float gas_value) {
+            void apply_action_vector(
+                ivec2 gas_cell,
+                ivec2 source_cell,
+                int layer,
+                vec4 actions,
+                vec4 scales,
+                int slot_offset,
+                inout float gas_value
+            ) {
                 for (int slot = 0; slot < 4; ++slot) {
                     int action_index = int(round(actions[slot]));
                     if (action_index <= 0 || action_index >= {{MAX_ACTIONS}}) {
@@ -190,8 +239,16 @@
                         continue;
                     }
                     vec4 af = action_f[action_index];
+                    uint source_generation = cell_generation_at(source_cell);
+                    uint action_generation = uint(max(0, action_meta[action_index].y));
+                    if (af.x > 0.0 && source_generation > action_generation) {
+                        continue;
+                    }
                     float scale = scales[slot];
                     gas_value = max(0.0, gas_value + af.x * scale);
+                    if (af.x > 0.0) {
+                        set_gas_generation(gas_cell, layer, source_generation + 1u);
+                    }
                     write_flow_sources(gas_cell, ai, af, scale, (slot_offset + slot) * 4);
                     atomicAdd(reaction_counts[1], 1u);
                     atomicAdd(reaction_counts[1 + {{TYPE_MODIFY_GAS}}], 1u);
@@ -269,6 +326,7 @@
                             if (!action_vector_empty(action_lo)) {
                                 apply_action_vector(
                                     gid.xy,
+                                    cell,
                                     gid.z,
                                     action_lo,
                                     fetch_scale_lo(cell),
@@ -280,6 +338,7 @@
                             if (!action_vector_empty(action_hi)) {
                                 apply_action_vector(
                                     gid.xy,
+                                    cell,
                                     gid.z,
                                     action_hi,
                                     fetch_scale_hi(cell),

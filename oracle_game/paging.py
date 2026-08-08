@@ -17,6 +17,16 @@ class RingPagingWindow:
     origin_y: int = 0
     buffer_origin_x: int = 0
     buffer_origin_y: int = 0
+    # Optional per-axis deadzone overrides for focus_on; negative means the
+    # default of active span // 4. The demo installs smaller thresholds sized
+    # so a focus-centered view always stays inside the resident window.
+    focus_threshold_x: int = -1
+    focus_threshold_y: int = -1
+    # Optional finite logical world extents.  Negative means the legacy
+    # unbounded page-store behaviour.  The desktop demo sets these so the
+    # physical ring remains an implementation detail rather than a torus.
+    logical_width: int = -1
+    logical_height: int = -1
 
     @property
     def chunk_size(self) -> int:
@@ -27,6 +37,14 @@ class RingPagingWindow:
             (world_x - self.origin_x + self.buffer_origin_x) % self.width,
             (world_y - self.origin_y + self.buffer_origin_y) % self.height,
         )
+
+    def in_logical_world(self, world_x: int, world_y: int) -> bool:
+        """Return whether a coordinate belongs to the finite open world."""
+        if self.logical_width > 0 and not (0 <= int(world_x) < int(self.logical_width)):
+            return False
+        if self.logical_height > 0 and not (0 <= int(world_y) < int(self.logical_height)):
+            return False
+        return True
 
     def buffer_to_world(self, buffer_x: int, buffer_y: int) -> tuple[int, int]:
         return (
@@ -45,8 +63,20 @@ class RingPagingWindow:
     def focus_on(self, center_x: int, center_y: int) -> list[PageStripeUpdate]:
         target_origin_x = self._snap_origin(center_x - self.active_width // 2)
         target_origin_y = self._snap_origin(center_y - self.active_height // 2)
-        threshold_x = self.active_width // 4
-        threshold_y = self.active_height // 4
+        if self.logical_width > 0:
+            target_origin_x = min(
+                max(0, target_origin_x), max(0, int(self.logical_width) - self.active_width)
+            )
+        if self.logical_height > 0:
+            target_origin_y = min(
+                max(0, target_origin_y), max(0, int(self.logical_height) - self.active_height)
+            )
+        threshold_x = (
+            self.focus_threshold_x if self.focus_threshold_x >= 0 else self.active_width // 4
+        )
+        threshold_y = (
+            self.focus_threshold_y if self.focus_threshold_y >= 0 else self.active_height // 4
+        )
         old_origin_x = self.origin_x
         old_origin_y = self.origin_y
         updates: list[PageStripeUpdate] = []

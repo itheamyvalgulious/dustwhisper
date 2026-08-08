@@ -664,6 +664,12 @@ def _stage_shadow_buffers(bridge, world: "WorldEngine", uploads: dict[str, Any])
     bridge.shadow_buffers["collapse_delay_pending"] = world.collapse_delay_pending.astype(
         np.int32
     ).copy()
+    bridge.shadow_buffers["reaction_chain_generation"] = world.reaction_chain_generation.astype(
+        np.uint8
+    ).copy()
+    bridge.shadow_buffers["gas_reaction_chain_generation"] = (
+        world.gas_reaction_chain_generation.astype(np.uint8).copy()
+    )
     bridge.shadow_buffers["cell_optical_dose"] = world.cell_optical_dose.astype(np.float32).copy()
     bridge.shadow_buffers["gas_optical_dose"] = world.gas_optical_dose.astype(np.float32).copy()
     bridge.shadow_buffers["active_meta"] = uploads["active_meta"].copy()
@@ -822,14 +828,16 @@ def _upload_cpu_written_cell_rects(bridge, world: "WorldEngine") -> bool:
         ("island_id", world.island_id),
         ("entity_id", world.entity_id),
         ("placeholder_displaced_material", world.placeholder_displaced_material),
+        ("reaction_chain_generation", world.reaction_chain_generation),
     ):
         if not bridge._should_upload_cpu_resource(world, name):
             continue
         buffer = bridge.buffers[name]
-        data = np.ascontiguousarray(array.astype(np.int32))
+        data_dtype = np.uint8 if name == "reaction_chain_generation" else np.int32
+        data = np.ascontiguousarray(array.astype(data_dtype))
         for x0, y0, x1, y1 in clamped:
             for row in range(y0, y1):
-                offset = (row * width + x0) * uint32_bytes
+                offset = (row * width + x0) * np.dtype(data_dtype).itemsize
                 buffer.write(data[row, x0:x1].tobytes(), offset=offset)
         uploaded.append(name)
     if bridge._should_upload_cpu_resource(world, "material"):
@@ -885,8 +893,16 @@ def _upload_bridge_core_buffers(bridge, world: "WorldEngine", uploads: dict[str,
         bridge.buffers["collapse_delay_pending"].write(
             np.ascontiguousarray(world.collapse_delay_pending.astype(np.int32)).tobytes()
         )
+    if bridge._should_upload_cpu_resource(world, "reaction_chain_generation"):
+        bridge.buffers["reaction_chain_generation"].write(
+            np.ascontiguousarray(world.reaction_chain_generation.astype(np.uint8)).tobytes()
+        )
     if bridge._should_upload_cpu_resource(world, "gas_concentration"):
         bridge.buffers["gas_concentration"].write(world.gas_concentration.astype("f4").tobytes())
+    if bridge._should_upload_cpu_resource(world, "gas_reaction_chain_generation"):
+        bridge.buffers["gas_reaction_chain_generation"].write(
+            np.ascontiguousarray(world.gas_reaction_chain_generation.astype(np.uint8)).tobytes()
+        )
     if upload_cell_dose_from_cpu:
         bridge.buffers["cell_optical_dose"].write(
             np.ascontiguousarray(world.cell_optical_dose.astype(np.float32)).tobytes()
@@ -1102,12 +1118,14 @@ def _mark_synced_resources_gpu_authoritative(bridge, world: "WorldEngine") -> No
     if getattr(world, "simulation_backend", "") == "gpu":
         bridge.mark_gpu_authoritative(
             "cell_core",
+            "reaction_chain_generation",
             "material",
             "island_id",
             "entity_id",
             "placeholder_displaced_material",
             "collapse_delay_pending",
             "gas_concentration",
+            "gas_reaction_chain_generation",
             "ambient_temperature",
             "flow_velocity",
             "pressure_ping",
@@ -1194,6 +1212,13 @@ def download_gpu_authoritative_resources(bridge, world: "WorldEngine") -> None:
                 world.material_id[:] = unpacked["material_id"]
                 world.phase[:] = unpacked["phase"]
                 world.cell_flags[:] = unpacked["cell_flags"]
+                if "reaction_chain_generation" in authoritative:
+                    generation_buffer = buffers.get("reaction_chain_generation")
+                    if generation_buffer is not None:
+                        world.reaction_chain_generation[:] = np.frombuffer(
+                            generation_buffer.read(size=world.reaction_chain_generation.nbytes),
+                            dtype=np.uint8,
+                        ).reshape(world.reaction_chain_generation.shape)
                 world.velocity[:] = unpacked["velocity"]
                 world.cell_temperature[:] = unpacked["cell_temperature"]
                 world.timer_pack[:] = unpacked["timer_pack"]
@@ -1228,6 +1253,13 @@ def download_gpu_authoritative_resources(bridge, world: "WorldEngine") -> None:
         mirror[:] = np.frombuffer(buffer.read(size=mirror.nbytes), dtype=np.float32).reshape(
             mirror.shape
         )
+    if "gas_reaction_chain_generation" in authoritative:
+        buffer = buffers.get("gas_reaction_chain_generation")
+        if buffer is not None:
+            mirror = world.gas_reaction_chain_generation
+            mirror[:] = np.frombuffer(buffer.read(size=mirror.nbytes), dtype=np.uint8).reshape(
+                mirror.shape
+            )
     for name in ("ambient_temperature", "pressure_ping", "flow_velocity"):
         if name not in authoritative:
             continue

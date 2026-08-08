@@ -4,15 +4,44 @@
             layout(std430, binding=0) buffer SpeciesParamBuffer {
                 vec4 params[{{MAX_SPECIES}}];
             };
+            layout(std430, binding=1) buffer GasReactionChainGeneration {
+                uint gas_reaction_chain_generation_words[];
+            };
             layout(binding=1) uniform sampler2D velocity_tex;
             layout(binding=2) uniform sampler2DArray gas_in_tex;
             layout(r32f, binding=3) writeonly uniform image2DArray gas_out_img;
+            uint gas_generation_index(ivec3 cell) {
+                return uint((cell.z * grid_size.y + cell.y) * grid_size.x + cell.x);
+            }
+            uint gas_generation_at(ivec3 cell) {
+                uint index = gas_generation_index(cell);
+                uint word = gas_reaction_chain_generation_words[index >> 2u];
+                return (word >> ((index & 3u) * 8u)) & 0xffu;
+            }
+            void set_gas_generation(ivec3 cell, uint generation) {
+                uint index = gas_generation_index(cell);
+                uint word_index = index >> 2u;
+                uint shift = (index & 3u) * 8u;
+                uint mask = 0xffu << shift;
+                uint old_word = gas_reaction_chain_generation_words[word_index];
+                for (int attempt = 0; attempt < 8; ++attempt) {
+                    uint next_word = (old_word & ~mask) | ((generation & 0xffu) << shift);
+                    uint observed = atomicCompSwap(
+                        gas_reaction_chain_generation_words[word_index], old_word, next_word
+                    );
+                    if (observed == old_word) {
+                        return;
+                    }
+                    old_word = observed;
+                }
+            }
             void main() {
                 ivec3 gid = ivec3(gl_GlobalInvocationID.xyz);
                 if (gid.x >= grid_size.x || gid.y >= grid_size.y || gid.z >= species_count) {
                     return;
                 }
                 float current = texelFetch(gas_in_tex, gid, 0).x;
+                uint source_generation = gas_generation_at(gid);
                 if (!solve_active(gid.xy)) {
                     imageStore(gas_out_img, gid, vec4(current, 0.0, 0.0, 0.0));
                     return;
@@ -45,6 +74,13 @@
                 if (gid.z == air_index) {
                     value = max(value, 0.3);
                 }
+                if (value <= 1.0e-6) {
+                    set_gas_generation(gid, 0u);
+                } else {
+                    ivec3 source_cell = ivec3(
+                        clamp(ivec2(floor(prev)), ivec2(0), grid_size - ivec2(1)), gid.z
+                    );
+                    set_gas_generation(gid, max(source_generation, gas_generation_at(source_cell)));
+                }
                 imageStore(gas_out_img, gid, vec4(value, 0.0, 0.0, 0.0));
             }
-            

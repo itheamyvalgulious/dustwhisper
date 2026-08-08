@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 
 from oracle_game.rules import build_default_optics_entries
+from oracle_game.rules_reactions import _build_rules
 from oracle_game.sim.gpu_collapse_dirty import clear_collapse_structure_dirty_tile_mask
 from oracle_game.types import (
     GasSpeciesDef,
@@ -46,8 +47,38 @@ def update_material_table(
     optics_payload = engine._material_optics_table_snapshot_payload()
     engine._set_stable_shadow_payload("materials", merged_payload)
     engine._set_stable_shadow_payload("optics", optics_payload)
+    # Material additions must inherit the generated acid-coverage rule.  Keep
+    # user-authored reaction rules intact and append only newly missing
+    # material/acid pairs.  During bootstrap the reaction table is installed
+    # immediately after the material table; deferring generation in that one
+    # case avoids merging the default rule payload with itself.
+    reaction_payload = engine._reaction_table_snapshot_payload()
+    material_material_rules = reaction_payload["rules"]["material_material"]
+    if len(engine.rulebook.reaction_actions) > 1:
+        existing_acid_pairs = {
+            (str(rule.get("lhs_material")), str(rule.get("rhs_material")))
+            for rule in material_material_rules
+            if str(rule.get("rhs_material")) == "acid_liquid"
+        }
+        for generated_rule in _build_rules(engine.rulebook.materials_by_id.values())[
+            "material_material"
+        ]:
+            generated_payload = asdict(generated_rule)
+            pair = (
+                str(generated_payload.get("lhs_material")),
+                str(generated_payload.get("rhs_material")),
+            )
+            if pair[1] == "acid_liquid" and pair not in existing_acid_pairs:
+                material_material_rules.append(generated_payload)
+                existing_acid_pairs.add(pair)
+        reaction_payload["rules"]["material_material"] = material_material_rules
+        engine.rulebook.material_material_rules = [
+            engine._coerce_pair_reaction_rule(rule) for rule in material_material_rules
+        ]
+        engine._set_stable_shadow_payload("reactions", reaction_payload)
     engine.bridge.upload_table("materials", merged_payload)
     engine.bridge.upload_table("optics", optics_payload)
+    engine.bridge.upload_table("reactions", reaction_payload)
     engine.bridge.sync_rule_tables(engine)
     engine.bootstrap_log.append("update_material_table")
     engine.bridge.ensure_world_resources(engine)
@@ -67,12 +98,18 @@ def update_gas_species_table(
     engine.rulebook.update_gases(engine._coerce_gas_species_def(item) for item in merged_payload)
     engine._rebuild_gas_property_arrays()
     previous = engine.gas_concentration
+    previous_generation = engine.gas_reaction_chain_generation
     gas_count = engine._gas_field_count()
     engine.gas_concentration = np.zeros(
         (gas_count, engine.gas_height, engine.gas_width), dtype=np.float32
     )
     count = min(previous.shape[0], engine.gas_concentration.shape[0])
     engine.gas_concentration[:count] = previous[:count]
+    engine.gas_reaction_chain_generation = np.zeros(
+        (gas_count, engine.gas_height, engine.gas_width), dtype=np.uint8
+    )
+    generation_count = min(previous_generation.shape[0], gas_count)
+    engine.gas_reaction_chain_generation[:generation_count] = previous_generation[:generation_count]
     if 0 <= engine.air_gas_species_id < engine.gas_concentration.shape[0]:
         engine.gas_concentration[engine.air_gas_species_id] = np.maximum(
             engine.gas_concentration[engine.air_gas_species_id], 1.0

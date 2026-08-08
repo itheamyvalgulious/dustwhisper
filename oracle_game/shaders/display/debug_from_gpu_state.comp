@@ -18,7 +18,8 @@ layout(std430, binding = 4) readonly buffer ActiveTileBuffer {
 layout(rgba32f, binding = 0) writeonly uniform image2D debug_tex;
 uniform sampler2D visible_tex;
 uniform sampler2D flow_velocity_tex;
-uniform sampler2D pressure_tex;
+uniform sampler2D ambient_temperature_tex;
+uniform sampler2D pressure_residual_tex;
 uniform int width;
 uniform int height;
 uniform int gas_width;
@@ -35,10 +36,11 @@ uniform int light_channel_count;
 uniform int gas_species_count;
 
 vec3 heat_color(float t) {
-    float cold = clamp((20.0 - t) / 80.0, 0.0, 1.0);
-    float hot = clamp((t - 20.0) / 180.0, 0.0, 1.0);
-    float warm = clamp(1.0 - abs(t - 20.0) / 80.0, 0.0, 1.0);
-    return clamp(vec3(hot, warm * 0.22 + hot * 0.45, cold), 0.0, 1.0);
+    float normalized = clamp(t / 200.0, 0.0, 1.0);
+    float cold = 1.0 - normalized;
+    float hot = normalized;
+    float warm = 1.0 - abs(normalized - 0.10) / 0.50;
+    return vec3(hot, clamp(warm, 0.0, 1.0) * 0.22 + hot * 0.45, cold);
 }
 
 vec3 vector_color(vec2 v) {
@@ -68,11 +70,14 @@ void main() {
     if (view_mode == 1) {
         color = heat_color(cell_temperature);
     } else if (view_mode == 2) {
+        float ambient_temperature = texelFetch(ambient_temperature_tex, gas_cell, 0).x;
+        color = heat_color(ambient_temperature);
+    } else if (view_mode == 3) {
         vec2 flow = texelFetch(flow_velocity_tex, gas_cell, 0).xy;
         color = vector_color(material_id > 0 ? cell_velocity : flow);
-    } else if (view_mode == 3) {
-        color = clamp(texelFetch(visible_tex, pos, 0).rgb, 0.0, 1.0);
     } else if (view_mode == 4) {
+        color = clamp(texelFetch(visible_tex, pos, 0).rgb, 0.0, 1.0);
+    } else if (view_mode == 5) {
         if (light_dose_channel >= 0 && light_dose_channel < light_channel_count) {
             float cell_dose = cell_optical_dose[light_dose_channel * width * height + cell_index];
             float gas_dose = gas_optical_dose[light_dose_channel * gas_width * gas_height + gas_index];
@@ -81,18 +86,30 @@ void main() {
         } else {
             color = clamp(texelFetch(visible_tex, pos, 0).rgb, 0.0, 1.0);
         }
-    } else if (view_mode == 5) {
+    } else if (view_mode == 6) {
         if (gas_species_id >= 0 && gas_species_id < gas_species_count) {
             float amount = gas_concentration[gas_species_id * gas_width * gas_height + gas_index];
             float strength = 1.0 - exp(-max(0.0, amount));
             color = vec3(strength * 0.3, strength, strength * 0.6);
         }
-    } else if (view_mode == 6) {
-        float pressure = texelFetch(pressure_tex, gas_cell, 0).x;
-        float pos_pressure = clamp(pressure, 0.0, 1.0);
-        float neg_pressure = clamp(-pressure, 0.0, 1.0);
-        color = vec3(pos_pressure, 0.18 * (1.0 - clamp(abs(pressure), 0.0, 1.0)), neg_pressure);
     } else if (view_mode == 7) {
+        float pressure = texelFetch(pressure_residual_tex, gas_cell, 0).x;
+        float normalized_pressure = clamp(pressure, -1.0, 1.0);
+        float pos_pressure = max(normalized_pressure, 0.0);
+        float neg_pressure = max(-normalized_pressure, 0.0);
+        vec3 pressure_color = vec3(
+            pos_pressure,
+            0.18 * (1.0 - abs(normalized_pressure)),
+            neg_pressure
+        );
+        // Preserve the signed residual as the dominant signal while adding a
+        // restrained velocity tint so moving gas remains visible in this
+        // diagnostic view (the dedicated velocity view still shows direction
+        // at full strength).
+        vec2 flow = texelFetch(flow_velocity_tex, gas_cell, 0).xy;
+        float flow_strength = clamp(length(flow) / 4.0, 0.0, 1.0);
+        color = mix(pressure_color, vector_color(flow), 0.35 * flow_strength);
+    } else if (view_mode == 8) {
         ivec2 tile = clamp(pos / max(1, tile_size), ivec2(0), ivec2(max(0, tile_width - 1), max(0, tile_height - 1)));
         int ttl = active_tile_ttl[tile.y * tile_width + tile.x];
         float active_value = clamp(float(ttl) / max(1.0, float(active_ttl_reset)), 0.0, 1.0);

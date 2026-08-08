@@ -728,6 +728,7 @@ class GPUGasPipeline(GPUPipelineBase):
         program["species_count"].value = species_count
         program["air_index"].value = typed_gas_id(gas_table, "air")
         resources.species_params.bind_to_storage_buffer(binding=0)
+        world.bridge.buffers["gas_reaction_chain_generation"].bind_to_storage_buffer(binding=1)
         resources.velocity_ping.use(location=1)
         resources.gas_ping.use(location=2)
         resources.active_gas_tex.use(location=ACTIVE_GAS_TEXTURE_UNIT)
@@ -782,6 +783,7 @@ class GPUGasPipeline(GPUPipelineBase):
         program["air_index"].value = typed_gas_id(gas_table, "air")
         resources.species_params.bind_to_storage_buffer(binding=0)
         bridge.buffers["gas_concentration"].bind_to_storage_buffer(binding=1)
+        bridge.buffers["gas_reaction_chain_generation"].bind_to_storage_buffer(binding=5)
         resources.velocity_ping.use(location=0)
         resources.gas_ping.use(location=1)
         resources.ambient_ping.use(location=2)
@@ -793,6 +795,7 @@ class GPUGasPipeline(GPUPipelineBase):
         bridge.textures["flow_velocity"].bind_to_image(2, read=False, write=True)
         bridge.textures["ambient_temperature"].bind_to_image(3, read=False, write=True)
         bridge.textures["pressure_ping"].bind_to_image(4, read=False, write=True)
+        bridge.textures["pressure_residual"].bind_to_image(5, read=False, write=True)
         program.run(
             (world.gas_width + SPECIES_COOPERATIVE_LOCAL_X - 1) // SPECIES_COOPERATIVE_LOCAL_X,
             (world.gas_height + SPECIES_COOPERATIVE_LOCAL_Y - 1) // SPECIES_COOPERATIVE_LOCAL_Y,
@@ -808,6 +811,7 @@ class GPUGasPipeline(GPUPipelineBase):
             "flow_velocity",
             "ambient_temperature",
             "pressure_ping",
+            "pressure_residual",
             "gas_concentration",
         )
         self.last_species_terminal_cooperative_used = True
@@ -862,6 +866,7 @@ class GPUGasPipeline(GPUPipelineBase):
         bridge.textures["flow_velocity"].bind_to_image(5, read=False, write=True)
         bridge.textures["ambient_temperature"].bind_to_image(6, read=False, write=True)
         bridge.textures["pressure_ping"].bind_to_image(7, read=False, write=True)
+        bridge.textures["pressure_residual"].bind_to_image(4, read=False, write=True)
         bridge.buffers["gas_concentration"].bind_to_storage_buffer(binding=8)
         program.run(group_x, group_y, int(world.gas_concentration.shape[0]))
         self._sync_compute_writes(bridge.ctx)

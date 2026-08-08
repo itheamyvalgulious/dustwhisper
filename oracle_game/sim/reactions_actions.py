@@ -24,6 +24,57 @@ from oracle_game.sim.gpu_reactions import (
 from oracle_game.sim.reactions_constants import REACTION_FLOW_SOURCE_LIFETIME
 from oracle_game.types import CellFlag, ForceSource, ReactionType
 
+_GENERATIONAL_REACTION_TYPES = frozenset(
+    {
+        int(ReactionType.EMIT_MATERIAL.value),
+        int(ReactionType.CONVERT_MATERIAL.value),
+        int(ReactionType.MODIFY_GAS.value),
+    }
+)
+
+
+def _action_generation(row: np.void) -> int:
+    names = getattr(getattr(row, "dtype", None), "names", ()) or ()
+    return max(0, int(row["generation"])) if "generation" in names else 0
+
+
+def _action_is_generative(row: np.void) -> bool:
+    reaction_type = int(row["reaction_type_id"])
+    if reaction_type not in _GENERATIONAL_REACTION_TYPES:
+        return False
+    # Removing gas is a side effect, not a source that can propagate.
+    return reaction_type != int(ReactionType.MODIFY_GAS.value) or float(row["speed"]) > 0.0
+
+
+def _cell_generation_allowed(world: "WorldEngine", x: int, y: int, action: np.void) -> bool:
+    if not _action_is_generative(action):
+        return True
+    return int(world.reaction_chain_generation[y, x]) <= _action_generation(action)
+
+
+def _advance_cell_generation(world: "WorldEngine", x: int, y: int) -> int:
+    current = int(world.reaction_chain_generation[y, x])
+    next_generation = min(255, current + 1)
+    world.reaction_chain_generation[y, x] = np.uint8(next_generation)
+    return next_generation
+
+
+def _gas_generation_allowed(
+    world: "WorldEngine", species_id: int, gx: int, gy: int, action: np.void
+) -> bool:
+    if not _action_is_generative(action):
+        return True
+    return int(world.gas_reaction_chain_generation[species_id, gy, gx]) <= _action_generation(
+        action
+    )
+
+
+def _advance_gas_generation(world: "WorldEngine", species_id: int, gx: int, gy: int) -> int:
+    current = int(world.gas_reaction_chain_generation[species_id, gy, gx])
+    next_generation = min(255, current + 1)
+    world.gas_reaction_chain_generation[species_id, gy, gx] = np.uint8(next_generation)
+    return next_generation
+
 
 def _rule_value(rule: object, field: str, default: object | None = None) -> object | None:
     dtype = getattr(rule, "dtype", None)
@@ -168,6 +219,8 @@ def _consume_gas_species(
         0.0,
         float(world.gas_concentration[species_id, gy, gx]) - float(amount),
     )
+    if world.gas_concentration[species_id, gy, gx] <= 0.0:
+        world.gas_reaction_chain_generation[species_id, gy, gx] = 0
 
 
 def _consume_light_dose(
@@ -204,6 +257,8 @@ def _trigger_material_slot(
     action = solver._action_row(world, action_index)
     if action is None:
         return
+    if not _cell_generation_allowed(world, x, y, action):
+        return
     if slot_index < 4:
         if world.timer_pack[y, x, slot_index] == 0 and int(action["duration"]) > 0:
             world.timer_pack[y, x, slot_index] = int(action["duration"])
@@ -217,6 +272,8 @@ def _execute_action(
 ) -> None:
     action = solver._action_row(world, action_index)
     if action is None:
+        return
+    if not _cell_generation_allowed(world, x, y, action):
         return
     reaction_type_id = int(action["reaction_type_id"])
     if reaction_type_id == int(ReactionType.NONE.value):
@@ -239,10 +296,15 @@ def _execute_action(
         )
         if emit_material_id > 0 and world.in_bounds(tx, ty) and world.material_id[ty, tx] == 0:
             world.set_cell_by_id(tx, ty, emit_material_id)
+            world.reaction_chain_generation[ty, tx] = np.uint8(
+                min(255, int(world.reaction_chain_generation[y, x]) + 1)
+            )
             world.velocity[ty, tx] = emitted_velocity
             solver._stage_extra_changed_cell_mask[ty, tx] = True
             solver.last_emitted_material_count += 1
             solver.last_emitted_material_mask[ty, tx] = True
+        if _action_is_generative(action):
+            _advance_cell_generation(world, x, y)
     elif reaction_type_id == int(ReactionType.EMIT_LIGHT.value):
         solver.last_emit_light_action_count += 1
         light_id = int(action["light_type_id"])
@@ -274,6 +336,12 @@ def _execute_action(
                 0.0,
                 world.gas_concentration[species_id, gy, gx] + float(action["speed"]) * 0.1 * scale,
             )
+            if float(action["speed"]) > 0.0:
+                world.gas_reaction_chain_generation[species_id, gy, gx] = np.uint8(
+                    min(255, int(world.reaction_chain_generation[y, x]) + 1)
+                )
+        if _action_is_generative(action):
+            _advance_cell_generation(world, x, y)
         solver._emit_modify_gas_flow_sources(world, action, x, y, scale)
     elif reaction_type_id == int(ReactionType.CONVERT_MATERIAL.value):
         solver.last_convert_material_action_count += 1
@@ -283,20 +351,21 @@ def _execute_action(
         world.integrity[y, x] -= float(action["harm_per_frame"]) * harm_scale
         if world.integrity[y, x] <= float(action["integrity_threshold"]):
             material_id = int(world.material_id[y, x])
+            source_generation = int(world.reaction_chain_generation[y, x])
             if int(action["flags"]) & REACTION_ACTION_FLAG_RANDOM_TARGET:
                 target_material_id = solver._select_random_convert_material(
                     world, material_id, x, y
                 )
-                if target_material_id > 0:
-                    world.set_cell_by_id(x, y, target_material_id)
-                else:
-                    world.clear_cell(x, y)
             else:
                 target_material_id = int(action["target_material_id"])
-                if target_material_id > 0:
-                    world.set_cell_by_id(x, y, target_material_id)
-                else:
-                    world.clear_cell(x, y)
+            if target_material_id > 0:
+                world.set_cell_by_id(x, y, target_material_id)
+                if _action_is_generative(action):
+                    world.reaction_chain_generation[y, x] = np.uint8(
+                        min(255, source_generation + 1)
+                    )
+            else:
+                world.clear_cell(x, y)
     elif reaction_type_id == int(ReactionType.MODIFY_TEMPERATURE.value):
         solver.last_modify_temperature_action_count += 1
         world.cell_temperature[y, x] += float(action["delta"]) * scale
@@ -319,6 +388,11 @@ def _execute_gas_action(
     action = solver._action_row(world, action_index)
     if action is None:
         return
+    species_id = int(action["gas_species_id"])
+    if 0 <= species_id < world.gas_reaction_chain_generation.shape[
+        0
+    ] and not _gas_generation_allowed(world, species_id, gx, gy, action):
+        return
     reaction_type_id = int(action["reaction_type_id"])
     if reaction_type_id == int(ReactionType.NONE.value):
         return
@@ -327,12 +401,13 @@ def _execute_gas_action(
         solver.last_stage_action_counts[solver._current_stage] += 1
     if reaction_type_id == int(ReactionType.MODIFY_GAS.value):
         solver.last_modify_gas_action_count += 1
-        species_id = int(action["gas_species_id"])
         if 0 <= species_id < world.gas_concentration.shape[0]:
             world.gas_concentration[species_id, gy, gx] = max(
                 0.0,
                 world.gas_concentration[species_id, gy, gx] + float(action["speed"]) * 0.1 * scale,
             )
+            if float(action["speed"]) > 0.0:
+                _advance_gas_generation(world, species_id, gx, gy)
         cell_x, cell_y = solver._gas_cell_center(world, gx, gy)
         solver._emit_modify_gas_flow_sources(world, action, cell_x, cell_y, scale)
         return
@@ -355,10 +430,15 @@ def _execute_gas_action(
         )
         if emit_material_id > 0 and world.in_bounds(tx, ty) and world.material_id[ty, tx] == 0:
             world.set_cell_by_id(tx, ty, emit_material_id)
+            world.reaction_chain_generation[ty, tx] = np.uint8(
+                min(255, int(world.reaction_chain_generation[cell_y, cell_x]) + 1)
+            )
             world.velocity[ty, tx] = emitted_velocity
             solver._stage_extra_changed_cell_mask[ty, tx] = True
             solver.last_emitted_material_count += 1
             solver.last_emitted_material_mask[ty, tx] = True
+        if _action_is_generative(action) and world.in_bounds(cell_x, cell_y):
+            _advance_cell_generation(world, cell_x, cell_y)
     elif reaction_type_id == int(ReactionType.EMIT_LIGHT.value):
         solver.last_emit_light_action_count += 1
         light_id = int(action["light_type_id"])

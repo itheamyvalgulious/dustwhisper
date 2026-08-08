@@ -136,6 +136,7 @@ def _invalidate_gpu_authoritative_cell_resources(engine: "WorldEngine") -> None:
     _invalidate_gpu_authoritative_resources(
         engine,
         "cell_core",
+        "reaction_chain_generation",
         "material",
         "island_id",
         "entity_id",

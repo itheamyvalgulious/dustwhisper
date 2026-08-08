@@ -35,7 +35,6 @@ DEBUG_VIEW_KEYMAP: dict[int, DebugView] = {
         ("T", DebugView.TEMPERATURE),
         ("Q", DebugView.PRESSURE),
         ("H", DebugView.HEAT),
-        ("F", DebugView.LIQUID),
         ("R", DebugView.REACTION),
         ("B", DebugView.COLLAPSE),
         ("I", DebugView.OPTICS),

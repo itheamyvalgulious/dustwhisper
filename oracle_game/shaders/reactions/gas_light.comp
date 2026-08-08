@@ -39,6 +39,9 @@
             layout(std430, binding=6) buffer MaterialParams {
                 vec4 material_params[{{MAX_MATERIALS}}];
             };
+            layout(std430, binding=7) buffer ActionMeta {
+                ivec4 action_meta[{{MAX_ACTIONS}}];
+            };
             layout(std430, binding=14) buffer LightEmitterBuffer {
                 vec4 light_emitters[{{MAX_EMITTED_LIGHTS_TIMES_2}}];
             };
@@ -47,6 +50,9 @@
             };
             layout(std430, binding=16) readonly buffer BridgeGasDoseBuffer {
                 float bridge_gas_dose[];
+            };
+            layout(std430, binding=17) buffer GasReactionChainGeneration {
+                uint gas_reaction_chain_generation_words[];
             };
             layout(r32f, binding=0) writeonly uniform image2DArray gas_out_img;
             layout(r32f, binding=1) writeonly uniform image2D ambient_out_img;
@@ -65,6 +71,31 @@
                     imageStore(flow_source_generation_img, location, uvec4(flow_source_generation));
                 }
                 #endif
+            }
+            uint gas_generation_index(ivec2 cell, int species) {
+                return uint((species * gas_grid_size.y + cell.y) * gas_grid_size.x + cell.x);
+            }
+            uint gas_generation_at(ivec2 cell, int species) {
+                uint index = gas_generation_index(cell, species);
+                uint word = gas_reaction_chain_generation_words[index >> 2u];
+                return (word >> ((index & 3u) * 8u)) & 0xffu;
+            }
+            void set_gas_generation(ivec2 cell, int species, uint generation) {
+                uint index = gas_generation_index(cell, species);
+                uint word_index = index >> 2u;
+                uint shift = (index & 3u) * 8u;
+                uint mask = 0xffu << shift;
+                uint old_word = gas_reaction_chain_generation_words[word_index];
+                for (int attempt = 0; attempt < 8; ++attempt) {
+                    uint next_word = (old_word & ~mask) | ((generation & 0xffu) << shift);
+                    uint observed = atomicCompSwap(
+                        gas_reaction_chain_generation_words[word_index], old_word, next_word
+                    );
+                    if (observed == old_word) {
+                        return;
+                    }
+                    old_word = observed;
+                }
             }
             void write_flow_sources(ivec2 cell, ivec4 ai, vec4 af, float scale) {
                 if (ai.w == 0) {
@@ -287,9 +318,21 @@
                             ai = action_i[ri.z];
                             af = action_f[ri.z];
                         }
+                        uint source_generation = source_species >= 0
+                            ? gas_generation_at(gid.xy, source_species)
+                            : gas_generation_at(gid.xy, gid.z);
+                        bool generational = ri.z >= 0
+                            && (ai.x == {{TYPE_EMIT_MATERIAL}}
+                                || (ai.x == {{TYPE_MODIFY_GAS}} && af.x > 0.0));
+                        if (generational && source_generation > uint(max(0, action_meta[ri.z].y))) {
+                            continue;
+                        }
                         if (ri.z >= 0 && ai.x == {{TYPE_MODIFY_GAS}} && gid.z == ai.y) {
                             record_gas_action(ai.x);
                             gas_value = max(0.0, gas_value + af.x * scale);
+                            if (af.x > 0.0) {
+                                set_gas_generation(gid.xy, gid.z, source_generation + 1u);
+                            }
                             write_flow_sources(gid.xy, ai, af, scale);
                         } else if (ri.z >= 0 && ai.x == {{TYPE_MODIFY_TEMPERATURE}} && gid.z == 0) {
                             record_gas_action(ai.x);

@@ -43,6 +43,7 @@ from oracle_game.enginedemo import (
     demo_brush_selection_label,
     demo_debug_view_for_key,
     demo_default_focus_world,
+    demo_focus_deadzone_thresholds,
     demo_focus_scroll_direction,
     demo_force_direction_from_drag,
     demo_light_direction_and_spread_from_drag,
@@ -51,6 +52,7 @@ from oracle_game.enginedemo import (
     demo_screen_to_world_cell,
     demo_velocity_from_drag,
     demo_view_focus_label,
+    demo_view_origin_for_focus,
     format_demo_focus_probe,
     format_demo_status_title,
     is_demo_brush_cycle_key,
@@ -3854,6 +3856,8 @@ def test_enginedemo_reaction_hotkey_does_not_overlap_reset_hotkey() -> None:
     assert demo_debug_view_for_key(ord("r")) == DebugView.REACTION
     assert demo_debug_view_for_key(ord("Q")) == DebugView.PRESSURE
     assert demo_debug_view_for_key(ord("q")) == DebugView.PRESSURE
+    assert demo_debug_view_for_key(ord("F")) is None
+    assert demo_debug_view_for_key(ord("f")) is None
     assert not is_demo_reset_key(ord("R"))
     assert not is_demo_reset_key(ord("r"))
     assert is_demo_reset_key(ord("X"))
@@ -4679,11 +4683,15 @@ def test_demo_fragment_shader_repeats_material_pattern_in_world_space() -> None:
         "ivec2 display_cell = ivec2(raw_display_cell.x, active_size.y - 1 - raw_display_cell.y);"
         in DEMO_FRAGMENT_SHADER_SOURCE
     )
-    assert "ivec2 logical_cell = world_origin + display_cell;" in DEMO_FRAGMENT_SHADER_SOURCE
+    assert "ivec2 logical_cell = world_origin + view_offset + display_cell;" in (
+        DEMO_FRAGMENT_SHADER_SOURCE
+    )
     assert (
         "vec2 repeat_uv = fract(vec2(logical_cell) / pattern_scale);" in DEMO_FRAGMENT_SHADER_SOURCE
     )
-    assert "(display_cell.x + buffer_origin.x) % buffer_size.x" in DEMO_FRAGMENT_SHADER_SOURCE
+    assert "(display_cell.x + view_offset.x + buffer_origin.x) % buffer_size.x" in (
+        DEMO_FRAGMENT_SHADER_SOURCE
+    )
 
 
 def test_demo_fragment_shader_blends_light_into_materials_and_empty_space() -> None:
@@ -4727,6 +4735,7 @@ def test_build_demo_render_uniforms_follow_paging_and_debug_view() -> None:
         "active_size": (24, 12),
         "buffer_origin": (0, 0),
         "world_origin": (0, 0),
+        "view_offset": (0, 0),
         "atlas_grid": tuple(engine.bridge.atlas_grid),
         "view_mode": 0,
         "force_debug_texture": False,
@@ -4873,6 +4882,145 @@ def test_enginedemo_wasd_hold_scrolls_focus_continuously_and_pages_via_deadzone(
     enginedemo_module._demo_scroll_held_focus_keys(demo, 1.0 / 60.0)
     assert demo.focus_x == expected_focus
     assert demo.engine.paging.origin_x == origin_before + 64
+
+
+def test_enginedemo_focus_deadzone_thresholds_keep_viewport_resident() -> None:
+    assert demo_focus_deadzone_thresholds(
+        active_width=2176,
+        active_height=1376,
+        visible_width=1440,
+        visible_height=900,
+        tile_size=32,
+    ) == (336, 206)
+    # No margin beyond the snap stride: the deadzone clamps to zero, and a
+    # viewport as large as the active window never needs to scroll.
+    assert demo_focus_deadzone_thresholds(
+        active_width=64,
+        active_height=32,
+        visible_width=32,
+        visible_height=16,
+        tile_size=32,
+    ) == (0, 0)
+
+
+def test_enginedemo_view_origin_centers_focus_within_active_window() -> None:
+    assert demo_view_origin_for_focus(
+        1088,
+        688,
+        origin_x=0,
+        origin_y=0,
+        active_width=2176,
+        active_height=1376,
+        visible_width=1440,
+        visible_height=900,
+    ) == (368, 238)
+    # Focus near a paging edge: the viewport clamps to the resident window.
+    assert demo_view_origin_for_focus(
+        100,
+        60,
+        origin_x=0,
+        origin_y=0,
+        active_width=2176,
+        active_height=1376,
+        visible_width=1440,
+        visible_height=900,
+    ) == (0, 0)
+    assert demo_view_origin_for_focus(
+        2100,
+        1300,
+        origin_x=0,
+        origin_y=0,
+        active_width=2176,
+        active_height=1376,
+        visible_width=1440,
+        visible_height=900,
+    ) == (736, 476)
+
+
+def test_ring_paging_focus_threshold_override_shrinks_deadzone() -> None:
+    paging = RingPagingWindow(width=128, height=96, active_width=128, active_height=96)
+    assert paging.focus_on(96, 48) == []
+    paging.focus_threshold_x = 16
+    updates = paging.focus_on(96, 48)
+    assert updates
+    assert paging.origin_x == 32
+    assert paging.origin_y == 0
+
+
+def test_enginedemo_smooth_view_follows_focus_while_paging_strides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _capture_enginedemo_config_class(monkeypatch)
+    demo = _make_enginedemo_harness(
+        config,
+        width=256,
+        height=128,
+        active_width=128,
+        active_height=96,
+        screen_width=32,
+        screen_height=16,
+    )
+    enginedemo_module._demo_install_focus_deadzone(demo)
+    assert (demo.engine.paging.focus_threshold_x, demo.engine.paging.focus_threshold_y) == (16, 8)
+    enginedemo_module._demo_sync_view_offset(demo)
+    assert (demo.engine.demo_view_offset_x, demo.engine.demo_view_offset_y) == (48, 40)
+
+    config.on_key_event(demo, ord("D"), 1, None)
+    enginedemo_module._demo_scroll_held_focus_keys(demo, 1.0 / 60.0)
+    assert demo.focus_x == 72
+    # The viewport follows the focus every frame while paging has not re-tiled.
+    enginedemo_module._demo_sync_view_offset(demo)
+    assert demo.engine.paging.origin_x == 0
+    assert demo.engine.demo_view_offset_x == 56
+    assert demo.engine.demo_view_offset_y == 40
+
+    while demo.focus_x < 96:
+        enginedemo_module._demo_scroll_held_focus_keys(demo, 1.0 / 60.0)
+        enginedemo_module._demo_sync_view_offset(demo)
+        # The viewport always stays inside the resident active window.
+        assert 0 <= demo.engine.demo_view_offset_x <= 128 - 32
+    # Paging re-tiled in one big stride and the viewport re-centered on focus.
+    assert demo.engine.paging.origin_x == 32
+    assert demo.engine.demo_view_offset_x == demo.focus_x - 16 - 32
+    config.on_key_event(demo, ord("D"), 0, None)
+
+
+def test_enginedemo_paint_maps_screen_through_view_offset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _capture_enginedemo_config_class(monkeypatch)
+    demo = _make_enginedemo_harness(
+        config,
+        width=256,
+        height=128,
+        active_width=128,
+        active_height=96,
+        screen_width=32,
+        screen_height=16,
+    )
+    demo.engine.clear_cell_region(0, 0, demo.engine.width, demo.engine.height)
+    demo.selected_material = "gold"
+    demo.brush_radius = 0
+    demo.focus_x, demo.focus_y = 64, 48
+    enginedemo_module._demo_sync_view_offset(demo)
+
+    config.on_mouse_press_event(demo, 0, 0, 1)
+
+    assert len(demo.engine.command_queue) == 1
+    queued = demo.engine.command_queue[0]
+    assert queued.kind == "inject_material"
+    # Screen (0,0) is the viewport's top-left cell: the view origin (48,40),
+    # not the paging origin (0,0).
+    assert (queued.payload["x"], queued.payload["y"]) == (48, 40)
+
+
+def test_build_demo_render_uniforms_reflect_demo_view_offset() -> None:
+    engine = WorldEngine(width=64, height=32, active_width=32, active_height=16)
+    engine.bridge.ensure_world_resources(engine)
+    engine.demo_view_offset_x = 7
+    engine.demo_view_offset_y = 3
+    uniforms = build_demo_render_uniforms(engine, debug_view=DebugView.MATERIAL)
+    assert uniforms["view_offset"] == (7, 3)
 
 
 def test_enginedemo_window_events_support_scroll_focus_paint_and_reset(
@@ -6269,8 +6417,8 @@ def test_patch_reaction_action_rejects_reserved_zero_index() -> None:
     with pytest.raises(ValueError, match="reaction action 0 is reserved for ReactionType.NONE"):
         engine.patch_reaction_action(action_index, reaction_type=ReactionType.NONE)
 
-    with pytest.raises(ValueError, match="reaction actions do not support non-zero generation"):
-        engine.patch_reaction_action(action_index, generation=1)
+    engine.patch_reaction_action(action_index, generation=1)
+    assert engine.rulebook.reaction_actions[action_index].generation == 1
 
 
 def test_patch_reaction_action_changes_material_gas_solver_behavior_in_cpu_and_gpu_paths() -> None:
@@ -8466,25 +8614,25 @@ def test_update_reaction_table_rejects_unknown_cross_table_references() -> None:
             },
         )
 
-    with pytest.raises(ValueError, match="reaction actions do not support non-zero generation"):
-        engine.update_reaction_table(
-            [
-                ReactionAction(
-                    ReactionType.CONVERT_MATERIAL,
-                    target_material="water_liquid",
-                    duration=1,
-                    generation=1,
-                )
-            ],
-            {
-                "material_material": [],
-                "material_gas": [],
-                "material_light": [],
-                "gas_gas": [],
-                "gas_light": [],
-                "self_rules": [],
-            },
-        )
+    engine.update_reaction_table(
+        [
+            ReactionAction(
+                ReactionType.CONVERT_MATERIAL,
+                target_material="water_liquid",
+                duration=1,
+                generation=1,
+            )
+        ],
+        {
+            "material_material": [],
+            "material_gas": [],
+            "material_light": [],
+            "gas_gas": [],
+            "gas_light": [],
+            "self_rules": [],
+        },
+    )
+    assert engine.rulebook.reaction_actions[-1].generation == 1
 
     with pytest.raises(KeyError, match="missing_runtime_gas"):
         engine.update_reaction_table(
@@ -46913,7 +47061,7 @@ def test_gpu_self_reaction_each_phosphor_variant_emits_only_its_own_light() -> N
         assert engine.emitters[0]["light_type"] == expected_light
 
 
-def test_gpu_self_reaction_trigger_can_modify_gas() -> None:
+def test_gpu_water_vapor_comes_from_heat_phase_change_without_self_reaction() -> None:
     engine = WorldEngine(width=32, height=24)
     engine.clear_cell_region(0, 0, engine.width, engine.height)
     engine.set_cell(8, 8, "water_liquid", mark_dirty=False)
@@ -46923,7 +47071,7 @@ def test_gpu_self_reaction_trigger_can_modify_gas() -> None:
     engine.reaction_solver._run_self_rules(engine)
     after = float(engine.gas_concentration[engine.rulebook.gas_id("water_gas"), gy, gx])
     assert engine.reaction_solver.last_backend == "gpu"
-    assert after > before
+    assert after == before
 
 
 def test_gpu_self_reaction_oil_liquid_still_uses_temperature_ignition_path() -> None:

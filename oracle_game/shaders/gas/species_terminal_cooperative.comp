@@ -16,6 +16,9 @@
             layout(std430, binding=1) writeonly buffer BridgeGasBuffer {
                 float bridge_gas[];
             };
+            layout(std430, binding=5) buffer GasReactionChainGeneration {
+                uint gas_reaction_chain_generation_words[];
+            };
             layout(binding=0) uniform sampler2D velocity_tex;
             layout(binding=1) uniform sampler2DArray gas_in_tex;
             layout(binding=2) uniform sampler2D ambient_in_tex;
@@ -27,6 +30,7 @@
             layout(rg32f, binding=2) writeonly uniform image2D bridge_velocity_img;
             layout(r32f, binding=3) writeonly uniform image2D bridge_ambient_img;
             layout(r32f, binding=4) writeonly uniform image2D bridge_pressure_img;
+            layout(r32f, binding=5) writeonly uniform image2D bridge_pressure_residual_img;
 
             const int LOCAL_X = {{SPECIES_COOPERATIVE_LOCAL_X}};
             const int LOCAL_Y = {{SPECIES_COOPERATIVE_LOCAL_Y}};
@@ -43,6 +47,31 @@
             }
             bool solve_active(ivec2 cell) {
                 return texelFetch(active_gas_tex, cell, 0).x > 0.5;
+            }
+            uint gas_generation_index(ivec3 cell) {
+                return uint((cell.z * grid_size.y + cell.y) * grid_size.x + cell.x);
+            }
+            uint gas_generation_at(ivec3 cell) {
+                uint index = gas_generation_index(cell);
+                uint word = gas_reaction_chain_generation_words[index >> 2u];
+                return (word >> ((index & 3u) * 8u)) & 0xffu;
+            }
+            void set_gas_generation(ivec3 cell, uint generation) {
+                uint index = gas_generation_index(cell);
+                uint word_index = index >> 2u;
+                uint shift = (index & 3u) * 8u;
+                uint mask = 0xffu << shift;
+                uint old_word = gas_reaction_chain_generation_words[word_index];
+                for (int attempt = 0; attempt < 8; ++attempt) {
+                    uint next_word = (old_word & ~mask) | ((generation & 0xffu) << shift);
+                    uint observed = atomicCompSwap(
+                        gas_reaction_chain_generation_words[word_index], old_word, next_word
+                    );
+                    if (observed == old_word) {
+                        return;
+                    }
+                    old_word = observed;
+                }
             }
             int velocity_index(ivec2 local_cell) {
                 return (local_cell.y + 1) * VELOCITY_X + local_cell.x + 1;
@@ -115,12 +144,15 @@
                 if (valid_cell && valid_species) {
                     ivec3 gas_cell = ivec3(gid, species);
                     float current = texelFetch(gas_in_tex, gas_cell, 0).x;
+                    uint source_generation = gas_generation_at(gas_cell);
+                    ivec2 source_cell = gid;
                     value = current;
                     if (active_cell) {
                         vec2 pos = vec2(gid) + vec2(0.5);
                         vec2 vel = bilerp_shared_velocity(pos, group_origin);
                         vel.y -= params[species].w;
                         vec2 prev = pos - vel * dt;
+                        source_cell = clamp(ivec2(floor(prev)), ivec2(0), grid_size - ivec2(1));
                         float advected = bilerp_layer(gas_in_tex, prev, species);
                         vec2 left_pos = vec2(max(gid.x - 1, 0), gid.y) + vec2(0.5);
                         vec2 right_pos = vec2(min(gid.x + 1, grid_size.x - 1), gid.y) + vec2(0.5);
@@ -145,6 +177,14 @@
                         if (species == air_index) {
                             value = max(value, 0.3);
                         }
+                    }
+                    if (value <= 1.0e-6) {
+                        set_gas_generation(gas_cell, 0u);
+                    } else {
+                        set_gas_generation(
+                            gas_cell,
+                            max(source_generation, gas_generation_at(ivec3(source_cell, species)))
+                        );
                     }
                 }
                 shared_species[species_lane] = value;
@@ -184,8 +224,10 @@
                 }
                 imageStore(ambient_out_img, gid, vec4(ambient, 0.0, 0.0, 0.0));
                 vec2 velocity = texelFetch(velocity_tex, gid, 0).xy;
-                float pressure = texelFetch(pressure_tex, gid, 0).x + texelFetch(thermo_pressure_tex, gid, 0).x;
+                float pressure_solver = texelFetch(pressure_tex, gid, 0).x;
+                float pressure = pressure_solver + texelFetch(thermo_pressure_tex, gid, 0).x;
                 imageStore(bridge_velocity_img, gid, vec4(velocity, 0.0, 0.0));
                 imageStore(bridge_ambient_img, gid, vec4(ambient, 0.0, 0.0, 0.0));
                 imageStore(bridge_pressure_img, gid, vec4(pressure, 0.0, 0.0, 0.0));
+                imageStore(bridge_pressure_residual_img, gid, vec4(pressure_solver, 0.0, 0.0, 0.0));
             }

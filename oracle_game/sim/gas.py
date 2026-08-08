@@ -166,15 +166,24 @@ class GasSolver:
         for species_id in range(species_count):
             species = gas_table[species_id]
             field = world.gas_concentration[species_id]
+            generation_field = world.gas_reaction_chain_generation[species_id].astype(
+                np.float32, copy=False
+            )
             species_velocity = velocity.copy()
             species_velocity[..., 1] -= float(species["buoyancy"])
             advected = advect_scalar(field, species_velocity, dt)
+            advected_generation = advect_scalar(generation_field, species_velocity, dt)
             diffused = advected + float(species["diffusion_rate"]) * dt * laplace(advected)
             diffused *= max(0.0, 1.0 - float(species["decay_rate"]) * dt)
             diffused = np.maximum(diffused, 0.0)
             if species_id == air_id:
                 diffused = np.maximum(diffused, 0.3)
             world.gas_concentration[species_id, solve_gas_mask] = diffused[solve_gas_mask]
+            generation = np.clip(np.rint(advected_generation), 0.0, 255.0).astype(np.uint8)
+            generation[diffused <= 1.0e-5] = 0
+            world.gas_reaction_chain_generation[species_id, solve_gas_mask] = generation[
+                solve_gas_mask
+            ]
 
         ambient = advect_scalar(world.ambient_temperature, velocity, dt)
         ambient += 0.08 * (cross_neighbor_sum(world.ambient_temperature) - 4.0 * ambient)

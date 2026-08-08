@@ -64,15 +64,15 @@ def sync_debug_display_texture(
     bridge.ensure_world_resources(world)
     bridge._ensure_display_programs()
     view_ids = {
-        "active": 7,
         "temperature": 1,
-        "heat": 1,
-        "velocity": 2,
-        "motion": 2,
-        "light": 3,
-        "optics": 4,
-        "gas": 5,
-        "pressure": 6,
+        "heat": 2,
+        "velocity": 3,
+        "motion": 3,
+        "light": 4,
+        "optics": 5,
+        "gas": 6,
+        "pressure": 7,
+        "active": 8,
     }
     view_id = view_ids.get(str(view).lower(), 0)
     if view_id == 0:
@@ -100,6 +100,8 @@ def sync_debug_display_texture(
     bridge.textures["visible_illumination"].use(0)
     bridge.textures["flow_velocity"].use(1)
     bridge.textures["pressure_ping"].use(2)
+    bridge.textures["ambient_temperature"].use(3)
+    bridge.textures["pressure_residual"].use(4)
     bridge.textures["debug"].bind_to_image(0, read=False, write=True)
     program.run(group_x=(int(world.width) + 15) // 16, group_y=(int(world.height) + 15) // 16)
     bridge.ctx.memory_barrier(
@@ -129,7 +131,8 @@ def _ensure_display_programs(bridge) -> None:
         )
         bridge.display_programs["debug_from_gpu_state"]["visible_tex"] = 0
         bridge.display_programs["debug_from_gpu_state"]["flow_velocity_tex"] = 1
-        bridge.display_programs["debug_from_gpu_state"]["pressure_tex"] = 2
+        bridge.display_programs["debug_from_gpu_state"]["ambient_temperature_tex"] = 3
+        bridge.display_programs["debug_from_gpu_state"]["pressure_residual_tex"] = 4
 
 
 def mark_active_rects(

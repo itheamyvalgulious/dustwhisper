@@ -160,8 +160,17 @@ def _upload_state(
             pipeline._formal_pending_bridge_publish_key = None
             pipeline._formal_pending_bridge_publish.clear()
     required_bridge_resources = bridge_loads.resource_names()
+    generation_resources = ("reaction_chain_generation", "gas_reaction_chain_generation")
+    world._require_gpu_authoritative_resources("reaction generation input", *generation_resources)
     if required_bridge_resources:
         world._require_gpu_authoritative_resources("reaction input", *required_bridge_resources)
+    # The generation sidecars are packed u8 bridge buffers.  Reaction shaders
+    # access them as four-byte words and atomically update individual bytes.
+    # Bindings 17/18 are intentionally outside the legacy reaction ABI so all
+    # pair/cell/self passes can share the same state.
+    bridge = world.bridge
+    bridge.buffers["reaction_chain_generation"].bind_to_storage_buffer(binding=17)
+    bridge.buffers["gas_reaction_chain_generation"].bind_to_storage_buffer(binding=18)
     upload_cell_state_from_cpu = (
         bridge_loads.cell_core
         and not (formal_gpu_frame and "cell_core" in authoritative)
@@ -861,8 +870,33 @@ def _upload_local_metadata(
         action_meta = np.zeros((MAX_ACTIONS, 4), dtype=np.int32)
         count = min(MAX_ACTIONS, int(action_table.shape[0]))
         action_meta[:count, 0] = action_table[:count]["duration"]
-        resources.action_meta.write(action_meta.tobytes())
+        if "generation" in action_table.dtype.names:
+            action_meta[:count, 1] = np.clip(action_table[:count]["generation"], 0, 255)
+        generation_bytes = np.ascontiguousarray(
+            world.reaction_chain_generation, dtype=np.uint8
+        ).reshape(-1)
+        padded_generation = np.pad(
+            generation_bytes,
+            (0, (-generation_bytes.size) % np.dtype(np.uint32).itemsize),
+        ).view(np.uint32)
+        resources.action_meta.write(action_meta.tobytes() + padded_generation.tobytes())
         resources.action_meta_signature = action_signature
+        resources.reaction_generation_initialized = True
+    elif (
+        not resources.reaction_generation_initialized
+        or "reaction_chain_generation" not in world.bridge.gpu_authoritative_resources
+    ):
+        generation_bytes = np.ascontiguousarray(
+            world.reaction_chain_generation, dtype=np.uint8
+        ).reshape(-1)
+        padded_generation = np.pad(
+            generation_bytes,
+            (0, (-generation_bytes.size) % np.dtype(np.uint32).itemsize),
+        ).view(np.uint32)
+        resources.action_meta.write(
+            padded_generation.tobytes(), offset=MAX_ACTIONS * 4 * np.dtype(np.uint32).itemsize
+        )
+        resources.reaction_generation_initialized = True
 
     if not include_self_rules:
         return

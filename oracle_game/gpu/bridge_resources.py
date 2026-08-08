@@ -62,6 +62,9 @@ def ensure_world_resources(bridge, world: "WorldEngine") -> None:
     bridge.textures["pressure_ping"] = bridge.ctx.texture(
         (world.gas_width, world.gas_height), 1, dtype="f4"
     )
+    bridge.textures["pressure_residual"] = bridge.ctx.texture(
+        (world.gas_width, world.gas_height), 1, dtype="f4"
+    )
     bridge.textures["flow_velocity"] = bridge.ctx.texture(
         (world.gas_width, world.gas_height), 2, dtype="f4"
     )
@@ -90,8 +93,18 @@ def ensure_world_resources(bridge, world: "WorldEngine") -> None:
         reserve=max(4, world.width * world.height * 4),
         dynamic=True,
     )
+    bridge.buffers["reaction_chain_generation"] = bridge.ctx.buffer(
+        reserve=max(4, ((world.width * world.height + 3) // 4) * 4), dynamic=True
+    )
     bridge.buffers["gas_concentration"] = bridge.ctx.buffer(
         reserve=max(4, world.gas_concentration.shape[0] * world.gas_width * world.gas_height * 4),
+        dynamic=True,
+    )
+    bridge.buffers["gas_reaction_chain_generation"] = bridge.ctx.buffer(
+        reserve=max(
+            4,
+            ((world.gas_concentration.shape[0] * world.gas_width * world.gas_height + 3) // 4) * 4,
+        ),
         dynamic=True,
     )
     bridge.buffers["cell_optical_dose"] = bridge.ctx.buffer(

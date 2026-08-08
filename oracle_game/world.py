@@ -399,12 +399,14 @@ from oracle_game.world_internal_helpers import (
     _page_store_key_lookup_update,
     _page_stripe_island_bboxes_from_payload,
     _pending_frame_input,
+    _process_paging_transition,
     _public_resolved_change_intent,
     _queued_command_xy,
     _record_cpu_written_cell_rect,
     _refresh_island_records_for_ids,
     _resolve_anchor_target,
     _set_nested_payload_value,
+    _start_paging_transition,
     bootstrap_defaults,
     cancel_all_pending_frame_submissions,
     downsample_cells_to_gas,
@@ -1371,6 +1373,9 @@ class WorldEngine:
     def in_bounds(self, *args: Any, **kwargs: Any) -> Any:
         return in_bounds(self, *args, **kwargs)
 
+    def in_logical_world(self, world_x: int, world_y: int) -> bool:
+        return bool(self.paging.in_logical_world(int(world_x), int(world_y)))
+
     def cell_xy_to_gas(self, *args: Any, **kwargs: Any) -> Any:
         return cell_xy_to_gas(self, *args, **kwargs)
 
@@ -1817,6 +1822,12 @@ class WorldEngine:
 
     def _advance_paging(self, *args: Any, **kwargs: Any) -> Any:
         return _advance_paging(self, *args, **kwargs)
+
+    def _start_paging_transition(self, *args: Any, **kwargs: Any) -> Any:
+        return _start_paging_transition(self, *args, **kwargs)
+
+    def _process_paging_transition(self, *args: Any, **kwargs: Any) -> Any:
+        return _process_paging_transition(self, *args, **kwargs)
 
     def _prepare_bridge_frame_inputs(self, *args: Any, **kwargs: Any) -> Any:
         return _prepare_bridge_frame_inputs(self, *args, **kwargs)

@@ -22,7 +22,9 @@ from oracle_game.sim.gpu_reactions_resources import (
     FLOW_SOURCE_LAYERS,
     FORMAL_GPU_EMPTY_DEFERRED_BATCH,
     LOCAL_SIZE,
+    MAX_ACTIONS,
     MAX_EMITTED_LIGHTS,
+    MAX_MATERIALS,
     GPUDeferredActionBatch,
     GPUReactionBridgeInputLoads,
     GPUReactionResources,
@@ -323,6 +325,27 @@ def _publish_bridge_cell_state(
     else:
         program.run(group_x, group_y, 1)
     pipeline._sync_compute_writes(bridge.ctx)
+    generation_bytes = ((world.width * world.height + 3) // 4) * np.dtype(np.uint32).itemsize
+    terminal_generation_source = bool(
+        getattr(pipeline, "last_material_pair_terminal_handoff", False)
+    )
+    generation_source = (
+        resources.material_pair_terminal_action_tables
+        if terminal_generation_source
+        else resources.action_meta
+    )
+    generation_read_offset = (
+        (MAX_ACTIONS * 3 * 4 + MAX_MATERIALS) * np.dtype(np.uint32).itemsize
+        if terminal_generation_source
+        else MAX_ACTIONS * 4 * np.dtype(np.uint32).itemsize
+    )
+    bridge.ctx.copy_buffer(
+        bridge.buffers["reaction_chain_generation"],
+        generation_source,
+        size=generation_bytes,
+        read_offset=generation_read_offset,
+    )
+    pipeline._sync_compute_writes(bridge.ctx)
     if fuse_structure_dirty_mark:
         setattr(world, "_gpu_collapse_structure_dirty_tiles_pending", True)
         bridge.mark_gpu_authoritative(
@@ -331,7 +354,7 @@ def _publish_bridge_cell_state(
             COLLAPSE_STRUCTURE_DIRTY_TILE_LIST_BUFFER,
             COLLAPSE_STRUCTURE_DIRTY_TILE_DISPATCH_ARGS_BUFFER,
         )
-    bridge.mark_gpu_authoritative("cell_core", "material")
+    bridge.mark_gpu_authoritative("cell_core", "material", "reaction_chain_generation")
 
 
 def _publish_bridge_gas_state(
@@ -374,7 +397,9 @@ def _publish_bridge_gas_state(
     else:
         program.run(group_x, group_y, group_z)
     pipeline._sync_compute_writes(bridge.ctx)
-    bridge.mark_gpu_authoritative("gas_concentration", "ambient_temperature")
+    bridge.mark_gpu_authoritative(
+        "gas_concentration", "ambient_temperature", "gas_reaction_chain_generation"
+    )
 
 
 def _publish_bridge_dose_state(
@@ -594,6 +619,21 @@ def _download_cell_state(
     world.timer_pack[:] = unpack_u8x4(
         np.frombuffer(resources.timer_pong.read(), dtype="u4").reshape((world.height, world.width))
     )
+    generation_bytes = ((world.width * world.height + 3) // 4) * np.dtype(np.uint32).itemsize
+    generation_words = np.frombuffer(
+        resources.action_meta.read(
+            size=generation_bytes,
+            offset=MAX_ACTIONS * 4 * np.dtype(np.uint32).itemsize,
+        ),
+        dtype=np.uint32,
+    )
+    generation_raw = generation_words.view(np.uint8)[: world.reaction_chain_generation.size]
+    world.reaction_chain_generation[:] = generation_raw.reshape(
+        world.reaction_chain_generation.shape
+    )
+    generation_buffer = world.bridge.buffers.get("reaction_chain_generation")
+    if generation_buffer is not None:
+        generation_buffer.write(generation_raw.tobytes())
     if hasattr(resources, "velocity_pong"):
         world.velocity[:] = np.frombuffer(resources.velocity_pong.read(), dtype="f4").reshape(
             (world.height, world.width, 2)
@@ -658,6 +698,11 @@ def _download_gas_state(pipeline, world: "WorldEngine", resources: GPUReactionRe
         np.frombuffer(resources.gas_pong.read(), dtype="f4").reshape(world.gas_concentration.shape),
         0.0,
     )
+    generation_buffer = world.bridge.buffers.get("gas_reaction_chain_generation")
+    if generation_buffer is not None:
+        world.gas_reaction_chain_generation[:] = np.frombuffer(
+            generation_buffer.read(size=world.gas_reaction_chain_generation.nbytes), dtype=np.uint8
+        ).reshape(world.gas_reaction_chain_generation.shape)
 
 
 def _download_dose_state(pipeline, world: "WorldEngine", resources: GPUReactionResources) -> None:

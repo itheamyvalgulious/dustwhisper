@@ -325,6 +325,7 @@ class GPUReactionResources:
     material_slots_signature: tuple[int, int] | None = None
     gas_tags_signature: tuple[int, int] | None = None
     action_meta_signature: tuple[int, int] | None = None
+    reaction_generation_initialized: bool = False
     self_rule_signature: tuple[int, int] | None = None
     random_targets_signature: tuple[int, int, int] | None = None
     material_pair_plan_upload_key: tuple[object, ...] | None = None
@@ -409,6 +410,7 @@ def _ensure_resources(pipeline, world: "WorldEngine") -> GPUReactionResources:
     light_count = signature[5]
     gas_count = signature[4]
     cell_count = max(1, int(world.width * world.height))
+    generation_word_count = (cell_count + 3) // 4
     flow_generation_dtype = "u1" if pipeline._flow_source_generation_u8_programs_enabled else "u4"
     flow_generation_numpy_dtype = (
         np.uint8 if pipeline._flow_source_generation_u8_programs_enabled else np.uint32
@@ -511,7 +513,10 @@ def _ensure_resources(pipeline, world: "WorldEngine") -> GPUReactionResources:
         gas_tags=ctx.buffer(reserve=MAX_MATERIALS * 4 * 4, dynamic=True),
         material_slots_lo=ctx.buffer(reserve=MAX_MATERIALS * 4 * 4, dynamic=True),
         material_slots_hi=ctx.buffer(reserve=MAX_MATERIALS * 4 * 4, dynamic=True),
-        action_meta=ctx.buffer(reserve=MAX_ACTIONS * 4 * 4, dynamic=True),
+        action_meta=ctx.buffer(
+            reserve=MAX_ACTIONS * 4 * 4 + generation_word_count * np.dtype(np.uint32).itemsize,
+            dynamic=True,
+        ),
         light_emitter_buffer=ctx.buffer(reserve=MAX_EMITTED_LIGHTS * 2 * 4 * 4, dynamic=True),
         light_emitter_count=ctx.buffer(reserve=16 * 4, dynamic=True),
         random_targets=ctx.buffer(reserve=MAX_MATERIALS * 4, dynamic=True),
@@ -541,7 +546,8 @@ def _ensure_resources(pipeline, world: "WorldEngine") -> GPUReactionResources:
             dynamic=True,
         ),
         material_pair_terminal_action_tables=ctx.buffer(
-            reserve=(MAX_ACTIONS * 3 * 4 + MAX_MATERIALS) * np.dtype(np.uint32).itemsize,
+            reserve=(MAX_ACTIONS * 3 * 4 + MAX_MATERIALS + generation_word_count)
+            * np.dtype(np.uint32).itemsize,
             dynamic=True,
         ),
         material_pair_terminal_rule_tables=ctx.buffer(

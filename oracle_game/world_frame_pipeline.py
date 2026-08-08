@@ -624,6 +624,7 @@ def _snapshot_preview_runtime_state(engine: "WorldEngine") -> dict[str, Any]:
         "material_id": engine.material_id.copy(),
         "phase": engine.phase.copy(),
         "cell_flags": engine.cell_flags.copy(),
+        "reaction_chain_generation": engine.reaction_chain_generation.copy(),
         "velocity": engine.velocity.copy(),
         "cell_temperature": engine.cell_temperature.copy(),
         "timer_pack": engine.timer_pack.copy(),
@@ -636,6 +637,7 @@ def _snapshot_preview_runtime_state(engine: "WorldEngine") -> dict[str, Any]:
         "ambient_temperature": engine.ambient_temperature.copy(),
         "pressure_ping": engine.pressure_ping.copy(),
         "gas_concentration": engine.gas_concentration.copy(),
+        "gas_reaction_chain_generation": engine.gas_reaction_chain_generation.copy(),
         "visible_illumination": engine.visible_illumination.copy(),
         "cell_optical_dose": engine.cell_optical_dose.copy(),
         "gas_optical_dose": engine.gas_optical_dose.copy(),
@@ -651,6 +653,7 @@ def _restore_preview_runtime_state(engine: "WorldEngine", snapshot: dict[str, An
     engine.material_id = snapshot["material_id"]
     engine.phase = snapshot["phase"]
     engine.cell_flags = snapshot["cell_flags"]
+    engine.reaction_chain_generation = snapshot["reaction_chain_generation"]
     engine.velocity = snapshot["velocity"]
     engine.cell_temperature = snapshot["cell_temperature"]
     engine.timer_pack = snapshot["timer_pack"]
@@ -663,6 +666,7 @@ def _restore_preview_runtime_state(engine: "WorldEngine", snapshot: dict[str, An
     engine.ambient_temperature = snapshot["ambient_temperature"]
     engine.pressure_ping = snapshot["pressure_ping"]
     engine.gas_concentration = snapshot["gas_concentration"]
+    engine.gas_reaction_chain_generation = snapshot["gas_reaction_chain_generation"]
     engine.visible_illumination = snapshot["visible_illumination"]
     engine.cell_optical_dose = snapshot["cell_optical_dose"]
     engine.gas_optical_dose = snapshot["gas_optical_dose"]

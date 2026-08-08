@@ -54,6 +54,48 @@ def compute_demo_grid_sizing(screen_width: int, screen_height: int) -> dict[str,
     }
 
 
+def demo_focus_deadzone_thresholds(
+    *,
+    active_width: int,
+    active_height: int,
+    visible_width: int,
+    visible_height: int,
+    tile_size: int,
+) -> tuple[int, int]:
+    """Largest paging deadzone that keeps a focus-centered view resident.
+
+    The demo renders a focus-centered viewport of ``visible`` cells out of the
+    larger paged active window. Re-tiling may lag the focus by at most the
+    margin between the active window and the viewport (minus one snap stride,
+    since snapped targets can trail the focus), otherwise the viewport would
+    show cells that are not resident yet. Paging still re-tiles in big strides
+    of roughly this threshold, so sustained scrolling stays cheap.
+    """
+    return (
+        max(0, (int(active_width) - int(visible_width)) // 2 - int(tile_size)),
+        max(0, (int(active_height) - int(visible_height)) // 2 - int(tile_size)),
+    )
+
+
+def demo_view_origin_for_focus(
+    focus_x: int,
+    focus_y: int,
+    *,
+    origin_x: int,
+    origin_y: int,
+    active_width: int,
+    active_height: int,
+    visible_width: int,
+    visible_height: int,
+) -> tuple[int, int]:
+    """Focus-centered display origin clamped to the resident active window."""
+    max_offset_x = max(0, int(active_width) - int(visible_width))
+    max_offset_y = max(0, int(active_height) - int(visible_height))
+    offset_x = min(max(int(focus_x) - int(visible_width) // 2 - int(origin_x), 0), max_offset_x)
+    offset_y = min(max(int(focus_y) - int(visible_height) // 2 - int(origin_y), 0), max_offset_y)
+    return (int(origin_x) + offset_x, int(origin_y) + offset_y)
+
+
 def demo_view_focus_label(
     debug_view: DebugView, *, gas_species: str, light_type: str | None
 ) -> str | None:
@@ -62,6 +104,58 @@ def demo_view_focus_label(
     if debug_view in {DebugView.OPTICS, DebugView.LIGHT}:
         return f"light={light_type or 'all'}"
     return None
+
+
+def _demo_heat_color(values: np.ndarray) -> np.ndarray:
+    normalized = np.clip(np.asarray(values, dtype=np.float32) / 200.0, 0.0, 1.0)
+    cold = 1.0 - normalized
+    hot = normalized
+    warm = np.clip(1.0 - np.abs(normalized - 0.10) / 0.50, 0.0, 1.0)
+    return np.stack((hot, warm * 0.22 + hot * 0.45, cold), axis=-1).astype(np.float32, copy=False)
+
+
+def demo_cell_temperature_frame(engine: WorldEngine) -> np.ndarray:
+    """Fixed-range cell-temperature view used by enginedemo's CPU fallback."""
+    return _demo_heat_color(engine.cell_temperature)
+
+
+def demo_ambient_temperature_frame(engine: WorldEngine) -> np.ndarray:
+    """Fixed-range ambient-temperature view upsampled to cell resolution."""
+    ambient = np.repeat(
+        np.repeat(engine.ambient_temperature, engine.gas_cell_size, axis=0),
+        engine.gas_cell_size,
+        axis=1,
+    )[: engine.height, : engine.width]
+    return _demo_heat_color(ambient)
+
+
+def demo_pressure_frame(engine: WorldEngine) -> np.ndarray:
+    """Display the pressure-solver residual, not the thermodynamic baseline."""
+    pressure = np.asarray(engine.pressure_ping, dtype=np.float32)
+    thermo = None
+    pressure_fields = getattr(
+        getattr(engine, "gas_solver", None), "_pressure_and_density_fields", None
+    )
+    if callable(pressure_fields):
+        try:
+            thermo, _ = pressure_fields(engine)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            thermo = None
+    residual = pressure if thermo is None else pressure - np.asarray(thermo, dtype=np.float32)
+    normalized = np.clip(residual, -1.0, 1.0)
+    positive = np.clip(normalized, 0.0, 1.0)
+    negative = np.clip(-normalized, 0.0, 1.0)
+    gas_frame = np.zeros((*normalized.shape, 3), dtype=np.float32)
+    gas_frame[..., 0] = positive
+    gas_frame[..., 1] = (1.0 - np.abs(normalized)) * 0.18
+    gas_frame[..., 2] = negative
+    return np.clip(
+        np.repeat(np.repeat(gas_frame, engine.gas_cell_size, axis=0), engine.gas_cell_size, axis=1)[
+            : engine.height, : engine.width
+        ],
+        0.0,
+        1.0,
+    )
 
 
 def demo_display_material_name(material_name: str) -> str:
@@ -123,6 +217,9 @@ def format_demo_focus_probe(
     light_type: str | None,
 ) -> str:
     paging = engine.paging
+    in_logical_world = getattr(engine, "in_logical_world", None)
+    if callable(in_logical_world) and not in_logical_world(int(focus_x), int(focus_y)):
+        return f"probe=({int(focus_x)},{int(focus_y)}) empty"
     world_to_buffer = getattr(paging, "world_to_buffer", None)
     if callable(world_to_buffer):
         buffer_x, buffer_y = world_to_buffer(int(focus_x), int(focus_y))

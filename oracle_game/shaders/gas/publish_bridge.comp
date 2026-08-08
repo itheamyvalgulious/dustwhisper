@@ -11,6 +11,7 @@
             layout(rg32f, binding=5) writeonly uniform image2D bridge_velocity_img;
             layout(r32f, binding=6) writeonly uniform image2D bridge_ambient_img;
             layout(r32f, binding=7) writeonly uniform image2D bridge_pressure_img;
+            layout(r32f, binding=4) writeonly uniform image2D bridge_pressure_residual_img;
             layout(std430, binding=8) writeonly buffer BridgeGasBuffer {
                 float bridge_gas[];
             };
@@ -23,12 +24,14 @@
                 if (species == 0) {
                     vec2 velocity = texelFetch(velocity_tex, gid, 0).xy;
                     float ambient = texelFetch(ambient_tex, gid, 0).x;
-                    float pressure = texelFetch(pressure_tex, gid, 0).x + texelFetch(thermo_pressure_tex, gid, 0).x;
+                    float pressure_solver = texelFetch(pressure_tex, gid, 0).x;
+                    float thermo_pressure = texelFetch(thermo_pressure_tex, gid, 0).x;
+                    float pressure = pressure_solver + thermo_pressure;
                     imageStore(bridge_velocity_img, gid, vec4(velocity, 0.0, 0.0));
                     imageStore(bridge_ambient_img, gid, vec4(ambient, 0.0, 0.0, 0.0));
                     imageStore(bridge_pressure_img, gid, vec4(pressure, 0.0, 0.0, 0.0));
+                    imageStore(bridge_pressure_residual_img, gid, vec4(pressure_solver, 0.0, 0.0, 0.0));
                 }
                 int dst_index = (species * grid_size.y + gid.y) * grid_size.x + gid.x;
                 bridge_gas[dst_index] = max(texelFetch(gas_tex, ivec3(gid, species), 0).x, 0.0);
             }
-            

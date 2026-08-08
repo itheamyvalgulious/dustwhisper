@@ -33,6 +33,13 @@
             layout(std430, binding=2) buffer GasDelta {
                 int gas_delta[];
             };
+            layout(std430, binding=10) buffer ActionMeta {
+                ivec4 action_meta[{{MAX_ACTIONS}}];
+                uint reaction_chain_generation_words[];
+            };
+            layout(std430, binding=18) buffer GasReactionChainGeneration {
+                uint gas_reaction_chain_generation_words[];
+            };
             layout(std430, binding=15) buffer ReactionCounters {
                 uint reaction_counts[16];
             };
@@ -63,6 +70,28 @@
 
             int gas_delta_index(ivec2 gas_cell, int layer) {
                 return (layer * gas_grid_size.y + gas_cell.y) * gas_grid_size.x + gas_cell.x;
+            }
+            uint cell_generation_at(ivec2 cell) {
+                uint index = uint(cell.y * cell_grid_size.x + cell.x);
+                uint word = reaction_chain_generation_words[index >> 2u];
+                return (word >> ((index & 3u) * 8u)) & 0xffu;
+            }
+            void set_gas_generation(ivec2 gas_cell, int layer, uint generation) {
+                uint index = uint(gas_delta_index(gas_cell, layer));
+                uint word_index = index >> 2u;
+                uint shift = (index & 3u) * 8u;
+                uint mask = 0xffu << shift;
+                uint old_word = gas_reaction_chain_generation_words[word_index];
+                for (int attempt = 0; attempt < 8; ++attempt) {
+                    uint next_word = (old_word & ~mask) | ((generation & 0xffu) << shift);
+                    uint observed = atomicCompSwap(
+                        gas_reaction_chain_generation_words[word_index], old_word, next_word
+                    );
+                    if (observed == old_word) {
+                        return;
+                    }
+                    old_word = observed;
+                }
             }
 
             void write_flow_sources(ivec2 gas_cell, ivec4 ai, vec4 af, float scale, int layer_base) {
@@ -96,7 +125,13 @@
                 }
             }
 
-            void scatter_action_vector(ivec2 gas_cell, vec4 actions, vec4 scales, int slot_offset) {
+            void scatter_action_vector(
+                ivec2 gas_cell,
+                ivec2 source_cell,
+                vec4 actions,
+                vec4 scales,
+                int slot_offset
+            ) {
                 for (int slot = 0; slot < 4; ++slot) {
                     int action_index = int(round(actions[slot]));
                     if (action_index <= 0 || action_index >= {{MAX_ACTIONS}}) {
@@ -107,6 +142,14 @@
                         continue;
                     }
                     vec4 af = action_f[action_index];
+                    uint source_generation = cell_generation_at(source_cell);
+                    uint action_generation = uint(max(0, action_meta[action_index].y));
+                    if (af.x > 0.0 && source_generation > action_generation) {
+                        continue;
+                    }
+                    if (af.x > 0.0) {
+                        set_gas_generation(gas_cell, ai.y, source_generation + 1u);
+                    }
                     if (!gas_delta_already_applied) {
                         float delta = af.x * scales[slot];
                         int fixed_delta = int(round(clamp(
@@ -209,9 +252,9 @@
                     min(gas_grid_size.y - 1, max(0, cell.y / gas_cell_size))
                 );
                 if (has_action_lo) {
-                    scatter_action_vector(gas_cell, action_lo, fetch_scale_lo(cell), 0);
+                    scatter_action_vector(gas_cell, cell, action_lo, fetch_scale_lo(cell), 0);
                 }
                 if (has_action_hi) {
-                    scatter_action_vector(gas_cell, action_hi, fetch_scale_hi(cell), 4);
+                    scatter_action_vector(gas_cell, cell, action_hi, fetch_scale_hi(cell), 4);
                 }
             }

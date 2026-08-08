@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Iterable
 import numpy as np
 
 from oracle_game.page_store import StoredStripeKey
-from oracle_game.types import PageStripeUpdate, ReadbackResult, TargetQuery
+from oracle_game.types import CellFlag, PageStripeUpdate, ReadbackResult, TargetQuery
 
 if TYPE_CHECKING:
     from oracle_game.world import WorldEngine
@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 # Schema versions for the persistable page-store wire formats. Bump the matching
 # constant whenever the payload layout changes; readers reject anything else.
-PAGE_STRIPE_SCHEMA_VERSION = 1
+PAGE_STRIPE_SCHEMA_VERSION = 2
 PAGE_STORE_EXPORT_SCHEMA_VERSION = 1
 
 
@@ -98,7 +98,6 @@ def _capture_page_stripe_cpu_snapshot(
 ) -> dict[str, Any]:
     gas_ranges = _stripe_buffer_ranges(engine, update, gas_grid=True)
     cell_axis = 1 if update.axis == "x" else 0
-    cell_dose_axis = 2 if update.axis == "x" else 1
     material_id = engine._capture_stripe_array(engine.material_id, update, stripe_axis=cell_axis)
     phase = engine._capture_stripe_array(engine.phase, update, stripe_axis=cell_axis)
     island_id = engine._capture_stripe_array(engine.island_id, update, stripe_axis=cell_axis)
@@ -139,7 +138,12 @@ def _capture_page_stripe_cpu_snapshot(
             "material_id": material_id,
             "phase": phase,
             "cell_flags": engine._capture_stripe_array(
-                engine.cell_flags, update, stripe_axis=cell_axis
+                engine.cell_flags & np.uint8(~int(CellFlag.REACTION_LATCHED) & 0xFF),
+                update,
+                stripe_axis=cell_axis,
+            ),
+            "reaction_chain_generation": engine._capture_stripe_array(
+                engine.reaction_chain_generation, update, stripe_axis=cell_axis
             ),
             "velocity": engine._capture_stripe_array(
                 engine.velocity, update, stripe_axis=cell_axis
@@ -161,16 +165,6 @@ def _capture_page_stripe_cpu_snapshot(
                 update,
                 stripe_axis=cell_axis,
             ),
-            "visible_illumination": engine._capture_stripe_array(
-                engine.visible_illumination,
-                update,
-                stripe_axis=cell_axis,
-            ),
-            "cell_optical_dose": engine._capture_stripe_array(
-                engine.cell_optical_dose,
-                update,
-                stripe_axis=cell_dose_axis,
-            ),
         },
         "runtime": runtime_payload,
         "gas": {
@@ -186,20 +180,14 @@ def _capture_page_stripe_cpu_snapshot(
                 stripe_axis=1 if update.axis == "x" else 0,
                 ranges=gas_ranges,
             ),
-            "pressure_ping": engine._capture_stripe_array(
-                engine.pressure_ping,
-                update,
-                stripe_axis=1 if update.axis == "x" else 0,
-                ranges=gas_ranges,
-            ),
             "gas_concentration": engine._capture_stripe_array(
                 engine.gas_concentration,
                 update,
                 stripe_axis=2 if update.axis == "x" else 1,
                 ranges=gas_ranges,
             ),
-            "gas_optical_dose": engine._capture_stripe_array(
-                engine.gas_optical_dose,
+            "reaction_chain_generation": engine._capture_stripe_array(
+                engine.gas_reaction_chain_generation,
                 update,
                 stripe_axis=2 if update.axis == "x" else 1,
                 ranges=gas_ranges,
@@ -397,6 +385,12 @@ def _coerce_page_stripe_payload(engine: "WorldEngine", payload: dict[str, Any]) 
             "material_id": np.asarray(cell_payload["material_id"], dtype=engine.material_id.dtype),
             "phase": np.asarray(cell_payload["phase"], dtype=engine.phase.dtype),
             "cell_flags": np.asarray(cell_payload["cell_flags"], dtype=engine.cell_flags.dtype),
+            "reaction_chain_generation": np.asarray(
+                cell_payload.get(
+                    "reaction_chain_generation", np.zeros_like(cell_payload["material_id"])
+                ),
+                dtype=engine.reaction_chain_generation.dtype,
+            ),
             "velocity": np.asarray(cell_payload["velocity"], dtype=engine.velocity.dtype),
             "cell_temperature": np.asarray(
                 cell_payload["cell_temperature"], dtype=engine.cell_temperature.dtype
@@ -413,14 +407,6 @@ def _coerce_page_stripe_payload(engine: "WorldEngine", payload: dict[str, Any]) 
                 cell_payload["collapse_delay_pending"],
                 dtype=np.uint8,
             ),
-            "visible_illumination": np.asarray(
-                cell_payload["visible_illumination"],
-                dtype=engine.visible_illumination.dtype,
-            ),
-            "cell_optical_dose": np.asarray(
-                cell_payload["cell_optical_dose"],
-                dtype=engine.cell_optical_dose.dtype,
-            ),
         },
         "runtime": runtime_payload,
         "gas": {
@@ -431,13 +417,12 @@ def _coerce_page_stripe_payload(engine: "WorldEngine", payload: dict[str, Any]) 
             "flow_velocity": np.asarray(
                 gas_payload["flow_velocity"], dtype=engine.flow_velocity.dtype
             ),
-            "pressure_ping": np.asarray(
-                gas_payload["pressure_ping"], dtype=engine.pressure_ping.dtype
-            ),
             "gas_concentration": gas_concentration,
-            "gas_optical_dose": np.asarray(
-                gas_payload["gas_optical_dose"],
-                dtype=engine.gas_optical_dose.dtype,
+            "reaction_chain_generation": np.asarray(
+                gas_payload.get(
+                    "reaction_chain_generation", np.zeros_like(gas_payload["gas_concentration"])
+                ),
+                dtype=engine.gas_reaction_chain_generation.dtype,
             ),
         },
     }
@@ -485,7 +470,6 @@ def _apply_page_stripe_dense_cpu(
     cell_payload = payload["cell"]
     gas_payload = payload["gas"]
     cell_axis = 1 if update.axis == "x" else 0
-    cell_dose_axis = 2 if update.axis == "x" else 1
 
     engine._write_stripe_array(
         engine.material_id, update, cell_payload["material_id"], stripe_axis=cell_axis
@@ -493,6 +477,12 @@ def _apply_page_stripe_dense_cpu(
     engine._write_stripe_array(engine.phase, update, cell_payload["phase"], stripe_axis=cell_axis)
     engine._write_stripe_array(
         engine.cell_flags, update, cell_payload["cell_flags"], stripe_axis=cell_axis
+    )
+    engine._write_stripe_array(
+        engine.reaction_chain_generation,
+        update,
+        cell_payload["reaction_chain_generation"],
+        stripe_axis=cell_axis,
     )
     engine._write_stripe_array(
         engine.velocity, update, cell_payload["velocity"], stripe_axis=cell_axis
@@ -524,19 +514,14 @@ def _apply_page_stripe_dense_cpu(
         np.asarray(cell_payload["collapse_delay_pending"], dtype=np.bool_),
         stripe_axis=cell_axis,
     )
-    engine._write_stripe_array(
-        engine.visible_illumination,
-        update,
-        cell_payload["visible_illumination"],
-        stripe_axis=cell_axis,
-    )
-    engine._write_stripe_array(
-        engine.cell_optical_dose,
-        update,
-        cell_payload["cell_optical_dose"],
-        stripe_axis=cell_dose_axis,
-    )
-
+    # Derived optical products are intentionally not part of the page schema.
+    for start, end in engine.paging.stripe_buffer_ranges(update):
+        if update.axis == "x":
+            engine.visible_illumination[:, start:end] = 0.0
+            engine.cell_optical_dose[:, :, start:end] = 0.0
+        else:
+            engine.visible_illumination[start:end, :] = 0.0
+            engine.cell_optical_dose[:, start:end, :] = 0.0
     engine._write_stripe_array(
         engine.ambient_temperature,
         update,
@@ -552,13 +537,6 @@ def _apply_page_stripe_dense_cpu(
         ranges=gas_ranges,
     )
     engine._write_stripe_array(
-        engine.pressure_ping,
-        update,
-        gas_payload["pressure_ping"],
-        stripe_axis=1 if update.axis == "x" else 0,
-        ranges=gas_ranges,
-    )
-    engine._write_stripe_array(
         engine.gas_concentration,
         update,
         gas_payload["gas_concentration"],
@@ -566,12 +544,19 @@ def _apply_page_stripe_dense_cpu(
         ranges=gas_ranges,
     )
     engine._write_stripe_array(
-        engine.gas_optical_dose,
+        engine.gas_reaction_chain_generation,
         update,
-        gas_payload["gas_optical_dose"],
+        gas_payload["reaction_chain_generation"],
         stripe_axis=2 if update.axis == "x" else 1,
         ranges=gas_ranges,
     )
+    # Pressure and optical outputs are solver products.  They are reset after
+    # a page load and regenerated by the next formal frame.
+    for start, end in gas_ranges:
+        if update.axis == "x":
+            engine.pressure_ping[:, start:end] = 0.0
+        else:
+            engine.pressure_ping[start:end, :] = 0.0
 
 
 def _sync_loaded_page_stripe_cpu_mirror(
@@ -625,7 +610,6 @@ def _default_page_stripe_payload(engine: "WorldEngine", update: PageStripeUpdate
     cell_height = engine.height if update.axis == "x" else cell_span
     gas_width = gas_span if update.axis == "x" else engine.gas_width
     gas_height = engine.gas_height if update.axis == "x" else gas_span
-    light_count = engine.cell_optical_dose.shape[0]
     gas_count = engine.gas_concentration.shape[0]
     payload = {
         "schema_version": PAGE_STRIPE_SCHEMA_VERSION,
@@ -641,6 +625,7 @@ def _default_page_stripe_payload(engine: "WorldEngine", update: PageStripeUpdate
             "material_id": np.zeros((cell_height, cell_width), dtype=np.int32),
             "phase": np.zeros((cell_height, cell_width), dtype=np.uint8),
             "cell_flags": np.zeros((cell_height, cell_width), dtype=np.uint8),
+            "reaction_chain_generation": np.zeros((cell_height, cell_width), dtype=np.uint8),
             "velocity": np.zeros((cell_height, cell_width, 2), dtype=np.float32),
             "cell_temperature": np.full((cell_height, cell_width), 20.0, dtype=np.float32),
             "timer_pack": np.zeros((cell_height, cell_width, 4), dtype=np.uint8),
@@ -649,8 +634,6 @@ def _default_page_stripe_payload(engine: "WorldEngine", update: PageStripeUpdate
             "entity_id": np.zeros((cell_height, cell_width), dtype=np.int32),
             "placeholder_displaced_material": np.zeros((cell_height, cell_width), dtype=np.int32),
             "collapse_delay_pending": np.zeros((cell_height, cell_width), dtype=np.uint8),
-            "visible_illumination": np.zeros((cell_height, cell_width, 3), dtype=np.float32),
-            "cell_optical_dose": np.zeros((light_count, cell_height, cell_width), dtype=np.float32),
         },
         "runtime": {
             "island_ids": np.zeros((0,), dtype=np.int32),
@@ -661,9 +644,10 @@ def _default_page_stripe_payload(engine: "WorldEngine", update: PageStripeUpdate
         "gas": {
             "ambient_temperature": np.full((gas_height, gas_width), 20.0, dtype=np.float32),
             "flow_velocity": np.zeros((gas_height, gas_width, 2), dtype=np.float32),
-            "pressure_ping": np.zeros((gas_height, gas_width), dtype=np.float32),
             "gas_concentration": np.zeros((gas_count, gas_height, gas_width), dtype=np.float32),
-            "gas_optical_dose": np.zeros((light_count, gas_height, gas_width), dtype=np.float32),
+            "reaction_chain_generation": np.zeros(
+                (gas_count, gas_height, gas_width), dtype=np.uint8
+            ),
         },
     }
     if 0 <= engine.air_gas_species_id < gas_count:

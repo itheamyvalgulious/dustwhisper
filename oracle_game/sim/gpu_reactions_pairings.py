@@ -1048,6 +1048,8 @@ def run_gas_gas(
     resources.flow_velocity_tex.use(location=5)
     resources.gas_tags.bind_to_storage_buffer(binding=5)
     resources.material_params.bind_to_storage_buffer(binding=6)
+    resources.action_meta.bind_to_storage_buffer(binding=7)
+    world.bridge.buffers["gas_reaction_chain_generation"].bind_to_storage_buffer(binding=17)
     resources.light_emitter_buffer.bind_to_storage_buffer(binding=14)
     resources.light_emitter_count.bind_to_storage_buffer(binding=15)
     group_x = (world.gas_width + LOCAL_SIZE - 1) // LOCAL_SIZE
@@ -1206,6 +1208,8 @@ def run_gas_light(
     resources.action_f.bind_to_storage_buffer(binding=3)
     resources.gas_tags.bind_to_storage_buffer(binding=5)
     resources.material_params.bind_to_storage_buffer(binding=6)
+    resources.action_meta.bind_to_storage_buffer(binding=7)
+    world.bridge.buffers["gas_reaction_chain_generation"].bind_to_storage_buffer(binding=17)
     if direct_bridge_gas_dose:
         world.bridge.buffers["gas_optical_dose"].bind_to_storage_buffer(binding=16)
     resources.light_emitter_buffer.bind_to_storage_buffer(binding=14)
@@ -1342,6 +1346,8 @@ def _run_formal_guarded_gas_light(
     resources.action_f.bind_to_storage_buffer(binding=3)
     resources.gas_tags.bind_to_storage_buffer(binding=5)
     resources.material_params.bind_to_storage_buffer(binding=6)
+    resources.action_meta.bind_to_storage_buffer(binding=7)
+    world.bridge.buffers["gas_reaction_chain_generation"].bind_to_storage_buffer(binding=17)
     world.bridge.buffers["gas_optical_dose"].bind_to_storage_buffer(binding=16)
     resources.light_emitter_buffer.bind_to_storage_buffer(binding=14)
     resources.light_emitter_count.bind_to_storage_buffer(binding=15)

@@ -117,6 +117,8 @@ def _init_world_engine(
     engine._pending_placeholder_dirty_rects: list[tuple[int, int, int, int]] = []
     engine.bridge_frame_paging_updates: list[PageStripeUpdate] = []
     engine.bridge_frame_page_stripes: list[tuple[PageStripeUpdate, dict[str, Any]]] = []
+    engine._paging_transition: dict[str, Any] | None = None
+    engine._paging_transition_target: tuple[int, int] | None = None
     engine._bridge_inputs_prepared = False
     engine._gpu_cpu_dirty_resources: set[str] = set()
     # Rects of cells explicitly written from the CPU side since the last
@@ -167,6 +169,9 @@ def _init_world_engine(
     engine.material_id = np.zeros((height, width), dtype=np.int32)
     engine.phase = np.zeros((height, width), dtype=np.uint8)
     engine.cell_flags = np.zeros((height, width), dtype=np.uint8)
+    # Persistent reaction provenance.  A generated material carries the
+    # generation of the state that produced it; zero is the user/scene seed.
+    engine.reaction_chain_generation = np.zeros((height, width), dtype=np.uint8)
     engine.velocity = np.zeros((height, width, 2), dtype=np.float32)
     engine.cell_temperature = np.full((height, width), 20.0, dtype=np.float32)
     engine.timer_pack = np.zeros((height, width, 4), dtype=np.uint8)
@@ -182,6 +187,9 @@ def _init_world_engine(
     )
     engine.pressure_ping = np.zeros((engine.gas_height, engine.gas_width), dtype=np.float32)
     engine.gas_concentration = np.zeros((1, engine.gas_height, engine.gas_width), dtype=np.float32)
+    engine.gas_reaction_chain_generation = np.zeros(
+        (1, engine.gas_height, engine.gas_width), dtype=np.uint8
+    )
     engine.visible_illumination = np.zeros((height, width, 3), dtype=np.float32)
     engine.cell_optical_dose = np.zeros((1, height, width), dtype=np.float32)
     engine.gas_optical_dose = np.zeros((1, engine.gas_height, engine.gas_width), dtype=np.float32)
@@ -260,7 +268,9 @@ def _init_world_engine(
             "entity_id",
             "placeholder_displaced_material",
             "collapse_delay_pending",
+            "reaction_chain_generation",
             "gas_concentration",
+            "gas_reaction_chain_generation",
             "ambient_temperature",
             "flow_velocity",
             "pressure_ping",

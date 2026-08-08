@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 from oracle_game.gpu import moderngl, unpack_cell_core
 from oracle_game.sim.gpu_base import GPUPipelineBase
 from oracle_game.sim.shader_loader import build_compute_shader
-from oracle_game.types import Phase
+from oracle_game.types import CellFlag, Phase
 
 LOCAL_SIZE = 128
 
@@ -53,7 +53,6 @@ class GPUPageStripePipeline(GPUPipelineBase):
             cell_payload = payload["cell"]
             gas_payload = payload["gas"]
             cell_axis = 1 if update.axis == "x" else 0
-            cell_dose_axis = 2 if update.axis == "x" else 1
             gas_axis = 1 if update.axis == "x" else 0
             gas_dose_axis = 2 if update.axis == "x" else 1
 
@@ -78,6 +77,14 @@ class GPUPageStripePipeline(GPUPipelineBase):
                 world.cell_flags,
                 update,
                 cell_payload["cell_flags"],
+                stripe_axis=cell_axis,
+                ranges=cell_ranges,
+            )
+            self._write_stripe_array(
+                ctx,
+                world.reaction_chain_generation,
+                update,
+                cell_payload["reaction_chain_generation"],
                 stripe_axis=cell_axis,
                 ranges=cell_ranges,
             )
@@ -145,22 +152,6 @@ class GPUPageStripePipeline(GPUPipelineBase):
                 stripe_axis=cell_axis,
                 ranges=cell_ranges,
             )
-            self._write_stripe_array(
-                ctx,
-                world.visible_illumination,
-                update,
-                cell_payload["visible_illumination"],
-                stripe_axis=cell_axis,
-                ranges=cell_ranges,
-            )
-            self._write_stripe_array(
-                ctx,
-                world.cell_optical_dose,
-                update,
-                cell_payload["cell_optical_dose"],
-                stripe_axis=cell_dose_axis,
-                ranges=cell_ranges,
-            )
 
             self._write_stripe_array(
                 ctx,
@@ -180,14 +171,6 @@ class GPUPageStripePipeline(GPUPipelineBase):
             )
             self._write_stripe_array(
                 ctx,
-                world.pressure_ping,
-                update,
-                gas_payload["pressure_ping"],
-                stripe_axis=gas_axis,
-                ranges=gas_ranges,
-            )
-            self._write_stripe_array(
-                ctx,
                 world.gas_concentration,
                 update,
                 gas_payload["gas_concentration"],
@@ -196,12 +179,13 @@ class GPUPageStripePipeline(GPUPipelineBase):
             )
             self._write_stripe_array(
                 ctx,
-                world.gas_optical_dose,
+                world.gas_reaction_chain_generation,
                 update,
-                gas_payload["gas_optical_dose"],
+                gas_payload["reaction_chain_generation"],
                 stripe_axis=gas_dose_axis,
                 ranges=gas_ranges,
             )
+            world.pressure_ping[...] = 0.0
             self.last_backend = "gpu"
             self.last_cpu_mirror_downloaded = True
         finally:
@@ -227,13 +211,11 @@ class GPUPageStripePipeline(GPUPipelineBase):
             "entity_id",
             "placeholder_displaced_material",
             "collapse_delay_pending",
+            "reaction_chain_generation",
             "gas_concentration",
+            "gas_reaction_chain_generation",
             "ambient_temperature",
             "flow_velocity",
-            "pressure_ping",
-            "visible_illumination",
-            "cell_optical_dose",
-            "gas_optical_dose",
         }
         missing = sorted(required.difference(bridge.gpu_authoritative_resources))
         if missing:
@@ -245,22 +227,26 @@ class GPUPageStripePipeline(GPUPipelineBase):
         cell_ranges = world._stripe_buffer_ranges(update, gas_grid=False)
         gas_ranges = world._stripe_buffer_ranges(update, gas_grid=True)
         cell_axis = 1 if update.axis == "x" else 0
-        cell_dose_axis = 2 if update.axis == "x" else 1
         gas_axis = 1 if update.axis == "x" else 0
         gas_dose_axis = 2 if update.axis == "x" else 1
-        bridge.ctx.finish()
-
-        packed_cell_core = np.frombuffer(
-            self._read_bridge_buffer(bridge.ctx, bridge.buffers["cell_core"]),
-            dtype=np.uint32,
-        ).reshape((world.height, world.width, 5))
+        # Cell core is a packed five-word record per cell.  Read only the
+        # outgoing stripe through the same region-DMA path as the sidecar
+        # buffers; copying the full resident buffer here was the largest
+        # avoidable page-transition spike.
+        packed_cell_core = self._capture_bridge_buffer_stripe(
+            bridge.ctx,
+            bridge.buffers["cell_core"],
+            (world.height, world.width, 5),
+            np.uint32,
+            stripe_axis=cell_axis,
+            ranges=cell_ranges,
+        )
         cell_core = unpack_cell_core(packed_cell_core)
-        material_id = self._capture_array_stripe(
-            cell_core["material_id"], stripe_axis=cell_axis, ranges=cell_ranges
-        ).astype(np.int32)
-        phase = self._capture_array_stripe(
-            cell_core["phase"], stripe_axis=cell_axis, ranges=cell_ranges
-        ).astype(np.uint8)
+        # _capture_bridge_buffer_stripe already packs wrapped ranges into a
+        # contiguous stripe. Do not slice it again with resident coordinates;
+        # that would turn every non-zero ring segment into an empty array.
+        material_id = np.ascontiguousarray(cell_core["material_id"], dtype=np.int32)
+        phase = np.ascontiguousarray(cell_core["phase"], dtype=np.uint8)
         island_id = self._capture_bridge_buffer_stripe(
             bridge.ctx,
             bridge.buffers["island_id"],
@@ -285,6 +271,14 @@ class GPUPageStripePipeline(GPUPipelineBase):
             stripe_axis=cell_axis,
             ranges=cell_ranges,
         )
+        reaction_chain_generation = self._capture_bridge_buffer_stripe(
+            bridge.ctx,
+            bridge.buffers["reaction_chain_generation"],
+            (world.height, world.width),
+            np.uint8,
+            stripe_axis=cell_axis,
+            ranges=cell_ranges,
+        )
         phase, island_id, entity_id, placeholder_displaced_material = (
             world._normalize_cell_runtime_arrays(
                 material_id,
@@ -302,10 +296,6 @@ class GPUPageStripePipeline(GPUPipelineBase):
             )
         )
 
-        visible_rgba = np.frombuffer(
-            self._read_bridge_texture(bridge.textures["visible_illumination"]),
-            dtype=np.float32,
-        ).reshape((world.height, world.width, 4))
         payload = {
             "meta": {
                 "axis": update.axis,
@@ -321,21 +311,30 @@ class GPUPageStripePipeline(GPUPipelineBase):
                 "material_id": material_id,
                 "phase": phase,
                 "cell_flags": self._capture_array_stripe(
-                    cell_core["cell_flags"], stripe_axis=cell_axis, ranges=cell_ranges
+                    cell_core["cell_flags"] & np.uint8(~int(CellFlag.REACTION_LATCHED) & 0xFF),
+                    stripe_axis=cell_axis,
+                    ranges=[(0, cell_core["cell_flags"].shape[cell_axis])],
                 ),
+                "reaction_chain_generation": reaction_chain_generation,
                 "velocity": self._capture_array_stripe(
-                    cell_core["velocity"], stripe_axis=cell_axis, ranges=cell_ranges
+                    cell_core["velocity"],
+                    stripe_axis=cell_axis,
+                    ranges=[(0, cell_core["velocity"].shape[cell_axis])],
                 ),
                 "cell_temperature": self._capture_array_stripe(
                     cell_core["cell_temperature"],
                     stripe_axis=cell_axis,
-                    ranges=cell_ranges,
+                    ranges=[(0, cell_core["cell_temperature"].shape[cell_axis])],
                 ),
                 "timer_pack": self._capture_array_stripe(
-                    cell_core["timer_pack"], stripe_axis=cell_axis, ranges=cell_ranges
+                    cell_core["timer_pack"],
+                    stripe_axis=cell_axis,
+                    ranges=[(0, cell_core["timer_pack"].shape[cell_axis])],
                 ),
                 "integrity": self._capture_array_stripe(
-                    cell_core["integrity"], stripe_axis=cell_axis, ranges=cell_ranges
+                    cell_core["integrity"],
+                    stripe_axis=cell_axis,
+                    ranges=[(0, cell_core["integrity"].shape[cell_axis])],
                 ),
                 "island_id": island_id,
                 "entity_id": entity_id,
@@ -348,19 +347,6 @@ class GPUPageStripePipeline(GPUPipelineBase):
                     stripe_axis=cell_axis,
                     ranges=cell_ranges,
                 ).astype(np.uint8),
-                "visible_illumination": self._capture_array_stripe(
-                    visible_rgba[..., :3],
-                    stripe_axis=cell_axis,
-                    ranges=cell_ranges,
-                ),
-                "cell_optical_dose": self._capture_bridge_buffer_stripe(
-                    bridge.ctx,
-                    bridge.buffers["cell_optical_dose"],
-                    tuple(int(dim) for dim in world.cell_optical_dose.shape),
-                    np.float32,
-                    stripe_axis=cell_dose_axis,
-                    ranges=cell_ranges,
-                ),
             },
             "runtime": runtime_payload,
             "gas": {
@@ -376,12 +362,6 @@ class GPUPageStripePipeline(GPUPipelineBase):
                     stripe_axis=gas_axis,
                     ranges=gas_ranges,
                 ),
-                "pressure_ping": self._capture_bridge_texture_stripe(
-                    bridge.textures["pressure_ping"],
-                    (world.gas_height, world.gas_width),
-                    stripe_axis=gas_axis,
-                    ranges=gas_ranges,
-                ),
                 "gas_concentration": self._capture_bridge_buffer_stripe(
                     bridge.ctx,
                     bridge.buffers["gas_concentration"],
@@ -390,11 +370,11 @@ class GPUPageStripePipeline(GPUPipelineBase):
                     stripe_axis=gas_dose_axis,
                     ranges=gas_ranges,
                 ),
-                "gas_optical_dose": self._capture_bridge_buffer_stripe(
+                "reaction_chain_generation": self._capture_bridge_buffer_stripe(
                     bridge.ctx,
-                    bridge.buffers["gas_optical_dose"],
-                    tuple(int(dim) for dim in world.gas_optical_dose.shape),
-                    np.float32,
+                    bridge.buffers["gas_reaction_chain_generation"],
+                    tuple(int(dim) for dim in world.gas_reaction_chain_generation.shape),
+                    np.uint8,
                     stripe_axis=gas_dose_axis,
                     ranges=gas_ranges,
                 ),
@@ -548,7 +528,6 @@ class GPUPageStripePipeline(GPUPipelineBase):
         cell_ranges = world._stripe_buffer_ranges(update, gas_grid=False)
         gas_ranges = world._stripe_buffer_ranges(update, gas_grid=True)
         cell_axis = 1 if update.axis == "x" else 0
-        cell_dose_axis = 2 if update.axis == "x" else 1
         gas_axis = 1 if update.axis == "x" else 0
         gas_dose_axis = 2 if update.axis == "x" else 1
 
@@ -594,11 +573,11 @@ class GPUPageStripePipeline(GPUPipelineBase):
             ranges=cell_ranges,
         )
         self._write_bridge_buffer_stripe(
-            bridge.buffers["cell_optical_dose"],
-            tuple(int(dim) for dim in world.cell_optical_dose.shape),
-            cell_payload["cell_optical_dose"],
-            np.float32,
-            stripe_axis=cell_dose_axis,
+            bridge.buffers["reaction_chain_generation"],
+            (world.height, world.width),
+            np.asarray(cell_payload["reaction_chain_generation"], dtype=np.uint8),
+            np.uint8,
+            stripe_axis=cell_axis,
             ranges=cell_ranges,
         )
         self._write_bridge_texture_stripe(
@@ -607,9 +586,7 @@ class GPUPageStripePipeline(GPUPipelineBase):
             stripe_axis=cell_axis,
             ranges=cell_ranges,
         )
-        visible = np.asarray(cell_payload["visible_illumination"], dtype=np.float32)
-        visible_rgba = np.empty((visible.shape[0], visible.shape[1], 4), dtype=np.float32)
-        visible_rgba[..., :3] = visible
+        visible_rgba = np.zeros((*cell_payload["material_id"].shape, 4), dtype=np.float32)
         visible_rgba[..., 3] = 1.0
         self._write_bridge_texture_stripe(
             bridge.textures["light"],
@@ -632,7 +609,13 @@ class GPUPageStripePipeline(GPUPipelineBase):
         )
         self._write_bridge_texture_stripe(
             bridge.textures["pressure_ping"],
-            np.asarray(gas_payload["pressure_ping"], dtype=np.float32),
+            np.zeros_like(np.asarray(gas_payload["ambient_temperature"], dtype=np.float32)),
+            stripe_axis=gas_axis,
+            ranges=gas_ranges,
+        )
+        self._write_bridge_texture_stripe(
+            bridge.textures["pressure_residual"],
+            np.zeros_like(np.asarray(gas_payload["ambient_temperature"], dtype=np.float32)),
             stripe_axis=gas_axis,
             ranges=gas_ranges,
         )
@@ -651,9 +634,31 @@ class GPUPageStripePipeline(GPUPipelineBase):
             ranges=gas_ranges,
         )
         self._write_bridge_buffer_stripe(
+            bridge.buffers["gas_reaction_chain_generation"],
+            tuple(int(dim) for dim in world.gas_reaction_chain_generation.shape),
+            np.asarray(gas_payload["reaction_chain_generation"], dtype=np.uint8),
+            np.uint8,
+            stripe_axis=gas_dose_axis,
+            ranges=gas_ranges,
+        )
+        self._write_bridge_buffer_stripe(
+            bridge.buffers["cell_optical_dose"],
+            tuple(int(dim) for dim in world.cell_optical_dose.shape),
+            np.zeros(
+                (world.cell_optical_dose.shape[0], *cell_payload["material_id"].shape),
+                dtype=np.float32,
+            ),
+            np.float32,
+            stripe_axis=2 if update.axis == "x" else 1,
+            ranges=cell_ranges,
+        )
+        self._write_bridge_buffer_stripe(
             bridge.buffers["gas_optical_dose"],
             tuple(int(dim) for dim in world.gas_optical_dose.shape),
-            gas_payload["gas_optical_dose"],
+            np.zeros(
+                (world.gas_optical_dose.shape[0], *gas_payload["gas_concentration"].shape[1:]),
+                dtype=np.float32,
+            ),
             np.float32,
             stripe_axis=gas_dose_axis,
             ranges=gas_ranges,
@@ -671,10 +676,12 @@ class GPUPageStripePipeline(GPUPipelineBase):
             "entity_id",
             "placeholder_displaced_material",
             "collapse_delay_pending",
+            "reaction_chain_generation",
             "ambient_temperature",
             "pressure_ping",
             "flow_velocity",
             "gas_concentration",
+            "gas_reaction_chain_generation",
             "cell_optical_dose",
             "gas_optical_dose",
         )
@@ -837,10 +844,66 @@ class GPUPageStripePipeline(GPUPipelineBase):
         stripe_axis: int,
         ranges: list[tuple[int, int]],
     ) -> np.ndarray:
-        source = np.frombuffer(self._read_bridge_buffer(ctx, buffer), dtype=dtype).reshape(
-            src_shape
-        )
-        return self._capture_array_stripe(source, stripe_axis=stripe_axis, ranges=ranges)
+        itemsize = np.dtype(dtype).itemsize
+        prefix_shape = tuple(src_shape[:stripe_axis])
+        trailing_shape = tuple(src_shape[stripe_axis + 1 :])
+        span_total = sum(max(0, int(end) - int(start)) for start, end in ranges)
+        output_shape = list(src_shape)
+        output_shape[stripe_axis] = span_total
+        if span_total <= 0:
+            return np.empty(tuple(output_shape), dtype=dtype)
+        trailing_count = int(np.prod(trailing_shape, dtype=np.int64)) if trailing_shape else 1
+        prefix_iter = [()] if not prefix_shape else np.ndindex(prefix_shape)
+        chunks: list[tuple[int, int, int, tuple[int, ...], int, int]] = []
+        staging_offset = 0
+        for range_index, (start, end) in enumerate(ranges):
+            span = int(end) - int(start)
+            if span <= 0:
+                continue
+            for prefix in (
+                prefix_iter if isinstance(prefix_iter, list) else np.ndindex(prefix_shape)
+            ):
+                nbytes = span * trailing_count * itemsize
+                chunks.append((staging_offset, nbytes, range_index, prefix, span, int(start)))
+                staging_offset += nbytes
+        staging = ctx.buffer(reserve=max(4, staging_offset), dynamic=True)
+        try:
+            for chunk_offset, nbytes, _range_index, prefix, span, start in chunks:
+                coord = prefix + (start,) + ((0,) * len(trailing_shape))
+                source_index = int(np.ravel_multi_index(coord, src_shape))
+                ctx.copy_buffer(
+                    staging,
+                    buffer,
+                    size=nbytes,
+                    read_offset=source_index * itemsize,
+                    write_offset=chunk_offset,
+                )
+            ctx.finish()
+            raw = memoryview(staging.read(size=staging_offset))
+            output = np.empty(tuple(output_shape), dtype=dtype)
+            output_offset = 0
+            chunk_index = 0
+            for range_index, (start, end) in enumerate(ranges):
+                span = int(end) - int(start)
+                if span <= 0:
+                    continue
+                for prefix in [()] if not prefix_shape else np.ndindex(prefix_shape):
+                    _, nbytes, _, _, _, _ = chunks[chunk_index]
+                    values = np.frombuffer(raw[output_offset : output_offset + nbytes], dtype=dtype)
+                    destination_axis_start = sum(
+                        max(0, int(e) - int(s)) for s, e in ranges[:range_index]
+                    )
+                    destination = (
+                        prefix
+                        + (slice(destination_axis_start, destination_axis_start + span),)
+                        + ((slice(None),) * len(trailing_shape))
+                    )
+                    output[destination] = values.reshape((span,) + trailing_shape)
+                    output_offset += nbytes
+                    chunk_index += 1
+            return np.ascontiguousarray(output)
+        finally:
+            staging.release()
 
     def _capture_bridge_texture_stripe(
         self,
@@ -850,10 +913,32 @@ class GPUPageStripePipeline(GPUPipelineBase):
         stripe_axis: int,
         ranges: list[tuple[int, int]],
     ) -> np.ndarray:
-        source = np.frombuffer(self._read_bridge_texture(texture), dtype=np.float32).reshape(
-            src_shape
-        )
-        return self._capture_array_stripe(source, stripe_axis=stripe_axis, ranges=ranges)
+        parts: list[np.ndarray] = []
+        for start, end in ranges:
+            span = int(end) - int(start)
+            if span <= 0:
+                continue
+            if stripe_axis == 1:
+                viewport = (int(start), 0, span, int(src_shape[0]))
+                shape = (int(src_shape[0]), span, *src_shape[2:])
+            elif stripe_axis == 0:
+                viewport = (0, int(start), int(src_shape[1]), span)
+                shape = (span, int(src_shape[1]), *src_shape[2:])
+            else:
+                raise ValueError("texture stripe axis must be 0 or 1")
+            try:
+                raw = texture.read(viewport=viewport)
+            except TypeError:
+                source = np.frombuffer(
+                    self._read_bridge_texture(texture), dtype=np.float32
+                ).reshape(src_shape)
+                return self._capture_array_stripe(source, stripe_axis=stripe_axis, ranges=ranges)
+            parts.append(np.frombuffer(raw, dtype=np.float32).reshape(shape).copy())
+        if not parts:
+            shape = list(src_shape)
+            shape[stripe_axis] = 0
+            return np.empty(tuple(shape), dtype=np.float32)
+        return np.ascontiguousarray(np.concatenate(parts, axis=stripe_axis))
 
     @staticmethod
     def _read_bridge_buffer(ctx: Any, buffer: Any) -> bytes:
